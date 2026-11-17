@@ -22,7 +22,6 @@ def _account(**kwargs) -> PricingAccount:
         "user_id": uuid4(),
         "name": "acc",
         "platform": PricingPlatform.ML,
-        "department": Department.CELULAR,
         "kit_number": 1,
         "commission": Decimal("0.10"),
         "margin1": Decimal("0.20"),
@@ -40,7 +39,6 @@ def _product(**kwargs) -> PricingProduct:
         "sku": "SKU-1",
         "name": "X",
         "department": Department.CELULAR,
-        "product_type": 2,
         "cost_kit1": Decimal("100.00"),
         "is_active": True,
         "in_catalog": False,
@@ -63,10 +61,12 @@ def _override(**kwargs) -> PricingOverride:
 
 def test_basic_formula():
     # SSH: (cost * (1 + margin) + shipping) / (1 - commission)
-    # (100 * 1.20 + 5) / 0.90 = 125 / 0.90 = 138.888... → 138.89
+    # (100 * 1.20 + 5) / 0.90 = 125 / 0.90 = 138.888... → 139 (o calculado é
+    # sempre em reais inteiros, como no SSH — calc.py; só o preço manual antigo
+    # tem centavos)
     out = calculate(_account(), _product())
     assert out.source == "computed"
-    assert out.price == Decimal("138.89")
+    assert out.price == Decimal("139")
 
 
 def test_kit_resolves_correct_pair():
@@ -76,9 +76,9 @@ def test_kit_resolves_correct_pair():
         shipping2=Decimal("10.00"),
     )
     p = _product(cost_kit2=Decimal("80.00"))
-    # (80 * 1.30 + 10) / 0.90 = 114 / 0.90 = 126.666... → 126.67
+    # (80 * 1.30 + 10) / 0.90 = 114 / 0.90 = 126.666... → 127
     out = calculate(a, p)
-    assert out.price == Decimal("126.67")
+    assert out.price == Decimal("127")
 
 
 def test_kit_falls_back_to_kit1_when_kit_n_null():
@@ -90,7 +90,7 @@ def test_kit_falls_back_to_kit1_when_kit_n_null():
     )
     p = _product(cost_kit2=None, cost_kit1=Decimal("100.00"))
     out = calculate(a, p)
-    assert out.price == Decimal("138.89")
+    assert out.price == Decimal("139")
 
 
 def test_kit_falls_back_when_kit_n_zero():
@@ -101,7 +101,7 @@ def test_kit_falls_back_when_kit_n_zero():
     )
     p = _product(cost_kit2=Decimal("0"), cost_kit1=Decimal("100.00"))
     out = calculate(a, p)
-    assert out.price == Decimal("138.89")
+    assert out.price == Decimal("139")
 
 
 def test_missing_commission_returns_missing_inputs():
@@ -119,9 +119,9 @@ def test_missing_margin_returns_missing_inputs():
 
 def test_missing_shipping_treats_as_zero():
     a = _account(shipping1=None)
-    # (100 * 1.20 + 0) / 0.90 = 120 / 0.90 = 133.333... → 133.33
+    # (100 * 1.20 + 0) / 0.90 = 120 / 0.90 = 133.333... → 133
     out = calculate(a, _product())
-    assert out.price == Decimal("133.33")
+    assert out.price == Decimal("133")
 
 
 def test_non_positive_denominator_fails():
@@ -165,8 +165,9 @@ def test_override_disabled_returns_disabled():
 
 
 def test_rounding_half_up():
-    # New formula: (10 * 1.04 + 0) / 0.95 = 10.40 / 0.95 = 10.9473... → 10.95
+    # New formula: (10 * 1.04 + 0) / 0.95 = 10.40 / 0.95 = 10.9473... → 11
+    # (meio para cima, em reais inteiros)
     a = _account(commission=Decimal("0.05"), margin1=Decimal("0.04"), shipping1=Decimal("0"))
     p = _product(cost_kit1=Decimal("10.00"))
     out = calculate(a, p)
-    assert out.price == Decimal("10.95")
+    assert out.price == Decimal("11")

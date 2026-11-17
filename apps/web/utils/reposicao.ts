@@ -9,6 +9,9 @@
 // vermelho). Exemplo da tarefa: estoque 0, vende 100 por mês, 30 + 30 dias →
 // necessário 200, Reposição −200. Positivo = sobra além do prazo.
 // Os prazos são os da Importação, por departamento (import_config).
+// Desde o M-4 (Importação) e o M-2 (Tabela de Preços), 17/11/2026, as duas
+// telas usam um prazo só, o "Reposição [N] dias", e passam 0 no tempo de
+// estoque: Reposição = Estoque − vendas 30d × Reposição ÷ 30.
 
 export interface ResultadoReposicao {
   /** estoque − necessário; negativo = falta. */
@@ -100,10 +103,10 @@ export function reposicaoPorPeca(
   return { valor: faltando.length ? somar(faltando) : somar(pecas), pecas, faltando }
 }
 
-/** Texto curto da conta, igual nas duas telas. */
-export function textoFormulaReposicao(tempoReposicao: unknown, tempoEstoque: unknown): string {
+/** Texto curto da conta da Tabela de Preços, com o prazo único da Reposição
+ *  (M-2, 17/11/2026; antes "× (reposição + estoque)"). A Importação tem o
+ *  texto dela, igual a este sem o fim. */
+export function textoFormulaReposicao(tempoReposicao: unknown): string {
   const tr = prazoDias(tempoReposicao)
-  const te = prazoDias(tempoEstoque)
-  const dias = `${tr ?? '?'} + ${te ?? '?'}`
-  return `Reposição = Estoque − vendas 30d × (${dias}) ÷ 30; a parte das vendas arredonda para cima`
+  return `Reposição = Estoque − vendas 30d × ${tr ?? '?'} ÷ 30; a parte das vendas arredonda para cima`
 }

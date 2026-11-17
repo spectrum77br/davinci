@@ -306,7 +306,11 @@ from app.models.pricing import (
     PricingPushIdempotency,
     StoreInfo,
 )
-from app.models.pricing_conferencia import PricingConferencia
+from app.models.pricing_conferencia import (
+    PricingConferencia,
+    PricingConferenciaMargem,
+    PricingConferenciaMargemProduto,
+)
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
 from app.models.estoque_transferencia import EstoqueTransferencia, EstoqueTransferenciaLinha
 from app.models.product import (
@@ -564,6 +568,8 @@ __all__ = [
     "RedeSocialPlataforma",
     "PricingAccount",
     "PricingConferencia",
+    "PricingConferenciaMargem",
+    "PricingConferenciaMargemProduto",
     "PricingGarantiaPrazo",
     "PricingOverride",
     "PricingPlatform",

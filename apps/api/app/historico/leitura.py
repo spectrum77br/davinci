@@ -43,6 +43,8 @@ ITEM_FKS: dict[str, tuple[str, ...]] = {
     "segment_special_dates": ("segment_id",),
     "chamado_mensagem": ("chamado_id",),
     "stores": ("company_id",),
+    # M-2 (17/11/2026): a margem própria não tem id/sku; o nome vem do produto.
+    "pricing_conferencia_margem_produto": ("pricing_product_id",),
 }
 
 # Guardados como fração (0,125) e digitados como porcentagem (12,5%).

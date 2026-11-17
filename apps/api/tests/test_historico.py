@@ -11,6 +11,7 @@ Estes testes entram pelo login DE VERDADE (cookie de sessão), não pelo
 # ruff: noqa: S105, S106  (senhas de teste, nada real)
 
 import uuid
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select, text
@@ -19,10 +20,12 @@ from app.config import get_settings
 from app.historico.contexto import Ator, abrir, ator_atual, fechar
 from app.historico.middleware import HistoricoMiddleware
 from app.models import (
+    CellStatus,
     HistoricoAcesso,
     HistoricoAlteracao,
     HistoricoEvento,
     PricingAccount,
+    PricingOverride,
     PricingProduct,
     Segment,
     UserRole,
@@ -63,19 +66,41 @@ async def _conta_e_produto(db, dono):
 # --- captura ---------------------------------------------------------------------
 
 
+async def _preco_manual_antigo(db, dono, a, p, preco: str) -> None:
+    """Preço manual gravado ANTES do M-3 (17/11/2026: o PUT /overrides não
+    aceita mais preço). Direto no banco, como um robô: não entra."""
+    db.add(
+        PricingOverride(
+            user_id=dono.id,
+            pricing_product_id=uuid.UUID(p["id"]),
+            pricing_account_id=uuid.UUID(a["id"]),
+            price_override=Decimal(preco),
+            cell_status=CellStatus.MANUAL,
+        )
+    )
+    await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_mudar_preco_fica_com_quem_antes_e_depois(client, db, make_user):
-    """O exemplo do Eduardo: alterou a Tabela de preços."""
+    """O exemplo do Eduardo: alterou a Tabela de preços. Desde o M-3 a tela
+    não grava preço manual; a mudança que sobra é tirar o preço antigo."""
     eu = await make_user(role=UserRole.ADMIN, email="heisenberg@davinci-test.com")
     eu_id = eu.id
     _logar(client, eu)
     a, p = await _conta_e_produto(db, eu)
-    corpo = {"pricing_product_id": p["id"], "pricing_account_id": a["id"], "cell_status": "manual"}
-    r = await client.put("/api/pricing/overrides", json={**corpo, "price_override": "1299.00"})
-    assert r.status_code == 200
+    await _preco_manual_antigo(db, eu, a, p, "1299.00")
+    corpo = {"pricing_product_id": p["id"], "pricing_account_id": a["id"]}
+    # Preço novo é recusado e não vira alteração.
     r = await client.put(
         "/api/pricing/overrides",
-        json={**corpo, "price_override": "1249.00"},
+        json={**corpo, "cell_status": "manual", "price_override": "1249.00"},
+    )
+    assert r.status_code == 422
+    assert await _alteracoes(db, tabela="pricing_overrides") == []
+    r = await client.put(
+        "/api/pricing/overrides",
+        json={**corpo, "cell_status": "auto", "price_override": None},
         headers={"referer": "https://app.hadken.com/pricing/tabela?dept=x"},
     )
     assert r.status_code == 200
@@ -83,7 +108,8 @@ async def test_mudar_preco_fica_com_quem_antes_e_depois(client, db, make_user):
     [mudou] = await _alteracoes(db, tabela="pricing_overrides", operacao="U")
     assert str(mudou.ator_id) == str(eu_id)
     assert mudou.antes["price_override"] == 1299.0
-    assert mudou.depois["price_override"] == 1249.0
+    assert mudou.depois["price_override"] is None
+    assert (mudou.antes["cell_status"], mudou.depois["cell_status"]) == ("manual", "auto")
     assert "updated_at" not in mudou.depois  # carimbo de hora não é mudança
 
     ev = [e for e in await _eventos(db) if e.req_id == mudou.req_id]
@@ -92,7 +118,7 @@ async def test_mudar_preco_fica_com_quem_antes_e_depois(client, db, make_user):
     assert ev[0].tela == "Tabela de preços"
     assert ev[0].pagina == "/pricing/tabela"
     assert ev[0].n_alteracoes == 1
-    assert ev[0].corpo["price_override"] == "1249.00"
+    assert ev[0].corpo["price_override"] is None
 
 
 @pytest.mark.asyncio
@@ -102,10 +128,7 @@ async def test_apagar_preco_por_comando_direto_tambem_fica(client, db, make_user
     eu = await make_user(role=UserRole.ADMIN)
     _logar(client, eu)
     a, p = await _conta_e_produto(db, eu)
-    await client.put(
-        "/api/pricing/overrides",
-        json={"pricing_product_id": p["id"], "pricing_account_id": a["id"], "price_override": "99.90"},
-    )
+    await _preco_manual_antigo(db, eu, a, p, "99.90")
     r = await client.delete(
         f"/api/pricing/overrides?pricing_product_id={p['id']}&pricing_account_id={a['id']}"
     )
@@ -306,9 +329,11 @@ async def test_eduardo_ve_e_gerencia(client, db, make_user):
     me = (await client.get("/api/auth/me")).json()
     assert me["historico"] is True
     a, p = await _conta_e_produto(db, eu)
+    # M-3 (17/11/2026): preço manual novo não entra; tirar o antigo é mudança.
+    await _preco_manual_antigo(db, eu, a, p, "10")
     await client.put(
         "/api/pricing/overrides",
-        json={"pricing_product_id": p["id"], "pricing_account_id": a["id"], "price_override": "10"},
+        json={"pricing_product_id": p["id"], "pricing_account_id": a["id"], "price_override": None},
     )
     r = await client.get("/api/historico")
     assert r.status_code == 200, r.text
@@ -318,10 +343,10 @@ async def test_eduardo_ve_e_gerencia(client, db, make_user):
     assert preco, dados["items"]
     alt = preco[0]["alteracoes"][0]
     assert alt["entidade"] == "Preço da célula"
-    assert alt["verbo"] == "criou"
+    assert alt["verbo"] == "alterou"
     assert alt["item"] == "dg053 · ML kia"  # nomes resolvidos pelas chaves
     campos = {c["nome"]: c for c in alt["campos"]}
-    assert campos["Preço manual"]["depois"] == "R$ 10,00"
+    assert campos["Preço manual"]["antes"] == "R$ 10,00"
 
     # busca pelo SKU acha a mudança de preço (nome congelado no evento)
     achou = (await client.get("/api/historico", params={"busca": "dg053"})).json()
@@ -330,6 +355,60 @@ async def test_eduardo_ve_e_gerencia(client, db, make_user):
 
     detalhe = (await client.get(f"/api/historico/{preco[0]['id']}")).json()
     assert detalhe["alteracoes"][0]["item"] == "dg053 · ML kia"
+
+
+@pytest.mark.asyncio
+async def test_margem_do_produto_diz_qual_e_o_produto(client, db, make_user):
+    """M-2 (17/11/2026): a margem própria (pricing_conferencia_margem_produto)
+    não tem id/sku/nome; o item vem do produto (ITEM_FKS), fica congelado no
+    evento e a busca pelo SKU acha a mudança."""
+    eu = await make_user(role=UserRole.ADMIN)
+    await _liberar(db, eu, gerente=True)
+    _logar(client, eu)
+    # A linha precisa morar num tipo (folha) debaixo da raiz do departamento,
+    # como na grade; senão a rota responde 409 (produto sem departamento).
+    raiz = Segment(name="Celular", slug=f"celular-{eu.id.hex[:6]}")
+    db.add(raiz)
+    await db.flush()
+    tipo = Segment(name="Smartphone", slug=f"smartphone-{eu.id.hex[:6]}", parent_id=raiz.id)
+    db.add(tipo)
+    await db.flush()
+    prod = PricingProduct(user_id=eu.id, sku="dg053", name="Celular", segment_id=tipo.id)
+    db.add(prod)
+    await db.commit()
+
+    url = f"/api/pricing/conferencia/margem/produto/{prod.id}"
+    r = await client.put(url, json={"margem_pct": 5})
+    assert r.status_code == 200, r.text
+    r = await client.put(url, json={"margem_pct": 8})
+    assert r.status_code == 200, r.text
+
+    dados = (await client.get("/api/historico")).json()
+    mudancas = [
+        (i, alt)
+        for i in dados["items"]
+        for alt in i["alteracoes"]
+        if alt["tabela"] == "pricing_conferencia_margem_produto" and alt["operacao"] == "U"
+    ]
+    assert len(mudancas) == 1, dados["items"]
+    evento, alt = mudancas[0]
+    assert alt["entidade"] == "Margem de erro do produto (Tabela de preços)"
+    assert alt["item"] == "dg053"
+    margem = {c["nome"]: c for c in alt["campos"]}["Margem de erro (%)"]
+    assert (margem["antes"], margem["depois"]) == ("5", "8")
+
+    # o criar também diz o produto
+    criou = [
+        alt
+        for i in dados["items"]
+        for alt in i["alteracoes"]
+        if alt["tabela"] == "pricing_conferencia_margem_produto" and alt["operacao"] == "I"
+    ]
+    assert [a["item"] for a in criou] == ["dg053"]
+
+    # busca pelo SKU acha a mudança (nome congelado no evento)
+    achou = (await client.get("/api/historico", params={"busca": "dg053"})).json()
+    assert [i for i in achou["items"] if i["id"] == evento["id"]]
 
 
 @pytest.mark.asyncio

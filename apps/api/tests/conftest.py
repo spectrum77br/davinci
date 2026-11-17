@@ -561,6 +561,10 @@ _CLEANUP_TABLES = (
     "listing_requests",
     "listings",
     "pricing_overrides",
+    # 0499 (M-2): a margem por produto (CASCADE no produto) e a Geral por
+    # departamento (sem FK que a apague: a margem de um teste não vaza).
+    "pricing_conferencia_margem_produto",
+    "pricing_conferencia_margem",
     "verificar_margem",
     "valuation",
     "valuation_estoque_bling_diario",

@@ -13,13 +13,27 @@ que o administrador digitar, sem precisar conferir de novo.
 variation_id | null, "preco": float | null, "preco_promocional": float | null,
 "ativo": bool | null, "motivo": str | null}. `preco` é o MESMO conceito de
 preço que o envio da Tabela grava na plataforma (`conferencia_leitores`).
+
+Margem no servidor (M-2, 17/11/2026, migration 0499): a "% margem de erro"
+saiu do navegador do administrador e mora em `PricingConferenciaMargem` (a
+Geral, uma por departamento) e `PricingConferenciaMargemProduto` (a de cada
+linha da Tabela). A comparação continua na tela: a conferência grava o preço
+lido, e a tela marca (!) com a margem do produto ou, sem ela, a Geral.
 """
 
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, Text, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -74,5 +88,65 @@ class PricingConferencia(Base):
         nullable=True,
     )
     conferido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+# Margem de erro sem nada gravado (a mesma da faixa roxa de antes): 5%.
+MARGEM_PADRAO_PCT = Decimal("5")
+
+
+class PricingConferenciaMargem(Base):
+    """A margem Geral de um departamento e as duas caixas do menu "Margem ▾"
+    (M-2, 17/11/2026). Sem linha = 5% e as duas ligadas.
+
+    `geral_ligada` desligada: produto sem margem própria não é conferido (sem
+    (!) e sem o motivo "fora da margem" do cartão). `por_produto_ligada`
+    desligada: as margens próprias ficam gravadas, mas todos usam a Geral."""
+
+    __tablename__ = "pricing_conferencia_margem"
+    __table_args__ = (CheckConstraint("margem_pct BETWEEN 0 AND 100", name="margem_pct"),)
+
+    # Slug da aba (celular/mala/eletro/...), o mesmo de `PricingConferencia.department`.
+    department: Mapped[str] = mapped_column(Text, primary_key=True)
+    margem_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, server_default=text("5")
+    )
+    geral_ligada: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    por_produto_ligada: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    atualizado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class PricingConferenciaMargemProduto(Base):
+    """A margem própria de uma linha da Tabela (M-2, 17/11/2026): "quando um
+    produto tem desconto, cadastro a margem dele aqui e a tabela para de
+    mostrar irregularidade nele". Sem linha = usa a Geral do departamento."""
+
+    __tablename__ = "pricing_conferencia_margem_produto"
+    __table_args__ = (CheckConstraint("margem_pct BETWEEN 0 AND 100", name="margem_pct"),)
+
+    pricing_product_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("pricing_products.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    margem_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    atualizado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

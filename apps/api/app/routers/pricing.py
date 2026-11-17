@@ -573,6 +573,35 @@ def _team_scope_accounts(stmt, scope):
     )
 
 
+async def _contas_da_grade(
+    session: AsyncSession, user: User, root_id: UUID | None
+) -> list[PricingAccount]:
+    """As colunas da grade (`/grid`) que esta pessoa vê, na ordem da grade:
+    do departamento (`root_id`; None = todos), sem loja/integração arquivada,
+    dentro da cerca de equipe da Tabela (`_escopo_precos`) e com a coluna de
+    catálogo só junto da base.
+
+    M-3, 17/11/2026: a conferência (`GET /conferencia`) passou a valer para
+    quem vê a Tabela, não só para o administrador, e devolve só as células
+    destas contas — a MESMA régua da grade, sem cópia da regra."""
+    stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
+    if root_id is not None:
+        stmt = stmt.where(PricingAccount.segment_id == root_id)
+    # Mesma exclusão do `/accounts`: conta de loja/integração arquivada não
+    # pode virar coluna no grid de preços.
+    stmt = _exclude_archived_accounts(stmt)
+    # Mesmo escopo por equipe do `/accounts`: as colunas do grid não podem
+    # mostrar contas de lojas fora da equipe do usuário.
+    stmt = _team_scope_accounts(stmt, await _escopo_precos(session, user))
+    return _so_filhas_com_base(
+        (
+            await session.execute(
+                stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
+            )
+        ).scalars().all()
+    )
+
+
 @router.get("/accounts", response_model=list[PricingAccountOut])
 async def list_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1158,6 +1187,19 @@ async def upsert_override(
         User, Depends(require_permission("tabela_precos", "edit"))
     ],
 ) -> PricingOverrideOut:
+    # M-3, 17/11/2026 (Eduardo): "Não pode alterar o preço da tabela
+    # manualmente" — o preço manual saiu da tela e o servidor não aceita preço
+    # novo. O que já está gravado continua valendo no cálculo (calc.py) até a
+    # limpeza do dado, feita à parte na publicação. Sem preço (null) a rota
+    # segue como antes.
+    if body.price_override is not None:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "preco_manual_desativado",
+                "message": "O preço manual foi desligado: a Tabela usa só o preço calculado.",
+            },
+        )
     cell_status = _coerce_cell_status(body.cell_status) or CellStatus.AUTO
 
     # Validate FK ownership
@@ -1445,30 +1487,17 @@ async def get_grid(
     department: str | None = Query(None),
 ) -> PricingGridOut:
     roots_by_id, leaves_by_id, root_id_by_slug = await _segment_index(session)
-    accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
     products_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
+    rid: UUID | None = None
     if department:
         rid = root_id_by_slug.get(department)
         if rid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
         leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
-        accounts_stmt = accounts_stmt.where(PricingAccount.segment_id == rid)
         products_stmt = products_stmt.where(PricingProduct.segment_id.in_(leaf_ids))
-    # Mesma exclusão do `/accounts`: conta de loja/integração arquivada não
-    # pode virar coluna no grid de preços.
-    accounts_stmt = _exclude_archived_accounts(accounts_stmt)
-    # Mesmo escopo por equipe do `/accounts`: as colunas do grid não podem
-    # mostrar contas de lojas fora da equipe do usuário.
-    accounts_stmt = _team_scope_accounts(
-        accounts_stmt, await _escopo_precos(session, user)
-    )
-    accounts = _so_filhas_com_base(
-        (
-            await session.execute(
-                accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
-            )
-        ).scalars().all()
-    )
+    # As colunas: departamento, sem arquivada, cerca de equipe e catálogo só
+    # com a base (`_contas_da_grade`, a mesma régua da conferência).
+    accounts = await _contas_da_grade(session, user, rid)
     products = (
         await session.execute(products_stmt.order_by(PricingProduct.sku))
     ).scalars().all()

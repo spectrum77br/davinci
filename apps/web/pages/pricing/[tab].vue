@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import {
-  Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
-  Lock, Send, Ban, Check, Link2, Copy, Minus,
+  Plus, Trash2, RefreshCw, X, AlertCircle, Loader2, Eye,
+  Send, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, DollarSign, Settings2, Upload, Coins,
-  ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, FolderPlus, ScanSearch,
+  ChevronDown, Download, Search, Tags, Camera, FolderPlus, ScanSearch,
 } from 'lucide-vue-next'
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { isoToday } from '~/lib/date'
 import {
   calcularReposicao, explicarReposicao, prazoDias, reposicaoPorPeca, textoFormulaReposicao,
@@ -81,8 +82,10 @@ const canEditContas = useCan('tabela_precos_contas', 'edit')
 const canDeleteContas = useCan('tabela_precos_contas', 'delete')
 const canEditProdutos = useCan('tabela_precos_produtos', 'edit')
 const canDeleteProdutos = useCan('tabela_precos_produtos', 'delete')
-// Conferência de preços dos anúncios (02/11/2026): só administrador. O
-// useCan libera tudo para admin, então aqui é o papel mesmo.
+// Conferência de preços dos anúncios (02/11/2026): os botões "Margem" e
+// "Conferir anúncios" são só do administrador. Desde o M-3 (17/11/2026) o
+// resultado — cartão vermelho e "(!) anúncio X" — aparece para todos que
+// veem a Tabela. O useCan libera tudo para admin, então aqui é o papel mesmo.
 const isAdmin = useIsAdmin()
 
 // Departments + their subtypes are loaded from /api/segments at boot.
@@ -293,24 +296,40 @@ function kitTitulo(k: number): string {
 // Colunas fixas da grade (02/11/2026): Produto · Estoque · 7d · 30d ·
 // Reposição · kit 1..8 (celular) ou custo (mala/eletro). A posição (left)
 // de cada uma sai da soma das larguras anteriores — antes eram números
-// soltos no template. "Ocultar kits" (celular, pedido do Eduardo) tira os
-// 8 custos de kit da grade; a aba Produtos e o Excel continuam com todos.
+// soltos no template. Menu "Layout ▾" da barra (M-2, 17/11/2026; antes era o
+// botão "Mostrar kits"): "Kit" (só celular) mostra os 8 custos de kit e
+// "Estoque" mostra Estoque, 7d, 30d e Reposição. A aba Produtos e o Excel
+// continuam com tudo. A escolha fica lembrada neste navegador.
 // Produto: olho 16 + espaço 4 + nome 180 + margens 16.
 const LARGURA_PRODUTO = 216
 const LARGURA_FIXA = 56
 const LARGURA_REPOSICAO = 64
 const ocultarKits = ref(false)
+const ocultarEstoque = ref(false)
+// As caixas do menu Layout são "mostrar" (marcada = aparece).
+const mostrarKits = computed({
+  get: () => !ocultarKits.value,
+  set: (v: boolean) => { ocultarKits.value = !v },
+})
+const mostrarEstoque = computed({
+  get: () => !ocultarEstoque.value,
+  set: (v: boolean) => { ocultarEstoque.value = !v },
+})
 const kitsNaGrade = computed(() =>
   department.value === 'celular' && !ocultarKits.value ? kitCount.value : 0,
 )
 const colunasFixas = computed(() => {
-  const colunas: [string, number][] = [
-    ['produto', LARGURA_PRODUTO],
-    ['estoque', LARGURA_FIXA],
-    ['v7', LARGURA_FIXA],
-    ['v30', LARGURA_FIXA],
-    ['reposicao', LARGURA_REPOSICAO],
-  ]
+  const colunas: [string, number][] = [['produto', LARGURA_PRODUTO]]
+  // Sem as 4 de estoque, os kits (ou o custo) encostam no Produto: o left
+  // de cada um é recalculado aqui, e o template tira os th/td junto.
+  if (!ocultarEstoque.value) {
+    colunas.push(
+      ['estoque', LARGURA_FIXA],
+      ['v7', LARGURA_FIXA],
+      ['v30', LARGURA_FIXA],
+      ['reposicao', LARGURA_REPOSICAO],
+    )
+  }
   if (department.value === 'celular') {
     for (let k = 1; k <= kitsNaGrade.value; k++) colunas.push([`kit${k}`, LARGURA_FIXA])
   } else {
@@ -2185,7 +2204,8 @@ type CatalogoAnuncio = {
   bloqueio?: string | null
 }
 // Também vem na célula de KIT de conta com o catálogo ligado quando o único
-// anúncio que casa é de catálogo (bloqueio 'so_catalogo'): cadeado, não envia.
+// anúncio que casa é de catálogo (bloqueio 'so_catalogo'): não envia (o
+// aviãozinho fica apagado; o motivo está no balão da célula).
 type CatalogoCelula = {
   anuncios: CatalogoAnuncio[]
   // null = pode enviar; 'sem_anuncio' | 'mesmo_anuncio' | 'sincronizado' |
@@ -2226,8 +2246,8 @@ type PushResult = {
 const grid = ref<GridResponse | null>(null)
 const gridLoading = ref(false)
 const gridErr = ref<string | null>(null)
-const editingCell = ref<{ accId: string; prodId: string } | null>(null)
-const cellEditValue = ref<string>('')
+// O preço manual (disquete/Enter na célula) saiu no M-3 (17/11/2026): a
+// Tabela usa só o preço calculado e o servidor recusa preço manual novo.
 const pushing = ref(false)
 const lastPushResults = ref<PushResult[]>([])
 // SSH-style per-cell feedback while pushItemsBatch walks the queue.
@@ -2243,18 +2263,6 @@ function pushCellKey(productId: string, accountId: string): string {
   return `${productId}:${accountId}`
 }
 
-// ---------- Feature 3: obs editing in header
-const editingObsId = ref<string | null>(null)
-const obsValue = ref('')
-
-// ---------- Feature 4: undo/redo
-type UndoEntry = { prodId: string; accId: string; oldValue: string; newValue: string }
-const undoStack = ref<UndoEntry[]>([])
-const redoStack = ref<UndoEntry[]>([])
-
-// ---------- Feature 6: bling sync from grid
-const syncingBlingCosts = ref(false)
-
 // ---------- Feature 7: grid search
 const gridSearch = ref('')
 
@@ -2269,73 +2277,10 @@ const showPushMenu = ref(false)
 const pushLabel = ref('')
 
 // ---------- Feature 11: keyboard nav
+// Só o anel azul e as setas: a paleta "Cor:" (M-2) e o Enter que abria o
+// preço manual (M-3) saíram em 17/11/2026. As cores já gravadas no banco
+// (pricing_overrides.cell_color) só deixaram de aparecer.
 const selectedCell = ref<{ row: number; col: number } | null>(null)
-
-// ---------- Excel-style per-cell highlight color
-// 8 swatches + a clear button. Backend whitelist mirrors this in
-// app/routers/pricing.py:_ALLOWED_CELL_COLORS — keep in sync. Tailwind
-// classes hardcoded so the JIT compiler picks them up; can't be built
-// dynamically from the color value.
-const CELL_COLORS: ReadonlyArray<{ value: CellColor; label: string; swatch: string; ring: string }> = [
-  { value: 'red',    label: 'Vermelho', swatch: 'bg-red-200',    ring: 'ring-red-500' },
-  { value: 'orange', label: 'Laranja',  swatch: 'bg-orange-200', ring: 'ring-orange-500' },
-  { value: 'yellow', label: 'Amarelo',  swatch: 'bg-yellow-200', ring: 'ring-yellow-500' },
-  { value: 'green',  label: 'Verde',    swatch: 'bg-green-200',  ring: 'ring-green-500' },
-  { value: 'blue',   label: 'Azul',     swatch: 'bg-blue-200',   ring: 'ring-blue-500' },
-  { value: 'purple', label: 'Roxo',     swatch: 'bg-purple-200', ring: 'ring-purple-500' },
-  { value: 'pink',   label: 'Rosa',     swatch: 'bg-pink-200',   ring: 'ring-pink-500' },
-  { value: 'gray',   label: 'Cinza',    swatch: 'bg-gray-300',   ring: 'ring-gray-500' },
-] as const
-
-const selectedCellColor = computed<CellColor | null>(() => {
-  if (!selectedCell.value) return null
-  const { row, col } = selectedCell.value
-  const prod = filteredGridProducts.value[row]
-  const acc = gridAccounts.value[col]
-  if (!prod || !acc) return null
-  return cellOf(prod.id, acc.id)?.cell_color ?? null
-})
-
-async function setCellColor(color: CellColor | null) {
-  if (!selectedCell.value) return
-  const { row, col } = selectedCell.value
-  const prod = filteredGridProducts.value[row]
-  const acc = gridAccounts.value[col]
-  if (!prod || !acc || !grid.value) return
-
-  // Optimistic local update — find or insert the cell row, then PUT.
-  let cell = cellOf(prod.id, acc.id)
-  const prevColor = cell?.cell_color ?? null
-  if (cell) {
-    cell.cell_color = color
-  } else {
-    cell = {
-      pricing_account_id: acc.id,
-      pricing_product_id: prod.id,
-      price: null,
-      source: 'computed',
-      cell_status: 'auto',
-      has_override: false,
-      cell_color: color,
-    }
-    grid.value.cells.push(cell)
-  }
-
-  try {
-    await api('/api/pricing/overrides/cell-color', {
-      method: 'PUT',
-      body: {
-        pricing_product_id: prod.id,
-        pricing_account_id: acc.id,
-        cell_color: color,
-      },
-    })
-  } catch (e) {
-    // Revert on failure.
-    cell.cell_color = prevColor
-    console.error('cell_color save failed', e)
-  }
-}
 
 // ---------- Feature 12: compare mode
 const compareProductIds = ref<Set<string>>(new Set())
@@ -2374,7 +2319,7 @@ async function loadGrid() {
 }
 
 // No mesmo departamento a grade velha vale enquanto recarrega (depois de cada
-// edição): os (!) e o filtro "só linhas com (!)" não piscam.
+// edição): os (!) e os cartões vermelhos não piscam.
 const gradePronta = computed(() => !!grid.value && gridDepartamento.value === department.value)
 
 // Maps: pricing_product_id -> integer (stock or units sold)
@@ -2512,16 +2457,20 @@ function tituloEstoque(prodId: string): string {
 }
 
 // ---------- Reposição (02/11/2026, tarefas do Eduardo)
-// Mesma conta da Importação (utils/reposicao.ts) e com os MESMOS prazos dela,
+// Mesma conta da Importação (utils/reposicao.ts) e com o MESMO prazo dela,
 // por departamento (import_config): mudar aqui muda lá. Só quem edita a
-// Importação muda os prazos (o PATCH é o da Importação).
+// Importação muda o prazo (o PATCH é o da Importação).
+// M-2 (17/11/2026), igual à Importação no M-4: um campo só, "Reposição [N]
+// dias" na barra, e a conta usa só ele —
+//   Reposição = Estoque − vendas 30d × Reposição ÷ 30
+// O tempo de estoque saiu da tela e da conta (vai 0); continua no banco e
+// no GET /reposicao-config, que a tela ignora.
 type PrazosReposicao = {
   department: string
   tempo_reposicao: number | null
-  tempo_estoque: number | null
   pode_editar: boolean
 }
-type CampoPrazo = 'tempo_reposicao' | 'tempo_estoque'
+type CampoPrazo = 'tempo_reposicao'
 const prazos = ref<PrazosReposicao | null>(null)
 const prazosErro = ref(false)
 const salvandoPrazos = ref(false)
@@ -2543,9 +2492,9 @@ async function carregarPrazos() {
   }
 }
 
-// Manda SÓ o prazo que mudou (a Importação mexe na mesma linha: mandar os
-// dois regravaria o outro com um valor velho) e mostra o que voltou do
-// servidor — inclusive o outro prazo, se alguém o mudou na Importação.
+// Manda SÓ o prazo da Reposição (a Importação mexe na mesma linha: mandar o
+// tempo de estoque junto regravaria um valor velho) e mostra o que voltou
+// do servidor.
 async function salvarPrazos(campo: CampoPrazo) {
   const p = prazos.value
   if (!p?.pode_editar) return
@@ -2558,30 +2507,49 @@ async function salvarPrazos(campo: CampoPrazo) {
   salvandoPrazos.value = true
   const seq = ++seqPrazos
   try {
-    const r = await api<{ tempo_reposicao: number; tempo_estoque: number }>(
+    const r = await api<{ tempo_reposicao: number }>(
       `/api/importacao/config?categoria=${encodeURIComponent(p.department)}`,
       { method: 'PATCH', body: { [campo]: valor } },
     )
     if (seq === seqPrazos && prazos.value?.department === p.department) {
-      prazos.value = { ...prazos.value, tempo_reposicao: r.tempo_reposicao, tempo_estoque: r.tempo_estoque }
+      prazos.value = { ...prazos.value, tempo_reposicao: r.tempo_reposicao }
     }
   } catch {
-    toast.error('Não salvou o prazo', 'Tente de novo; os valores voltaram ao que está salvo.')
+    toast.error('Não salvou o prazo', 'Tente de novo; o valor voltou ao que está salvo.')
     await carregarPrazos()
   } finally {
     salvandoPrazos.value = false
   }
 }
 
-const tituloPrazos = computed(() =>
-  prazos.value?.pode_editar
-    ? 'Os mesmos prazos da tela Importação deste departamento: mudar aqui muda lá.'
-    : 'Os prazos são os da tela Importação; só quem edita a Importação pode mudar.',
-)
+const formulaReposicao = computed(() => textoFormulaReposicao(prazos.value?.tempo_reposicao))
 
-const formulaReposicao = computed(() =>
-  textoFormulaReposicao(prazos.value?.tempo_reposicao, prazos.value?.tempo_estoque),
-)
+// Balão do campo "Reposição [N] dias" da barra: a conta, o que cada parte
+// quer dizer (era a explicação da caixa amarela, que saiu no M-2) e quem
+// pode mudar. Carregando/erro/sem prazo também aparecem aqui.
+const tituloPrazos = computed(() => {
+  const quem = prazos.value?.pode_editar
+    ? 'O mesmo prazo da tela Importação deste departamento: mudar aqui muda lá.'
+    : 'O prazo é o da tela Importação; só quem edita a Importação pode mudar.'
+  const estoque = department.value === 'celular'
+    ? 'soma dos lotes (ci, pi, ra, sa, sp, cd) no Bling'
+    : 'soma dos SKUs da linha no Bling'
+  const estado = prazosErro.value
+    ? 'O prazo da Reposição não carregou — recarregue a página.'
+    : !prazos.value
+      ? 'carregando o prazo…'
+      : prazos.value.tempo_reposicao == null
+        ? 'Este departamento não tem prazo de reposição na Importação.'
+        : ''
+  return [
+    estado,
+    `${formulaReposicao.value}.`,
+    'Negativo, em vermelho = falta estoque para o prazo: é quanto comprar (linha com várias cores ou voltagens: soma só as que faltam).',
+    `Estoque = ${estoque}; 30d = vendas dos últimos 30 dias (sem cancelados; kit e conjunto contam em cada peça).`,
+    'Não desconta o que já está em lote aberto na Importação.',
+    quem,
+  ].filter(Boolean).join('\n')
+})
 
 // Uma célula de Reposição. Na linha com várias peças (cores, voltagens) a
 // conta é peça a peça: a sobra de uma não cobre a falta de outra — a célula
@@ -2614,15 +2582,15 @@ function calcularCelulaReposicao(prodId: string): ReposicaoCelula {
     return { tipo: prazosErro.value ? 'erro' : 'carregando' }
   }
   if (estoqueEstado.value === 'erro' || vendasEstado.value === 'erro') return { tipo: 'erro' }
+  // Um prazo só (M-2): o tempo de estoque vai 0, como na Importação.
   const tr = prazos.value.tempo_reposicao
-  const te = prazos.value.tempo_estoque
-  if (prazoDias(tr) == null || prazoDias(te) == null) return { tipo: 'sem_prazo' }
+  if (prazoDias(tr) == null) return { tipo: 'sem_prazo' }
   if (stockConjunto.value[prodId]) return { tipo: 'conjunto' }
-  const formula = textoFormulaReposicao(tr, te)
+  const formula = textoFormulaReposicao(tr)
   const porEstoque = estoquePorPeca(prodId)
   const porVendas = salesPecas30d.value[prodId]
   if (porEstoque && porVendas) {
-    const linha = reposicaoPorPeca(porEstoque, porVendas, tr, te)
+    const linha = reposicaoPorPeca(porEstoque, porVendas, tr, 0)
     if (linha && linha.pecas.length > 1) {
       const ordem = [...linha.pecas].sort((a, b) => a.r.valor - b.r.valor)
       const linhas = [
@@ -2641,7 +2609,7 @@ function calcularCelulaReposicao(prodId: string): ReposicaoCelula {
   }
   const estoque = stockMap.value[prodId] ?? 0
   const vendas = salesMap30d.value[prodId] ?? 0
-  const r = calcularReposicao(estoque, vendas, tr, te)
+  const r = calcularReposicao(estoque, vendas, tr, 0)
   if (!r) return { tipo: 'sem_prazo' }
   return { tipo: 'ok', valor: r.valor, titulo: `${explicarReposicao(r, estoque, vendas)}\n${formula}` }
 }
@@ -2668,19 +2636,23 @@ function textoReposicao(prodId: string): string {
 function tituloReposicao(prodId: string): string {
   const c = reposicoes.value.get(prodId)
   if (!c || c.tipo === 'carregando') return 'carregando…'
-  if (c.tipo === 'erro') return 'Estoque, vendas ou prazos não carregaram — recarregue a tabela.'
-  if (c.tipo === 'sem_prazo') return 'Sem prazos de reposição para este departamento (os prazos vêm da Importação).'
+  if (c.tipo === 'erro') return 'Estoque, vendas ou o prazo da Reposição não carregaram — recarregue a tabela.'
+  if (c.tipo === 'sem_prazo') return 'Sem prazo de reposição para este departamento (o prazo vem da Importação).'
   if (c.tipo === 'conjunto') {
     return 'Linha de conjunto/kit (composição no Bling): a compra é feita pelos itens avulsos, que têm a Reposição na linha deles. Somar aqui contaria a mesma demanda duas vezes.'
   }
   return c.titulo
 }
 
-// ---------- Conferência dos anúncios (02/11/2026, só administrador)
+// ---------- Conferência dos anúncios (02/11/2026)
 // O servidor lê o preço VIVO de cada anúncio (job no worker, só na produção)
 // e guarda; aqui a célula ganha (!) quando algum anúncio dela foge da
-// "% margem de erro" em relação ao preço da Tabela. Mudar a margem não relê
-// nada: só recalcula na tela. A margem fica lembrada neste navegador.
+// margem de erro em relação ao preço da Tabela. Mudar a margem não relê
+// nada: só recalcula na tela.
+// M-2/M-3 (17/11/2026): a leitura vale para todos que veem a Tabela (o
+// servidor só manda as células das contas que a pessoa vê na grade); os
+// botões "Margem" e "Conferir anúncios" continuam só do administrador. A
+// margem saiu do navegador e foi para o servidor (Geral + por produto).
 type AnuncioConferido = {
   anuncio: string
   variacao: string | null
@@ -2716,42 +2688,86 @@ type JobConferencia = {
     contas_com_erro?: { conta: string; motivo: string }[]
   } | null
 }
+// Margem da conferência (M-2, 17/11/2026): no servidor e igual para todos
+// (decisão do Eduardo). Uma Geral por departamento (padrão 5%) e um % próprio
+// por produto — produto com desconto ganha a margem dele e para de aparecer
+// como irregular. As caixas "Geral" e "Por produto" também ficam gravadas.
+// `produtos`: pricing_product_id → %, só os do departamento. `pode_editar` =
+// administrador (PUT /conferencia/margem e /conferencia/margem/produto/{id}).
+type MargemConferencia = {
+  department: string
+  margem_pct: number
+  geral_ligada: boolean
+  por_produto_ligada: boolean
+  produtos: Record<string, number>
+  pode_editar: boolean
+}
 // `ultimo_concluido`: o último job do departamento que terminou bem.
+// `margem` e `pode_conferir` (= administrador) vêm desde o M-2.
 type ConferenciaResposta = {
   job: JobConferencia | null
   ultimo_concluido: string | null
   celulas: CelulaConferida[]
+  margem?: Partial<MargemConferencia> | null
+  pode_conferir?: boolean
 }
 
+// Sem linha no banco o servidor manda 5% com as duas caixas ligadas.
 const MARGEM_PADRAO = 5
-const CHAVE_MARGEM = 'precos.margemErroPct'
 const CHAVE_OCULTAR_KITS = 'precos.ocultarKits'
-const margemErro = ref<number>(MARGEM_PADRAO)
+const CHAVE_OCULTAR_ESTOQUE = 'precos.ocultarEstoque'
 const conferencia = ref<ConferenciaResposta | null>(null)
-// 'carregando' até a 1ª resposta do departamento; 'erro' se ela falhou (aí a
-// tela não diz "ainda não conferido", que levaria a conferir de novo à toa).
+// 'carregando' até a 1ª resposta do departamento; 'erro' se ela falhou (aí o
+// balão do "Conferir anúncios" não diz "ainda não conferido", que levaria a
+// conferir de novo à toa).
 const conferenciaEstado = ref<EstadoMapa>('carregando')
 const conferenciaIniciando = ref(false)
 // A releitura falhou com dados na tela (ex.: a do fim da conferência): eles
-// podem ser de antes do fim — a faixa avisa e a tela tenta de novo algumas
-// vezes ('tentando') antes de pedir para recarregar ('desistiu').
+// podem ser de antes do fim — o balão do botão avisa e a tela tenta de novo
+// algumas vezes ('tentando') antes de pedir para recarregar ('desistiu').
 const releitura = ref<'ok' | 'tentando' | 'desistiu'>('ok')
 const TENTATIVAS_RELEITURA = 5
 let tentativasReleitura = 0
-const soDivergentes = ref(false)
 let seqConferencia = 0
 let timerConferencia: ReturnType<typeof setTimeout> | null = null
 let desmontado = false
+// A margem do departamento (null até a conferência carregar). `seqMargem`
+// conta as gravações: uma leitura da conferência que saiu antes de uma
+// gravação não desfaz a margem que acabou de ser gravada.
+const margem = ref<MargemConferencia | null>(null)
+const salvandoMargem = ref(false)
+let seqMargem = 0
 
 const conferenciaRodando = computed(() => {
   const s = conferencia.value?.job?.status
   return s === 'pending' || s === 'running'
 })
 
+// A margem como a tela usa: números de verdade (o NUMERIC pode vir como texto)
+// e o padrão do servidor no que faltar. Servidor sem o campo: 5%, as duas
+// caixas ligadas e ninguém edita.
+function margemDaResposta(bruta: Partial<MargemConferencia> | null | undefined, dep: string): MargemConferencia {
+  const produtos: Record<string, number> = {}
+  for (const [id, v] of Object.entries(bruta?.produtos ?? {})) {
+    const n = Number(v)
+    if (v != null && Number.isFinite(n)) produtos[id] = n
+  }
+  const pct = Number(bruta?.margem_pct)
+  return {
+    department: bruta?.department ?? dep,
+    margem_pct: bruta?.margem_pct != null && Number.isFinite(pct) ? pct : MARGEM_PADRAO,
+    geral_ligada: bruta?.geral_ligada ?? true,
+    por_produto_ligada: bruta?.por_produto_ligada ?? true,
+    produtos,
+    pode_editar: bruta?.pode_editar ?? false,
+  }
+}
+
 async function carregarConferencia() {
-  if (!isAdmin.value || import.meta.server || desmontado) return
+  if (import.meta.server || desmontado) return
   const dep = department.value
   const seq = ++seqConferencia
+  const margemAntes = seqMargem
   try {
     const r = await api<ConferenciaResposta>(`/api/pricing/conferencia?department=${encodeURIComponent(dep)}`)
     if (seq !== seqConferencia || desmontado) return
@@ -2759,6 +2775,7 @@ async function carregarConferencia() {
     conferenciaEstado.value = 'ok'
     releitura.value = 'ok'
     tentativasReleitura = 0
+    if (margemAntes === seqMargem || margem.value?.department !== dep) margem.value = margemDaResposta(r.margem, dep)
   } catch {
     if (seq !== seqConferencia || desmontado) return
     // Falha passageira com dados do mesmo departamento: fica com os últimos,
@@ -2780,7 +2797,9 @@ async function carregarConferencia() {
 
 // Enquanto o job roda: a cada 4 s só o andamento (leve, /api/jobs/{id}/status);
 // as células (resposta grande, MBs na mala) a cada 5 voltas e no fim — as
-// contas vão chegando aos poucos.
+// contas vão chegando aos poucos. Quem não é administrador não lê o job (o
+// /api/jobs só mostra os da própria pessoa): relê a conferência inteira, a
+// cada 30 s, até ela terminar.
 const VOLTAS_ATE_RELER_CELULAS = 5
 let voltasConferencia = 0
 function agendarConferencia() {
@@ -2788,7 +2807,9 @@ function agendarConferencia() {
   timerConferencia = null
   if (desmontado) return
   if (import.meta.client && conferenciaRodando.value && tab.value === 'tabela') {
-    timerConferencia = setTimeout(() => void acompanharConferencia(), 4000)
+    timerConferencia = isAdmin.value
+      ? setTimeout(() => void acompanharConferencia(), 4000)
+      : setTimeout(() => void carregarConferencia(), 30000)
   }
 }
 
@@ -2835,7 +2856,7 @@ async function conferirAnuncios() {
     if (code === 'so_no_servidor') {
       toast.warning('A conferência só roda no servidor', 'Ela lê os anúncios ao vivo nos marketplaces.')
     } else if (code === 'conferencia_em_andamento') {
-      toast.warning('Já há uma conferência rodando', 'O andamento aparece aqui.')
+      toast.warning('Já há uma conferência rodando', 'O andamento aparece no balão do botão "Conferir anúncios".')
     } else {
       toast.error('A conferência não começou', textoErroConferencia(code) || 'erro desconhecido')
     }
@@ -2858,10 +2879,54 @@ const ERROS_CONFERENCIA: Record<string, string> = {
   invalid_department: 'departamento inválido',
 }
 // Código desconhecido (ex.: o texto de uma exceção do servidor) não aparece
-// cru: a faixa mostra o texto genérico e o código fica no balão.
+// cru: o balão mostra o texto genérico e o código entre parênteses.
 function textoErroConferencia(codigo: string | null | undefined): string {
   return codigo ? ERROS_CONFERENCIA[codigo] ?? 'erro inesperado no servidor — confira de novo' : ''
 }
+
+// Balão do botão "Conferir anúncios": o que antes ficava escrito na faixa
+// roxa (última conferência, andamento, não terminou, contas que não leram,
+// não carregou). A faixa e o resumo saíram no M-2.
+const tituloConferir = computed(() => {
+  const linhas = ['Lê agora o preço de cada anúncio deste departamento nos marketplaces e compara com a Tabela.']
+  const conf = conferencia.value
+  const job = conf?.job
+  if (!conf) {
+    linhas.push(conferenciaEstado.value === 'erro'
+      ? 'A última conferência não carregou — recarregue a página antes de conferir de novo.'
+      : 'Carregando a última conferência…')
+  } else if (!job) {
+    linhas.push('Ainda não conferido.')
+  } else if (conferenciaRodando.value) {
+    linhas.push(`Lendo os anúncios: ${job.processed} de ${job.total || '…'} contas.`)
+  } else {
+    linhas.push(`Última conferência: ${fmtQuando(job.finished_at || job.created_at)}.`)
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      const cru = job.error && !ERROS_CONFERENCIA[job.error] ? ` (${job.error})` : ''
+      linhas.push(`Não terminou${job.error ? `: ${textoErroConferencia(job.error)}${cru}` : ''}.`)
+    }
+    const contas = job.result?.contas_com_erro ?? []
+    if (contas.length) {
+      linhas.push(`${contas.length} conta(s) não leram:`, ...contas.map((c) => `• ${c.conta}: ${c.motivo}`))
+    }
+  }
+  if (releitura.value !== 'ok') {
+    linhas.push(releitura.value === 'tentando'
+      ? 'O resultado mais recente não carregou — tentando de novo…'
+      : 'O resultado mais recente não carregou — recarregue a página.')
+  }
+  return linhas.join('\n')
+})
+
+// O balão tem um aviso (não carregou, não terminou, conta que não leu):
+// o botão ganha um alerta para a pessoa saber que vale passar o mouse.
+const conferirComAviso = computed(() => {
+  const job = conferencia.value?.job
+  if (!conferencia.value) return conferenciaEstado.value === 'erro'
+  if (releitura.value !== 'ok') return true
+  if (!job || conferenciaRodando.value) return false
+  return job.status === 'failed' || job.status === 'cancelled' || !!job.result?.contas_com_erro?.length
+})
 
 const conferenciaPorCelula = computed(() => {
   const m = new Map<string, CelulaConferida>()
@@ -2871,13 +2936,19 @@ const conferenciaPorCelula = computed(() => {
   return m
 })
 
-const margemValida = computed<number | null>(() => {
-  // Campo apagado vira '' no v-model.number: não é margem zero.
-  const bruto = margemErro.value as unknown
-  if (bruto === '' || bruto == null) return null
-  const m = Number(bruto)
-  return Number.isFinite(m) && m >= 0 && m <= 100 ? m : null
-})
+// A margem que vale para a linha: o % próprio do produto (com "Por produto"
+// ligado), senão a Geral (com "Geral" ligado), senão nenhuma — a linha não é
+// conferida (sem (!) e sem o motivo "fora da margem" no cartão vermelho).
+function margemDaLinha(m: MargemConferencia | null | undefined, pricingProductId: string): number | null {
+  if (!m) return null
+  if (m.por_produto_ligada) {
+    const propria = m.produtos?.[pricingProductId]
+    if (propria != null && Number.isFinite(Number(propria))) return Number(propria)
+  }
+  if (!m.geral_ligada) return null
+  const geral = Number(m.margem_pct)
+  return Number.isFinite(geral) ? geral : null
+}
 
 type Divergencia = {
   tabela: number
@@ -2886,6 +2957,8 @@ type Divergencia = {
   // Anúncios da célula sem preço lido (o balão do (!) avisa).
   naoLidos: number
   anuncios: number
+  // A margem usada na linha (a do produto ou a Geral), para o balão.
+  margem: number
 }
 
 // Anúncios cuja diferença para o preço da Tabela passa da margem (em %). Na
@@ -2912,18 +2985,21 @@ function celulaComparavel(prodId: string, accId: string): GridCell | null {
 }
 
 // Compara com o preço ATUAL da célula (o da Tabela agora), não com o da hora
-// da conferência. Só com a grade do departamento certo carregada.
+// da conferência, e com a margem da linha. Só com a grade e a margem do
+// departamento certo carregadas.
 // Calculado uma vez para a grade inteira (a célula só consulta o mapa).
 const divergencias = computed(() => {
   const m = new Map<string, Divergencia>()
-  const margem = margemValida.value
-  if (!isAdmin.value || margem == null || !gradePronta.value) return m
+  const mg = margem.value
+  if (!mg || mg.department !== department.value || !gradePronta.value) return m
   for (const conf of conferencia.value?.celulas ?? []) {
     if (conf.situacao !== 'conferida') continue
+    const margemLinha = margemDaLinha(mg, conf.pricing_product_id)
+    if (margemLinha == null) continue
     const c = celulaComparavel(conf.pricing_product_id, conf.pricing_account_id)
     if (!c) continue
     const tabela = Number(c.price)
-    const fora = anunciosForaDaMargem(conf.anuncios, tabela, margem)
+    const fora = anunciosForaDaMargem(conf.anuncios, tabela, margemLinha)
     if (fora.length) {
       m.set(`${conf.pricing_product_id}::${conf.pricing_account_id}`, {
         tabela,
@@ -2931,6 +3007,7 @@ const divergencias = computed(() => {
         conferidoEm: conf.conferido_em,
         naoLidos: anunciosNaoLidos(conf).length,
         anuncios: conf.anuncios.length,
+        margem: margemLinha,
       })
     }
   }
@@ -2941,64 +3018,24 @@ function divergenciaDe(prodId: string, accId: string): Divergencia | null {
   return divergencias.value.get(`${prodId}::${accId}`) ?? null
 }
 
-// Células com preço que a conferência NÃO conferiu por inteiro, com o motivo:
-// ? cinza na grade. Célula em branco = conferida por inteiro e dentro da
-// margem — por isso o ? vale também para conta sem integração no DaVinci,
-// sem anúncio vinculado, anúncio que o envio pula, leitura parcial (sem (!):
-// com (!), o balão dele conta os não lidos), leitura de uma conferência
-// anterior quando a última parou no meio e célula fora da conferência
-// (conferência dupla, 02/11/2026: antes essas ficavam em branco, ~30% das
-// células com preço). Sem margem válida não há comparação: nem (!) nem ?.
-type TipoNaoConferida =
-  | 'sem_integracao' | 'sem_anuncio' | 'catalogo_nao_lido' | 'fora_do_envio' | 'sem_leitor' | 'erro_conta'
-  | 'nao_lido' | 'desatualizada' | 'fora_da_conferencia'
-type NaoConferida = { tipo: TipoNaoConferida; motivo: string }
-// A conferência do departamento: `atual` = o último job, `concluido` = o
-// último que terminou bem. Vale a leitura gravada por um dos dois; a de
-// outro job é de uma conferência que parou no meio ou de conta que não
-// gravou (services/pricing/conferencia.py: ela fica com a leitura anterior).
-// 'sem_dados': o GET da conferência falhou.
-type EstadoConferencia = {
-  situacao: 'nunca' | 'rodando' | 'terminou' | 'parou' | 'sem_dados'
-  atual: string | null
-  concluido: string | null
+function anunciosNaoLidos(conf: CelulaConferida): AnuncioConferido[] {
+  return conf.anuncios.filter((a) => a.preco == null)
 }
-// Textos gravados pelo servidor: MOTIVO_SEM_INTEGRACAO e MOTIVO_SEM_VINCULO
-// (services/pricing/conferencia.py) e os do catálogo (TEXTO_BLOQUEIO e o da
-// conta de kit sem integração, services/pricing/anuncios.py). Outro motivo
-// de 'sem_anuncio' é anúncio que o envio pula (pausado, em revisão...).
+
+// "Sem anúncio": o servidor grava um texto (situacao 'sem_anuncio' da
+// conferência e `texto` do bloqueio do catálogo no /grid) — MOTIVO_SEM_INTEGRACAO
+// e MOTIVO_SEM_VINCULO (services/pricing/conferencia.py) e os do catálogo
+// (TEXTO_BLOQUEIO e o da conta de kit sem integração, services/pricing/
+// anuncios.py). Outro texto é anúncio que o envio pula ('fora_do_envio':
+// pausado, em revisão, sincronizado, só catálogo...).
+type TipoSemAnuncio = 'sem_integracao' | 'sem_anuncio' | 'catalogo_nao_lido' | 'fora_do_envio'
 const MOTIVO_SEM_INTEGRACAO = 'conta sem integração'
 const MOTIVO_SEM_VINCULO = 'sem anúncio vinculado'
 const PREFIXOS_SEM_INTEGRACAO = ['Conta de kit sem integração']
 const PREFIXOS_SEM_VINCULO = ['Sem anúncio de catálogo vinculado']
 const PREFIXOS_CATALOGO_NAO_LIDO = ['Marca de catálogo ainda não lida']
-const ROTULO_NAO_CONFERIDA: Record<TipoNaoConferida, string> = {
-  sem_integracao: 'conta sem integração no DaVinci',
-  sem_anuncio: 'sem anúncio vinculado',
-  catalogo_nao_lido: 'marca de catálogo ainda não lida (varredura diária)',
-  fora_do_envio: 'o envio não manda preço aqui (pausado, em revisão, catálogo, conta sem tipo…)',
-  sem_leitor: 'plataforma sem leitura de preço',
-  erro_conta: 'a conta não leu (erro)',
-  nao_lido: 'anúncio sem preço lido',
-  desatualizada: 'leitura antiga (conferência que parou no meio ou conta que não gravou)',
-  fora_da_conferencia: 'fora da última conferência',
-}
-const MOTIVO_SEM_LINHA: Record<EstadoConferencia['situacao'], string> = {
-  nunca: 'ainda não conferido: use "Conferir anúncios"',
-  rodando: 'ainda não lida nesta conferência (em andamento)',
-  parou: 'não lida: a última conferência parou no meio — confira de novo',
-  terminou: 'não estava na última conferência (conta ou preço novo): confira de novo',
-  sem_dados: 'a última conferência não carregou — recarregue a página',
-}
-const MOTIVO_LEITURA_ANTIGA: Record<EstadoConferencia['situacao'], string> = {
-  nunca: 'numa conferência que não terminou — confira de novo',
-  rodando: 'numa conferência que não terminou; a de agora ainda não chegou nela',
-  parou: 'numa conferência que não terminou — confira de novo',
-  terminou: 'na última conferência esta conta não conseguiu gravar — confira de novo',
-  sem_dados: 'numa conferência que não terminou — confira de novo',
-}
 
-function tipoSemAnuncio(motivo: string | null): TipoNaoConferida {
+function tipoSemAnuncio(motivo: string | null): TipoSemAnuncio {
   const m = motivo ?? ''
   if (m === MOTIVO_SEM_INTEGRACAO || PREFIXOS_SEM_INTEGRACAO.some((p) => m.startsWith(p))) return 'sem_integracao'
   if (!m || m === MOTIVO_SEM_VINCULO || PREFIXOS_SEM_VINCULO.some((p) => m.startsWith(p))) return 'sem_anuncio'
@@ -3006,145 +3043,153 @@ function tipoSemAnuncio(motivo: string | null): TipoNaoConferida {
   return 'fora_do_envio'
 }
 
-function anunciosNaoLidos(conf: CelulaConferida): AnuncioConferido[] {
-  return conf.anuncios.filter((a) => a.preco == null)
+// ---------- Cartão vermelho (M-3, 17/11/2026)
+// Retângulo vermelho pequeno, à esquerda do aviãozinho, quando a célula tem
+// algum destes problemas (o balão lista os motivos):
+//   a) a conta não tem integração no DaVinci (na coluna de catálogo, a conta
+//      de kit dela) — token vencido não conta;
+//   b) não há anúncio vinculado (não repete quando já é o a);
+//   c) há anúncio vinculado inativo (pausado, em revisão, encerrado, inativo
+//      ou excluído) — basta um, e o balão diz qual;
+//   d) o último envio de preço deu erro;
+//   e) o preço do anúncio está fora da margem (a do produto ou a Geral).
+// Vem do /grid (integração, cell_status, bloqueio do catálogo) e da última
+// conferência (anúncios lidos ao vivo; "sem anúncio vinculado" na coluna de
+// kit). Bloqueio do catálogo que é regra do envio (sincronizado, mesmo
+// anúncio, sem tipo, sem preço de catálogo, só catálogo, marca ainda não
+// lida) não é defeito: sem cartão.
+type EntradaCartao = {
+  // A conta que diz se há integração: na coluna de catálogo, a BASE (a
+  // filha nunca tem integration_id).
+  conta: { integration_id: string | null } | null | undefined
+  celula: Pick<GridCell, 'cell_status' | 'catalogo'> | null | undefined
+  conferida: CelulaConferida | null | undefined
+  divergencia: Divergencia | null | undefined
+}
+const CARTAO_SEM_INTEGRACAO = 'Conta sem integração no DaVinci'
+const CARTAO_SEM_ANUNCIO = 'Sem anúncio vinculado nesta conta'
+const CARTAO_ERRO_ENVIO = 'O último envio de preço deu erro'
+// Anúncios inativos listados no balão; o resto vira "e mais N".
+const CARTAO_INATIVOS_NO_BALAO = 3
+const BLOQUEIOS_ANUNCIO_INATIVO = new Set(['pausado', 'em_revisao', 'encerrado'])
+// Status gravado do anúncio de catálogo → bloqueio (o _MOTIVO_POR_STATUS de
+// services/pricing/anuncios.py; 'inactive' é anúncio parado pelo ML).
+const BLOQUEIO_POR_STATUS: Record<string, string> = {
+  paused: 'pausado',
+  inactive: 'pausado',
+  under_review: 'em_revisao',
+  closed: 'encerrado',
+}
+// Texto da conferência que é anúncio inativo (e não regra do envio): ML
+// encerrado/moderado, Shopee/TikTok excluído, catálogo pausado/em revisão.
+const PADRAO_ANUNCIO_INATIVO = /pausad|em revis|encerrad|exclu[íi]d|modera/i
+
+function motivosDoCartao(e: EntradaCartao): string[] {
+  const motivos: string[] = []
+  const somar = (m: string) => {
+    if (!motivos.includes(m)) motivos.push(m)
+  }
+  const cat = e.celula?.catalogo ?? null
+  const conf = e.conferida ?? null
+
+  // a) Conta sem integração (inclusive a coluna de catálogo de uma conta de
+  // kit sem integração).
+  const semIntegracao = (!!e.conta && e.conta.integration_id == null)
+    || (cat?.bloqueio === 'sem_anuncio' && tipoSemAnuncio(cat.texto) === 'sem_integracao')
+  if (semIntegracao) somar(CARTAO_SEM_INTEGRACAO)
+
+  // b) Sem anúncio vinculado. Célula com `catalogo` (coluna de catálogo, ou
+  // de kit que só tem anúncio de catálogo): quem diz é o /grid. Coluna de kit:
+  // a conferência, ou o envio que gravou no_link.
+  if (!semIntegracao) {
+    const semVinculo = e.celula?.cell_status === 'no_link' || (cat
+      ? cat.bloqueio === 'sem_anuncio' && tipoSemAnuncio(cat.texto) === 'sem_anuncio'
+      : conf?.situacao === 'sem_anuncio' && tipoSemAnuncio(conf.motivo) === 'sem_anuncio')
+    if (semVinculo) somar(CARTAO_SEM_ANUNCIO)
+  }
+
+  // c) Anúncio vinculado inativo.
+  const inativos: string[] = []
+  for (const an of cat?.anuncios ?? []) {
+    // 'so_catalogo': o anúncio é da coluna Catálogo, não desta.
+    if (an.bloqueio === 'so_catalogo') continue
+    const bloqueio = an.bloqueio && BLOQUEIOS_ANUNCIO_INATIVO.has(an.bloqueio)
+      ? an.bloqueio
+      : BLOQUEIO_POR_STATUS[(an.status ?? '').toLowerCase()]
+    if (bloqueio) inativos.push(`Anúncio de catálogo ${an.external_id} ${MOTIVO_ANUNCIO[bloqueio] ?? bloqueio}`)
+  }
+  if (!inativos.length && cat?.bloqueio && BLOQUEIOS_ANUNCIO_INATIVO.has(cat.bloqueio)) {
+    inativos.push(`Anúncio de catálogo ${MOTIVO_ANUNCIO[cat.bloqueio] ?? cat.bloqueio}`)
+  }
+  // O que a conferência leu ao vivo: inativo, ou sem preço porque foi
+  // encerrado/excluído/moderado.
+  for (const a of conf?.anuncios ?? []) {
+    const motivoInativo = a.motivo && PADRAO_ANUNCIO_INATIVO.test(a.motivo) ? a.motivo : null
+    if (a.ativo !== false && !(a.preco == null && motivoInativo)) continue
+    const variacao = a.variacao ? ` (variação ${a.variacao})` : ''
+    const detalhe = motivoInativo
+      ? motivoInativo.replace(/\s*—\s*o envio pula$/, '')
+      : 'inativo no marketplace (pausado, em revisão ou fora do ar)'
+    inativos.push(`Anúncio ${a.anuncio}${variacao}: ${detalhe}`)
+  }
+  // "Fora do envio" da conferência: só pausado/em revisão/encerrado é motivo
+  // (sincronizado, mesmo anúncio, só catálogo... são regra do envio).
+  if (!cat && conf?.situacao === 'sem_anuncio' && tipoSemAnuncio(conf.motivo) === 'fora_do_envio'
+    && PADRAO_ANUNCIO_INATIVO.test(conf.motivo ?? '')) {
+    inativos.push(conf.motivo!)
+  }
+  for (const m of inativos.slice(0, CARTAO_INATIVOS_NO_BALAO)) somar(m)
+  if (inativos.length > CARTAO_INATIVOS_NO_BALAO) {
+    somar(`… e mais ${inativos.length - CARTAO_INATIVOS_NO_BALAO} anúncio(s) inativo(s)`)
+  }
+
+  // d) O último envio deu erro (o texto do erro não fica guardado).
+  if (e.celula?.cell_status === 'error') somar(CARTAO_ERRO_ENVIO)
+
+  // e) Fora da margem da linha.
+  const d = e.divergencia
+  if (d && d.fora.length) {
+    const a = d.fora[0]
+    const dif = ((a.preco! - d.tabela) / d.tabela) * 100
+    const mais = d.fora.length > 1 ? ` (e mais ${d.fora.length - 1})` : ''
+    somar(
+      `Preço do anúncio fora da margem de ${fmtPct(d.margem)}%: anúncio ${Math.round(a.preco!)} × Tabela ${Math.round(d.tabela)}`
+      + ` (${dif > 0 ? '+' : ''}${dif.toFixed(1).replace('.', ',')}%)${mais}`,
+    )
+  }
+  return motivos
 }
 
-function motivoDosNaoLidos(anuncios: AnuncioConferido[]): string {
-  const motivos = [...new Set(anuncios.map((a) => a.motivo).filter(Boolean))]
-  return motivos.length ? motivos.join('; ') : 'sem preço lido'
-}
-
-// `temFora`: a célula tem (!) — ele fala por ela, mesmo numa leitura antiga
-// (o balão dele traz a data).
-function naoConferidaDaCelula(
-  conf: CelulaConferida | undefined,
-  temFora: boolean,
-  estado: EstadoConferencia,
-): NaoConferida | null {
-  if (!conf) return { tipo: 'fora_da_conferencia', motivo: MOTIVO_SEM_LINHA[estado.situacao] }
-  if (temFora) return null
-  if (conf.job_id == null || (conf.job_id !== estado.atual && conf.job_id !== estado.concluido)) {
-    return {
-      tipo: 'desatualizada',
-      motivo: `lida em ${fmtQuando(conf.conferido_em)}, ${MOTIVO_LEITURA_ANTIGA[estado.situacao]}`,
+// Os motivos de cada célula da grade (produto::conta), já juntos para o
+// balão. Calculado uma vez para a grade inteira, como `divergencias`; vale
+// também para célula sem preço (conta sem integração: cartão em todas).
+const cartoes = computed(() => {
+  const m = new Map<string, string>()
+  if (!gradePronta.value || !grid.value) return m
+  for (const acc of grid.value.accounts) {
+    const conta = contaParametros(acc)
+    for (const prod of grid.value.products) {
+      const chave = `${prod.id}::${acc.id}`
+      const motivos = motivosDoCartao({
+        conta,
+        celula: cellMap.value.get(chave),
+        conferida: conferenciaPorCelula.value.get(chave),
+        divergencia: divergencias.value.get(chave),
+      })
+      if (motivos.length) m.set(chave, motivos.join('\n'))
     }
-  }
-  if (conf.situacao === 'erro_conta') return { tipo: 'erro_conta', motivo: `erro na conta: ${conf.motivo ?? 'sem detalhe'}` }
-  if (conf.situacao === 'nao_suportada') {
-    return { tipo: 'sem_leitor', motivo: conf.motivo ?? 'sem leitura de preço para esta plataforma' }
-  }
-  if (conf.situacao === 'sem_anuncio') {
-    const tipo = tipoSemAnuncio(conf.motivo)
-    const motivo = conf.motivo === MOTIVO_SEM_INTEGRACAO
-      ? 'conta sem integração no DaVinci: não dá para ler o anúncio'
-      : conf.motivo ?? MOTIVO_SEM_VINCULO
-    return { tipo, motivo }
-  }
-  const naoLidos = anunciosNaoLidos(conf)
-  if (!conf.anuncios.length) return { tipo: 'nao_lido', motivo: 'nenhum anúncio lido' }
-  if (naoLidos.length === conf.anuncios.length) return { tipo: 'nao_lido', motivo: motivoDosNaoLidos(naoLidos) }
-  if (naoLidos.length) {
-    const lidos = conf.anuncios.length - naoLidos.length
-    return {
-      tipo: 'nao_lido',
-      motivo: `${lidos} de ${conf.anuncios.length} anúncios lidos, dentro da margem; os outros: ${motivoDosNaoLidos(naoLidos)}`,
-    }
-  }
-  return null
-}
-
-// Toda célula com preço da grade (`comparavel`) que não ficou conferida por
-// inteiro: chave → motivo. Pura, como `contarConferencia` (testes em
-// tests/pricing-conferencia.cjs).
-function classificarNaoConferidas(
-  celulas: { pricing_product_id: string; pricing_account_id: string }[],
-  comparavel: (prodId: string, accId: string) => boolean,
-  porCelula: Map<string, CelulaConferida>,
-  divergentes: Map<string, unknown>,
-  estado: EstadoConferencia,
-): Map<string, NaoConferida> {
-  const m = new Map<string, NaoConferida>()
-  for (const c of celulas) {
-    if (!comparavel(c.pricing_product_id, c.pricing_account_id)) continue
-    const chave = `${c.pricing_product_id}::${c.pricing_account_id}`
-    const nc = naoConferidaDaCelula(porCelula.get(chave), divergentes.has(chave), estado)
-    if (nc) m.set(chave, nc)
   }
   return m
-}
-
-// Os números da faixa: cada célula com preço das linhas e colunas na tela em
-// um balde só — (!), não conferida (?) ou conferida dentro da margem.
-function contarConferencia(
-  produtos: { id: string }[],
-  contas: { id: string }[],
-  comparavel: (prodId: string, accId: string) => boolean,
-  divergentes: Map<string, unknown>,
-  naoConferidasDaGrade: Map<string, NaoConferida>,
-): { fora: number; conferidas: number; qtdNaoConferidas: number; porTipo: Map<TipoNaoConferida, number> } {
-  let fora = 0
-  let conferidas = 0
-  let qtdNaoConferidas = 0
-  const porTipo = new Map<TipoNaoConferida, number>()
-  for (const prod of produtos) {
-    for (const acc of contas) {
-      if (!comparavel(prod.id, acc.id)) continue
-      const chave = `${prod.id}::${acc.id}`
-      const nc = naoConferidasDaGrade.get(chave)
-      if (divergentes.has(chave)) {
-        fora++
-      } else if (nc) {
-        qtdNaoConferidas++
-        porTipo.set(nc.tipo, (porTipo.get(nc.tipo) ?? 0) + 1)
-      } else {
-        conferidas++
-      }
-    }
-  }
-  return { fora, conferidas, qtdNaoConferidas, porTipo }
-}
-
-const estadoConferencia = computed<EstadoConferencia>(() => {
-  const conf = conferencia.value
-  const concluido = conf?.ultimo_concluido ?? null
-  const job = conf?.job
-  if (!conf) return { situacao: 'sem_dados', atual: null, concluido: null }
-  if (!job) return { situacao: 'nunca', atual: null, concluido }
-  const situacao = job.status === 'pending' || job.status === 'running'
-    ? 'rodando'
-    : job.status === 'succeeded' ? 'terminou' : 'parou'
-  return { situacao, atual: job.id, concluido }
 })
 
-function temPrecoComparavel(prodId: string, accId: string): boolean {
-  return celulaComparavel(prodId, accId) != null
-}
-
-const naoConferidas = computed(() => {
-  // Carregando: a faixa avisa e as marcas vêm em seguida. GET que falhou sem
-  // dados: toda célula com preço fica com ? ('sem_dados').
-  const semDados = !conferencia.value && conferenciaEstado.value === 'erro'
-  if (!isAdmin.value || !gradePronta.value || (!conferencia.value && !semDados) || margemValida.value == null) {
-    return new Map<string, NaoConferida>()
-  }
-  return classificarNaoConferidas(
-    grid.value?.cells ?? [],
-    temPrecoComparavel,
-    conferenciaPorCelula.value,
-    divergencias.value,
-    estadoConferencia.value,
-  )
-})
-
-function naoConferidaDe(prodId: string, accId: string): string | null {
-  return naoConferidas.value.get(`${prodId}::${accId}`)?.motivo ?? null
+function cartaoDe(prodId: string, accId: string): string | null {
+  return cartoes.value.get(`${prodId}::${accId}`) ?? null
 }
 
 const fmtReal = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 const fmtPct = (v: number) => v.toLocaleString('pt-BR', { maximumFractionDigits: 2 })
-// Um formatador só: o ? da leitura antiga formata a data de milhares de
-// células a cada recálculo (toLocaleString com opções é ~20× mais lento).
+// Um formatador só: a data entra no balão de milhares de células a cada
+// recálculo (toLocaleString com opções é ~20× mais lento).
 const FMT_QUANDO = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 const fmtQuando = (iso: string | null | undefined) => (iso ? FMT_QUANDO.format(new Date(iso)) : '—')
 
@@ -3159,54 +3204,158 @@ function tituloDivergencia(d: Divergencia): string {
     return `Anúncio ${a.anuncio}${variacao}: ${fmtReal(a.preco!)}, ${sinal}${dif.toFixed(1).replace('.', ',')}% da Tabela${promo}${pausado}${obs}`
   })
   return [
-    `Fora da margem de ${fmtPct(margemValida.value ?? 0)}%: Tabela ${fmtReal(d.tabela)}`,
+    `Fora da margem de ${fmtPct(d.margem)}%: Tabela ${fmtReal(d.tabela)}`,
     ...linhas,
     ...(d.naoLidos ? [`${d.naoLidos} de ${d.anuncios} anúncios desta célula sem preço lido`] : []),
     `Conferido em ${fmtQuando(d.conferidoEm)}`,
   ].join('\n')
 }
 
-// Números da faixa: só as células na tela (busca, filtro de marketplace e
-// "só linhas com (!)") — os mesmos (!) e ? que a grade mostra.
-const resumoConferencia = computed(() => {
-  const conf = conferencia.value
-  if (!conf || !isAdmin.value) return null
-  const n = contarConferencia(
-    filteredGridProducts.value,
-    gridAccounts.value,
-    temPrecoComparavel,
-    divergencias.value,
-    naoConferidas.value,
-  )
-  const tituloNaoConferidas = [
-    'Células com preço que a conferência não conferiu por inteiro (? cinza na grade; o balão diz o motivo):',
-    ...(Object.keys(ROTULO_NAO_CONFERIDA) as TipoNaoConferida[])
-      .filter((t) => n.porTipo.get(t))
-      .map((t) => `• ${ROTULO_NAO_CONFERIDA[t]}: ${n.porTipo.get(t)}`),
+// ---------- Botão "Margem N% ▾" (M-2, 17/11/2026; só administrador)
+// Menu igual ao do Layout: [x] Geral [n] % e [x] Por produto (busca + um %
+// por produto). Cada mudança grava na hora no servidor; recusa → aviso e
+// volta ao que está salvo. Campo de % por produto vazio = sem % próprio
+// (usa a Geral).
+const rotuloMargem = computed(() => {
+  const m = margem.value
+  if (!m) return 'Margem …'
+  return m.geral_ligada ? `Margem ${fmtPct(m.margem_pct)}%` : 'Margem —'
+})
+
+const tituloMargem = computed(() => {
+  const m = margem.value
+  const base = 'Margem de erro da conferência: a diferença aceita entre o preço do anúncio e o da Tabela, '
+    + 'para o (!) e o cartão vermelho.'
+  if (!m) return `${base}\n${conferenciaEstado.value === 'erro' ? 'Não carregou — recarregue a página.' : 'carregando…'}`
+  const proprios = Object.keys(m.produtos).length
+  return [
+    base,
+    m.geral_ligada
+      ? `Geral: ${fmtPct(m.margem_pct)}% (produtos sem % próprio).`
+      : 'Geral desligada: produto sem % próprio não é conferido.',
+    m.por_produto_ligada
+      ? `Por produto: ${proprios} produto(s) com % próprio.`
+      : `Por produto desligado: todos usam a Geral (${proprios} % próprio(s) guardado(s)).`,
   ].join('\n')
+})
+
+// "7,5" ou "7.5" → 7.5; vazio → null; outra coisa ou fora de 0..100 → undefined.
+function lerPct(texto: string): number | null | undefined {
+  const t = texto.trim().replace(',', '.')
+  if (t === '') return null
+  const n = Number(t)
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : undefined
+}
+
+function textoErroMargem(e: any): string {
+  const status = e?.status ?? e?.response?.status
+  if (status === 422) return 'Use um número de 0 a 100.'
+  if (status === 403) return 'Só o administrador muda a margem.'
+  if (status === 404) return 'Produto não encontrado — recarregue a página.'
+  return 'Tente de novo; voltou ao que está salvo.'
+}
+
+async function salvarMargem(mudanca: { margem_pct?: number; geral_ligada?: boolean; por_produto_ligada?: boolean }) {
+  const antes = margem.value
+  if (!antes?.pode_editar || salvandoMargem.value) return
+  const dep = antes.department
+  // Já na tela (as caixas respondem na hora); volta ao salvo se o servidor recusar.
+  margem.value = { ...antes, ...mudanca }
+  salvandoMargem.value = true
+  seqMargem++
+  try {
+    const r = await api<MargemConferencia>('/api/pricing/conferencia/margem', {
+      method: 'PUT',
+      body: { department: dep, ...mudanca },
+    })
+    if (margem.value?.department === dep) margem.value = margemDaResposta(r, dep)
+  } catch (e: any) {
+    toast.error('Não salvou a margem', textoErroMargem(e))
+    if (margem.value?.department === dep) margem.value = antes
+  } finally {
+    salvandoMargem.value = false
+  }
+}
+
+function salvarMargemGeral(ev: Event) {
+  const campo = ev.target as HTMLInputElement
+  const atual = margem.value
+  if (!atual) return
+  const valor = lerPct(campo.value)
+  if (valor == null) {
+    toast.error('Margem inválida', 'Use um número de 0 a 100.')
+    campo.value = fmtPct(atual.margem_pct)
+    return
+  }
+  if (valor === atual.margem_pct) return
+  void salvarMargem({ margem_pct: valor })
+}
+
+async function salvarMargemProduto(prodId: string, ev: Event) {
+  const campo = ev.target as HTMLInputElement
+  const antes = margem.value
+  if (!antes?.pode_editar || salvandoMargem.value) return
+  const salvo = antes.produtos[prodId] ?? null
+  const voltar = () => {
+    campo.value = salvo == null ? '' : fmtPct(salvo)
+  }
+  const valor = lerPct(campo.value)
+  if (valor === undefined) {
+    toast.error('Margem inválida', 'Use um número de 0 a 100, ou deixe vazio para usar a Geral.')
+    voltar()
+    return
+  }
+  if (valor === salvo) return
+  const dep = antes.department
+  salvandoMargem.value = true
+  seqMargem++
+  try {
+    const r = await api<MargemConferencia>(
+      `/api/pricing/conferencia/margem/produto/${encodeURIComponent(prodId)}`,
+      { method: 'PUT', body: { margem_pct: valor } },
+    )
+    if (margem.value?.department === dep) margem.value = margemDaResposta(r, dep)
+  } catch (e: any) {
+    toast.error('Não salvou a margem do produto', textoErroMargem(e))
+    voltar()
+  } finally {
+    salvandoMargem.value = false
+  }
+}
+
+// Lista do "Por produto" (M-2, 17/11/2026: um campo % para cada produto do
+// departamento; a busca só filtra). Sem busca vêm TODOS os produtos da grade:
+// primeiro os que já têm % próprio, por nome; depois os outros, por nome. Com
+// texto, a busca (SKU ou nome) filtra as duas partes; a rolagem do menu dá
+// conta da Mala, que tem muitas linhas.
+const buscaMargemProduto = ref('')
+const produtosDaMargem = computed(() => {
+  const prods = gradePronta.value ? grid.value?.products ?? [] : []
+  const proprios = margem.value?.produtos ?? {}
+  const porNome = (a: PricingProduct, b: PricingProduct) =>
+    (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+  const q = buscaMargemProduto.value.trim().toLowerCase()
+  const achados = q
+    ? prods.filter((p) => (p.sku || '').toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q))
+    : prods
   return {
-    fora: n.fora,
-    conferidas: n.conferidas,
-    qtdNaoConferidas: n.qtdNaoConferidas,
-    tituloNaoConferidas,
-    contasComErro: conf.job?.result?.contas_com_erro ?? [],
+    comPropria: achados.filter((p) => proprios[p.id] != null).sort(porNome),
+    semPropria: achados.filter((p) => proprios[p.id] == null).sort(porNome),
   }
 })
 
-// O filtro "só linhas com (!)" vale só com o controle dele na tela: conferência
-// terminada, margem válida e a grade do departamento carregada.
-const filtroDivergentesAtivo = computed(
-  () =>
-    soDivergentes.value
-    && isAdmin.value
-    && margemValida.value != null
-    && !!conferencia.value?.job
-    && !conferenciaRodando.value
-    && gradePronta.value,
-)
-
-function linhaTemDivergencia(prodId: string): boolean {
-  return gridAccounts.value.some((acc) => divergenciaDe(prodId, acc.id) != null)
+// O menu "Margem ▾" grava os campos no change, que só dispara ao sair do
+// campo ou com Enter. Esc ou clique fora fecham o Popover e tiram o campo do
+// DOM ainda com o foco — e tirar um campo focado não dispara blur/change
+// (Firefox e Safari seguem a especificação). Por isso, ao fechar, grava o
+// campo que está com o foco (M-2, 17/11/2026). Se o change também disparar,
+// o "valor igual ao salvo" / "já salvando" das funções evita gravar duas vezes.
+function gravarCampoMargemComFoco() {
+  if (typeof document === 'undefined') return
+  const el = document.activeElement as HTMLInputElement | null
+  if (!el?.closest?.('[data-menu-margem]')) return
+  if (el.dataset.campo === 'margem-geral') salvarMargemGeral({ target: el } as unknown as Event)
+  else if (el.dataset.margemProduto) void salvarMargemProduto(el.dataset.margemProduto, { target: el } as unknown as Event)
 }
 
 const cellMap = computed(() => {
@@ -3260,111 +3409,12 @@ function liveCellLabel(prod: any, acc: Account): string {
   return cellLabel(c)
 }
 
-function cellTone(c: GridCell | undefined): string {
-  if (!c) return 'text-muted-foreground'
-  // Critical states keep priority over any manual highlight — NA/SV/error
-  // /no_link are signals the operator actually needs to see, not paint over.
-  if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
-  if (c.cell_status === 'SV') return 'bg-amber-100 text-amber-700 font-semibold'
-  // Transient post-push states. SSH paints these so the user can decide whether
-  // to mark NA/SV permanently or fix the underlying issue and retry.
-  if (c.cell_status === 'error') return 'bg-red-50 text-red-700'
-  if (c.cell_status === 'no_link') return 'bg-amber-50 text-amber-700'
-  // Operator-picked highlight beats the automatic palette. Hardcoded
-  // Tailwind class names so the JIT bundles them; keep in sync with
-  // CELL_COLORS above.
-  if (c.cell_color) {
-    switch (c.cell_color) {
-      case 'red':    return 'bg-red-200 text-red-900'
-      case 'orange': return 'bg-orange-200 text-orange-900'
-      case 'yellow': return 'bg-yellow-200 text-yellow-900'
-      case 'green':  return 'bg-green-200 text-green-900'
-      case 'blue':   return 'bg-blue-200 text-blue-900'
-      case 'purple': return 'bg-purple-200 text-purple-900'
-      case 'pink':   return 'bg-pink-200 text-pink-900'
-      case 'gray':   return 'bg-gray-300 text-gray-800'
-    }
-  }
-  if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
-  if (c.source === 'locked') return 'bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-100'
-  // SSH: override (preço fixo manual) → fundo laranja.
-  if (c.source === 'override') return 'bg-orange-100 text-orange-900 dark:bg-orange-900/30 dark:text-orange-100'
-  if (c.source === 'missing_inputs') return 'bg-gray-100 text-gray-500 font-semibold'
-  if (c.price != null) {
-    const prod = grid.value?.products.find(p => p.id === c.pricing_product_id)
-    const acc = grid.value?.accounts.find(a => a.id === c.pricing_account_id)
-    if (prod && acc) {
-      const price = Number(c.price)
-      const cost = custoDaConta(prod, acc)
-      const ms = getMarginShipping(contaParametros(acc), prod.product_type)
-      const shipping = ms ? Number(ms.shipping) : 0
-      if (cost != null && price < cost + shipping) return 'bg-red-100 text-red-700 font-bold'
-    }
-  }
-  return ''
-}
-
-function startCellEdit(c: GridCell) {
-  editingCell.value = { accId: c.pricing_account_id, prodId: c.pricing_product_id }
-  cellEditValue.value = c.price != null ? String(c.price) : ''
-}
-
-function cancelCellEdit() {
-  editingCell.value = null
-  cellEditValue.value = ''
-}
-
-async function saveOverride() {
-  if (!editingCell.value) return
-  const { accId, prodId } = editingCell.value
-  const val = cellEditValue.value.trim()
-  const oldCell = cellOf(prodId, accId)
-  const oldValue = oldCell?.price != null ? String(oldCell.price) : ''
-  try {
-    if (val === '') {
-      await api(
-        `/api/pricing/overrides?pricing_product_id=${prodId}&pricing_account_id=${accId}`,
-        { method: 'DELETE' },
-      ).catch((e) => {
-        if (e?.response?.status !== 404) throw e
-      })
-    } else {
-      await api('/api/pricing/overrides', {
-        method: 'PUT',
-        body: {
-          pricing_product_id: prodId,
-          pricing_account_id: accId,
-          price_override: parseDec(val),
-          cell_status: 'manual',
-        },
-      })
-    }
-    if (oldValue !== val) {
-      undoStack.value.push({ prodId, accId, oldValue, newValue: val })
-      redoStack.value = []
-    }
-    cancelCellEdit()
-    await loadGrid()
-  } catch (e: any) {
-    gridErr.value = e?.data?.detail?.code ?? 'save_failed'
-  }
-}
-
-async function setCellStatus(c: GridCell, status: 'auto' | 'locked' | 'disabled' | 'NA' | 'SV') {
-  try {
-    await api('/api/pricing/overrides/cell-status', {
-      method: 'PUT',
-      body: {
-        pricing_product_id: c.pricing_product_id,
-        pricing_account_id: c.pricing_account_id,
-        cell_status: status,
-      },
-    })
-    await loadGrid()
-  } catch (e: any) {
-    gridErr.value = e?.data?.detail?.code ?? 'status_failed'
-  }
-}
+// Cores da célula: saíram no M-3 (17/11/2026). O preço fica sempre em preto
+// (sem fundo por status, por cor escolhida, por preço manual, por 'locked'
+// nem por margem negativa — esta continua no aviso acima da grade); o que
+// precisa de atenção vira o cartão vermelho (cartaoDe). Fica só o fundo da
+// coluna (colunaBg). O disquete (preço manual), o ⊘ e os botões NA/SV também
+// saíram: os estados já gravados continuam valendo no servidor.
 
 async function pushCell(c: GridCell) {
   const bloq = catalogoBloqueado(c.pricing_product_id, c.pricing_account_id)
@@ -3431,7 +3481,6 @@ type BatchJob = {
   result?: { summary?: { total: number; ok: number; failed: number; cached: number } }
   error?: string | null
 }
-const activeJob = ref<BatchJob | null>(null)
 
 // SSH-style cell-by-cell push: walk the items sequentially from the browser,
 // one POST /api/pricing/push per cell, and update per-cell visual state in
@@ -3450,7 +3499,7 @@ async function pushItemsBatch(
     if (bloqueadas > 0) {
       toast.warning(
         'Nada para enviar',
-        `${bloqueadas} célula(s) de catálogo bloqueada(s) — passe o mouse no cadeado para ver o motivo`,
+        `${bloqueadas} célula(s) de catálogo bloqueada(s) — passe o mouse na célula para ver o motivo`,
       )
     } else {
       gridErr.value = 'no_eligible_cells'
@@ -3579,46 +3628,6 @@ async function pushItemsBatch(
   }
 }
 
-async function pollJob(jobId: string, attempts = 0): Promise<void> {
-  try {
-    const job = await api<BatchJob>(`/api/jobs/${jobId}`)
-    activeJob.value = job
-    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
-      await loadGrid()
-      // Surface the terminal outcome via toast so the user doesn't have to
-      // scroll back to the (also-rendered) result box.
-      if (job.status === 'succeeded') {
-        const s = job.result?.summary
-        if (s) {
-          if (s.failed === 0) {
-            toast.success('Push concluído!', `${s.ok} preço(s) enviado(s)`)
-          } else {
-            toast.error(
-              `Envio: ${s.ok} ok, ${s.failed} falha(s)`,
-              s.cached ? `${s.cached} cached` : undefined,
-            )
-          }
-        } else {
-          toast.success('Push concluído!')
-        }
-      } else if (job.status === 'failed') {
-        toast.error('Push falhou', job.error || 'Erro desconhecido')
-      } else {
-        toast.warning('Push cancelado')
-      }
-      return
-    }
-  } catch (e: any) {
-    if (attempts > 60) {
-      gridErr.value = 'job_poll_timeout'
-      toast.error('Timeout aguardando o job', 'Recarregue a página pra ver o status')
-      return
-    }
-  }
-  await new Promise((r) => setTimeout(r, 1500))
-  return pollJob(jobId, attempts + 1)
-}
-
 async function pushAccountColumn(accId: string) {
   if (!grid.value) return
   const elegiveis = filteredGridProducts.value
@@ -3651,22 +3660,6 @@ async function pushAllVisible() {
   const aviso = fila.bloqueadas > 0 ? ` (${fila.bloqueadas} bloqueada(s) de catálogo serão puladas)` : ''
   if (!confirm(`Push ${fila.items.length} célula(s)?${aviso}`)) return
   await pushItemsBatch(fila.items, 'all-visible', fila.bloqueadas)
-}
-
-async function sendManualReport() {
-  const text = prompt(
-    'Texto do relatório (HTML do Telegram):',
-    activeJob.value
-      ? `Push job ${activeJob.value.id}\nstatus: ${activeJob.value.status}\nok: ${activeJob.value.result?.summary?.ok ?? 0} / ${activeJob.value.total}`
-      : 'Sem dados',
-  )
-  if (!text) return
-  try {
-    await api('/api/pricing/push-report', { method: 'POST', body: { summary: text } })
-    alert('Enviado.')
-  } catch (e: any) {
-    gridErr.value = e?.data?.detail?.code ?? 'report_failed'
-  }
 }
 
 // =========================================================== grid: conta de catálogo
@@ -3865,8 +3858,8 @@ const gridAccountsOrdenadas = computed<Account[]>(() => {
   })
 })
 
-// Filtro "Todos marketplaces": plataforma, ou as duas tabelas do ML
-// separadas ('ml_kit' / 'ml_catalogo').
+// Filtro "Plataforma" (até o M-2, 17/11/2026, "Todos marketplaces"):
+// plataforma, ou as duas tabelas do ML separadas ('ml_kit' / 'ml_catalogo').
 function passaFiltroPlataforma(a: Account, f: string): boolean {
   if (!f) return true
   if (f === 'ml_kit') return a.platform === 'mercadolivre' && !ehCatalogo(a)
@@ -3942,19 +3935,15 @@ const produtosDaBusca = computed(() => {
   return q ? prods.filter((p) => p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)) : prods
 })
 
-const filteredGridProducts = computed(() => {
-  let filtered = produtosDaBusca.value.slice()
-  // Admin com a conferência aberta: "só com (!)" deixa só as linhas que têm
-  // algum anúncio fora da margem nas colunas visíveis.
-  if (filtroDivergentesAtivo.value) filtered = filtered.filter((p) => linhaTemDivergencia(p.id))
-  return filtered.sort((a, b) =>
+// O filtro "só linhas com (!)" saiu com a faixa da conferência (M-2).
+const filteredGridProducts = computed(() =>
+  produtosDaBusca.value.slice().sort((a, b) =>
     (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
-  )
-})
+  ),
+)
 
-// A seleção (cor, teclado) é por posição: se a lista visível muda (busca,
-// "só linhas com (!)", fim da conferência), a posição apontaria para outro
-// produto — então a seleção sai.
+// A seleção (anel azul, setas) é por posição: se a lista visível muda (busca,
+// recarga), a posição apontaria para outro produto — então a seleção sai.
 watch(
   () => filteredGridProducts.value.map((p) => p.id).join(','),
   () => {
@@ -4091,81 +4080,9 @@ function grupoHeaderBg(group: { platform: string; catalogo: boolean }): string {
   return group.catalogo ? 'bg-indigo-100 text-indigo-900 dark:bg-indigo-900/40 dark:text-indigo-100' : platformHeaderBg(group.platform)
 }
 
-// Feature 3: header obs editing
-// Na coluna de catálogo as anotações são as da conta de kit: mostra e grava
-// na base (`colId` = coluna clicada, `accId` = conta que recebe o PATCH).
-function notaDe(acc: Account, field: string): string | null {
-  return (contaParametros(acc) as any)[field] ?? null
-}
-
-function startEditObs(colId: string, field: string, currentVal: string | null) {
-  editingObsId.value = `${colId}-${field}`
-  obsValue.value = currentVal || ''
-}
-
-async function commitObs(colId: string, accId: string, field: string) {
-  // Enter já gravou e fechou o campo: o blur que vem depois não grava de novo.
-  if (editingObsId.value !== `${colId}-${field}`) return
-  // Snapshot obsValue synchronously: blur on obs1 → click on obs2 would
-  // reassign obsValue before the PATCH fires (same race as commitEditProduct).
-  const raw = obsValue.value.trim()
-  editingObsId.value = null
-  obsValue.value = ''
-  const acc = (grid.value?.accounts ?? []).find(a => a.id === accId)
-  if (!acc) return
-  try {
-    const updated = await api<Account>(`/api/pricing/accounts/${accId}`, {
-      method: 'PATCH',
-      body: { [field]: raw || null },
-    })
-    Object.assign(acc, updated)
-    const local = accounts.value.find(a => a.id === accId)
-    if (local) Object.assign(local, updated)
-  } catch (e: any) {
-    gridErr.value = e?.data?.detail?.code ?? 'save_failed'
-  }
-}
-
-// Feature 4: undo/redo
-async function saveOverrideValue(prodId: string, accId: string, val: string) {
-  try {
-    if (!val) {
-      await api(
-        `/api/pricing/overrides?pricing_product_id=${prodId}&pricing_account_id=${accId}`,
-        { method: 'DELETE' },
-      ).catch((e: any) => {
-        if (e?.response?.status !== 404) throw e
-      })
-    } else {
-      await api('/api/pricing/overrides', {
-        method: 'PUT',
-        body: {
-          pricing_product_id: prodId,
-          pricing_account_id: accId,
-          price_override: parseDec(val),
-          cell_status: 'manual',
-        },
-      })
-    }
-    await loadGrid()
-  } catch (e: any) {
-    gridErr.value = e?.data?.detail?.code ?? 'save_failed'
-  }
-}
-
-function handleUndo() {
-  if (!undoStack.value.length) return
-  const entry = undoStack.value.pop()!
-  redoStack.value.push(entry)
-  saveOverrideValue(entry.prodId, entry.accId, entry.oldValue)
-}
-
-function handleRedo() {
-  if (!redoStack.value.length) return
-  const entry = redoStack.value.pop()!
-  undoStack.value.push(entry)
-  saveOverrideValue(entry.prodId, entry.accId, entry.newValue)
-}
+// As 6 anotações da conta (desconto, afiliado, ads, cupom, oferta, obs) saíram
+// do cabeçalho da grade no M-3 (17/11/2026): ficam só na aba Contas. O
+// Desfazer/Refazer (M-2) só servia ao preço manual e saiu junto com ele.
 
 // Feature 5: Excel/CSV export
 function handleExportExcel() {
@@ -4173,7 +4090,8 @@ function handleExportExcel() {
   // Ordem da tela (catálogo depois dos kits), sem o filtro de marketplace.
   const accs = gridAccountsOrdenadas.value
   const prods = filteredGridProducts.value
-  // Excel leva sempre os 8 kits, mesmo com "Ocultar kits" ligado na tela.
+  // Excel leva sempre os 8 kits e as colunas de estoque, mesmo com o Kit ou o
+  // Estoque desmarcados no Layout.
   const headers = ['SKU', 'Produto', 'Estoque', '7d', '30d', 'Reposição', department.value === 'celular' ? 'Kit1' : 'Custo']
   if (department.value === 'celular') {
     for (let k = 2; k <= 8; k++) headers.push(`Kit${k}`)
@@ -4219,21 +4137,6 @@ function handleExportExcel() {
   URL.revokeObjectURL(url)
 }
 
-// Feature 6: Bling sync from grid
-async function syncBlingCostsFromGrid() {
-  syncingBlingCosts.value = true
-  try {
-    const r = await api<{ job_id: string }>('/api/pricing/jobs/sync-bling-costs', { method: 'POST' })
-    activeJob.value = null
-    await pollJob(r.job_id)
-    await loadGrid()
-  } catch (e: any) {
-    gridErr.value = e?.data?.detail?.code ?? 'sync_failed'
-  } finally {
-    syncingBlingCosts.value = false
-  }
-}
-
 // Feature 8: push dropdown helpers
 async function pushAllAndClose() {
   showPushMenu.value = false
@@ -4256,13 +4159,13 @@ async function pushAccountAndClose(accId: string, accName: string) {
 }
 
 // Feature 11: keyboard navigation in grid
+// Setas movem a seleção e Esc limpa. Ctrl/Cmd+Z/Y (desfazer o preço manual)
+// e o Enter que abria o preço manual saíram no M-2/M-3 (17/11/2026). Tecla
+// digitada num campo da grade (custo do kit) é do campo: não mexe a seleção.
 function handleGridKeyDown(e: KeyboardEvent) {
-  if (e.ctrlKey || e.metaKey) {
-    if (e.key.toLowerCase() === 'z') { e.preventDefault(); handleUndo(); return }
-    if (e.key.toLowerCase() === 'y') { e.preventDefault(); handleRedo(); return }
-  }
   if (!selectedCell.value) return
-  if (editingCell.value) return
+  const alvo = e.target as HTMLElement | null
+  if (alvo && (alvo.tagName === 'INPUT' || alvo.tagName === 'TEXTAREA' || alvo.tagName === 'SELECT')) return
   const { row, col } = selectedCell.value
   const maxRow = filteredGridProducts.value.length - 1
   const maxCol = gridAccounts.value.length - 1
@@ -4271,16 +4174,6 @@ function handleGridKeyDown(e: KeyboardEvent) {
     case 'ArrowDown': e.preventDefault(); if (row < maxRow) selectedCell.value = { row: row + 1, col }; break
     case 'ArrowLeft': e.preventDefault(); if (col > 0) selectedCell.value = { row, col: col - 1 }; break
     case 'ArrowRight': e.preventDefault(); if (col < maxCol) selectedCell.value = { row, col: col + 1 }; break
-    case 'Enter': {
-      e.preventDefault()
-      const prod = filteredGridProducts.value[row]
-      const acc = gridAccounts.value[col]
-      if (prod && acc) {
-        const c = cellOf(prod.id, acc.id)
-        if (c) startCellEdit(c)
-      }
-      break
-    }
     case 'Escape': e.preventDefault(); selectedCell.value = null; break
   }
 }
@@ -4387,8 +4280,9 @@ function talvezCarregarMegaStatus() {
   if (megaStatus.value != null) return
   void carregarMegaStatus()
 }
-// Preferências deste navegador (02/11/2026): "Ocultar kits" e a margem da
-// conferência. Lidas só depois de montar (no servidor não há localStorage).
+// Preferências deste navegador (02/11/2026): as caixas Kit e Estoque do menu
+// Layout (M-2, 17/11/2026; a margem da conferência saiu daqui e foi para o
+// servidor). Lidas só depois de montar (no servidor não há localStorage).
 function lerPreferencia(chave: string): string | null {
   try {
     return localStorage.getItem(chave)
@@ -4408,27 +4302,21 @@ onMounted(() => {
   paginaMontada = true
   talvezCarregarMegaStatus()
   ocultarKits.value = lerPreferencia(CHAVE_OCULTAR_KITS) === '1'
-  const margem = Number(lerPreferencia(CHAVE_MARGEM))
-  if (lerPreferencia(CHAVE_MARGEM) != null && Number.isFinite(margem) && margem >= 0 && margem <= 100) {
-    margemErro.value = margem
-  }
+  ocultarEstoque.value = lerPreferencia(CHAVE_OCULTAR_ESTOQUE) === '1'
   watch(ocultarKits, (v) => gravarPreferencia(CHAVE_OCULTAR_KITS, v ? '1' : '0'))
-  watch(margemValida, (v) => {
-    if (v != null) gravarPreferencia(CHAVE_MARGEM, String(v))
-  })
+  watch(ocultarEstoque, (v) => gravarPreferencia(CHAVE_OCULTAR_ESTOQUE, v ? '1' : '0'))
 })
 
-// Prazos e conferência: uma vez por visita à aba e por troca de departamento
-// (o loadGrid roda depois de cada edição e não precisa reler isto).
+// Prazo e conferência (com a margem): uma vez por visita à aba e por troca de
+// departamento (o loadGrid roda depois de cada edição e não precisa reler
+// isto). A conferência é de todos desde o M-3: o cartão vermelho e o (!).
 function carregarExtrasDaTabela() {
   void carregarPrazos()
-  if (isAdmin.value) {
-    conferencia.value = null
-    conferenciaEstado.value = 'carregando'
-    releitura.value = 'ok'
-    tentativasReleitura = 0
-    void carregarConferencia()
-  }
+  conferencia.value = null
+  conferenciaEstado.value = 'carregando'
+  releitura.value = 'ok'
+  tentativasReleitura = 0
+  void carregarConferencia()
 }
 
 watch(
@@ -4451,13 +4339,15 @@ watch(department, async () => {
   // dept may not have the same platforms, and stale filters silently
   // hide all columns until the operator notices.
   gridPlatformFilter.value = ''
-  soDivergentes.value = false
-  // Até os mapas, os prazos e a conferência do departamento novo chegarem,
-  // nada do anterior é usado (a Reposição mostra "…", não números trocados).
+  buscaMargemProduto.value = ''
+  // Até os mapas, o prazo, a conferência e a margem do departamento novo
+  // chegarem, nada do anterior é usado (a Reposição mostra "…", não números
+  // trocados; nenhum (!) com a margem de outro departamento).
   estoqueEstado.value = 'carregando'
   vendas7Estado.value = 'carregando'
   vendasEstado.value = 'carregando'
   prazos.value = null
+  margem.value = null
   // Resposta de mapa do departamento anterior ainda no ar é descartada.
   seqEstoque++
   seqVendas++
@@ -5892,6 +5782,11 @@ watch(department, async () => {
 
     <!-- ============================================ TABELA DE PREÇOS (grid) -->
     <section v-else-if="tab === 'tabela'" class="space-y-3">
+      <!-- Barra (M-2, 17/11/2026): Buscar | Plataforma | Layout ▾ | Excel |
+           Enviar ▾ | Recarregar | Reposição [N] dias | Margem N% ▾ |
+           Conferir anúncios. Saíram Desfazer, Refazer, Custo Bling, Enviar
+           relatório e a paleta Cor; a caixa amarela da Reposição e a faixa
+           roxa da conferência viraram o campo e os dois botões do fim. -->
       <div class="flex flex-wrap items-center gap-2">
         <div class="relative flex-1 min-w-[200px] max-w-sm">
           <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
@@ -5901,50 +5796,62 @@ watch(department, async () => {
             class="border rounded pl-7 pr-2 py-1 text-sm bg-background w-full"
           />
         </div>
-        <!-- Marketplace filter: hides every column except the selected
-             platform's. Empty string = todos. Options list reflects
-             only platforms actually present in the loaded department. -->
+        <!-- Plataforma: esconde as colunas das outras plataformas. Vazio =
+             todas. As opções são só as plataformas do departamento. -->
         <select
           v-model="gridPlatformFilter"
           class="border rounded px-2 py-1 text-sm bg-background min-w-[140px]"
-          title="Filtrar colunas por marketplace"
+          title="Filtrar colunas por plataforma"
+          data-filtro="plataforma"
         >
-          <option value="">Todos marketplaces</option>
+          <option value="">Plataforma</option>
           <option v-for="o in gridPlatformOptions" :key="o.value" :value="o.value" :disabled="o.disabled">
             {{ o.label }}
           </option>
         </select>
-        <!-- Ocultar kits (celular): tira da grade as 8 colunas de custo dos
-             kits; a escolha fica lembrada neste navegador. -->
-        <button
-          v-if="department === 'celular'"
-          class="btn btn-sm"
-          data-acao="ocultar-kits"
-          :aria-pressed="ocultarKits"
-          :title="ocultarKits ? 'Mostrar as colunas kit 1 a kit 8' : 'Esconder as colunas kit 1 a kit 8 (custo de cada kit)'"
-          @click="ocultarKits = !ocultarKits"
-        >
-          <Eye v-if="ocultarKits" class="h-4 w-4 mr-1" />
-          <EyeOff v-else class="h-4 w-4 mr-1" />
-          {{ ocultarKits ? 'Mostrar kits' : 'Ocultar kits' }}
-        </button>
-        <button class="btn btn-sm" :disabled="!undoStack.length" title="Desfazer (Ctrl+Z)" @click="handleUndo">
-          <Undo2 class="h-4 w-4" />
-        </button>
-        <button class="btn btn-sm" :disabled="!redoStack.length" title="Refazer (Ctrl+Y)" @click="handleRedo">
-          <Redo2 class="h-4 w-4" />
-        </button>
+        <!-- Layout ▾ (era "Mostrar kits"): para todos que veem a Tabela. Kit só
+             no Celular (Mala e Eletro não têm kits). Lembrado neste navegador. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm" data-acao="layout" title="Escolher as colunas que a grade mostra">
+              Layout
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-layout
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <label
+                v-if="department === 'celular'"
+                class="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input v-model="mostrarKits" type="checkbox" class="size-4 mt-0.5" data-campo="layout-kit" />
+                <span>
+                  Kit
+                  <span class="block text-[11px] text-muted-foreground">custo de cada kit (kit 1 a kit 8)</span>
+                </span>
+              </label>
+              <label class="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50">
+                <input v-model="mostrarEstoque" type="checkbox" class="size-4 mt-0.5" data-campo="layout-estoque" />
+                <span>
+                  Estoque
+                  <span class="block text-[11px] text-muted-foreground">colunas Estoque, 7d, 30d e Reposição</span>
+                </span>
+              </label>
+              <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
+                Fica lembrado neste navegador. O Excel leva tudo. Esc ou clicar fora fecha.
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
         <button class="btn btn-sm" :disabled="!grid?.products.length" @click="handleExportExcel">
           <Download class="h-4 w-4 mr-1" /> Excel
-        </button>
-        <button
-          class="btn btn-sm text-green-700 border-green-300 hover:bg-green-50"
-          :disabled="syncingBlingCosts"
-          @click="syncBlingCostsFromGrid"
-        >
-          <Loader2 v-if="syncingBlingCosts" class="h-4 w-4 animate-spin mr-1" />
-          <RefreshCw v-else class="h-4 w-4 mr-1" />
-          Custo Bling
         </button>
         <div class="relative inline-block">
           <button
@@ -5982,193 +5889,169 @@ watch(department, async () => {
             </template>
           </div>
         </div>
-        <button class="btn btn-sm" :disabled="pushing" @click="sendManualReport">
-          Enviar relatório
-        </button>
-        <button class="btn btn-sm" :disabled="gridLoading" @click="loadGrid">
-          <RefreshCw class="h-4 w-4 mr-1" :class="{ 'animate-spin': gridLoading }" />
-          Recarregar
-        </button>
         <span v-if="pushing" class="text-sm text-muted-foreground flex items-center gap-1">
           <Loader2 class="h-3 w-3 animate-spin" />
           {{ bulkPushProgress ? `enviando ${bulkPushProgress}…` : 'enviando…' }}
         </span>
-        <!-- Excel-style cell color picker — only shows once a cell is selected.
-             Selected swatch gets a ring matching its color. Trailing X clears. -->
-        <div v-if="selectedCell" class="flex items-center gap-1 border-l pl-2 ml-1">
-          <span class="text-xs text-muted-foreground mr-1">Cor:</span>
-          <button
-            v-for="color in CELL_COLORS"
-            :key="color.value"
-            type="button"
-            class="w-5 h-5 rounded-sm border border-gray-300 transition-transform hover:scale-110"
-            :class="[
-              color.swatch,
-              selectedCellColor === color.value ? `ring-2 ${color.ring} scale-110` : '',
-            ]"
-            :title="color.label"
-            @click="setCellColor(color.value)"
-          />
-          <button
-            type="button"
-            class="w-5 h-5 rounded-sm border border-gray-300 flex items-center justify-center hover:bg-muted transition-colors"
-            :class="selectedCellColor === null ? 'ring-2 ring-gray-400' : ''"
-            title="Remover cor"
-            @click="setCellColor(null)"
-          >
-            <X class="h-3 w-3 text-muted-foreground" />
-          </button>
-        </div>
-      </div>
-
-      <!-- Prazos da Reposição (02/11/2026): os MESMOS da Importação, por
-           departamento — mudar aqui muda lá. Explicação da conta visível. -->
-      <div
-        class="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border bg-amber-50 px-3 py-1.5 text-xs dark:bg-amber-900/20"
-        data-faixa="reposicao"
-      >
-        <template v-if="prazos && prazos.tempo_reposicao != null && prazos.tempo_estoque != null">
-          <label class="inline-flex items-center gap-2" :title="tituloPrazos">
-            <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de reposição</span>
-            <input
-              v-model.number="prazos.tempo_reposicao"
-              type="number" min="0" max="999" step="1"
-              class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:cursor-not-allowed disabled:opacity-60"
-              data-campo="tempo-reposicao"
-              :disabled="!prazos.pode_editar || salvandoPrazos"
-              @change="salvarPrazos('tempo_reposicao')"
-            />
-            <span class="text-[10px] text-muted-foreground">dias</span>
-          </label>
-          <label class="inline-flex items-center gap-2" :title="tituloPrazos">
-            <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de estoque</span>
-            <input
-              v-model.number="prazos.tempo_estoque"
-              type="number" min="0" max="999" step="1"
-              class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:cursor-not-allowed disabled:opacity-60"
-              data-campo="tempo-estoque"
-              :disabled="!prazos.pode_editar || salvandoPrazos"
-              @change="salvarPrazos('tempo_estoque')"
-            />
-            <span class="text-[10px] text-muted-foreground">dias</span>
-          </label>
-        </template>
-        <span v-else-if="prazosErro" class="text-red-700">Os prazos da Reposição não carregaram — recarregue a página.</span>
-        <span v-else-if="prazos" class="text-muted-foreground">Este departamento não tem prazos de reposição na Importação.</span>
-        <span v-else class="text-muted-foreground">carregando os prazos…</span>
-        <span class="text-[11px] text-muted-foreground" data-texto="formula-reposicao">
-          <strong class="text-foreground">{{ formulaReposicao }}</strong>.
-          Negativo, em vermelho = falta estoque para o prazo: é quanto comprar (linha com várias cores ou voltagens: soma só as que faltam).
-          Estoque = {{ department === 'celular' ? 'soma dos lotes (ci, pi, ra, sa, sp, cd) no Bling' : 'soma dos SKUs da linha no Bling' }};
-          30d = vendas dos últimos 30 dias (sem cancelados; kit e conjunto contam em cada peça).
-          <strong class="text-foreground" data-texto="reposicao-lote-aberto">Não desconta o que já está em lote aberto na Importação.</strong>
-        </span>
-      </div>
-
-      <!-- Conferência dos anúncios — só administrador (o servidor também
-           recusa os outros). O (!) aparece na célula cujo anúncio está fora
-           da margem; o balão mostra o preço do anúncio e a diferença. -->
-      <div
-        v-if="isAdmin"
-        class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-violet-200 bg-violet-50 px-3 py-1.5 text-xs dark:border-violet-800 dark:bg-violet-900/20"
-        data-faixa="conferencia"
-      >
-        <span class="font-semibold text-violet-900 dark:text-violet-200">Conferência dos anúncios</span>
-        <span class="rounded bg-violet-100 px-1 text-[9px] font-semibold uppercase tracking-wide text-violet-700 dark:bg-violet-900/60 dark:text-violet-200">só administrador</span>
-        <label class="inline-flex items-center gap-1" title="Diferença aceita entre o preço do anúncio e o da Tabela. Mudar não relê os anúncios: só recalcula os (!).">
-          margem de erro
+        <button class="btn btn-sm" :disabled="gridLoading" @click="loadGrid">
+          <RefreshCw class="h-4 w-4 mr-1" :class="{ 'animate-spin': gridLoading }" />
+          Recarregar
+        </button>
+        <!-- Reposição única (M-2): o MESMO prazo da Importação, por
+             departamento — mudar aqui muda lá. Reposição = Estoque − vendas
+             30d × Reposição ÷ 30. A explicação da conta está no balão. -->
+        <label
+          class="inline-flex items-center gap-1 text-sm"
+          data-prazo-reposicao
+          :title="tituloPrazos"
+        >
+          <span class="text-muted-foreground">Reposição</span>
           <input
-            v-model.number="margemErro"
-            type="number" min="0" max="100" step="0.5"
-            class="h-7 w-16 border rounded px-2 text-right text-sm bg-background"
-            data-campo="margem-erro"
+            v-if="prazos"
+            v-model.number="prazos.tempo_reposicao"
+            type="number" min="0" max="999" step="1"
+            class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:cursor-not-allowed disabled:opacity-60"
+            data-campo="tempo-reposicao"
+            :disabled="!prazos.pode_editar || salvandoPrazos"
+            @change="salvarPrazos('tempo_reposicao')"
           />
-          %
+          <input
+            v-else
+            type="text"
+            :value="prazosErro ? '—' : '…'"
+            class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:cursor-not-allowed disabled:opacity-60"
+            data-campo="tempo-reposicao"
+            disabled
+          />
+          <span class="text-muted-foreground">dias</span>
         </label>
+        <!-- Margem N% ▾ (M-2): só administrador, a mesma trava de hoje. A
+             margem fica no servidor (vale para todos); a do produto ganha da
+             Geral. O (!) e o cartão vermelho usam a margem da linha. -->
+        <PopoverRoot v-if="isAdmin" @update:open="(aberto: boolean) => { if (!aberto) gravarCampoMargemComFoco() }">
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm" data-acao="margem" :title="tituloMargem">
+              {{ rotuloMargem }}
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-margem
+              class="z-[70] w-80 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div v-if="!margem" class="px-1 py-1 text-sm text-muted-foreground">
+                {{ conferenciaEstado === 'erro' ? 'A margem não carregou — recarregue a página.' : 'carregando a margem…' }}
+              </div>
+              <template v-else>
+                <div class="flex items-center gap-2 rounded px-1 py-1 text-sm">
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      class="size-4"
+                      data-campo="margem-geral-ligada"
+                      :checked="margem.geral_ligada"
+                      :disabled="!margem.pode_editar || salvandoMargem"
+                      @change="salvarMargem({ geral_ligada: !margem.geral_ligada })"
+                    />
+                    Geral
+                  </label>
+                  <input
+                    type="text"
+                    inputmode="decimal"
+                    class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:opacity-60"
+                    data-campo="margem-geral"
+                    :value="fmtPct(margem.margem_pct)"
+                    :disabled="!margem.pode_editar || salvandoMargem"
+                    @change="salvarMargemGeral"
+                  />
+                  %
+                </div>
+                <p class="px-1 pb-1 text-[11px] text-muted-foreground">
+                  Vale para todos os produtos sem % próprio. Desmarcada: esses produtos não são conferidos.
+                </p>
+                <label class="flex cursor-pointer items-center gap-2 rounded border-t px-1 pb-1 pt-2 text-sm">
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    data-campo="margem-por-produto-ligada"
+                    :checked="margem.por_produto_ligada"
+                    :disabled="!margem.pode_editar || salvandoMargem"
+                    @change="salvarMargem({ por_produto_ligada: !margem.por_produto_ligada })"
+                  />
+                  Por produto
+                </label>
+                <p class="px-1 pb-1 text-[11px] text-muted-foreground">
+                  O produto com % próprio (ex.: com desconto) usa o dele; os outros usam a Geral. Vazio = usa a Geral.
+                  Desmarcada: todos usam a Geral.
+                </p>
+                <div class="relative px-1 pb-1">
+                  <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <input
+                    v-model="buscaMargemProduto"
+                    placeholder="Buscar produto por SKU ou nome…"
+                    class="h-7 w-full border rounded pl-7 pr-2 text-sm bg-background"
+                    data-campo="margem-busca-produto"
+                  />
+                </div>
+                <div
+                  class="max-h-64 overflow-y-auto px-1"
+                  :class="{ 'opacity-60': !margem.por_produto_ligada }"
+                  data-lista-margem-produto
+                >
+                  <div
+                    v-for="p in [...produtosDaMargem.comPropria, ...produtosDaMargem.semPropria]"
+                    :key="p.id"
+                    class="flex items-center justify-between gap-2 py-0.5 text-xs"
+                  >
+                    <span class="truncate" :title="`${p.sku} — ${p.name}`">{{ p.name }}</span>
+                    <span class="inline-flex shrink-0 items-center gap-1">
+                      <input
+                        type="text"
+                        inputmode="decimal"
+                        class="h-6 w-14 border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                        :placeholder="margem.geral_ligada ? fmtPct(margem.margem_pct) : '—'"
+                        :value="margem.produtos[p.id] != null ? fmtPct(margem.produtos[p.id]) : ''"
+                        :disabled="!margem.pode_editar || salvandoMargem"
+                        :data-margem-produto="p.id"
+                        @change="salvarMargemProduto(p.id, $event)"
+                      />
+                      %
+                    </span>
+                  </div>
+                  <p
+                    v-if="!produtosDaMargem.comPropria.length && !produtosDaMargem.semPropria.length"
+                    class="py-1 text-[11px] text-muted-foreground"
+                  >
+                    {{ buscaMargemProduto.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.' }}
+                  </p>
+                </div>
+                <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
+                  Grava ao sair do campo, com Enter ou ao fechar; vale para todos.
+                </div>
+              </template>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <!-- Conferir anúncios: só administrador. O andamento, a última
+             conferência e os erros ficam no balão do botão. -->
         <button
+          v-if="isAdmin"
           class="btn btn-sm"
           data-acao="conferir-anuncios"
           :disabled="conferenciaIniciando || conferenciaRodando"
-          title="Lê agora o preço de cada anúncio deste departamento nos marketplaces e compara com a Tabela"
+          :title="tituloConferir"
           @click="conferirAnuncios"
         >
           <Loader2 v-if="conferenciaIniciando || conferenciaRodando" class="h-4 w-4 mr-1 animate-spin" />
           <ScanSearch v-else class="h-4 w-4 mr-1" />
           {{ conferenciaRodando ? 'Conferindo…' : 'Conferir anúncios' }}
+          <AlertCircle v-if="conferirComAviso" class="h-3.5 w-3.5 ml-1 text-amber-600" data-aviso-conferencia />
         </button>
-        <span v-if="margemValida == null" class="text-red-700">Margem inválida: use de 0 a 100.</span>
-        <span v-if="conferenciaEstado === 'carregando' && !conferencia" class="text-muted-foreground">carregando a última conferência… (as marcas aparecem em seguida)</span>
-        <span v-else-if="conferenciaEstado === 'erro' && !conferencia" class="text-red-700" data-texto="conferencia-nao-carregou">
-          A última conferência não carregou — recarregue a página antes de conferir de novo.
-        </span>
-        <template v-else-if="conferenciaRodando && conferencia?.job">
-          <span class="text-muted-foreground" data-texto="conferencia-andamento">
-            lendo os anúncios: {{ conferencia.job.processed }} de {{ conferencia.job.total || '…' }} contas
-          </span>
-        </template>
-        <template v-else-if="conferencia?.job && resumoConferencia">
-          <span class="text-muted-foreground">
-            última: {{ fmtQuando(conferencia.job.finished_at || conferencia.job.created_at) }}
-          </span>
-          <span
-            v-if="conferencia.job.status === 'failed' || conferencia.job.status === 'cancelled'"
-            class="text-red-700"
-            :title="conferencia.job.error ?? undefined"
-            data-texto="conferencia-falhou"
-          >
-            não terminou{{ conferencia.job.error ? `: ${textoErroConferencia(conferencia.job.error)}` : '' }}
-          </span>
-          <span v-if="releitura !== 'ok'" class="text-amber-800 dark:text-amber-300" data-texto="conferencia-releitura">
-            {{ releitura === 'tentando'
-              ? 'o resultado mais recente não carregou — tentando de novo…'
-              : 'o resultado mais recente não carregou — recarregue a página' }}
-          </span>
-          <span v-if="margemValida == null" class="text-muted-foreground" data-texto="conferencia-resumo">(!) e ? só com uma margem válida</span>
-          <span v-else-if="!gradePronta" class="text-muted-foreground" data-texto="conferencia-resumo">comparando com a Tabela…</span>
-          <template v-else>
-            <span
-              data-texto="conferencia-resumo"
-              :class="resumoConferencia.fora
-                ? 'font-semibold text-red-700 dark:text-red-400'
-                : resumoConferencia.qtdNaoConferidas || !resumoConferencia.conferidas
-                  ? 'text-muted-foreground'
-                  : 'text-emerald-700 dark:text-emerald-400'"
-            >
-              {{ resumoConferencia.fora
-                ? `${resumoConferencia.fora} célula(s) com (!)`
-                : !resumoConferencia.conferidas ? 'nenhuma célula conferida aqui'
-                  : resumoConferencia.qtdNaoConferidas ? 'nenhuma das conferidas fora da margem' : 'nenhuma célula fora da margem' }}
-            </span>
-            <span class="text-muted-foreground" data-texto="conferencia-conferidas">
-              {{ resumoConferencia.conferidas }} conferida(s) dentro da margem
-            </span>
-            <span
-              v-if="resumoConferencia.qtdNaoConferidas"
-              class="text-muted-foreground underline decoration-dotted cursor-help"
-              :title="resumoConferencia.tituloNaoConferidas"
-              data-texto="conferencia-nao-conferidas"
-            >
-              {{ resumoConferencia.qtdNaoConferidas }} não conferida(s) (?)
-            </span>
-            <span v-if="gridPlatformFilter || gridSearch.trim() || filtroDivergentesAtivo" class="text-muted-foreground" data-texto="conferencia-so-na-tela">
-              (contando só o que está na tela)
-            </span>
-          </template>
-          <span
-            v-if="resumoConferencia.contasComErro.length"
-            class="text-amber-800 underline decoration-dotted dark:text-amber-300"
-            :title="resumoConferencia.contasComErro.map((c) => `${c.conta}: ${c.motivo}`).join('\n')"
-          >
-            {{ resumoConferencia.contasComErro.length }} conta(s) não leram
-          </span>
-          <label class="inline-flex items-center gap-1 cursor-pointer" :class="{ 'opacity-50': margemValida == null || !gradePronta }">
-            <input v-model="soDivergentes" type="checkbox" data-campo="so-divergentes" :disabled="margemValida == null || !gradePronta" />
-            só linhas com (!)
-          </label>
-        </template>
-        <span v-else class="text-muted-foreground">
-          Ainda não conferido. Lê o preço de cada anúncio nos marketplaces (no servidor) e marca (!) onde ele foge da margem.
-        </span>
       </div>
 
       <div
@@ -6182,30 +6065,6 @@ watch(department, async () => {
 
       <div v-if="compareToast" class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
         {{ compareToast }}
-      </div>
-
-      <div v-if="activeJob" class="rounded border bg-muted/40 px-3 py-2 text-sm">
-        <div class="flex items-center justify-between">
-          <span class="font-medium">Job #{{ activeJob.id.slice(0, 8) }}</span>
-          <span :class="{
-            'text-amber-700': activeJob.status === 'running' || activeJob.status === 'pending',
-            'text-emerald-700': activeJob.status === 'succeeded',
-            'text-red-700': activeJob.status === 'failed' || activeJob.status === 'cancelled',
-          }">{{ activeJob.status }}</span>
-        </div>
-        <div class="mt-1 h-1.5 bg-muted rounded overflow-hidden">
-          <div class="h-full bg-primary transition-all" :style="{
-            width: activeJob.total ? `${Math.round((activeJob.processed / activeJob.total) * 100)}%` : '0%',
-          }" />
-        </div>
-        <div class="text-xs text-muted-foreground mt-1">
-          {{ activeJob.processed }} / {{ activeJob.total }}
-          <span v-if="activeJob.result?.summary">
-            · ok {{ activeJob.result.summary.ok }} · falhas {{ activeJob.result.summary.failed }}
-            · cached {{ activeJob.result.summary.cached }}
-          </span>
-          <span v-if="activeJob.error" class="text-red-600 ml-1">{{ activeJob.error }}</span>
-        </div>
       </div>
 
       <div v-if="gridErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
@@ -6248,14 +6107,15 @@ watch(department, async () => {
                 :colspan="group.accounts.length"
                 class="px-2 py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-500"
                 :class="grupoHeaderBg(group)"
-                :title="group.catalogo ? 'Preço = coluna Catálogo do produto + frete e comissão da conta de kit; margem da conta de kit, ou a própria do catálogo quando preenchida (aba Contas, botão “% margens” do Catálogo ML). Envia só para o anúncio de catálogo; célula com cadeado não envia.' : undefined"
+                :title="group.catalogo ? 'Preço = coluna Catálogo do produto + frete e comissão da conta de kit; margem da conta de kit, ou a própria do catálogo quando preenchida (aba Contas, botão “% margens” do Catálogo ML). Envia só para o anúncio de catálogo; célula bloqueada não envia (aviãozinho apagado, motivo no balão da célula).' : undefined"
               >
                 {{ group.label }}
               </th>
             </tr>
-            <!-- Row 2: Account names + obs (left spacer is intentionally
-                 empty — "Produto" lives in the row 3 column header to avoid
-                 the duplicate label readers were seeing) -->
+            <!-- Row 2: nome da conta + aviãozinho (M-3, 17/11/2026: saíram as 6
+                 anotações, o selo "catálogo" e o "margem própria" — os dados
+                 continuam na aba Contas). O espaço da esquerda fica vazio:
+                 "Produto" está no cabeçalho da linha 3. -->
             <tr>
               <th
                 class="sticky left-0 bg-background px-2 py-1 text-left z-30 align-bottom"
@@ -6269,61 +6129,34 @@ watch(department, async () => {
               >
                 <div class="flex items-center gap-1">
                   <span class="text-xs font-semibold truncate" :title="nomeColuna(acc)">{{ nomeColuna(acc) }}</span>
-                  <span
-                    v-if="ehCatalogo(acc)"
-                    class="shrink-0 rounded border border-indigo-300 bg-indigo-100 px-1 text-[9px] font-semibold leading-tight text-indigo-800 dark:border-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200"
-                    title="Coluna de catálogo: usa a comissão, fretes e anotações da conta de kit (a margem também, salvo a própria do catálogo) e envia só para o anúncio de catálogo"
-                  >catálogo</span>
                   <button class="p-0.5 hover:bg-muted rounded shrink-0" title="Push para esta conta" @click="pushAccountColumn(acc.id)">
                     <Send class="h-3 w-3" />
                   </button>
                 </div>
-                <div
-                  v-if="ehCatalogo(acc) && resumoMargemPropria(acc)"
-                  class="text-[9px] font-semibold leading-tight text-indigo-700 dark:text-indigo-300 truncate"
-                  :title="`Margem própria do catálogo: ${resumoMargemPropria(acc)}. Os outros tipos usam a margem da conta de kit.`"
-                  data-selo="margem-propria"
-                >margem própria</div>
-                <template v-for="f in STORE_NOTE_FIELDS" :key="f.key">
-                  <div v-if="editingObsId === `${acc.id}-${f.key}`">
-                    <input
-                      v-model="obsValue"
-                      class="w-full text-[9px] border rounded px-1 py-0.5 bg-background"
-                      @blur="commitObs(acc.id, contaParametros(acc).id, f.key)"
-                      @keydown.enter="commitObs(acc.id, contaParametros(acc).id, f.key)"
-                      @keydown.escape="editingObsId = null"
-                    />
-                  </div>
-                  <div
-                    v-else
-                    class="text-[9px] cursor-pointer truncate leading-tight"
-                    :class="notaDe(acc, f.key) ? 'text-amber-700 font-medium' : 'text-muted-foreground/60 italic'"
-                    :title="(notaDe(acc, f.key) ? `${f.label}: ${notaDe(acc, f.key)}` : f.label) + (ehCatalogo(acc) ? ' (da conta de kit)' : '')"
-                    @click="startEditObs(acc.id, f.key, notaDe(acc, f.key))"
-                  >
-                    {{ notaDe(acc, f.key) ? `${f.label}: ${notaDe(acc, f.key)}` : f.label }}
-                  </div>
-                </template>
               </th>
             </tr>
             <!-- Row 3: Listing type + cost column headers -->
             <tr>
               <th class="sticky left-0 bg-background px-2 py-1 text-left z-30" :style="estiloFixa('produto')">Produto</th>
-              <th
-                class="sticky bg-background px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 dark:text-green-400"
-                :style="estiloFixa('estoque')"
-                title="Estoque no Bling. Celular: soma de todos os lotes do produto (ci, pi, ra, sa, sp e cd), sem kits e sem usados. Mala/eletro: o SKU de cada cor. Passe o mouse no número para ver as parcelas."
-              >Estoque</th>
-              <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v7')" :title="tituloVendas('ok', 7)">7d</th>
-              <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v30')" :title="tituloVendas('ok', 30)">30d</th>
-              <th
-                class="sticky bg-amber-50 px-1 py-1 text-center text-[10px] text-amber-800 font-bold z-30 dark:bg-amber-950 dark:text-amber-200"
-                :style="estiloFixa('reposicao')"
-                :title="`${formulaReposicao}. Negativo (vermelho) = falta: é quanto comprar. Positivo = sobra. Linha com várias cores ou voltagens: conta item a item e soma só as faltas. Linha de conjunto/kit: — (a compra é pelos avulsos).`"
-                data-coluna="reposicao"
-              >Reposição</th>
+              <!-- Estoque, 7d, 30d e Reposição: somem com "Estoque" desmarcado no
+                   Layout (o left das colunas presas vem de colunasFixas). -->
+              <template v-if="!ocultarEstoque">
+                <th
+                  class="sticky bg-background px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 dark:text-green-400"
+                  :style="estiloFixa('estoque')"
+                  title="Estoque no Bling. Celular: soma de todos os lotes do produto (ci, pi, ra, sa, sp e cd), sem kits e sem usados. Mala/eletro: o SKU de cada cor. Passe o mouse no número para ver as parcelas."
+                >Estoque</th>
+                <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v7')" :title="tituloVendas('ok', 7)">7d</th>
+                <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v30')" :title="tituloVendas('ok', 30)">30d</th>
+                <th
+                  class="sticky bg-amber-50 px-1 py-1 text-center text-[10px] text-amber-800 font-bold z-30 dark:bg-amber-950 dark:text-amber-200"
+                  :style="estiloFixa('reposicao')"
+                  :title="`${formulaReposicao}. Negativo (vermelho) = falta: é quanto comprar. Positivo = sobra. Linha com várias cores ou voltagens: conta item a item e soma só as faltas. Linha de conjunto/kit: — (a compra é pelos avulsos). Não desconta o que já está em lote aberto na Importação.`"
+                  data-coluna="reposicao"
+                >Reposição</th>
+              </template>
               <!-- Celular mostra os 8 kits (pedido do Eduardo 2026-08-24;
-                   antes parava no kit 4); "Ocultar kits" esconde todos. -->
+                   antes parava no kit 4); "Kit" desmarcado no Layout esconde todos. -->
               <template v-if="department === 'celular'">
                 <th
                   v-for="k in kitsNaGrade" :key="`gridkith-${k}`"
@@ -6357,9 +6190,7 @@ watch(department, async () => {
               <td colSpan="999" class="p-6 text-center text-muted-foreground">
                 {{ !grid?.products.length
                   ? 'Nenhum produto. Crie/importe produtos na aba Produtos.'
-                  : filtroDivergentesAtivo
-                    ? 'Nenhuma linha com (!) — desmarque “só linhas com (!)” para ver todas.'
-                    : 'Nenhum produto corresponde à busca.' }}
+                  : 'Nenhum produto corresponde à busca.' }}
               </td>
             </tr>
             <tr
@@ -6384,46 +6215,49 @@ watch(department, async () => {
                   </div>
                 </div>
               </td>
-              <!-- Sticky: Estoque (soma dos lotes no celular; balão com as parcelas) -->
-              <td
-                class="sticky bg-green-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-green-950"
-                :class="estoqueEstado !== 'ok'
-                  ? 'text-muted-foreground/60'
-                  : (stockMap[prod.id] ?? 0) <= 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'"
-                :style="estiloFixa('estoque')"
-                :title="tituloEstoque(prod.id)"
-              >
-                {{ estoqueEstado === 'carregando' ? '…' : estoqueEstado === 'erro' ? '—' : stockMap[prod.id] ?? 0 }}
-              </td>
-              <!-- Sticky: 7d sales -->
-              <td
-                class="sticky bg-blue-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-blue-950"
-                :class="vendas7Estado !== 'ok' || (salesMap7d[prod.id] ?? 0) === 0 ? 'text-muted-foreground/60' : 'text-blue-700 dark:text-blue-300'"
-                :style="estiloFixa('v7')"
-                :title="tituloVendas(vendas7Estado, 7)"
-              >
-                {{ textoVendas(vendas7Estado, salesMap7d[prod.id]) }}
-              </td>
-              <!-- Sticky: 30d sales -->
-              <td
-                class="sticky bg-blue-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-blue-950"
-                :class="vendasEstado !== 'ok' || (salesMap30d[prod.id] ?? 0) === 0 ? 'text-muted-foreground/60' : 'text-blue-700 dark:text-blue-300'"
-                :style="estiloFixa('v30')"
-                :title="tituloVendas(vendasEstado, 30)"
-              >
-                {{ textoVendas(vendasEstado, salesMap30d[prod.id]) }}
-              </td>
-              <!-- Sticky: Reposição = estoque − vendas 30d × prazo ÷ 30 (negativo em vermelho = comprar) -->
-              <td
-                class="sticky bg-amber-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-amber-950"
-                :class="(reposicaoDe(prod.id) ?? 0) < 0 ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'"
-                :style="estiloFixa('reposicao')"
-                :title="tituloReposicao(prod.id)"
-                data-coluna="reposicao"
-              >
-                {{ textoReposicao(prod.id) }}
-              </td>
-              <!-- Sticky cost: kits (celular, somem com "Ocultar kits") ou custo -->
+              <!-- Estoque, 7d, 30d e Reposição: somem com "Estoque" desmarcado no Layout -->
+              <template v-if="!ocultarEstoque">
+                <!-- Sticky: Estoque (soma dos lotes no celular; balão com as parcelas) -->
+                <td
+                  class="sticky bg-green-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-green-950"
+                  :class="estoqueEstado !== 'ok'
+                    ? 'text-muted-foreground/60'
+                    : (stockMap[prod.id] ?? 0) <= 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'"
+                  :style="estiloFixa('estoque')"
+                  :title="tituloEstoque(prod.id)"
+                >
+                  {{ estoqueEstado === 'carregando' ? '…' : estoqueEstado === 'erro' ? '—' : stockMap[prod.id] ?? 0 }}
+                </td>
+                <!-- Sticky: 7d sales -->
+                <td
+                  class="sticky bg-blue-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-blue-950"
+                  :class="vendas7Estado !== 'ok' || (salesMap7d[prod.id] ?? 0) === 0 ? 'text-muted-foreground/60' : 'text-blue-700 dark:text-blue-300'"
+                  :style="estiloFixa('v7')"
+                  :title="tituloVendas(vendas7Estado, 7)"
+                >
+                  {{ textoVendas(vendas7Estado, salesMap7d[prod.id]) }}
+                </td>
+                <!-- Sticky: 30d sales -->
+                <td
+                  class="sticky bg-blue-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-blue-950"
+                  :class="vendasEstado !== 'ok' || (salesMap30d[prod.id] ?? 0) === 0 ? 'text-muted-foreground/60' : 'text-blue-700 dark:text-blue-300'"
+                  :style="estiloFixa('v30')"
+                  :title="tituloVendas(vendasEstado, 30)"
+                >
+                  {{ textoVendas(vendasEstado, salesMap30d[prod.id]) }}
+                </td>
+                <!-- Sticky: Reposição = estoque − vendas 30d × prazo ÷ 30 (negativo em vermelho = comprar) -->
+                <td
+                  class="sticky bg-amber-50 px-1 py-1 text-center text-xs font-bold z-10 dark:bg-amber-950"
+                  :class="(reposicaoDe(prod.id) ?? 0) < 0 ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'"
+                  :style="estiloFixa('reposicao')"
+                  :title="tituloReposicao(prod.id)"
+                  data-coluna="reposicao"
+                >
+                  {{ textoReposicao(prod.id) }}
+                </td>
+              </template>
+              <!-- Sticky cost: kits (celular, somem com "Kit" desmarcado no Layout) ou custo -->
               <template v-if="department === 'celular'">
                 <td
                   v-for="k in kitsNaGrade" :key="`gridkit-${k}`"
@@ -6466,13 +6300,15 @@ watch(department, async () => {
                   <span v-else>{{ Number(prod.cost_kit1 || 0).toFixed(0) }}</span>
                 </td>
               </template>
-              <!-- Account cells -->
+              <!-- Account cells (M-3, 17/11/2026): preço sempre em preto + cartão
+                   vermelho + aviãozinho. Saíram o "?", o disquete (preço manual),
+                   o ⊘, o NA, o SV, o cadeado e as cores; fica a linha "(!) anúncio X"
+                   embaixo do preço quando o anúncio está fora da margem. -->
               <td
                 v-for="(acc, accIdx) in gridAccounts"
                 :key="acc.id"
-                class="px-1 py-1 relative"
+                class="px-1 py-1 relative text-foreground"
                 :class="[
-                  cellTone(cellOf(prod.id, acc.id)),
                   colunaBg(acc),
                   'border-l',
                   selectedCell?.row === rowIdx && selectedCell?.col === accIdx ? 'ring-2 ring-blue-500 ring-inset' : '',
@@ -6496,105 +6332,56 @@ watch(department, async () => {
                   <X v-else-if="pushStates.get(pushCellKey(prod.id, acc.id)) === 'error'" class="h-3 w-3 text-red-600" />
                   <Minus v-else class="h-3 w-3 text-gray-500" />
                 </div>
-                <template v-if="editingCell && editingCell.accId === acc.id && editingCell.prodId === prod.id">
-                  <div class="flex items-center gap-1">
-                    <input
-                      v-model="cellEditValue"
-                      type="text" inputmode="decimal"
-                      class="border rounded px-1 py-0.5 w-20 text-xs bg-background"
-                      @keydown.enter="saveOverride"
-                      @keydown.escape="cancelCellEdit"
-                    />
-                    <button class="p-0.5 text-emerald-600 hover:bg-muted rounded" @click="saveOverride">
-                      <Save class="h-3 w-3" />
-                    </button>
-                    <button class="p-0.5 hover:bg-muted rounded" @click="cancelCellEdit">
-                      <X class="h-3 w-3" />
-                    </button>
-                  </div>
-                </template>
-                <template v-else>
-                  <div class="flex flex-col gap-0.5">
-                    <div class="flex items-center justify-between gap-1">
-                      <!-- catálogo bloqueado: preço esmaecido + cadeado (motivo no hover) -->
-                      <span v-if="catalogoBloqueado(prod.id, acc.id)" class="inline-flex items-center gap-0.5">
-                        <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
-                        <span class="opacity-50">{{ liveCellLabel(prod, acc) }}</span>
+                <div class="flex flex-col gap-0.5">
+                  <div class="flex items-center justify-between gap-1">
+                    <span class="tabular-nums">{{ liveCellLabel(prod, acc) }}</span>
+                    <!-- Cartão e aviãozinho em espaços fixos (sempre reservados):
+                         ficam alinhados em todas as linhas e colunas. -->
+                    <div class="flex shrink-0 items-center gap-0.5">
+                      <span class="inline-flex h-4 w-2.5 items-center justify-center">
                         <span
-                          v-if="naoConferidaDe(prod.id, acc.id)"
-                          class="cursor-help text-[9px] font-bold text-muted-foreground"
-                          :title="`Não conferido: ${naoConferidaDe(prod.id, acc.id)}`"
-                          data-nao-conferida="1"
-                        >?</span>
+                          v-if="cartaoDe(prod.id, acc.id)"
+                          class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm cursor-help"
+                          role="img"
+                          :title="cartaoDe(prod.id, acc.id)!"
+                          :aria-label="cartaoDe(prod.id, acc.id)!"
+                          data-cartao
+                        />
+                        <span v-else class="invisible block h-[10px] w-[7px]" aria-hidden="true" />
                       </span>
-                      <span v-else class="inline-flex items-center gap-0.5">
-                        {{ liveCellLabel(prod, acc) }}
-                        <!-- Conferência (só admin): célula com preço não conferida por inteiro (o balão diz o motivo) -->
-                        <span
-                          v-if="naoConferidaDe(prod.id, acc.id)"
-                          class="cursor-help text-[9px] font-bold text-muted-foreground"
-                          :title="`Não conferido: ${naoConferidaDe(prod.id, acc.id)}`"
-                          data-nao-conferida="1"
-                        >?</span>
-                      </span>
-                      <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
-                        <button v-if="cellOf(prod.id, acc.id)" class="p-0.5 hover:bg-muted rounded" title="Editar override" @click.stop="startCellEdit(cellOf(prod.id, acc.id)!)">
-                          <Save class="h-3 w-3" />
-                        </button>
-                        <button
-                          v-if="cellOf(prod.id, acc.id)"
-                          class="p-0.5 hover:bg-muted rounded"
-                          :title="cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'Habilitar' : 'Desabilitar'"
-                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'auto' : 'disabled')"
-                        >
-                          <Ban class="h-3 w-3" />
-                        </button>
-                        <button
-                          v-if="cellOf(prod.id, acc.id)?.cell_status === 'NA' || cellOf(prod.id, acc.id)?.cell_status === 'error'"
-                          class="px-1 py-0.5 hover:bg-muted rounded text-[9px] font-bold"
-                          :class="cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'text-gray-700 bg-gray-200' : 'text-gray-500'"
-                          :title="cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'Limpar NA' : 'Marcar como NA (não anunciar)'"
-                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'auto' : 'NA')"
-                        >NA</button>
-                        <button
-                          v-if="cellOf(prod.id, acc.id)?.cell_status === 'SV' || cellOf(prod.id, acc.id)?.cell_status === 'no_link'"
-                          class="px-1 py-0.5 hover:bg-muted rounded text-[9px] font-bold"
-                          :class="cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'text-amber-700 bg-amber-100' : 'text-amber-600'"
-                          :title="cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'Limpar SV' : 'Marcar como SV (sem vínculo)'"
-                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'auto' : 'SV')"
-                        >SV</button>
-                        <button
-                          v-if="cellOf(prod.id, acc.id) && cellOf(prod.id, acc.id)?.price"
-                          class="p-0.5 rounded"
-                          :class="catalogoBloqueado(prod.id, acc.id) ? 'text-muted-foreground opacity-40 cursor-not-allowed' : 'hover:bg-emerald-100 text-emerald-700'"
-                          :title="catalogoBloqueado(prod.id, acc.id)
-                            ? `Envio bloqueado: ${textoBloqueio(catalogoBloqueado(prod.id, acc.id)!)}`
-                            : 'Push esta célula'"
-                          :disabled="pushing || !!catalogoBloqueado(prod.id, acc.id)"
-                          @click.stop="pushCell(cellOf(prod.id, acc.id)!)"
-                        >
-                          <Send class="h-3 w-3" />
-                        </button>
-                      </div>
-                    </div>
-                    <div
-                      v-if="compareProductIds.has(prod.id) && actualPriceMap[prod.id]?.[acc.id] != null"
-                      class="text-[9px]"
-                      :class="actualPriceMap[prod.id][acc.id]! > Number(cellOf(prod.id, acc.id)?.price || 0) ? 'text-cyan-600' : 'text-purple-600'"
-                    >
-                      real: {{ actualPriceMap[prod.id][acc.id] }}
-                    </div>
-                    <!-- Conferência (só admin): anúncio fora da margem → (!) e o preço dele -->
-                    <div
-                      v-if="divergenciaDe(prod.id, acc.id)"
-                      class="cursor-help text-[9px] font-bold leading-tight text-red-600 dark:text-red-400"
-                      :title="tituloDivergencia(divergenciaDe(prod.id, acc.id)!)"
-                      data-divergencia="1"
-                    >
-                      (!) anúncio {{ Math.round(divergenciaDe(prod.id, acc.id)!.fora[0].preco!) }}<template v-if="divergenciaDe(prod.id, acc.id)!.fora.length > 1"> +{{ divergenciaDe(prod.id, acc.id)!.fora.length - 1 }}</template>
+                      <button
+                        v-if="cellOf(prod.id, acc.id)?.price != null"
+                        class="p-0.5 rounded"
+                        :class="catalogoBloqueado(prod.id, acc.id) ? 'text-muted-foreground opacity-40 cursor-not-allowed' : 'opacity-60 hover:opacity-100 hover:bg-emerald-100 text-emerald-700'"
+                        :title="catalogoBloqueado(prod.id, acc.id)
+                          ? `Envio bloqueado: ${textoBloqueio(catalogoBloqueado(prod.id, acc.id)!)}`
+                          : 'Push esta célula'"
+                        :disabled="pushing || !!catalogoBloqueado(prod.id, acc.id)"
+                        @click.stop="pushCell(cellOf(prod.id, acc.id)!)"
+                      >
+                        <Send class="h-3 w-3" />
+                      </button>
+                      <span v-else class="invisible block h-4 w-4" aria-hidden="true" />
                     </div>
                   </div>
-                </template>
+                  <div
+                    v-if="compareProductIds.has(prod.id) && actualPriceMap[prod.id]?.[acc.id] != null"
+                    class="text-[9px]"
+                    :class="actualPriceMap[prod.id][acc.id]! > Number(cellOf(prod.id, acc.id)?.price || 0) ? 'text-cyan-600' : 'text-purple-600'"
+                  >
+                    real: {{ actualPriceMap[prod.id][acc.id] }}
+                  </div>
+                  <!-- Conferência (para todos desde o M-3): anúncio fora da margem
+                       da linha (a do produto ou a Geral) → (!) e o preço dele -->
+                  <div
+                    v-if="divergenciaDe(prod.id, acc.id)"
+                    class="cursor-help text-[9px] font-bold leading-tight text-red-600 dark:text-red-400"
+                    :title="tituloDivergencia(divergenciaDe(prod.id, acc.id)!)"
+                    data-divergencia="1"
+                  >
+                    (!) anúncio {{ Math.round(divergenciaDe(prod.id, acc.id)!.fora[0].preco!) }}<template v-if="divergenciaDe(prod.id, acc.id)!.fora.length > 1"> +{{ divergenciaDe(prod.id, acc.id)!.fora.length - 1 }}</template>
+                  </div>
+                </div>
               </td>
             </tr>
           </tbody>

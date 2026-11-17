@@ -43,6 +43,7 @@ console.log('pricing conferencia ok')
 
 // Balão do (!): mostra o motivo do leitor (ex.: TikTok "sem promoção ativa"),
 // não repete "em promoção" e diz "pausado" sempre que o anúncio está inativo.
+// A margem do balão é a da linha (d.margem: a do produto ou a Geral, M-2).
 const pegar = (nome) => {
   const n = source.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === nome)
   assert.ok(n, `${nome} existe na página`)
@@ -51,14 +52,14 @@ const pegar = (nome) => {
 const fmtReal = (v) => `R$ ${v}`
 const fmtQuando = () => '02/11, 10:00'
 const fmtPct = (v) => v.toLocaleString('pt-BR', { maximumFractionDigits: 2 })
-const montarTitulo = (margem) => new Function('fmtReal', 'fmtQuando', 'fmtPct', 'margemValida',
-  `${pegar('tituloDivergencia')}\nreturn tituloDivergencia`)(fmtReal, fmtQuando, fmtPct, { value: margem })
-const titulo = montarTitulo(5)
+const titulo = new Function('fmtReal', 'fmtQuando', 'fmtPct',
+  `${pegar('tituloDivergencia')}\nreturn tituloDivergencia`)(fmtReal, fmtQuando, fmtPct)
 const d = {
   tabela: 1000,
   conferidoEm: '2026-11-02T13:00:00Z',
   naoLidos: 0,
   anuncios: 3,
+  margem: 5,
   fora: [
     { anuncio: 'T1', variacao: 'S1', preco: 900, preco_promocional: null, ativo: false, motivo: 'sem promoção ativa' },
     { anuncio: 'M1', variacao: null, preco: 1200, preco_promocional: 999, ativo: true, motivo: 'em promoção' },
@@ -72,10 +73,12 @@ assert.match(txt, /Anúncio M1: R\$ 1200, \+20,0% da Tabela · em promoção por
 assert.match(txt, /Anúncio M2: R\$ 800, -20,0% da Tabela · anúncio pausado$/m)
 assert.match(txt, /Conferido em 02\/11, 10:00$/)
 assert.doesNotMatch(txt, /sem preço lido/)
-// Margem com vírgula (era "7.5%") e o aviso dos anúncios da célula sem leitura.
-const txt2 = montarTitulo(7.5)({ ...d, naoLidos: 2, anuncios: 5 })
+// Margem do produto com vírgula (era "7.5%") e o aviso dos anúncios da célula sem leitura.
+const txt2 = titulo({ ...d, margem: 7.5, naoLidos: 2, anuncios: 5 })
 assert.match(txt2, /^Fora da margem de 7,5%: Tabela R\$ 1000/)
 assert.match(txt2, /^2 de 5 anúncios desta célula sem preço lido$/m)
+// A margem não vem mais do navegador (margemValida/localStorage saíram no M-2).
+assert.doesNotMatch(descriptor.scriptSetup.content, /margemValida|precos\.margemErroPct/)
 
 // Códigos de erro do job viram texto de gente; código novo sai cru.
 const erro = new Function('ERROS_CONFERENCIA', `${pegar('textoErroConferencia')}\nreturn textoErroConferencia`)({ interrompida: 'o servidor reiniciou no meio' })
@@ -85,109 +88,192 @@ assert.equal(erro('TimeoutError'), 'erro inesperado no servidor — confira de n
 assert.equal(erro(null), '')
 console.log('pricing conferencia balão ok')
 
-// Célula não conferida (? cinza): em branco só a conferida por inteiro. As
-// constantes de texto vêm da própria página.
+// Constantes de primeiro nível da página.
 const pegarConst = (nome) => {
   const n = source.statements.find((s) => ts.isVariableStatement(s)
     && s.declarationList.declarations.some((d) => d.name.getText(source) === nome))
   assert.ok(n, `${nome} existe na página`)
   return ts.transpileModule(n.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 }
-const regra = new Function('fmtQuando', [
+
+// Margem da linha (M-2, 17/11/2026): o % do produto com "Por produto" ligado,
+// senão a Geral com "Geral" ligado, senão nenhuma (a linha não é conferida).
+const margens = new Function([
+  pegarConst('MARGEM_PADRAO'),
+  pegar('margemDaLinha'),
+  pegar('margemDaResposta'),
+  pegar('lerPct'),
+  'return { margemDaLinha, margemDaResposta, lerPct }',
+].join('\n'))()
+const { margemDaLinha, margemDaResposta, lerPct } = margens
+const mg = (geral_ligada, por_produto_ligada) => ({
+  department: 'celular', margem_pct: 5, geral_ligada, por_produto_ligada, produtos: { p1: 12, p0: 0 }, pode_editar: true,
+})
+// As duas ligadas: o produto com % usa o dele; os outros, a Geral.
+assert.equal(margemDaLinha(mg(true, true), 'p1'), 12)
+assert.equal(margemDaLinha(mg(true, true), 'p2'), 5)
+// % próprio zero vale (não cai para a Geral).
+assert.equal(margemDaLinha(mg(true, true), 'p0'), 0)
+// Só a Geral: todos usam a Geral, mesmo quem tem % próprio guardado.
+assert.equal(margemDaLinha(mg(true, false), 'p1'), 5)
+assert.equal(margemDaLinha(mg(true, false), 'p2'), 5)
+// Só por produto: quem tem % usa o dele; os outros não são conferidos.
+assert.equal(margemDaLinha(mg(false, true), 'p1'), 12)
+assert.equal(margemDaLinha(mg(false, true), 'p2'), null)
+// Nenhuma: ninguém é conferido.
+assert.equal(margemDaLinha(mg(false, false), 'p1'), null)
+assert.equal(margemDaLinha(mg(false, false), 'p2'), null)
+// Margem ainda não carregada.
+assert.equal(margemDaLinha(null, 'p1'), null)
+// A resposta do servidor: NUMERIC em texto vira número; sem o campo, o padrão
+// do servidor (5%, as duas ligadas) e ninguém edita.
+assert.deepEqual(margemDaResposta(undefined, 'mala'),
+  { department: 'mala', margem_pct: 5, geral_ligada: true, por_produto_ligada: true, produtos: {}, pode_editar: false })
+assert.deepEqual(margemDaResposta({ department: 'celular', margem_pct: '7.50', geral_ligada: false, por_produto_ligada: true,
+  produtos: { p1: '3.25', p2: null }, pode_editar: true }, 'celular'),
+{ department: 'celular', margem_pct: 7.5, geral_ligada: false, por_produto_ligada: true, produtos: { p1: 3.25 }, pode_editar: true })
+// O campo de %: vírgula ou ponto; vazio = sem % próprio; fora de 0..100 = inválido.
+assert.equal(lerPct('7,5'), 7.5)
+assert.equal(lerPct(' 10 '), 10)
+assert.equal(lerPct(''), null)
+assert.equal(lerPct('101'), undefined)
+assert.equal(lerPct('-1'), undefined)
+assert.equal(lerPct('abc'), undefined)
+console.log('pricing conferencia margem da linha ok')
+
+// Cartão vermelho (M-3, 17/11/2026): os motivos a–e, do /grid e da conferência.
+const motivosDoCartao = new Function('fmtPct', [
   ...['MOTIVO_SEM_INTEGRACAO', 'MOTIVO_SEM_VINCULO', 'PREFIXOS_SEM_INTEGRACAO', 'PREFIXOS_SEM_VINCULO',
-    'PREFIXOS_CATALOGO_NAO_LIDO', 'MOTIVO_SEM_LINHA', 'MOTIVO_LEITURA_ANTIGA'].map(pegarConst),
-  ...['tipoSemAnuncio', 'anunciosNaoLidos', 'motivoDosNaoLidos', 'naoConferidaDaCelula',
-    'classificarNaoConferidas', 'contarConferencia'].map(pegar),
-  'return { naoConferidaDaCelula, classificarNaoConferidas, contarConferencia }',
-].join('\n'))((iso) => `quando(${iso})`)
-const naoConferida = regra.naoConferidaDaCelula
-// J2 = a última conferência; J1 = uma antes dela.
-const terminou = { situacao: 'terminou', atual: 'J2', concluido: 'J2' }
-const celula = (situacao, anuncios = [], motivo = null, job_id = 'J2', conferido_em = '2026-11-02T12:05:00Z') =>
-  ({ situacao, motivo, anuncios, job_id, conferido_em })
+    'PREFIXOS_CATALOGO_NAO_LIDO', 'MOTIVO_ANUNCIO', 'CARTAO_SEM_INTEGRACAO', 'CARTAO_SEM_ANUNCIO',
+    'CARTAO_ERRO_ENVIO', 'CARTAO_INATIVOS_NO_BALAO', 'BLOQUEIOS_ANUNCIO_INATIVO', 'BLOQUEIO_POR_STATUS',
+    'PADRAO_ANUNCIO_INATIVO'].map(pegarConst),
+  ...['tipoSemAnuncio', 'motivosDoCartao'].map(pegar),
+  'return motivosDoCartao',
+].join('\n'))(fmtPct)
+const SEM_INTEGRACAO = 'Conta sem integração no DaVinci'
+const SEM_ANUNCIO = 'Sem anúncio vinculado nesta conta'
+const ERRO_ENVIO = 'O último envio de preço deu erro'
+const integrada = { integration_id: 'I1' }
+const semInteg = { integration_id: null }
+const auto = { cell_status: 'auto', catalogo: null }
+const conf = (situacao, anuncios = [], motivo = null) =>
+  ({ situacao, motivo, anuncios, job_id: 'J1', conferido_em: '2026-11-17T12:00:00Z' })
+const cartao = (e) => motivosDoCartao({ conta: integrada, celula: auto, conferida: null, divergencia: null, ...e })
 
-// Sem linha na conferência: o motivo depende de como ela está.
-assert.equal(naoConferida(undefined, false, terminou).tipo, 'fora_da_conferencia')
-assert.match(naoConferida(undefined, false, terminou).motivo, /conta ou preço novo/)
-assert.match(naoConferida(undefined, false, { situacao: 'nunca', atual: null, concluido: null }).motivo, /ainda não conferido/)
-assert.match(naoConferida(undefined, false, { situacao: 'rodando', atual: 'J3', concluido: 'J2' }).motivo, /em andamento/)
-assert.match(naoConferida(undefined, false, { situacao: 'parou', atual: 'J3', concluido: 'J2' }).motivo, /parou no meio/)
-assert.match(naoConferida(undefined, false, { situacao: 'sem_dados', atual: null, concluido: null }).motivo, /não carregou/)
-// Sem anúncio: integração, vínculo, marca de catálogo não lida ou o envio não manda (texto do servidor no balão).
-assert.equal(naoConferida(celula('sem_anuncio', [], 'conta sem integração'), false, terminou).tipo, 'sem_integracao')
-assert.equal(naoConferida(celula('sem_anuncio', [],
-  'Conta de kit sem integração do Mercado Livre — sem anúncio de catálogo'), false, terminou).tipo, 'sem_integracao')
-assert.deepEqual(naoConferida(celula('sem_anuncio', [], 'sem anúncio vinculado'), false, terminou),
-  { tipo: 'sem_anuncio', motivo: 'sem anúncio vinculado' })
-assert.equal(naoConferida(celula('sem_anuncio', [], 'Sem anúncio de catálogo vinculado nesta conta'), false, terminou).tipo,
-  'sem_anuncio')
-assert.equal(naoConferida(celula('sem_anuncio', [],
-  'Marca de catálogo ainda não lida nesta conta (a varredura diária lê às 10h; …)'), false, terminou).tipo, 'catalogo_nao_lido')
-assert.deepEqual(naoConferida(celula('sem_anuncio', [], 'MLB1 pausado — não envia'), false, terminou),
-  { tipo: 'fora_do_envio', motivo: 'MLB1 pausado — não envia' })
-assert.equal(naoConferida(celula('nao_suportada', [], 'sem leitor de preço para a plataforma magalu'), false, terminou).tipo,
-  'sem_leitor')
-assert.equal(naoConferida(celula('erro_conta', [], 'token'), false, terminou).motivo, 'erro na conta: token')
-// Lida por inteiro e dentro da margem: em branco.
-assert.equal(naoConferida(celula('conferida', [a(1000), a(990, 'MLB2')]), false, terminou), null)
-// Nenhum anúncio lido.
-assert.deepEqual(naoConferida(celula('conferida', [{ ...a(null), motivo: 'anúncio não encontrado' }]), false, terminou),
-  { tipo: 'nao_lido', motivo: 'anúncio não encontrado' })
-assert.equal(naoConferida(celula('conferida', []), false, terminou).motivo, 'nenhum anúncio lido')
-// Parcial sem (!): ? com quantos foram lidos; com (!): o (!) fala por ela.
-assert.match(naoConferida(celula('conferida', [a(1000), { ...a(null, 'MLB2'), motivo: 'sem preço' }]), false, terminou).motivo,
-  /^1 de 2 anúncios lidos, dentro da margem; os outros: sem preço$/)
-assert.equal(naoConferida(celula('conferida', [a(1500), a(null, 'MLB2')]), true, terminou), null)
+// Tudo certo: sem cartão.
+assert.deepEqual(cartao({}), [])
+assert.deepEqual(cartao({ conferida: conf('conferida', [a(1000)]) }), [])
 
-// Que leitura vale: a do último job ou a do último que terminou bem.
-const antiga = (estado) => naoConferida(celula('conferida', [a(1000)], null, 'J1'), false, estado)
-// Terminou bem, mas esta conta não gravou: ficou com a leitura do J1.
-assert.deepEqual(antiga(terminou),
-  { tipo: 'desatualizada', motivo: 'lida em quando(2026-11-02T12:05:00Z), na última conferência esta conta não conseguiu gravar — confira de novo' })
-// Parou no meio (J2), e o último que terminou bem é o J1: a leitura do J1 vale; a do J2 também.
-const parou = { situacao: 'parou', atual: 'J2', concluido: 'J1' }
-assert.equal(antiga(parou), null)
-assert.equal(naoConferida(celula('conferida', [a(1000)], null, 'J2'), false, parou), null)
-// Leitura de um job que parou (J1), sem nenhum concluído depois: ? — e o (!) antigo continua.
-assert.match(antiga({ situacao: 'parou', atual: 'J2', concluido: 'J0' }).motivo, /numa conferência que não terminou — confira de novo$/)
-assert.equal(naoConferida(celula('conferida', [a(1500)], null, 'J1'), true, { situacao: 'parou', atual: 'J2', concluido: 'J0' }), null)
-// Conferindo de novo (J3) depois de uma que parou (J2): a leitura do J2 não volta a valer
-// em branco; a do último concluído (J1) vale até ser trocada.
-const rodando = { situacao: 'rodando', atual: 'J3', concluido: 'J1' }
-assert.match(naoConferida(celula('conferida', [a(1000)], null, 'J2'), false, rodando).motivo, /a de agora ainda não chegou nela$/)
-assert.equal(naoConferida(celula('conferida', [a(1000)], null, 'J1'), false, rodando), null)
-assert.equal(naoConferida(celula('conferida', [a(1000)], null, 'J3'), false, rodando), null)
-// Linha sem job: não vale.
-assert.equal(naoConferida(celula('conferida', [a(1000)], null, null), false, terminou).tipo, 'desatualizada')
-console.log('pricing conferencia não conferidas ok')
+// a) Conta sem integração: cartão em todas as células, com ou sem preço; não
+// repete o b (sem anúncio vinculado).
+assert.deepEqual(cartao({ conta: semInteg }), [SEM_INTEGRACAO])
+assert.deepEqual(cartao({ conta: semInteg, celula: undefined }), [SEM_INTEGRACAO])
+assert.deepEqual(cartao({
+  conta: semInteg,
+  celula: { cell_status: 'no_link', catalogo: null },
+  conferida: conf('sem_anuncio', [], 'conta sem integração'),
+}), [SEM_INTEGRACAO])
+assert.deepEqual(cartao({ conta: semInteg, conferida: conf('sem_anuncio', [], 'sem anúncio vinculado') }), [SEM_INTEGRACAO])
+// a) Coluna de catálogo bloqueada por conta de kit sem integração (a conta
+// passada é a base): o mesmo motivo, sem o b.
+const catSemInteg = { cell_status: 'auto', catalogo: { anuncios: [], bloqueio: 'sem_anuncio',
+  texto: 'Conta de kit sem integração do Mercado Livre — sem anúncio de catálogo' } }
+assert.deepEqual(cartao({ conta: semInteg, celula: catSemInteg }), [SEM_INTEGRACAO])
+assert.deepEqual(cartao({ conta: integrada, celula: catSemInteg }), [SEM_INTEGRACAO])
 
-// A grade inteira: toda célula com preço cai em um balde só, e a contagem da
-// faixa é a das marcas — inclusive a célula com preço que a conferência nem tem.
-const cel = (p, c) => ({ pricing_product_id: p, pricing_account_id: c })
-const grade = [cel('p1', 'c1'), cel('p1', 'c2'), cel('p1', 'c3'), cel('p2', 'c1'), cel('p2', 'c2'), cel('p2', 'c3')]
-const semPreco = new Set(['p2::c3'])  // NA/SV/∅ ou sem preço: fora de tudo
-const comparavel = (p, c) => !semPreco.has(`${p}::${c}`)
-const porCelula = new Map([
-  ['p1::c1', celula('conferida', [a(1000)])],  // em branco
-  ['p1::c2', celula('conferida', [a(1300)])],  // (!)
-  ['p1::c3', celula('sem_anuncio', [], 'conta sem integração')],  // ?
-  ['p2::c1', celula('conferida', [a(1000), a(null, 'MLB9')])],  // ? parcial
-  // p2::c2 sem linha: ? fora da conferência
-])
-const divergentes = new Map([['p1::c2', {}]])
-const nc = regra.classificarNaoConferidas(grade, comparavel, porCelula, divergentes, terminou)
-assert.deepEqual([...nc.keys()].sort(), ['p1::c3', 'p2::c1', 'p2::c2'])
-assert.equal(nc.get('p2::c2').tipo, 'fora_da_conferencia')
-const produtos = [{ id: 'p1' }, { id: 'p2' }]
-const contas = [{ id: 'c1' }, { id: 'c2' }, { id: 'c3' }]
-const n = regra.contarConferencia(produtos, contas, comparavel, divergentes, nc)
-assert.deepEqual({ fora: n.fora, conferidas: n.conferidas, qtdNaoConferidas: n.qtdNaoConferidas }, { fora: 1, conferidas: 1, qtdNaoConferidas: 3 })
-assert.equal(n.fora + n.conferidas + n.qtdNaoConferidas, grade.filter((c) => comparavel(c.pricing_product_id, c.pricing_account_id)).length)
-assert.deepEqual([...n.porTipo.entries()].sort(), [['fora_da_conferencia', 1], ['nao_lido', 1], ['sem_integracao', 1]])
-// Só o que está na tela: uma linha e uma coluna a menos.
-const n2 = regra.contarConferencia([{ id: 'p1' }], [{ id: 'c1' }, { id: 'c3' }], comparavel, divergentes, nc)
-assert.deepEqual({ fora: n2.fora, conferidas: n2.conferidas, qtdNaoConferidas: n2.qtdNaoConferidas }, { fora: 0, conferidas: 1, qtdNaoConferidas: 1 })
-// Antes da primeira conferência: toda célula com preço ganha ?.
-const nunca = regra.classificarNaoConferidas(grade, comparavel, new Map(), new Map(), { situacao: 'nunca', atual: null, concluido: null })
-assert.equal(nunca.size, 5)
-console.log('pricing conferencia grade ok')
+// b) Sem anúncio vinculado — kit: pela conferência ou pelo no_link do envio (um motivo só).
+assert.deepEqual(cartao({ conferida: conf('sem_anuncio', [], 'sem anúncio vinculado') }), [SEM_ANUNCIO])
+assert.deepEqual(cartao({ celula: { cell_status: 'no_link', catalogo: null } }), [SEM_ANUNCIO])
+assert.deepEqual(cartao({
+  celula: { cell_status: 'no_link', catalogo: null },
+  conferida: conf('sem_anuncio', [], 'sem anúncio vinculado'),
+}), [SEM_ANUNCIO])
+// b) Catálogo: o bloqueio 'sem_anuncio' do /grid (e a conferência não repete).
+const catSemAnuncio = { cell_status: 'auto', catalogo: { anuncios: [], bloqueio: 'sem_anuncio',
+  texto: 'Sem anúncio de catálogo vinculado nesta conta' } }
+assert.deepEqual(cartao({ celula: catSemAnuncio }), [SEM_ANUNCIO])
+assert.deepEqual(cartao({ celula: catSemAnuncio,
+  conferida: conf('sem_anuncio', [], 'Sem anúncio de catálogo vinculado nesta conta') }), [SEM_ANUNCIO])
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [], bloqueio: 'sem_anuncio', texto: null } } }),
+  [SEM_ANUNCIO])
+// Marca de catálogo ainda não lida: não se sabe — sem cartão.
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [], bloqueio: 'sem_anuncio',
+  texto: 'Marca de catálogo ainda não lida nesta conta (a varredura diária lê às 10h; …)' } } }), [])
+
+// Bloqueios de catálogo que são regra do envio: sem cartão.
+const anCat = (external_id, status, bloqueio) => ({ external_id, status, listing_type: 'gold_pro', sincronizado_com: [], bloqueio })
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB7', 'active', 'sincronizado')],
+  bloqueio: 'sincronizado', texto: 'Anúncio de catálogo MLB7 sincronizado com o anúncio comum MLB1' } } }), [])
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB7', 'active', 'mesmo_anuncio')],
+  bloqueio: 'mesmo_anuncio', texto: null } } }), [])
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [], bloqueio: 'sem_tipo', texto: null } } }), [])
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB7', 'active', null)],
+  bloqueio: 'sem_preco_catalogo', texto: null } } }), [])
+// Kit que só tem anúncio de catálogo: o anúncio é da coluna Catálogo — nem b nem c,
+// mesmo pausado; e o "fora do envio" da conferência também não conta.
+assert.deepEqual(cartao({
+  celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB8', 'paused', 'so_catalogo')], bloqueio: 'so_catalogo', texto: null } },
+  conferida: conf('sem_anuncio', [], 'Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo (MLB8)'),
+}), [])
+assert.deepEqual(cartao({ conferida: conf('sem_anuncio', [],
+  'Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo (MLB8)') }), [])
+
+// c) Anúncio inativo — catálogo: pelo bloqueio do anúncio (ou o status gravado).
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB9', 'paused', 'pausado')],
+  bloqueio: 'pausado', texto: 'Anúncio de catálogo MLB9 pausado — não envia' } } }), ['Anúncio de catálogo MLB9 pausado'])
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB9', 'under_review', null), anCat('MLB5', 'active', null)],
+  bloqueio: null, texto: 'Envia para MLB5' } } }), ['Anúncio de catálogo MLB9 em revisão'])
+assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB9', 'closed', 'encerrado')],
+  bloqueio: 'encerrado', texto: null } } }), ['Anúncio de catálogo MLB9 encerrado'])
+// c) Kit: o que a conferência leu ao vivo — basta um inativo, o balão diz qual.
+const inativo = (anuncio, motivo = null, preco = 1000) => ({ ...a(preco, anuncio), ativo: false, motivo })
+const c1 = cartao({ conferida: conf('conferida', [a(1000, 'MLB1'), inativo('MLB2')]) })
+assert.equal(c1.length, 1)
+assert.match(c1[0], /^Anúncio MLB2: inativo no marketplace/)
+assert.deepEqual(cartao({ conferida: conf('conferida', [inativo('MLB3', 'anúncio encerrado — o envio pula', null)]) }),
+  ['Anúncio MLB3: anúncio encerrado'])
+assert.deepEqual(cartao({ conferida: conf('conferida', [{ ...a(null, '123'), ativo: null, motivo: 'anúncio excluído na Shopee' }]) }),
+  ['Anúncio 123: anúncio excluído na Shopee'])
+assert.deepEqual(cartao({ conferida: conf('conferida', [{ ...inativo('MLB4', 'removido por moderação — o envio pula', null), variacao: 'V1' }]) }),
+  ['Anúncio MLB4 (variação V1): removido por moderação'])
+// Sem preço por outro motivo (não lido, promoção não suportada): não é inativo.
+assert.deepEqual(cartao({ conferida: conf('conferida', [{ ...a(null, 'T9'), motivo: 'em Oferta Relâmpago — o envio pula, não conferido' }]) }), [])
+// "Fora do envio" da conferência que é anúncio parado conta; o resto não.
+assert.deepEqual(cartao({ conferida: conf('sem_anuncio', [], 'MLB1 pausado — não envia') }), ['MLB1 pausado — não envia'])
+// Muitos inativos: os 3 primeiros e "e mais".
+const muitos = cartao({ conferida: conf('conferida', ['A', 'B', 'C', 'D', 'E'].map((x) => inativo(x))) })
+assert.equal(muitos.length, 4)
+assert.equal(muitos[3], '… e mais 2 anúncio(s) inativo(s)')
+
+// d) O último envio deu erro.
+assert.deepEqual(cartao({ celula: { cell_status: 'error', catalogo: null } }), [ERRO_ENVIO])
+
+// e) Fora da margem da linha (exemplo do pedido: dg101.pi Amazon, Tabela 1139 × anúncio 1031).
+const div = { tabela: 1139, fora: [a(1031, 'B0X')], conferidoEm: '2026-11-17T12:00:00Z', naoLidos: 0, anuncios: 1, margem: 5 }
+assert.deepEqual(cartao({ divergencia: div }),
+  ['Preço do anúncio fora da margem de 5%: anúncio 1031 × Tabela 1139 (-9,5%)'])
+assert.match(cartao({ divergencia: { ...div, margem: 12.5, fora: [a(1031, 'B0X'), a(1300, 'B0Y')] } })[0],
+  /^Preço do anúncio fora da margem de 12,5%: .* \(e mais 1\)$/)
+
+// Vários motivos juntos, na ordem a–e (o balão junta com quebra de linha).
+assert.deepEqual(cartao({
+  celula: { cell_status: 'error', catalogo: null },
+  conferida: conf('conferida', [a(1031, 'B0X'), inativo('B0Z')]),
+  divergencia: div,
+}).map((m) => m.slice(0, 22)), ['Anúncio B0Z: inativo n', ERRO_ENVIO.slice(0, 22), 'Preço do anúncio fora '])
+console.log('pricing conferencia cartão ok')
+
+// O template: o cartão (à esquerda do aviãozinho, espaço sempre reservado) e
+// o (!) continuam; o "?", o disquete, o ⊘, NA/SV e o cadeado saíram.
+const tpl = descriptor.template.content
+const iCelula = tpl.indexOf('<!-- Account cells')
+assert.ok(iCelula > 0, 'célula de preço no template')
+const celulaTpl = tpl.slice(iCelula, tpl.indexOf('</tbody>', iCelula))
+assert.ok(celulaTpl.includes('data-cartao'), 'cartão na célula')
+assert.ok(celulaTpl.indexOf('data-cartao') < celulaTpl.indexOf("'Push esta célula'"), 'cartão à esquerda do aviãozinho')
+assert.match(celulaTpl, /<span v-else class="invisible block h-\[10px\] w-\[7px\]"/, 'espaço do cartão reservado')
+assert.match(celulaTpl, /data-divergencia="1"/)
+for (const fora of ['data-nao-conferida', 'Editar override', 'Desabilitar', "'NA'", "'SV'", '<Lock', 'cellTone']) {
+  assert.ok(!celulaTpl.includes(fora), `${fora} saiu da célula`)
+}
+console.log('pricing conferencia template ok')

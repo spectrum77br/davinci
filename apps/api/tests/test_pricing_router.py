@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -12,8 +13,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    CellStatus,
     PricingAccount,
     PricingOverride,
+    PricingPlatform,
     PricingProduct,
     Segment,
     User,
@@ -292,78 +295,110 @@ async def test_import_products_creates_and_updates(
 # ============================================================== overrides
 
 
+async def _conta_e_linha_no_banco(db: AsyncSession, dono: User) -> tuple[str, str]:
+    """Conta e linha do Celular criadas direto no banco (com a aba e o tipo)."""
+    raiz = Segment(name="Celular", slug="celular", sort_order=0)
+    db.add(raiz)
+    await db.flush()
+    folha = Segment(name="tipo 1", slug="cel-1", sort_order=0, parent_id=raiz.id)
+    db.add(folha)
+    await db.flush()
+    conta = PricingAccount(
+        user_id=dono.id,
+        name="A",
+        platform=PricingPlatform.SHOPEE,
+        segment_id=raiz.id,
+        commission=Decimal("0.10"),
+        margin1=Decimal("0.20"),
+    )
+    linha = PricingProduct(
+        user_id=dono.id, sku="OVR-1", name="n", segment_id=folha.id, cost_kit1=Decimal("10")
+    )
+    db.add_all([conta, linha])
+    await db.commit()
+    return str(conta.id), str(linha.id)
+
+
+async def _celula(client: AsyncClient, conta_id: str, linha_id: str) -> dict:
+    grade = (await client.get("/api/pricing/grid", params={"department": "celular"})).json()
+    [cel] = [
+        c
+        for c in grade["cells"]
+        if (c["pricing_account_id"], c["pricing_product_id"]) == (conta_id, linha_id)
+    ]
+    return cel
+
+
 @pytest.mark.asyncio
-async def test_upsert_override_then_set_status_then_delete(
+async def test_preco_manual_recusado_o_que_ja_existe_vale_e_status_segue(
     db: AsyncSession,
     client: AsyncClient,
     user_full: User,
     auth_as: Callable[[User | None], None],
 ):
+    """M-3, 17/11/2026: "Não pode alterar o preço da tabela manualmente". O
+    PUT /overrides recusa preço (422 preco_manual_desativado); o preço manual
+    que JÁ está no banco continua valendo no cálculo até a limpeza do dado
+    (feita à parte); sem preço, a rota e as de status/apagar seguem iguais."""
     auth_as(user_full)
-    a = (
-        await client.post(
-            "/api/pricing/accounts",
-            json={"name": "A", "platform": "shopee"},
-        )
-    ).json()
-    p = (
-        await client.post(
-            "/api/pricing/products",
-            json={"sku": "OVR-1", "name": "n", "cost_kit1": "10"},
-        )
-    ).json()
+    a, p = await _conta_e_linha_no_banco(db, user_full)
+    par = {"pricing_product_id": p, "pricing_account_id": a}
+    recusa = {
+        "code": "preco_manual_desativado",
+        "message": "O preço manual foi desligado: a Tabela usa só o preço calculado.",
+    }
 
-    # PUT — create
+    # Preço novo: recusado, nada gravado.
     r = await client.put(
         "/api/pricing/overrides",
-        json={
-            "pricing_product_id": p["id"],
-            "pricing_account_id": a["id"],
-            "price_override": "199.90",
-            "cell_status": "manual",
-        },
+        json={**par, "price_override": "199.90", "cell_status": "manual"},
     )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["cell_status"] == "manual"
-    assert str(body["price_override"]) == "199.90"
+    assert (r.status_code, r.json()["detail"]) == (422, recusa)
+    assert (await db.execute(select(PricingOverride))).scalars().all() == []
 
-    # PUT again — update same row (UNIQUE preserved)
-    r = await client.put(
-        "/api/pricing/overrides",
-        json={
-            "pricing_product_id": p["id"],
-            "pricing_account_id": a["id"],
-            "price_override": "299.00",
-            "cell_status": "locked",
-        },
+    # O preço manual antigo (gravado antes da mudança) continua na grade.
+    db.add(
+        PricingOverride(
+            user_id=user_full.id,
+            pricing_product_id=uuid.UUID(p),
+            pricing_account_id=uuid.UUID(a),
+            price_override=Decimal("938.00"),
+            cell_status=CellStatus.MANUAL,
+        )
     )
-    assert r.json()["cell_status"] == "locked"
-    rows = (
-        await db.execute(select(PricingOverride))
+    await db.commit()
+    cel = await _celula(client, a, p)
+    assert (cel["source"], float(cel["price"]), cel["cell_status"]) == ("override", 938.0, "manual")
+
+    # Trocar o preço que existe também é recusado: a linha fica como estava.
+    r = await client.put(
+        "/api/pricing/overrides", json={**par, "price_override": "299.00", "cell_status": "locked"}
+    )
+    assert (r.status_code, r.json()["detail"]) == (422, recusa)
+    [row] = (
+        await db.execute(select(PricingOverride).execution_options(populate_existing=True))
     ).scalars().all()
-    assert len(rows) == 1
+    assert (row.price_override, row.cell_status) == (Decimal("938.00"), CellStatus.MANUAL)
 
-    # cell-status only
+    # Sem preço a rota segue como antes (aqui: tira o preço e a célula calcula).
     r = await client.put(
-        "/api/pricing/overrides/cell-status",
-        json={
-            "pricing_product_id": p["id"],
-            "pricing_account_id": a["id"],
-            "cell_status": "disabled",
-        },
+        "/api/pricing/overrides", json={**par, "price_override": None, "cell_status": "auto"}
+    )
+    assert r.status_code == 200, r.text
+    assert (r.json()["price_override"], r.json()["cell_status"]) == (None, "auto")
+    assert (await _celula(client, a, p))["source"] == "computed"
+
+    # cell-status e o apagar continuam iguais (UNIQUE preservado).
+    r = await client.put(
+        "/api/pricing/overrides/cell-status", json={**par, "cell_status": "disabled"}
     )
     assert r.json()["cell_status"] == "disabled"
-
-    # delete
+    assert len((await db.execute(select(PricingOverride))).scalars().all()) == 1
     r = await client.delete(
-        f"/api/pricing/overrides?pricing_product_id={p['id']}&pricing_account_id={a['id']}"
+        f"/api/pricing/overrides?pricing_product_id={p}&pricing_account_id={a}"
     )
     assert r.status_code == 204
-    rows = (
-        await db.execute(select(PricingOverride))
-    ).scalars().all()
-    assert rows == []
+    assert (await db.execute(select(PricingOverride))).scalars().all() == []
 
 
 @pytest.mark.asyncio

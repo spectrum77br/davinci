@@ -405,6 +405,9 @@ TABELAS: dict[str, str] = {
     "audit_uploads": "Planilha da auditoria de preços",
     "audit_runs": "Rodada da auditoria de preços",
     "pricing_product_variant": "Variação de produto (Tabela de preços)",
+    # M-2 (17/11/2026, migration 0499): a margem de erro da conferência.
+    "pricing_conferencia_margem": "Margem de erro geral (Tabela de preços)",
+    "pricing_conferencia_margem_produto": "Margem de erro do produto (Tabela de preços)",
     "store_info": "Loja",
     "stores": "Conta de marketplace",
     "companies": "Empresa",
@@ -531,6 +534,12 @@ CAMPOS: dict[str, str] = {
     "estoque_bling": "Estoque",
     "tempo_reposicao": "Tempo de reposição (dias)",
     "tempo_estoque": "Tempo de estoque (dias)",
+    # Margem de erro da conferência (M-2, 17/11/2026).
+    "margem_pct": "Margem de erro (%)",
+    "geral_ligada": "Margem geral ligada",
+    "por_produto_ligada": "Margem por produto ligada",
+    "department": "Departamento",
+    "atualizado_por": "Atualizado por",
     # Catálogo ML (06/10/2026).
     "preco_catalogo": "Catálogo (custo)",
     "canal": "Canal (kit/catálogo)",

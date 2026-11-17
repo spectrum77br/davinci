@@ -1078,13 +1078,22 @@ def fila(monkeypatch) -> _Fila:
 
 
 @pytest.mark.asyncio
-async def test_rotas_so_de_administrador(
+async def test_conferir_so_de_administrador_e_ver_para_quem_ve_a_tabela(
     client: AsyncClient, make_user, cenario, auth_as: Callable, fila: _Fila
 ):
+    """M-3, 17/11/2026: o cartão vermelho e o (!) são de todos que veem a
+    Tabela — o GET vale para `tabela_precos` (ver); conferir continua só do
+    administrador (o teste da cerca de equipe está em
+    test_pricing_conferencia_margem.py)."""
     vendedor = await make_user(role=UserRole.USER, permissions=PERM_PRECOS)
     auth_as(vendedor)
     r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
     assert r.status_code == 403
+    r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
+    assert r.status_code == 200, r.text
+    assert (r.json()["pode_conferir"], r.json()["margem"]["pode_editar"]) == (False, False)
+    sem_tabela = await make_user(role=UserRole.USER, permissions={})
+    auth_as(sem_tabela)
     r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
     assert r.status_code == 403
     assert fila.jobs == []
@@ -1183,7 +1192,21 @@ async def test_get_devolve_o_ultimo_job_e_as_celulas(
 ):
     auth_as(admin)
     r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
-    assert r.json() == {"job": None, "ultimo_concluido": None, "celulas": []}
+    assert r.json() == {
+        "job": None,
+        "ultimo_concluido": None,
+        "celulas": [],
+        # M-2 (17/11/2026): a margem do servidor (nada gravado = 5%) e quem confere.
+        "margem": {
+            "department": "celular",
+            "margem_pct": 5.0,
+            "geral_ligada": True,
+            "por_produto_ligada": True,
+            "produtos": {},
+            "pode_editar": True,
+        },
+        "pode_conferir": True,
+    }
 
     job = await _rodar(db, admin)
     r = await client.get("/api/pricing/conferencia", params={"department": "celular"})

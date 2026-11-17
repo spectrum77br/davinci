@@ -77,7 +77,13 @@ assert.equal(reposicaoPorPeca({ y: 7 }, {}, 15, 15).valor, 7)
 // Sem peças: zero. Sem prazo: null.
 assert.equal(reposicaoPorPeca({}, {}, 15, 15).valor, 0)
 assert.equal(reposicaoPorPeca({ a: 1 }, { a: 1 }, '', 15), null)
-// Texto da conta igual nas duas telas.
-assert.equal(textoFormulaReposicao(30, 30), 'Reposição = Estoque − vendas 30d × (30 + 30) ÷ 30; a parte das vendas arredonda para cima')
-assert.equal(textoFormulaReposicao('', 30), 'Reposição = Estoque − vendas 30d × (? + 30) ÷ 30; a parte das vendas arredonda para cima')
+// Texto da conta da Tabela de Preços: um prazo só desde o M-2 (17/11/2026).
+assert.equal(textoFormulaReposicao(30), 'Reposição = Estoque − vendas 30d × 30 ÷ 30; a parte das vendas arredonda para cima')
+assert.equal(textoFormulaReposicao(150), 'Reposição = Estoque − vendas 30d × 150 ÷ 30; a parte das vendas arredonda para cima')
+assert.equal(textoFormulaReposicao(''), 'Reposição = Estoque − vendas 30d × ? ÷ 30; a parte das vendas arredonda para cima')
+assert.equal(textoFormulaReposicao(null), 'Reposição = Estoque − vendas 30d × ? ÷ 30; a parte das vendas arredonda para cima')
+// A conta da Tabela com o tempo de estoque em 0 (como a Importação): 100 por
+// mês, 30 dias → necessário 100.
+assert.deepEqual(calcularReposicao(0, 100, 30, 0), { valor: -100, necessario: 100, dias: 30 })
+assert.equal(reposicaoPorPeca({ a: 10 }, { a: 30 }, 30, 0).valor, -20)
 console.log('reposicao por peca ok')
