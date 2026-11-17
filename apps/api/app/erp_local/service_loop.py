@@ -332,6 +332,10 @@ def main():
                     "situação do cadastro %s",
                     catalog_follow.follow_status(erp, store.all_rows("products")),
                 )
+                log.info(
+                    "nomes e custos do cadastro %s",
+                    catalog_follow.follow_names(erp, store.all_rows("products")),
+                )
                 from app.erp_local import multi_company
 
                 try:

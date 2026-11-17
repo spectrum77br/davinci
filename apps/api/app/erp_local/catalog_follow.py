@@ -7,6 +7,9 @@ their smallest part's, and the other 19 were 1 or 2 units off, so their stock is
 their own. A new combo with no parts in Bling is reported for a person instead of guessed.
 Situation follows Bling too: a product inactivated or excluded there turns inactive here (and
 active again if Bling reactivates it), so its listings get 0 instead of a stock nobody sells.
+So do the name and the cost: a product renamed in Bling (WP60 → WP60 5G, 11/2026) is renamed
+here, and a cost changed there (147 products were behind on 17/11) is the cost here. A cost that
+follows Bling is not an ERP cost change: it does not enter the cost-change result.
 While Bling owns the catalog its situation wins; once a store is switched this stops.
 Nothing is written to Bling.
 """
@@ -16,7 +19,12 @@ from decimal import Decimal, InvalidOperation
 
 from app.erp_local.core import ERPError, dumps, text
 
-COMMANDS = {"catalog.follow.add", "catalog.follow.status"}
+COMMANDS = {
+    "catalog.follow.add",
+    "catalog.follow.status",
+    "catalog.follow.name",
+    "catalog.follow.cost",
+}
 # Bling's situation letter → the ERP's product status. Excluded is inactive here: reversible,
 # and the history and balances stay.
 FOLLOWED = {"A": "active", "I": "inactive", "E": "inactive"}
@@ -77,11 +85,70 @@ def _status(erp, db, key, p):
     return {"sku": sku, "status": p["status"], "changed": True, "external_writes": False}
 
 
+def _name(erp, db, p):
+    from app.erp_local import bling_mirror
+
+    if set(p) != {"sku", "name"}:
+        raise ERPError("catalog_follow", "Nome do Bling não reconhecido.")
+    if bling_mirror.switched(db):
+        raise ERPError(
+            "catalog_follow_stopped", "Há loja trocada para o ERP; o cadastro é do ERP.", 409
+        )
+    sku = erp.product(db, p["sku"])["sku"]
+    name = text(p["name"], "nome", 300)
+    previous = db.execute("SELECT name FROM products WHERE sku=?", (sku,)).fetchone()[0]
+    if previous == name:
+        return {"sku": sku, "changed": False, "external_writes": False}
+    db.execute("UPDATE products SET name=? WHERE sku=?", (name, sku))
+    return {
+        "sku": sku,
+        "name": name,
+        "previous": previous,
+        "changed": True,
+        "external_writes": False,
+    }
+
+
+def _cost(erp, db, p):
+    from app.erp_local import bling_mirror
+
+    if set(p) != {"sku", "cost_price"}:
+        raise ERPError("catalog_follow", "Custo do Bling não reconhecido.")
+    if bling_mirror.switched(db):
+        raise ERPError(
+            "catalog_follow_stopped", "Há loja trocada para o ERP; o cadastro é do ERP.", 409
+        )
+    sku = erp.product(db, p["sku"])["sku"]
+    cost = _decimal(p["cost_price"])
+    if cost is None or cost < 0:
+        raise ERPError("catalog_follow", "Custo do Bling inválido.")
+    value = str(cost.quantize(Decimal("0.0001")))
+    row = db.execute("SELECT cost_price FROM product_pricing WHERE sku=?", (sku,)).fetchone()
+    if row and _decimal(row[0]) == cost:
+        return {"sku": sku, "changed": False, "external_writes": False}
+    if row:
+        db.execute("UPDATE product_pricing SET cost_price=? WHERE sku=?", (value, sku))
+    else:
+        db.execute("INSERT INTO product_pricing VALUES (?,?,?)", (sku, None, value))
+    previous = row[0] if row else None
+    return {
+        "sku": sku,
+        "cost_price": value,
+        "previous": previous,
+        "changed": True,
+        "external_writes": False,
+    }
+
+
 def apply(erp, db, key, kind, p):
     if not isinstance(p, dict):
         raise ERPError("catalog_follow", "Dados não reconhecidos.")
     if kind == "catalog.follow.status":
         return _status(erp, db, key, p)
+    if kind == "catalog.follow.name":
+        return _name(erp, db, p)
+    if kind == "catalog.follow.cost":
+        return _cost(erp, db, p)
     return _add(erp, db, p)
 
 
@@ -121,6 +188,60 @@ def follow_status(erp, products):
             report["changed"] += 1
         except ERPError as error:
             report["refused"][sku] = error.message[:80]
+    return report
+
+
+def follow_names(erp, products):
+    """Bling's name and cost onto the products already here. When DaVinci's copy has the same
+    Bling product twice, the active row changed last wins."""
+    import hashlib
+
+    from app.erp_local import bling_mirror
+
+    report = {"changed": 0, "costs": 0, "refused": {}}
+    with erp.connection() as db:
+        if bling_mirror.switched(db):
+            return {"state": "stopped"}
+        origin = {}
+        for row in db.execute("SELECT sku,data FROM catalog_origin"):
+            source = json.loads(row["data"]).get("bling_product_id")
+            if source:
+                origin[str(source)] = row["sku"]
+        names = {r["sku"]: r["name"] for r in db.execute("SELECT sku,name FROM products")}
+        costs = {
+            r["sku"]: _decimal(r["cost_price"])
+            for r in db.execute("SELECT sku,cost_price FROM product_pricing")
+        }
+    wanted = {}
+    for p in products:
+        bid = str(p.get("bling_product_id") or "")
+        if bid not in origin:
+            continue
+        rank = (str(p.get("situacao") or "").upper() == "A", str(p.get("updated_at") or ""))
+        if bid not in wanted or rank > wanted[bid][0]:
+            wanted[bid] = (rank, p)
+    for bid, (_, p) in sorted(wanted.items()):
+        sku = origin[bid]
+        name = (p.get("name") or "").strip()
+        cost = _decimal(p.get("bling_cost_price"))
+        changes = []
+        if name and len(name) <= 300 and names.get(sku) != name:
+            changes.append(("name", "catalog.follow.name", {"sku": sku, "name": name}, name))
+        if cost is not None and cost >= 0 and costs.get(sku) != cost:
+            payload = {"sku": sku, "cost_price": str(cost)}
+            changes.append(("cost", "catalog.follow.cost", payload, str(cost)))
+        for what, kind, payload, value in changes:
+            digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+            try:
+                erp.command(
+                    f"catalog-follow-v1:{what}:{bid}:{digest}",
+                    kind,
+                    payload,
+                    actor="cadastro do Bling",
+                )
+                report["changed" if what == "name" else "costs"] += 1
+            except ERPError as error:
+                report["refused"][sku] = error.message[:80]
     return report
 
 

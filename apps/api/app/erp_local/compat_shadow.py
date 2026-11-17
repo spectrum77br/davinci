@@ -4,9 +4,11 @@ Before DaVinci points at the ERP (etapa 2), each kind of read it makes of Bling 
 depots, sales channels, categories, products by code and by id, balances) is asked of both, on the
 same products: Bling through bling_shadow_probe (GET only, no token refresh, DaVinci's own queue)
 and the ERP through its compatible API, in this process, on the live base opened read only.
-Nothing is written at Bling or at DaVinci. In the ERP's own base only two things: the compatible
-numeric ids of depots, categories and products, which the API itself gives on its first read
-(`number`), and the result of the round.
+Nothing is written at Bling or at DaVinci. In the ERP's own base only: what only Bling knows and
+the ERP must answer the same (the id of Bling's depot and Bling's list of sales channels,
+`keep_from_bling`), the compatible numeric ids the API itself gives on its first read (`number`),
+and the result of the round. Bling keeps owning everything; once a store is switched, nothing more
+is kept from it.
 
 Field by field: equal, different, answered by Bling but missing in the ERP, and only in the ERP. A
 balance can move between the two reads, and the ERP follows Bling's balance within the hour, so
@@ -30,6 +32,11 @@ from app.erp_local import bling_shadow_probe as probe
 from app.erp_local.core import ERPError, LocalERP
 
 SCHEMA = "CREATE TABLE IF NOT EXISTS compat_shadow (taken_at TEXT PRIMARY KEY, data TEXT NOT NULL);"
+CHANNEL_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS bling_channel_copy "
+    "(id INTEGER PRIMARY KEY, data TEXT NOT NULL, seen_at TEXT NOT NULL);"
+)
+CHANNEL_PAGES = 3
 KEEP = 72
 SAMPLE = 8
 LISTED = 40
@@ -111,14 +118,88 @@ def number(erp):
             raise
 
 
+def keep_from_bling(erp, asked, results):
+    """What only Bling knows and the ERP must answer the same: the id of its (single) depot, given
+    to the ERP's default depot, and its sales channels as it lists them. Only while Bling owns the
+    stores; an own id the ERP gave the depot before is replaced, since nothing outside used it."""
+    from app.erp_local import bling_mirror, deposits
+
+    depots, channels = None, []
+    for (route, _path, _params), result in zip(asked, results, strict=True):
+        body = result["body"] if result["status"] == 200 else None
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list):
+            continue
+        if route == "depositos":
+            depots = [d for d in data if isinstance(d, dict) and d.get("situacao") == 1]
+        elif route == "canais":
+            channels += [c for c in data if isinstance(c, dict) and _channel(c)]
+    kept = {"depot": None, "channels": 0}
+    with erp.connection() as db:
+        if bling_mirror.switched(db):
+            return {"state": "stopped"}
+        db.executescript(bling_compat.SCHEMA + CHANNEL_SCHEMA)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if depots is not None and len(depots) == 1 and type(depots[0].get("id")) is int:
+                kept["depot"] = _keep_depot(db, deposits.snapshot(db), depots[0]["id"])
+            seen = datetime.now(UTC).isoformat()
+            for channel in channels:
+                row = {k: channel[k] for k in ("id", "descricao", "tipo", "situacao")}
+                db.execute(
+                    "INSERT OR REPLACE INTO bling_channel_copy VALUES (?,?,?)",
+                    (row["id"], json.dumps(row, ensure_ascii=False), seen),
+                )
+            kept["channels"] = len(channels)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    return kept
+
+
+def _channel(row):
+    return (
+        type(row.get("id")) is int
+        and isinstance(row.get("descricao"), str)
+        and len(row["descricao"]) <= 200
+        and isinstance(row.get("tipo"), str)
+        and len(row["tipo"]) <= 60
+        and type(row.get("situacao")) is int
+    )
+
+
+def _keep_depot(db, depots, bling_id):
+    default = next((d["id"] for d in depots if d["is_default"]), None)
+    if not default:
+        return None
+    current = db.execute(
+        "SELECT numeric_id FROM compat_ids WHERE kind='depot' AND local_id=?", (default,)
+    ).fetchone()
+    holder = db.execute(
+        "SELECT local_id FROM compat_ids WHERE kind='depot' AND numeric_id=?", (bling_id,)
+    ).fetchone()
+    if holder and holder[0] != default:
+        return None
+    if current and current[0] == bling_id:
+        return bling_id
+    if current and current[0] < bling_compat.FIRST_OWN_ID:
+        return None
+    db.execute("INSERT OR REPLACE INTO compat_ids VALUES ('depot',?,?)", (default, bling_id))
+    return bling_id
+
+
 def calls(sample):
     out = [
         ("situacoes", "/situacoes/modulos", []),
         ("situacoes_vendas", f"/situacoes/modulos/{bling_compat.MODULE_SALES}", []),
         ("depositos", "/depositos", []),
-        ("canais", "/canais-venda", [["limite", "100"]]),
-        ("categorias", "/categorias/produtos", [["limite", "100"]]),
     ]
+    out += [
+        ("canais", "/canais-venda", [["pagina", str(page)], ["limite", "100"]])
+        for page in range(1, CHANNEL_PAGES + 1)
+    ]
+    out.append(("categorias", "/categorias/produtos", [["limite", "100"]]))
     for product in sample:
         out.append(("produto_codigo", "/produtos", [["codigo", product["sku"]]]))
         out.append(("produto", f"/produtos/{product['id']}", []))
@@ -341,15 +422,18 @@ def run(erp, reader=None, *, live=None, now=None):
     sample = pick(live, now)
     asked = calls(sample)
     request = {"calls": [{"path": path, "params": params} for _, path, params in asked]}
-    number(erp)
     read = (reader or host_reader)(request)
     if not _valid(read, len(asked)):
         raise ERPError("shadow_read_invalid", "Leitura do Bling fora do formato esperado.")
+    kept = None
     if read["state"] == "read_ok":
+        kept = keep_from_bling(erp, asked, read["results"])
+        number(erp)
         report = summarize(asked, read["results"], ask_erp(live, asked), sample)
     else:
         report = {"sample": [p["sku"] for p in sample], "totals": {}, "routes": [], "paths": []}
     report["state"] = read["state"]
+    report["kept"] = kept
     taken = datetime.now(UTC).isoformat()
     with erp.connection() as db:
         db.executescript(SCHEMA)

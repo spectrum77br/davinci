@@ -28,6 +28,7 @@ def bling_like(erp, change=None):
 
     def read(request):
         asked = [(None, c["path"], c["params"]) for c in request["calls"]]
+        compat_shadow.number(erp)
         results = compat_shadow.ask_erp(compat_shadow.ReadOnlyERP(erp.database), asked)
         if change:
             change(asked, results)
@@ -160,3 +161,61 @@ def test_the_homologation_shows_the_rounds_kept_in_the_real_base(erp, tmp_path):
     with copy.connection() as db:
         report = compat_shadow.latest(db)
     assert report["state"] == "read_ok" and report["totals"]["different"] == 0
+
+
+BLING_DEPOT = 14887091246
+NEXUS = {"id": 204437662, "descricao": "ML Nexus AG", "tipo": "MercadoLivre", "situacao": 1}
+
+
+def bling_registers(asked, results):
+    for index, (_, path, params) in enumerate(asked):
+        if path == "/depositos":
+            depot = {"id": BLING_DEPOT, "descricao": "Geral", "situacao": 1, "padrao": True}
+            results[index] = {"status": 200, "body": {"data": [depot]}}
+        if path == "/canais-venda":
+            page = dict(params)["pagina"]
+            results[index] = {"status": 200, "body": {"data": [NEXUS] if page == "1" else []}}
+
+
+def test_bling_depot_id_and_channels_are_kept_and_answered_the_same(erp):
+    with_origin(erp)
+    compat_shadow.number(erp)  # the ERP had given its depot an id of its own
+    compat_shadow.run(erp, bling_like(erp, bling_registers), now=0)
+    with erp.connection() as db:
+        report = compat_shadow.latest(db)
+    assert report["kept"] == {"depot": BLING_DEPOT, "channels": 1}
+    asked = [
+        (None, "/depositos", []),
+        (None, "/canais-venda", [["limite", "100"]]),
+        (None, "/estoques/saldos", []),
+    ]
+    depots, channels, balances = (r["body"]["data"] for r in compat_shadow.ask_erp(erp, asked))
+    (default,) = [d for d in depots if d["padrao"]]
+    assert default["id"] == BLING_DEPOT
+    assert channels[0] == NEXUS
+    assert all("codigo" in b["produto"] for b in balances)
+    assert any(d["id"] == BLING_DEPOT for b in balances for d in b["depositos"])
+    compat_shadow.run(erp, bling_like(erp, bling_registers), now=0)
+    with erp.connection() as db:
+        ids = db.execute("SELECT count(*) FROM compat_ids WHERE numeric_id=?", (BLING_DEPOT,))
+        assert ids.fetchone()[0] == 1
+
+
+def test_product_answers_ncm_and_cost_as_bling_shows_them(erp):
+    from app.erp_local import bling_compat
+
+    assert bling_compat._ncm("95030080") == "9503.00.80"
+    assert bling_compat._ncm("9503.00.80") == "9503.00.80"
+    assert bling_compat._ncm("") == ""
+    with_origin(erp)
+    compat_shadow.number(erp)
+    product = next(p for p in erp.snapshot()["products"] if not p["suppliers"]["rows"])
+    with erp.connection() as db:
+        identifier = bling_compat.numeric_id(db, "product", product["sku"])
+    (answer,) = compat_shadow.ask_erp(erp, [(None, f"/produtos/{identifier}", [])])
+    cost = bling_compat._float(product["cost_price"])
+    assert (
+        answer["body"]["data"]["fornecedor"]["precoCusto"]
+        == cost
+        == answer["body"]["data"]["precoCusto"]
+    )

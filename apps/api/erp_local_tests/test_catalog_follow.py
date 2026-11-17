@@ -127,3 +127,54 @@ def test_a_code_changed_in_bling_is_reported_not_applied(erp):
     assert report["renamed"] == {"demo.aparelho": "z002800.mala"}
     assert report["created"] == 0
     assert kind(erp, "demo.aparelho") == "simple" and kind(erp, "z002800.mala") is None
+
+
+def test_names_follow_bling_and_stop_once_a_store_is_switched(erp):
+    from app.erp_local import catalog_follow
+
+    with erp.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO catalog_origin VALUES (?,?)",
+            ("demo.fone", json.dumps({"bling_product_id": "77", "stock_state": "known"})),
+        )
+    rows = [
+        {
+            "bling_product_id": "77",
+            "name": "Fone antigo",
+            "situacao": "I",
+            "updated_at": "2026-11-17",
+        },
+        {"bling_product_id": "77", "name": "Fone 5G", "situacao": "A", "updated_at": "2026-11-16"},
+        {"bling_product_id": "99", "name": "Fora do ERP", "situacao": "A"},
+    ]
+    assert catalog_follow.follow_names(erp, rows) == {"changed": 1, "costs": 0, "refused": {}}
+    assert catalog_follow.follow_names(erp, rows) == {"changed": 0, "costs": 0, "refused": {}}
+    with erp.connection() as db:
+        assert db.execute("SELECT name FROM products WHERE sku='demo.fone'").fetchone()[0] == (
+            "Fone 5G"
+        )
+        db.execute(
+            "INSERT INTO ingest_accounts(channel,store,enabled,authority,failures,updated_at) "
+            "VALUES ('ml','x',1,'own',0,'2026-11-17')"
+        )
+    rows[1]["name"] = "Outro nome"
+    assert catalog_follow.follow_names(erp, rows) == {"state": "stopped"}
+
+
+def test_cost_follows_bling_without_counting_as_an_erp_cost_change(erp):
+    from app.erp_local import catalog_follow, price_table
+
+    with erp.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO catalog_origin VALUES (?,?)",
+            ("demo.fone", json.dumps({"bling_product_id": "77", "stock_state": "known"})),
+        )
+        before = price_table.cost_changes(db, limit=200)
+        name = db.execute("SELECT name FROM products WHERE sku='demo.fone'").fetchone()[0]
+    rows = [{"bling_product_id": "77", "name": name, "situacao": "A", "bling_cost_price": 2000}]
+    assert catalog_follow.follow_names(erp, rows) == {"changed": 0, "costs": 1, "refused": {}}
+    assert catalog_follow.follow_names(erp, rows)["costs"] == 0
+    with erp.connection() as db:
+        cost = db.execute("SELECT cost_price FROM product_pricing WHERE sku='demo.fone'")
+        assert cost.fetchone()[0] == "2000.0000"
+        assert price_table.cost_changes(db, limit=200) == before

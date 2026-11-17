@@ -187,6 +187,23 @@ def _product_base(db, product):
     }
 
 
+def _ncm(value):
+    """Bling shows an NCM as 9503.00.80; the ERP keeps the digits."""
+    digits = "".join(c for c in str(value or "") if c.isdigit())
+    if len(digits) != 8:
+        return str(value or "")
+    return f"{digits[:4]}.{digits[4:6]}.{digits[6:]}"
+
+
+def channel_copy(db):
+    """Bling's sales channels as Bling lists them, kept by the shadow check while Bling exists."""
+    try:
+        rows = db.execute("SELECT data FROM bling_channel_copy ORDER BY id").fetchall()
+    except sqlite3.OperationalError:  # no copy yet
+        return []
+    return [json.loads(r[0]) for r in rows]
+
+
 def _product_detail(db, product):
     d, tax = product["details"], product["tax"]["data"]
     base = _product_base(db, product)
@@ -248,7 +265,8 @@ def _product_detail(db, product):
             "id": 0,
             "contato": {"id": 0, "nome": ""},
             "codigo": "",
-            "precoCusto": 0.0,
+            # Bling shows the product's cost here too; DaVinci writes it through the supplier link.
+            "precoCusto": _float(product["cost_price"]),
             "precoCompra": 0.0,
         },
         "dimensoes": {
@@ -259,7 +277,7 @@ def _product_detail(db, product):
         },
         "tributacao": {
             "origem": int(tax["origin"]) if tax.get("origin") not in (None, "") else 0,
-            "ncm": tax.get("ncm", ""),
+            "ncm": _ncm(tax.get("ncm", "")),
             "cest": tax.get("cest", ""),
             "codigoListaServicos": tax.get("service_code", ""),
             "spedTipoItem": tax.get("item_type", ""),
@@ -716,11 +734,12 @@ def router(erp):
     def channels(pagina: int = 1, limite: int = 100):
         with erp.connection() as db:
             rows = db.execute("SELECT channel,store,status,data FROM store_policies").fetchall()
-        result = []
+            result = channel_copy(db)
+        copied = {r["id"] for r in result}
         for row in rows:
             data = json.loads(row["data"])
             profile = data.get("source_profile") or {}
-            if profile.get("bling_store_id"):
+            if profile.get("bling_store_id") and int(profile["bling_store_id"]) not in copied:
                 result.append(
                     {
                         "id": int(profile["bling_store_id"]),
@@ -1329,7 +1348,7 @@ def router(erp):
                 counted = [b for b in product["balances"] if b.get("in_total") is not False]
                 result.append(
                     {
-                        "produto": {"id": identifier},
+                        "produto": {"id": identifier, "codigo": product["sku"]},
                         "saldoFisicoTotal": sum(_float(b["physical"]) for b in counted),
                         "saldoVirtualTotal": _available(product),
                         "depositos": depots,
