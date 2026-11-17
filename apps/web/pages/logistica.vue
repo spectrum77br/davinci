@@ -845,12 +845,32 @@ function abrirRaio(c: Logistica) {
 function podeAtualizarStatus(c: Logistica): boolean {
   return canEdit.value && !!c.pedido_marketplace && (isMl(c) || isShopee(c) || isTiktok(c) || isAmazon(c))
 }
-function atualizarStatusPlataforma(c: Logistica) {
-  if (isMl(c)) return atualizarMeli(c)
-  if (isShopee(c)) return atualizarShopee(c)
-  if (isTiktok(c)) return atualizarTiktok(c)
-  if (isAmazon(c)) return atualizarAmazon(c)
+// 17/11/2026 (Vinicius, pedido 305553): o ⟳ também fica na coluna Status da
+// tabela, sem abrir o Raio-X. Avisa o resultado — sem o aviso, status que não
+// mudou parecia clique que não fez nada.
+async function atualizarStatusPlataforma(c: Logistica) {
+  const consultar = isMl(c)
+    ? atualizarMeli
+    : isShopee(c)
+      ? atualizarShopee
+      : isTiktok(c)
+        ? atualizarTiktok
+        : isAmazon(c)
+          ? atualizarAmazon
+          : null
+  if (!consultar || refreshingMeli.value.has(c.id)) return
+  const antes = assinatura(c)
+  if (!(await consultar(c))) {
+    toasts.error('Não foi possível consultar o status', error.value || '')
+    return
+  }
+  const linha = rows.value.find((r) => r.id === c.id)
+  const depois = linha ? assinatura(linha) : ''
+  if (depois !== antes) toasts.success('Status atualizado', `${antes || '—'} → ${depois || '—'}`)
+  else toasts.info('Status conferido agora', `Continua: ${depois || '—'}`)
 }
+const TITULO_ATUALIZAR_STATUS =
+  'Consultar agora o status na plataforma (o robô também relê sozinho a cada 30 min)'
 const RAIO_BTN =
   'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50'
 
@@ -1519,7 +1539,17 @@ function statusResumoData(c: Logistica): string {
   if (!top) return ''
   const aprox = top.fonte && top.fonte !== 'plataforma' ? '~' : ''
   const desde = fmtDesde(top.em)
-  return `${aprox}${fmtDataHora(top.em)}${desde ? ` · ${desde}` : ''}`
+  // "desde": é quando o status MUDOU, não a última leitura (17/11, 305553: o
+  // "há 9 dias" era lido como "ninguém consulta faz 9 dias"). Sem o ano quando
+  // é o ano corrente: a coluna é estreita e o "há X" ficava cortado.
+  const d = new Date(top.em as string)
+  if (Number.isNaN(d.getTime())) return ''
+  const quando = d.toLocaleString('pt-BR', {
+    day: '2-digit', month: '2-digit',
+    ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' as const }),
+    hour: '2-digit', minute: '2-digit',
+  }).replace(',', '')
+  return `desde ${aprox}${quando}${desde ? ` · ${desde}` : ''}`
 }
 
 // Tooltip da coluna "Status Plataforma": uma linha por campo da assinatura, com
@@ -1647,9 +1677,11 @@ async function atualizarMeli(c: Logistica) {
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
     if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
+    return true
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
+    return false
   } finally {
     const s = new Set(refreshingMeli.value)
     s.delete(c.id)
@@ -1666,9 +1698,11 @@ async function atualizarShopee(c: Logistica) {
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
     if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
+    return true
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
+    return false
   } finally {
     const s = new Set(refreshingMeli.value)
     s.delete(c.id)
@@ -1685,9 +1719,11 @@ async function atualizarTiktok(c: Logistica) {
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
     if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
+    return true
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
+    return false
   } finally {
     const s = new Set(refreshingMeli.value)
     s.delete(c.id)
@@ -1815,9 +1851,11 @@ async function atualizarAmazon(c: Logistica) {
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
     if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
+    return true
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
+    return false
   } finally {
     const s = new Set(refreshingMeli.value)
     s.delete(c.id)
@@ -3343,6 +3381,15 @@ async function aplicarStatusBling(c: Logistica) {
                         aria-label="Copiar o status"
                         @click.stop="copiarChave(c)"
                       ><Copy class="size-3" /></button>
+                      <button
+                        v-if="podeAtualizarStatus(c)"
+                        type="button"
+                        class="ml-1 inline-flex align-[-2px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        :title="TITULO_ATUALIZAR_STATUS"
+                        aria-label="Atualizar o status"
+                        :disabled="refreshingMeli.has(c.id)"
+                        @click.stop="atualizarStatusPlataforma(c)"
+                      ><RefreshCw class="size-3" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" /></button>
                     </div>
                     <div v-if="statusResumoData(c)" class="truncate text-[10px] text-muted-foreground">{{ statusResumoData(c) }}</div>
                   </td>
@@ -3502,7 +3549,7 @@ async function aplicarStatusBling(c: Logistica) {
                     v-if="podeAtualizarStatus(raioRow)"
                     type="button"
                     :class="RAIO_BTN"
-                    title="Consulta agora o status na plataforma"
+                    :title="TITULO_ATUALIZAR_STATUS"
                     :disabled="refreshingMeli.has(raioRow.id)"
                     @click="atualizarStatusPlataforma(raioRow)"
                   >
@@ -3834,6 +3881,16 @@ async function aplicarStatusBling(c: Logistica) {
             </span>
             <button class="shrink-0 hover:text-foreground" title="Copiar chave" @click.stop="copiarChave(c)">
               <Copy class="size-3.5" />
+            </button>
+            <button
+              v-if="podeAtualizarStatus(c)"
+              class="shrink-0 hover:text-foreground disabled:opacity-50"
+              :title="TITULO_ATUALIZAR_STATUS"
+              aria-label="Atualizar o status"
+              :disabled="refreshingMeli.has(c.id)"
+              @click.stop="atualizarStatusPlataforma(c)"
+            >
+              <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
             </button>
           </div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
