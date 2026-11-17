@@ -590,3 +590,28 @@ def test_opt_in_global_exige_regra_literal_e_legado_kia_nao_autoriza():
     assert sem_demanda.regra_especifica_kia(regra)
     assert sem_demanda.regra_especifica_kia(vars(regra))
     assert not sem_demanda.regra_aprovada(regra)
+
+
+async def test_a_fila_do_cartao_olha_os_novos_primeiro_e_nao_entope_com_os_velhos(
+    db, make_user, ia_ligada, modelo, envios, monkeypatch
+):
+    """17/11/2026: a fila do cartão ia da mais velha para a mais nova (25 vagas) e as
+    conversas velhas que nunca passam ocupavam todas as vagas — o cartão novo esperava
+    ~10 h. Agora: só os últimos 3 dias, os mais novos primeiro."""
+    velha, card_velho, _ = await _cenario(
+        db, make_user, ia_ligada, monkeypatch, externo_id="conv-velha"
+    )
+    # O turno da velha foi há 10 dias (fora da janela da fila).
+    dez_dias = datetime.now(UTC) - timedelta(days=10)
+    card_velho.enviada_em = dez_dias
+    velha.ultima_do_cliente_em = dez_dias
+    await db.commit()
+    nova, _, _ = await _cenario(
+        db, make_user, ia_ligada, monkeypatch, externo_id="conv-nova", criar_regras=False
+    )
+    # Uma vaga só: antes ela ia para a velha (a mais antiga primeiro); agora é da nova.
+    assert (await ia.manter_fila(db, limite=1))["sem_demanda"] == 1
+    await db.refresh(nova)
+    await db.refresh(velha)
+    assert nova.sem_resposta_necessaria and not nova.aguardando_resposta
+    assert not velha.sem_resposta_necessaria, "a velha (10 dias) fica fora da fila"

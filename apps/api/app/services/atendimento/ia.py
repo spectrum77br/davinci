@@ -7860,6 +7860,14 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
         await _soltar_rodada(token)
 
 
+# A fila do cartão (17/11/2026): só os turnos de cartão dos últimos 3 dias, os MAIS NOVOS
+# primeiro. Antes ia da mais velha para a mais nova, com 25 vagas: desde 13/11, ~23
+# conversas de abril a 13/11 que nunca passam (pedido não achado, devolução, turno com
+# texto) ocupavam as vagas, e o cartão novo esperava ~10 h (o sem_demanda caiu de 53–91
+# marcações por dia para 18–39, e as conversas ficavam "A IA não respondeu").
+JANELA_FILA_CARTAO = timedelta(days=3)
+
+
 async def manter_fila(session: AsyncSession, *, limite: int = 25) -> dict[str, int]:
     """Repara pendência já respondida e processa cartões acolhidos, sem envio."""
     from app.services.atendimento import sem_demanda
@@ -7947,8 +7955,9 @@ async def manter_fila(session: AsyncSession, *, limite: int = 25) -> dict[str, i
                     c.precisa_resposta_em.is_(None),
                     c.precisa_resposta_em < c.ultima_do_cliente_em,
                 ),
+                c.ultima_do_cliente_em >= datetime.now(UTC) - JANELA_FILA_CARTAO,
             )
-            .order_by(c.ultima_do_cliente_em)
+            .order_by(c.ultima_do_cliente_em.desc())
             .limit(limite)
         )
     ).all()
