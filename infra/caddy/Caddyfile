@@ -71,6 +71,12 @@
 import /etc/caddy/sites-enabled/*.caddy
 
 gestaoestoque.com, www.gestaoestoque.com {
+	# Cert proprio (Cloudflare em Full aceita). O cert ACME venceu em 20/08/2026 e
+	# HTTP-01/TLS-ALPN nao validam atras do Cloudflare com a porta 80 bloqueada.
+	# 18/11/2026: esta linha so existia no servidor (9ce6e156, 29/10) e sumiu num
+	# reset; o restart do Caddy as 12:14 UTC derrubou o dominio (525). Agora no main.
+	tls internal
+
 	encode zstd gzip
 
 	# Root → operator's only page. Saves a round-trip vs letting the
