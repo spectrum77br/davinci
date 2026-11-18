@@ -66,6 +66,9 @@ assert.equal(f.fmtGasto(null), '')
 for (const [digitado, esperado] of [
   ['50', 50], ['50,9', 50.9], ['1.234,56', 1234.56], ['0', 0], ['', null], [' ', null],
   ['-1', undefined], ['abc', undefined], ['12,345', 12.35],
+  // Revisão M-7..M-12: ponto de milhar sem vírgula era lido como decimal
+  // ("3.000" gravava R$ 3,00).
+  ['3.000', 3000], [' 1.500 ', 1500], ['1.234.567', 1234567], ['3.000,00', 3000], ['1.5', 1.5],
 ]) assert.equal(f.lerGasto(digitado), esperado, `gasto ${JSON.stringify(digitado)}`)
 
 const conta = {

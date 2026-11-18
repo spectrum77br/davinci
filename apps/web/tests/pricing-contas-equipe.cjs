@@ -106,6 +106,20 @@ assert.equal(aEsquerda.length, 2, 'só Nome e Obs à esquerda')
 assert.match(cab, /text-left[^>]*>Nome<\/th>/)
 assert.ok(aEsquerda.some((th) => th.includes('v-for="f in STORE_NOTE_FIELDS"')), 'Obs à esquerda')
 for (const th of abreTh.filter((t) => !/\btext-left\b/.test(t))) assert.match(th, /\btext-center\b/)
+// O `v-for` das anotações vale por 6 colunas: o alinhamento de cada uma sai
+// da expressão do :class (revisão M-7..M-12: o Ads ficava à esquerda).
+const campos = new Function(`${ts.transpileModule(source.statements.find((s) => ts.isVariableStatement(s)
+  && s.declarationList.declarations.some((d) => d.name.getText(source) === 'STORE_NOTE_FIELDS')).getText(source),
+{ compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText}\nreturn STORE_NOTE_FIELDS`)()
+const thNotas = abreTh.find((th) => th.includes('v-for="f in STORE_NOTE_FIELDS"'))
+const classeNota = new Function('f', `return ${/:class="([^"]*)"/.exec(thNotas)[1]}`)
+const alinhamento = Object.fromEntries(campos.map((f) => [f.key, /\btext-left\b/.test(classeNota(f)) ? 'esquerda' : 'centro']))
+assert.deepEqual(alinhamento, {
+  desconto_ate: 'centro', afiliado_pct: 'centro', ads: 'centro', cupom_ate: 'centro',
+  oferta_limite_pct: 'centro', observation: 'esquerda',
+}, 'das anotações, só Obs à esquerda')
+for (const f of campos) assert.match(classeNota(f), /\btext-(left|center)\b/)
+assert.match(contas, /v-else-if="f\.key === 'ads'"\s+class="[^"]*\btext-center\b/, 'célula do Ads centralizada')
 // "marg" e "frete" herdam o formato do cabeçalho (sem tamanho próprio).
 assert.match(cab, /<div class="text-muted-foreground flex justify-center gap-3">\s*<span>marg<\/span><span>frete<\/span>/)
 
@@ -122,6 +136,32 @@ const menuEq = filtros.slice(iEquipe)
 assert.match(menuEq, /data-filtro-equipe[\s\S]*?v-for="o in equipesPresentesNoDept"[\s\S]*?type="checkbox"[\s\S]*?:checked="!contasEquipesDesmarcadas\.includes\(o\.valor\)"[\s\S]*?\{\{ o\.rotulo \}\}/)
 assert.match(menuEq, /@click="contasEquipesDesmarcadas = \[\]">Marcar todas</)
 assert.match(menuEq, /@click="contasEquipesDesmarcadas = equipesPresentesNoDept\.map\(\(o\) => o\.valor\)">Limpar</)
+// No mesmo visual dos menus da Tabela de Preços: mesma largura, "Marcar todas
+// · Limpar" no topo (azul) e a lista numa área com rolagem embaixo.
+const tabela = tpl.slice(tpl.indexOf('v-model="gridSearch"'))
+const menuTabela = tabela.slice(tabela.indexOf('data-menu-plataforma'), tabela.indexOf('</PopoverContent>'))
+const visual = (menu) => {
+  const conteudo = menu.slice(menu.indexOf('data-menu-'))
+  return {
+    caixa: /class="([^"]*)"/.exec(conteudo)[1],
+    topo: /<div class="([^"]*)">\s*<button[^>]*>Marcar todas<\/button>\s*<span class="text-muted-foreground">·<\/span>/.exec(conteudo)?.[1],
+    // Atributos entre aspas (o @click do Limpar tem "=>").
+    botoes: [...conteudo.matchAll(/<button type="button" class="([^"]*)"(?:\s+[^\s=>]+="[^"]*")*>(?:Marcar todas|Limpar)</g)].map((m) => m[1]),
+    lista: /<\/div>\s*<div class="([^"]*)">\s*<label/.exec(conteudo)?.[1],
+    ordem: conteudo.indexOf('Marcar todas') < conteudo.indexOf('<label'),
+  }
+}
+const daTabela = visual(menuTabela)
+assert.deepEqual(daTabela, {
+  caixa: 'z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg',
+  topo: 'flex items-center gap-2 px-1 pb-1 text-xs',
+  botoes: ['text-blue-700 hover:underline dark:text-blue-300', 'text-blue-700 hover:underline dark:text-blue-300'],
+  lista: 'max-h-72 overflow-y-auto border-t pt-1',
+  ordem: true,
+}, 'menu Plataforma da Tabela (referência)')
+assert.deepEqual(visual(menuPlat), daTabela, 'Plataforma ▾ da aba Contas igual ao da Tabela')
+assert.deepEqual(visual(menuEq), daTabela, 'Equipe ▾ da aba Contas igual ao da Tabela')
+assert.doesNotMatch(filtros, /justify-between/, 'sem o rodapé antigo')
 
 // Conta nova (nasce sem equipe) não some atrás de um filtro desmarcado.
 assert.match(setup, /accounts\.value\.push\(created\)\s*\n(\s*\/\/.*\n)*\s*if \(!passaFiltroEquipe\(created, contasEquipesDesmarcadas\.value\)\) \{\s*contasEquipesDesmarcadas\.value = contasEquipesDesmarcadas\.value\.filter\(\(v\) => !chavesEquipe\(created\)\.includes\(v\)\)/)

@@ -1309,10 +1309,13 @@ function fmtGasto(v: number | null | undefined): string {
   return v == null ? '' : v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-// Gasto por dia: "50", "50,90", "1.234,56" → reais com centavos; vazio → null;
-// outra coisa ou negativo → undefined (não grava).
+// Gasto por dia: "50", "50,90", "1.234,56", "3.000" → reais com centavos;
+// vazio → null; outra coisa ou negativo → undefined (não grava). Ponto sem
+// vírgula em grupos de 3 é milhar ("3.000" = 3 mil, não 3,00).
 function lerGasto(texto: string): number | null | undefined {
-  if (!texto.trim()) return null
+  const t = texto.trim()
+  if (!t) return null
+  if (/^\d{1,3}(\.\d{3})+$/.test(t)) return Number(t.replace(/\./g, ''))
   const n = parseDec(texto)
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined
 }
@@ -4835,7 +4838,8 @@ watch(department, async () => {
           class="border rounded px-2 py-1 text-sm bg-background w-56"
         />
         <!-- Plataforma ▾ e Equipe ▾ (M-9): caixas de marcar, no visual dos
-             menus da Tabela de Preços. Recarregar a página marca tudo de novo. -->
+             menus da Tabela de Preços ("Marcar todas · Limpar" no topo, lista
+             com rolagem). Recarregar a página marca tudo de novo. -->
         <PopoverRoot>
           <PopoverTrigger as-child>
             <button
@@ -4856,24 +4860,27 @@ watch(department, async () => {
               :side-offset="4"
               :collision-padding="8"
               data-menu-plataforma
-              class="z-[70] w-56 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
             >
-              <label
-                v-for="p in platformsPresentInDept"
-                :key="p"
-                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
-              >
-                <input
-                  type="checkbox"
-                  class="size-4"
-                  :checked="!contasPlataformasDesmarcadas.includes(p)"
-                  @change="contasPlataformasDesmarcadas = alternarNaLista(contasPlataformasDesmarcadas, p)"
-                />
-                {{ platformLabel(p) }}
-              </label>
-              <div class="mt-1 flex items-center justify-between border-t px-1 pt-1 text-xs">
-                <button type="button" class="text-blue-600 hover:underline dark:text-blue-400" @click="contasPlataformasDesmarcadas = []">Marcar todas</button>
-                <button type="button" class="text-muted-foreground hover:underline" @click="contasPlataformasDesmarcadas = [...platformsPresentInDept]">Limpar</button>
+              <div class="flex items-center gap-2 px-1 pb-1 text-xs">
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" @click="contasPlataformasDesmarcadas = []">Marcar todas</button>
+                <span class="text-muted-foreground">·</span>
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" @click="contasPlataformasDesmarcadas = [...platformsPresentInDept]">Limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto border-t pt-1">
+                <label
+                  v-for="p in platformsPresentInDept"
+                  :key="p"
+                  class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="!contasPlataformasDesmarcadas.includes(p)"
+                    @change="contasPlataformasDesmarcadas = alternarNaLista(contasPlataformasDesmarcadas, p)"
+                  />
+                  {{ platformLabel(p) }}
+                </label>
               </div>
             </PopoverContent>
           </PopoverPortal>
@@ -4898,24 +4905,27 @@ watch(department, async () => {
               :side-offset="4"
               :collision-padding="8"
               data-menu-equipe
-              class="z-[70] w-48 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
             >
-              <label
-                v-for="o in equipesPresentesNoDept"
-                :key="o.valor"
-                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
-              >
-                <input
-                  type="checkbox"
-                  class="size-4"
-                  :checked="!contasEquipesDesmarcadas.includes(o.valor)"
-                  @change="contasEquipesDesmarcadas = alternarNaLista(contasEquipesDesmarcadas, o.valor)"
-                />
-                {{ o.rotulo }}
-              </label>
-              <div class="mt-1 flex items-center justify-between border-t px-1 pt-1 text-xs">
-                <button type="button" class="text-blue-600 hover:underline dark:text-blue-400" @click="contasEquipesDesmarcadas = []">Marcar todas</button>
-                <button type="button" class="text-muted-foreground hover:underline" @click="contasEquipesDesmarcadas = equipesPresentesNoDept.map((o) => o.valor)">Limpar</button>
+              <div class="flex items-center gap-2 px-1 pb-1 text-xs">
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" @click="contasEquipesDesmarcadas = []">Marcar todas</button>
+                <span class="text-muted-foreground">·</span>
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" @click="contasEquipesDesmarcadas = equipesPresentesNoDept.map((o) => o.valor)">Limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto border-t pt-1">
+                <label
+                  v-for="o in equipesPresentesNoDept"
+                  :key="o.valor"
+                  class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="!contasEquipesDesmarcadas.includes(o.valor)"
+                    @change="contasEquipesDesmarcadas = alternarNaLista(contasEquipesDesmarcadas, o.valor)"
+                  />
+                  {{ o.rotulo }}
+                </label>
               </div>
             </PopoverContent>
           </PopoverPortal>
@@ -4967,12 +4977,12 @@ watch(department, async () => {
               </th>
               </template>
               <!-- Desconto até / Afiliado / Cupom até / Oferta limite: colunas de ~84px,
-                   centralizadas (M-11); Ads e Obs à esquerda. -->
+                   centralizadas (M-11); Ads centralizado e só Obs à esquerda (M-9). -->
               <th
                 v-for="f in STORE_NOTE_FIELDS"
                 :key="`h-${f.key}`"
                 class="px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
-                :class="f.tipo ? 'text-center w-[84px] min-w-[84px]' : 'text-left min-w-[120px]'"
+                :class="f.key === 'observation' ? 'text-left min-w-[120px]' : f.tipo ? 'text-center w-[84px] min-w-[84px]' : 'text-center min-w-[120px]'"
                 :title="f.titulo"
                 :data-coluna-anotacao="f.key"
               >{{ f.label }}</th>
@@ -5356,7 +5366,7 @@ watch(department, async () => {
                      da Margem. Quem não edita Contas abre e só vê. -->
                 <td
                   v-else-if="f.key === 'ads'"
-                  class="border border-border px-1 py-1 text-left"
+                  class="border border-border px-1 py-1 text-center"
                   :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'ads') }"
                 >
                   <PopoverRoot @update:open="abrirOuFecharAds">

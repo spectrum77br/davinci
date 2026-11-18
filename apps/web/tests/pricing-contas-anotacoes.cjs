@@ -122,7 +122,7 @@ console.log('pricing contas anotações: script ok')
 const tpl = descriptor.template.content
 const contas = tpl.slice(tpl.indexOf("tab === 'contas'"), tpl.indexOf("tab === 'produtos'"))
 const cab = contas.slice(0, contas.indexOf('</thead>'))
-assert.match(cab, /v-for="f in STORE_NOTE_FIELDS"[\s\S]*?:class="f\.tipo \? 'text-center w-\[84px\] min-w-\[84px\]' : 'text-left min-w-\[120px\]'"[\s\S]*?>\{\{ f\.label \}\}<\/th>/)
+assert.match(cab, /v-for="f in STORE_NOTE_FIELDS"[\s\S]*?:class="f\.key === 'observation' \? 'text-left min-w-\[120px\]' : f\.tipo \? 'text-center w-\[84px\] min-w-\[84px\]' : 'text-center min-w-\[120px\]'"[\s\S]*?>\{\{ f\.label \}\}<\/th>/)
 assert.doesNotMatch(cab, /capitalize/)
 const celulas = contas.slice(contas.indexOf('<!-- desconto até / afiliado / ads / cupom até / oferta limite / obs -->'))
 const proprio = celulas.slice(0, celulas.indexOf('v-else'))
