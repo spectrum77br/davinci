@@ -77,6 +77,22 @@ _SKU_TAG_OVERRIDES: dict[str, str] = {
     "bp001": "mala",  # Mochila - Bege
     "bp002": "mala",  # Mochila - Preto
     "bp003": "mala",  # Mochila - Cinza
+    # Lotes de malas salvadas (z* sem sufixo cairiam em `us`). Pedido do
+    # dono em 18/11/2026: "hoje esses sku estão na tag de usados, preciso
+    # que eles vão para a tag mala". Lote ABS = malas 28/24/20/18 +
+    # frasqueira/encosto; Lote PP = 4 frasqueiras 14.
+    "zabs-01": "mala",
+    "zabs-02": "mala",
+    "zabs-03": "mala",
+    "zabs-04": "mala",
+    "zabs-05": "mala",
+    "zabs-06": "mala",
+    "zabs-07": "mala",
+    "zpp-01": "mala",
+    "zpp-02": "mala",
+    "zpp-03": "mala",
+    "zpp-04": "mala",
+    "zpp-05": "mala",
 }
 
 _MALA_RE = re.compile(r"^b[0-9]")

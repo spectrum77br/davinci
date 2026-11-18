@@ -46,6 +46,12 @@ _col = Column("sku", String)
     ("bp001", "mala"),
     ("bp002", "mala"),
     ("bp003", "mala"),
+    # Lotes de malas salvadas (override 18/11/2026; sem ele seriam `us`)
+    ("zABS-01", "mala"),
+    ("zABS-07", "mala"),
+    ("zPP-01", "mala"),
+    ("zPP-05", "mala"),
+    ("zABS-08", "us"),   # fora da lista segue a regra 0
     # Regra 0: z* SEM sufixo → us
     ("z0099", "us"),
     ("z0101", "us"),
@@ -147,6 +153,11 @@ def _matches(tag: str, sku: str) -> bool:
     ("mala", "bp003", True),
     ("mala", "bp999", False),
     ("mala", "z0099", False),
+    # Lotes de malas salvadas: saem de us e entram em mala
+    ("mala", "zABS-01", True),
+    ("mala", "zPP-05", True),
+    ("us", "zABS-01", False),
+    ("us", "zPP-05", False),
     # Carve-outs continuam
     ("mala", "z0094.mala", True),
     ("eletro", "z0010.eletro", True),
