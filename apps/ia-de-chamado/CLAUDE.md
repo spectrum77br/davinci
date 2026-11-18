@@ -145,6 +145,15 @@ ela mostra; persistindo a dúvida, `humano` explicando a contradição.
   leu. `autor` = o nome que a tela mostra + quem é. Menu e saudação automática
   ("Selecione uma opção", "Olá, sou o assistente…") podem ficar de fora; o que for
   sobre o caso entra inteiro. Não repita o que já está em `mensagens`. Até 60 falas.
+- **Também quando você só leu** ("Conferido na tela"): se a tela mostra uma fala
+  ou decisão da plataforma que **não está em `mensagens`** — resposta de consulta
+  ou formulário, resposta do Agente/atendente, decisão de disputa, revisão,
+  recurso ou ticket, aviso de ajuste/compensação com texto — mande em `conversa`
+  como `quem: "plataforma"`, copiada como está, com a hora e o autor que a tela
+  mostra. Se o texto que NÓS mandamos naquele formulário/consulta também não está
+  em `mensagens`, mande antes como `quem: "nos"`. Sem isso a resposta fica só no
+  seu resumo e a coluna da esquerda segue em branco (301112, 15/11: o Agente Shopee
+  respondeu a consulta e nada entrou). Status, saldo e "nada novo" não entram.
 - **`protocolo`** — o número que a plataforma deu nesta rodada (protocolo do chat,
   da solicitação, da consulta). Vira o nº do chamado se ele ainda está "sem nº".
   Com mais de um número, mande o da solicitação que vai trazer a resposta e cite
