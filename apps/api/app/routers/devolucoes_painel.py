@@ -866,6 +866,11 @@ class ChamadoJanelaOut(BaseModel):
     # Pedido no painel Fraude: aí quem lança e abre é o robô da Fraude (com a
     # instrução, quando houver) — não precisa lançar antes.
     fraude: bool = False
+    # 18/11/2026 (Vinicius, 306771: "chegou no painel Chamados, agora o painel
+    # Chamados vai cuidar"): a contestação não saiu pela API, mas o chamado já
+    # está na aba Chamados — onde ele está lá (o mesmo Status da coluna).
+    chamado_aba: str | None = None
+    chamado_aba_motivo: str | None = None
 
 
 class AbrirChamadoIn(BaseModel):
@@ -995,6 +1000,13 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
             out.abertura_status = abertura.status
             out.abertura_erro = abertura.erro
             out.enviada_at = abertura.enviada_at
+        if out.abertura_status == "falhou":
+            # Não saiu pela API: daqui pra frente quem cuida é a aba Chamados.
+            from app.routers.chamados import _to_out as chamados_to_out
+
+            (linha,) = await chamados_to_out(session, [ch])
+            out.chamado_aba = linha.status_aba
+            out.chamado_aba_motivo = linha.status_aba_motivo
         msgs = (
             (
                 await session.execute(

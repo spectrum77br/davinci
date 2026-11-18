@@ -37,6 +37,9 @@ type Janela = {
   ia_nao_abriu?: string | null
   tem_lancamento?: boolean
   fraude?: boolean
+  // Não saiu pela API: onde o chamado está na aba Chamados (Status da coluna).
+  chamado_aba?: string | null
+  chamado_aba_motivo?: string | null
 }
 type LinhaPrevia = { sku: string | null; produtos: string | null; quantidade: number; motivo_devolucao: string | null; observacao: string | null }
 type Previa = { abre: boolean; motivo: string | null; texto: string | null; avisos: string[] }
@@ -169,14 +172,32 @@ const VERDE = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-
 const AMARELO = 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
 const VERMELHO = 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300'
 const CINZA = 'bg-muted text-muted-foreground'
+const AZUL = 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300'
+// Os nomes do Status da aba Chamados (ChamadosPainel.vue, STATUS_ABA).
+const ABA_CHAMADOS: Record<string, string> = {
+  analise_humano: 'Análise Humano',
+  analise_robo: 'Análise Robô',
+  aguard_plataforma: 'Aguard. Plataforma',
+  encerrado: 'Encerrado',
+  concluido: 'Concluído',
+}
 const estado = computed<{ texto: string; cor: string; dica: string } | null>(() => {
   const j = janela.value
   if (!j) return null
   const prazoTxt = props.prazoContestacao ? `Prazo pra contestar: ${quando(props.prazoContestacao)} (${faltam(props.prazoContestacao)}).` : ''
   if (segurada.value) return { texto: 'Segurado — decidir', cor: VERMELHO, dica: `A IA segurou: o motivo não bate com o que foi escrito. ${prazoTxt}`.trim() }
-  if (j.abertura_status === 'falhou') return { texto: 'Não saiu', cor: VERMELHO, dica: porQueNaFila.value || j.abertura_erro || 'erro' }
   if (j.resolvido) return { texto: 'Concluído', cor: CINZA, dica: 'Chamado concluído na aba Chamados' }
   if (cancelada.value || j.status_plataforma === 'encerrado') return { texto: 'Encerrado', cor: CINZA, dica: 'Encerrado sem contestar: nada foi pra plataforma' }
+  // 18/11/2026 (Vinicius, 306771: "chegou no painel Chamados, agora o painel
+  // Chamados vai cuidar"): a contestação não saiu pela API, mas o chamado já está
+  // na aba Chamados — o caso é dela daqui pra frente, não vermelho aqui.
+  if (j.abertura_status === 'falhou') {
+    const porque = porQueNaFila.value || j.abertura_erro || 'erro'
+    const aba = j.chamado_aba ? ABA_CHAMADOS[j.chamado_aba] || j.chamado_aba : ''
+    const la = aba ? ` Lá está em ${aba}${j.chamado_aba_motivo ? `: ${j.chamado_aba_motivo}` : ''}.` : ''
+    // Vinicius: "Aberto fica verdinho, azulzinho é enviado, painel Chamados".
+    return { texto: 'Enviado · aba Chamados', cor: AZUL, dica: `Enviado pra aba Chamados, que cuida dele daqui pra frente. Pela API não saiu: ${porque}.${la}` }
+  }
   if (saiu.value) {
     const partes = [`Saiu pra ${props.plataforma || 'a plataforma'}${j.enviada_at ? ` em ${quando(j.enviada_at)}` : ''}`]
     if (motivoAtual.value) partes.push(`motivo ${motivoAtual.value}`)

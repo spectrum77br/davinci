@@ -192,6 +192,44 @@ async def test_nao_depois_que_saiu_e_recusado(client, make_user, auth_as, db, ml
     assert r.status_code == 409 and r.json()["detail"]["code"] == "chamado_ja_saiu"
 
 
+async def test_nao_saiu_pela_api_mostra_onde_esta_na_aba_chamados(
+    client, make_user, auth_as, db, ml
+):
+    """306771 (18/11/2026): a TikTok já tinha reembolsado (quick refund) e a
+    contestação não saiu pela API — mas o chamado já está na aba Chamados, que
+    cuida dele dali pra frente. A janela traz o Status de lá pra dizer isso."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="880004", numeroloja="3880004")
+    r = await client.post(
+        "/api/devolutions",
+        json=_lancamento(
+            "880004",
+            "3880004",
+            condicao_produto="Extraviado",
+            motivo_devolucao="Não recebido",
+            link_abertura=ABERTURA,
+        ),
+    )
+    assert r.status_code == 201, r.text
+    ch = await _chamado(db, "880004")
+
+    # Saiu: nada da aba Chamados na janela.
+    r = await client.get("/api/devolucoes-painel/880004/chamado")
+    assert r.status_code == 200, r.text
+    assert r.json()["abertura_status"] == "enviada" and r.json()["chamado_aba"] is None
+
+    ab = await _abertura(db, ch.id)
+    ab.status, ab.erro = "falhou", "tiktok_quick_refund"
+    await db.commit()
+    r = await client.get("/api/devolucoes-painel/880004/chamado")
+    assert r.status_code == 200, r.text
+    janela = r.json()
+    assert janela["abertura_status"] == "falhou"
+    assert janela["chamado_aba"] == "analise_humano"
+    assert "tiktok_quick_refund" in (janela["chamado_aba_motivo"] or "")
+
+
 # ── Conferência da IA ─────────────────────────────────────────────────────
 
 
