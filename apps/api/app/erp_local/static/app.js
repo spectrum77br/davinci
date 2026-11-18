@@ -182,7 +182,7 @@ function render() {
   document.getElementById('environment').classList.toggle('consulta',consulta);
   document.getElementById('environment').classList.toggle('homolog',!consulta&&!!state.homolog);
   for(const [id,text] of [['foot-title',consulta?'Consulta':state.homolog?'Homologação':'Banco local separado'],['foot-note',consulta?'O Bling manda até a troca; aqui só se consulta':state.homolog?'Pedidos reais a cada minuto; nada sai daqui':'Testes sem movimentar as lojas']]){const el=document.getElementById(id);if(el)el.textContent=text;}
-  document.getElementById('environment').textContent=consulta?'CONSULTA · O Bling manda em estoque, pedidos e cadastro até a troca · Aqui só se consulta: alterações são feitas no Bling':state.homolog?`HOMOLOGAÇÃO · Cópia da base real desde ${homologSince} · Pedidos das lojas chegam a cada minuto · Nada sai para lojas, Bling ou SEFAZ`:page==='reference'?'REFERÊNCIA REAL · Somente leitura · Bling segue operando':state.catalog_import?'NÚCLEO PRÓPRIO · Carga inicial real · Operações locais sem envio às lojas':'SIMULAÇÃO LOCAL · Dados fictícios · Nenhuma loja conectada';
+  document.getElementById('environment').textContent=consulta?'CONSULTA · O Bling manda em estoque, pedidos e cadastro até a troca · Aqui só se consulta: alterações são feitas no Bling'+(stateAt?' · Atualizado às '+stateAt.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}):''):state.homolog?`HOMOLOGAÇÃO · Cópia da base real desde ${homologSince} · Pedidos das lojas chegam a cada minuto · Nada sai para lojas, Bling ou SEFAZ`:page==='reference'?'REFERÊNCIA REAL · Somente leitura · Bling segue operando':state.catalog_import?'NÚCLEO PRÓPRIO · Carga inicial real · Operações locais sem envio às lojas':'SIMULAÇÃO LOCAL · Dados fictícios · Nenhuma loja conectada';
   document.getElementById('title').textContent=title;
   document.getElementById('subtitle').textContent=sub;
   document.querySelectorAll('nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
@@ -194,10 +194,11 @@ function message(value,error=false) {
   notice.textContent=value; notice.hidden=false;notice.classList.toggle('error',error);
 }
 
+let stateAt=null;
 async function refresh() {
   const response=await fetch('/api/erp-local/state');
   if(!response.ok) throw new Error('Não foi possível ler o banco local.');
-  state=await response.json();window.erpConsulta=state.consulta||null;applyAccessMenus();if(page==='stock'&&selectedStockSku)stockHistory=null;render();updateReferenceAge();
+  state=await response.json();stateAt=new Date();window.erpConsulta=state.consulta||null;applyAccessMenus();if(page==='stock'&&selectedStockSku)stockHistory=null;render();updateReferenceAge();
   if(page==='stock'&&selectedStockSku)await loadStockHistory();
 }
 
@@ -326,7 +327,20 @@ async function refreshReference(){
   }catch(e){message(e.message,true);if(button)button.disabled=false;}
 }
 
-refresh().catch(e=>message(e.message,true));
+// The opening plays while the state loads; it leaves once the screen has content (or the error is
+// on screen), never before the mark is drawn.
+const openingSince=performance.now();
+function openingDone(){const el=document.getElementById('abertura');if(!el)return;setTimeout(()=>el.classList.add('pronta'),Math.max(0,1300-(performance.now()-openingSince)));}
+refresh().catch(e=>message(e.message,true)).finally(openingDone);
+// In consulta the ERP follows Bling every minute, so the page follows too: once a minute, while
+// the tab is visible and nobody is typing or has a window open over the page.
+setInterval(()=>{
+  if(!state?.consulta?.active||document.hidden||busy)return;
+  const focused=document.activeElement;
+  if(focused&&['INPUT','SELECT','TEXTAREA'].includes(focused.tagName))return;
+  if(document.querySelector('[role=dialog],.occ-backdrop'))return;
+  refresh().catch(()=>{});
+},60000);
 
 function updateReferenceAge(){
   const element=document.getElementById('reference-age');

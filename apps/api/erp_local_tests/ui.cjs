@@ -1489,3 +1489,24 @@ test('outside consulta a change is sent as before',async()=>{
   await new Promise(r=>setImmediate(r));
   assert.equal(requests[0].kind,'product.create');
 });
+
+test('a store opened in Integrations asks only for its own orders, which are no longer in the page state',async()=>{
+ const policy={channel:'tiktok',store:'TT1',status:'shadow',data:{name:'TikTok local',credentials_present:true,cancellation:'review'}};
+ const native={accounts:[{integration_id:'TT1',platform:'tiktok',state:'read_ok',has_more:false,pages_read:1,identity_match:true}],orders:[{channel:'tiktok',store:'TT1',local_items:[{line_id:'11',state:'matched',sku:'demo.kit',kind:'kit'}],data:{id:'7000000000000000009',status:'AWAITING_SHIPMENT',within_window:true,items:[{line_id:'11',quantity:1,seller_sku:'demo.kit',sale_price:{amount:'15.00',currency:'BRL'}}]}}]};
+ const {dom,document:d}=await setup({integration_registry:{policies:[policy],unbound_profiles:[],observed_profiles:1}});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+ const asked=[],before=dom.window.fetch;
+ dom.window.fetch=async(url,options)=>{if(String(url).startsWith('/api/erp-local/native-orders?')){asked.push(String(url));return {ok:true,status:200,json:async()=>native};}return before(url,options);};
+ d.querySelector('nav [data-page=integrations]').click();d.querySelector('[data-policy-select]').click();
+ assert.match(d.querySelector('main').textContent,/Carregando os pedidos lidos desta loja/);
+ for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));
+ assert.deepEqual(asked,['/api/erp-local/native-orders?channel=tiktok&store=TT1']);
+ assert.match(d.querySelector('main').textContent,/7000000000000000009/);
+});
+
+test('the DaVinci opening covers the page while it loads and leaves once the state is in',async()=>{
+ const {document:d}=await setup();
+ const opening=d.getElementById('abertura');
+ assert.ok(opening&&opening.querySelector('.ab-v')&&/DaVinci\s*ERP/.test(opening.textContent));
+ await new Promise(r=>setTimeout(r,1400));
+ assert.ok(opening.classList.contains('pronta'));
+});

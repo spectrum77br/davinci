@@ -72,5 +72,17 @@
     <aside id="action-rail" aria-label="Ações da tela"></aside>
     <footer>ERP próprio em preparação · Nenhuma alteração daqui é enviada ao Bling ou às lojas.</footer>
   </div>
+  <!-- A abertura do DaVinci (a mesma marca do Studio DaVinci): o D entra, o V se desenha e o nome
+       aparece enquanto o estado carrega por baixo. A cortina só sai quando a tela tem conteúdo. -->
+  <div class="abertura" id="abertura" aria-hidden="true">
+    <svg class="abertura-marca" viewBox="0 0 100 100" width="104" height="104">
+      <defs><clipPath id="ab-d"><path d="M12 6H50A44 44 0 0 1 50 94H12Z"/></clipPath></defs>
+      <path class="ab-d" d="M12 6H50A44 44 0 0 1 50 94H12Z" fill="#2B5BE8"/>
+      <polyline class="ab-v" points="19,37 49,73 82,36" fill="none" stroke="#FFFFFF"
+                stroke-width="14" stroke-linecap="round" stroke-linejoin="round" clip-path="url(#ab-d)"/>
+    </svg>
+    <p class="abertura-nome">DaVinci <span>ERP</span></p>
+    <p class="abertura-espera">Carregando estoque, pedidos e cadastro…</p>
+  </div>
 </body>
 </html>

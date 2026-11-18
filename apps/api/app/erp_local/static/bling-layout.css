@@ -179,3 +179,21 @@ body[data-screen=products] #subtitle{display:none}
 .cost-centers{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;border:1px solid #d9e2ef;border-radius:5px;padding:8px}.cost-centers legend{font-size:11px;color:#5a6d87}.listings-actions{justify-content:flex-start;flex-wrap:wrap}
 .products-view-tabs{margin:2px 0 10px}
 .guide-video{margin:0 0 18px;max-width:960px}.guide-video video{width:100%;border-radius:8px;background:#0c111f}.guide-video figcaption{font-size:11px;color:#7d8fa7;margin-top:6px}.guide-steps{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}.guide-step{background:#fff;border:1px solid #e6ebf4;border-radius:8px;padding:14px}.guide-step h3{font-size:13px;color:#4d5d73;display:flex;gap:8px;align-items:center}.guide-step h3 span{color:#2b5ed9;font-size:11px}.guide-step p{font-size:12px;color:#40506a;margin:6px 0 10px}.guide-links{display:flex;gap:8px;flex-wrap:wrap}
+
+/* A abertura do DaVinci (mesma marca do Studio DaVinci). O D entra, o V se desenha, o nome
+   aparece; a cortina fica até o estado carregar (classe .pronta) e sai com visibility, para não
+   ficar invisível por cima da tela engolindo os cliques. */
+.abertura{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;align-content:center;gap:16px;background:#f7f9fb;transition:opacity .45s cubic-bezier(.4,0,.2,1),transform .45s cubic-bezier(.4,0,.2,1),visibility 0s linear .45s}
+.abertura.pronta{opacity:0;visibility:hidden;transform:scale(1.04)}
+.abertura-marca{overflow:visible}
+.ab-d{transform-origin:50% 50%;animation:ab-d-entra .55s cubic-bezier(.34,1.3,.64,1) both}
+@keyframes ab-d-entra{from{opacity:0;transform:translateY(10px) scale(.86)}to{opacity:1;transform:none}}
+.ab-v{stroke-dasharray:100;stroke-dashoffset:100;animation:ab-v-traco .6s cubic-bezier(.65,0,.35,1) .38s forwards}
+@keyframes ab-v-traco{to{stroke-dashoffset:0}}
+.abertura-nome{margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em;color:#172238;animation:ab-nome .5s ease .85s both}
+.abertura-nome span{font-weight:400;color:#7b8e99}
+@keyframes ab-nome{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.abertura-espera{margin:0;font-size:11px;color:#8b99ad;opacity:0;animation:ab-espera .4s ease 1.6s forwards}
+@keyframes ab-espera{to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.ab-d,.ab-v,.abertura-nome{animation:none}.ab-v{stroke-dashoffset:0}.abertura{transition:opacity .3s ease,visibility 0s linear .3s}.abertura.pronta{transform:none}}
+@media print{.abertura{display:none!important}}

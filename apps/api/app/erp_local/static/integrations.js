@@ -1,5 +1,21 @@
 'use strict';
 let integrationQuery='', integrationTab='installed', selectedPolicy='', nativeOrderOffset=0;
+// One store's direct reads and orders, asked when the store is opened (they are no longer in the
+// page state). Kept a minute; an older copy is shown while a fresh one comes.
+let nativeOrdersByStore={}, nativeOrdersLoading='';
+function nativeOrdersFor(policy){
+ if(state.native_orders)return state.native_orders;
+ const key=JSON.stringify([policy.channel,policy.store]),kept=nativeOrdersByStore[key];
+ if((!kept||Date.now()-kept.at>60000)&&nativeOrdersLoading!==key){
+  nativeOrdersLoading=key;
+  fetch('/api/erp-local/native-orders?'+new URLSearchParams({channel:policy.channel,store:policy.store}))
+   .then(r=>r.ok?r.json():Promise.reject(new Error('leitura')))
+   .then(data=>{nativeOrdersByStore[key]={at:Date.now(),data};})
+   .catch(()=>{nativeOrdersByStore[key]={at:Date.now(),data:null,failed:true};})
+   .finally(()=>{nativeOrdersLoading='';if(selectedPolicy===key)render();});
+ }
+ return kept?(kept.failed?{failed:true}:kept.data):null;
+}
 const platformNames={ml:'Mercado Livre',shopee:'Shopee',amazon:'Amazon',tiktok:'TikTok Shop',temu:'Temu',shein:'Shein',aliexpress:'AliExpress',magalu:'Magalu',carrefour:'Carrefour'};
 const profileState={shadow:'Vínculo identificado',identity_review:'Conferir vínculo com o Bling',inactive:'Inativa'};
 const authorizationLabels={read_ok:'Leitura e identidade confirmadas',identity_review:'Leitura confirmada; conferir identidade',identity_mismatch:'Identidade divergente',shop_inactive:'Loja indisponível para operação',auth_denied:'Acesso recusado',rate_limited:'Limite de consultas',provider_unavailable:'Consulta indisponível',invalid_response:'Resposta não confirmada',credentials_missing:'Credenciais incompletas',configuration_missing:'Configuração a conferir',credential_unreadable:'Credenciais a conferir no servidor',partial_read:'Leitura parcial; conferir detalhes',not_run:'Não consultada nesta rodada'};
@@ -25,7 +41,10 @@ function nativeSourceNote(order){
  return tax+`<small class="native-origin-note ${['historical_lot_change','sku_difference','quantity_difference','source_ambiguous'].includes(r.state)?'warn':''}">${esc(labels[r.state]||'Conferir origem')}${r.source_numbers.length?' · Bling '+r.source_numbers.map(esc).join(', '):''}${['historical_lot_change','sku_difference'].includes(r.state)?'<br>Origem: '+r.source_skus.map(esc).join(', '):''}${r.unit_line_count_matches===true?'<br>Contagem de linhas coincide; quantidade ainda não inferida':''}</small>`;
 }
 function nativeOrderDetail(policy){
- const native=state.native_orders||{accounts:[],orders:[]},read=native.accounts.find(a=>a.integration_id===policy.store);
+ const native=nativeOrdersFor(policy);
+ if(!native)return '<p class="source-line">Carregando os pedidos lidos desta loja…</p>';
+ if(native.failed)return '<p class="source-line">Não foi possível ler os pedidos desta loja agora. Abra a loja de novo em instantes.</p>';
+ const read=(native.accounts||[]).find(a=>a.integration_id===policy.store);
  if(!read)return '<p class="source-line">Leitura direta de pedidos ainda não conferida nesta conta.</p>';
  const orders=native.orders.filter(o=>o.store===policy.store&&o.channel===policy.channel);
  const offset=Math.min(nativeOrderOffset,Math.max(0,Math.floor((orders.length-1)/50)*50)), visible=orders.slice(offset,offset+50);

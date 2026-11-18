@@ -351,7 +351,9 @@ def import_read(erp, read):
     )
 
 
-def snapshot(db):
+def snapshot(db, channel=None, store=None):
+    """Store reads and orders kept. With a store, only that store's: the screen asks for it when
+    the store is opened, instead of carrying every store's history on each page load."""
     from app.erp_local import native_reconciliation
 
     source = native_reconciliation.context(db)
@@ -359,6 +361,8 @@ def snapshot(db):
     for row in db.execute("SELECT * FROM native_order_reads ORDER BY captured_at DESC"):
         report = json.loads(row["data"])
         for account in report["accounts"]:
+            if store is not None and account.get("integration_id") != store:
+                continue
             reads.setdefault(
                 account["integration_id"],
                 {
@@ -370,8 +374,16 @@ def snapshot(db):
                     ),
                 },
             )
+        if store is not None and reads:
+            break  # the newest read of this store is the one shown
+    where, args = "", ()
+    if channel is not None and store is not None:
+        where, args = " WHERE channel=? AND store=?", (channel, store)
     for row in db.execute(
-        "SELECT * FROM native_order_observations ORDER BY updated_at DESC,captured_at DESC"
+        "SELECT * FROM native_order_observations"  # noqa: S608 - fixed text, values bound
+        + where
+        + " ORDER BY updated_at DESC,captured_at DESC",
+        args,
     ):
         identity = (row["channel"], row["store"], row["external_id"])
         data = json.loads(row["data"])

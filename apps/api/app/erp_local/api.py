@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -30,6 +31,59 @@ class Command(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+def _plain(value):
+    """What FastAPI's encoder did for the few non-JSON values: numbers stay numbers."""
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, set | frozenset | tuple):
+        return list(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+STATE_MODULES = (
+    "bank_statements",
+    "bling_compat",
+    "bling_coverage",
+    "cash_register",
+    "categories",
+    "compat_shadow",
+    "contacts",
+    "finance",
+    "finance_categories",
+    "fiscal",
+    "fiscal_invoices",
+    "homolog",
+    "inbound_invoices",
+    "integration_registry",
+    "inventory",
+    "logistics",
+    "multi_company",
+    "native_ingest",
+    "order_imeis",
+    "payment_methods",
+    "price_lists",
+    "price_table",
+    "procurement",
+    "production",
+    "proposals",
+    "returns",
+    "sellers",
+    "stock_priority",
+    "would",
+)
+
+
+def _state_json(payload) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_plain)
+
+
 def create_app(database: str | Path, *, reference_source=None, refresh_seconds=300) -> FastAPI:
     from app.erp_local import fiscal_invoices
 
@@ -45,9 +99,25 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             except ERPError:
                 pass  # A previous successful snapshot remains available, with the failed attempt.
 
+    def warm():
+        """Behind the gate (production), the first page load should not pay for the imports and the
+        cold read of the base: done once at start, in the background."""
+        import importlib
+
+        try:
+            for name in STATE_MODULES:
+                importlib.import_module("app.erp_local." + name)
+            erp.snapshot()
+        except Exception as error:  # noqa: BLE001 - only a head start; the page works without it
+            logging.getLogger("erp.api").info(
+                "aquecimento da tela não concluído: %s", type(error).__name__
+            )
+
     @asynccontextmanager
     async def lifespan(_app):
         await asyncio.to_thread(channels.recover, only_deferred=True)
+        if access.enforced():
+            asyncio.get_running_loop().run_in_executor(None, warm)
         task = asyncio.create_task(update_reference()) if reference_source else None
         yield
         if task:
@@ -176,7 +246,6 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             logistics,
             multi_company,
             native_ingest,
-            native_orders,
             order_imeis,
             payment_methods,
             price_lists,
@@ -218,7 +287,6 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "invoicing": fiscal_invoices.snapshot(db),
                 "logistics": logistics.snapshot(db),
                 "integration_registry": integration_registry.snapshot(db),
-                "native_orders": native_orders.snapshot(db),
                 "ingest": native_ingest.snapshot(db),
                 "stock_priority": stock_priority.snapshot(db),
                 "access": access.snapshot(db),
@@ -234,14 +302,28 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             "channels": channels.snapshot(),
             "parity": parity_status(),
         }
-        if not access.enforced():
-            return payload
+        if access.enforced():
+            with erp.connection() as db:
+                person = access.who(
+                    db, request.headers.get("x-erp-actor"), request.headers.get("x-erp-role")
+                )
+                payload["access"] = access.snapshot(db)
+            payload = {**access.filter_state(payload, person), "me": person}
+        # Several megabytes on the real base: serialized straight, without FastAPI's per-value
+        # conversion, which alone took most of the page load.
+        return Response(_state_json(payload), media_type="application/json")
+
+    @app.get("/api/erp-local/native-orders")
+    def native_orders_of(channel: str = Query(max_length=40), store: str = Query(max_length=120)):
+        """One store's direct reads and orders, asked when the store is opened on the screen."""
+        from app.erp_local import native_orders
+
         with erp.connection() as db:
-            person = access.who(
-                db, request.headers.get("x-erp-actor"), request.headers.get("x-erp-role")
+            db.execute("BEGIN")
+            return Response(
+                _state_json(native_orders.snapshot(db, channel=channel, store=store)),
+                media_type="application/json",
             )
-            payload["access"] = access.snapshot(db)
-        return {**access.filter_state(payload, person), "me": person}
 
     @app.post("/api/erp-local/channels/events")
     def receive_event(body: dict):
