@@ -79,9 +79,21 @@ def ticket_ativo(status: str | None) -> bool:
 
 
 def _tag(envio: dict, nome: str) -> str | None:
+    """Valor de uma etiqueta do envio (`mi:reference_code` = nº do pedido no Bling).
+
+    O ME devolve o par nos DOIS sentidos: `{"tag": "mi:reference_code", "url":
+    "303724"}` e, em outros envios, `{"tag": "306097", "url": "mi:reference_code"}`
+    (18/11/2026: o atendimento 2130240, AE071697531BR, entrou na aba sem pedido e
+    sem conta porque só o primeiro sentido era lido)."""
     for t in envio.get("tags") or []:
-        if isinstance(t, dict) and t.get("tag") == nome and t.get("url"):
-            return str(t["url"]).strip() or None
+        if not isinstance(t, dict):
+            continue
+        tag = str(t.get("tag") or "").strip()
+        url = str(t.get("url") or "").strip()
+        if tag == nome and url:
+            return url
+        if url == nome and tag:
+            return tag
     return None
 
 
@@ -264,6 +276,48 @@ async def _novo_chamado(session: AsyncSession, envio: dict, ticket: dict, numero
     return ch
 
 
+async def _completar_pedido(
+    session: AsyncSession, token: str, ch: Chamado, envio: dict | None, corpo: dict
+) -> bool:
+    """Chamado do ME que ficou sem o nº do Bling (entrou antes de o `_tag` ler as
+    etiquetas no outro sentido): acha o envio do atendimento e completa pedido, conta
+    e produto. O envio vem da lista da aba ou, se o atendimento já saiu dela
+    (resolvido), da busca pelo protocolo (`ORD-…`) do atendimento — confere o id do
+    envio com o `order_id` do atendimento antes de usar."""
+    if ch.pedido_bling:
+        return False
+    # Na lista da aba o envio já está aqui; fora dela (resolvido), uma busca.
+    if envio is None:
+        protocolo = str(corpo.get("protocol") or "").strip()
+        if not protocolo:
+            return False
+        http, achado = await me.ler_envios(token, q=protocolo)
+        if http != 200:
+            return False
+        order_id = str(corpo.get("order_id") or "")
+        envio = next(
+            (
+                e
+                for e in achado.get("data") or []
+                if isinstance(e, dict)
+                and (
+                    str(e.get("protocol") or "") == protocolo
+                    or (order_id and str(e.get("id") or "") == order_id)
+                )
+            ),
+            None,
+        )
+        if envio is None:
+            return False
+    pedido = _tag(envio, "mi:reference_code")
+    if not pedido:
+        return False
+    ch.pedido_bling = pedido
+    ch.pedido_marketplace = ch.pedido_marketplace or _tag(envio, "mi:marketplace_code")
+    await chamados_svc.preencher_do_pedido(session, ch)
+    return True
+
+
 async def _lista_de_atendimentos(token: str) -> tuple[dict[str, tuple[dict, dict]], int | None]:
     """{nº do atendimento: (envio, ticket)} da aba Atendimentos do ME."""
     achados: dict[str, tuple[dict, dict]] = {}
@@ -336,6 +390,10 @@ async def sincronizar(session: AsyncSession) -> dict[str, Any]:
                 resumo["me_falhas"] += 1
                 continue
             resumo["me_lidos"] += 1
+            if await _completar_pedido(
+                session, token, ch, lista.get(numero, (None, None))[0], corpo
+            ):
+                resumo["me_completados"] = resumo.get("me_completados", 0) + 1
             resumo["me_falas"] += await gravar_falas(session, ch, corpo)
             if ch.id in criados:
                 ch.data = dia_da_abertura(corpo) or ch.data

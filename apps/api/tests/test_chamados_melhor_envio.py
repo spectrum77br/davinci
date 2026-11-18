@@ -85,6 +85,8 @@ def fake_me(monkeypatch):
         },
         "lidos": [],
         "enviados": [],
+        "buscas": [],
+        "fora_da_aba": [],
         "envio_http": 200,
     }
 
@@ -92,6 +94,10 @@ def fake_me(monkeypatch):
         return "tok", {}
 
     async def _envios(token, *, page=1, q=None, extra=None):
+        if q is not None:  # busca pelo protocolo (atendimento que já saiu da aba)
+            estado["buscas"].append(q)
+            todos = estado["lista"] + estado["fora_da_aba"]
+            return 200, {"data": [e for e in todos if e.get("protocol") == q], "last_page": 1}
         assert extra == me.PARAMS_ATENDIMENTOS
         return 200, {"data": estado["lista"], "last_page": 1}
 
@@ -178,6 +184,65 @@ async def test_so_o_atendimento_ativo_vira_linha_com_a_conversa(db, fake_me):
     assert falas[1].autor_nome == "Natalia A S - Melhor Envio"
     # o resolvido nunca entrou: nem é lido
     assert fake_me["lidos"] == [str(ATIVO)]
+
+
+def test_tag_nos_dois_sentidos():
+    """18/11/2026 (atendimento 2130240, AE071697531BR): o ME devolve a etiqueta
+    também com nome e valor trocados — o chamado entrava sem pedido e sem conta."""
+    normal = {"tags": [{"tag": "mi:reference_code", "url": "303724"}]}
+    trocado = {
+        "tags": [
+            {"tag": "306097", "url": "mi:reference_code"},
+            {"tag": "702-3809368-8549006", "url": "mi:marketplace_code"},
+        ]
+    }
+    assert cme._tag(normal, "mi:reference_code") == "303724"
+    assert cme._tag(trocado, "mi:reference_code") == "306097"
+    assert cme._tag(trocado, "mi:marketplace_code") == "702-3809368-8549006"
+    assert cme._tag(trocado, "mi:client_id") is None
+    vazio = {"tags": [{"tag": "", "url": "mi:reference_code"}]}
+    assert cme._tag(vazio, "mi:reference_code") is None
+
+
+async def test_etiqueta_trocada_entra_com_o_pedido(db, fake_me):
+    envio = fake_me["lista"][0]
+    envio["tags"] = [
+        {"tag": "298756", "url": "mi:reference_code"},
+        {"tag": "701-7654805-6401806", "url": "mi:marketplace_code"},
+    ]
+    await cme.sincronizar(db)
+    await db.commit()
+    [ch] = await _chamados_me(db)
+    assert (ch.pedido_bling, ch.pedido_marketplace) == ("298756", "701-7654805-6401806")
+
+
+async def test_chamado_sem_pedido_se_completa_pelo_protocolo(db, fake_me):
+    """O 2130240 entrou sem pedido em 17/11 e no dia seguinte já estava resolvido no
+    ME (fora da lista da aba): a leitura acha o envio pelo protocolo e completa."""
+    fake_me["lista"][0]["tags"] = []  # como entrou: sem etiqueta legível
+    await cme.sincronizar(db)
+    await db.commit()
+    [ch] = await _chamados_me(db)
+    assert ch.pedido_bling is None
+
+    envio = fake_me["lista"].pop(0)
+    envio["tags"] = [
+        {"tag": "298756", "url": "mi:reference_code"},
+        {"tag": "701-7654805-6401806", "url": "mi:marketplace_code"},
+    ]
+    fake_me["fora_da_aba"].append(envio)
+    fake_me["tickets"][str(ATIVO)]["protocol"] = envio["protocol"]
+    r = await cme.sincronizar(db)
+    await db.commit()
+    assert r.get("me_completados") == 1
+    assert fake_me["buscas"] == [envio["protocol"]]
+    await db.refresh(ch)
+    assert (ch.pedido_bling, ch.pedido_marketplace) == ("298756", "701-7654805-6401806")
+
+    # completo, não busca de novo
+    await cme.sincronizar(db)
+    await db.commit()
+    assert fake_me["buscas"] == [envio["protocol"]]
 
 
 async def test_segunda_passada_nao_duplica_e_traz_so_a_fala_nova(db, fake_me):
