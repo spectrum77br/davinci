@@ -482,6 +482,13 @@ const agora = useRelogio()
 // Pedir a sugestão e avaliá-la: quem mexe e quem só lê (fase de observação).
 const canAvaliar = computed(() => props.canEdit || props.canSugerir === true)
 
+// A faixa da conversa da devolução do TikTok (18/11/2026): a decisão (aprovar,
+// recusar, confirmar o pacote) sai pelo bloco da aba Pedido; mensagem ao
+// comprador não sai pela conversa da devolução (a da Poofy/Inova nem existe:
+// o app delas não tem o atendimento do TikTok).
+// No topo do setup: o `bloqueioEnvio` (computed) lê antes de qualquer tique.
+const FAIXA_DEVOLUCAO_TIKTOK = 'Devolução do TikTok: aprovar, recusar ou confirmar o pacote pelo bloco da devolução, na aba Pedido. Mensagem ao comprador não sai por esta conversa.'
+
 const detalhe = ref<Detalhe | null>(null)
 const carregando = ref(false)
 const erro = ref<string | null>(null)
@@ -1262,11 +1269,32 @@ function soCartao(m: Mensagem) {
 }
 
 // Foto do cliente aberta grande (Esc ou clique fora fecha).
-const imagemAberta = ref<{ url: string; nome: string } | null>(null)
+// O vídeo do comprador na devolução do TikTok (18/11/2026) abre no mesmo visor.
+const imagemAberta = ref<{ url: string; nome: string; tipo?: 'imagem' | 'video' } | null>(null)
 onKeyStroke('Escape', () => { imagemAberta.value = null })
 // As fotos da avaliação (cartão e painel) abrem no mesmo visor.
-function abrirImagem(i: { url: string; nome: string }) {
+function abrirImagem(i: { url: string; nome: string; tipo?: 'imagem' | 'video' }) {
   imagemAberta.value = i
+}
+// Acessibilidade (18/11/2026): ao abrir, o foco vai para o "fechar" do visor; ao
+// fechar (Esc, clique fora ou o botão), volta para quem abriu (a miniatura).
+const fecharVisorRef = ref<HTMLElement | null>(null)
+let abriuVisor: HTMLElement | null = null
+watch(imagemAberta, async (agora, antes) => {
+  if (agora && !antes) {
+    abriuVisor = (globalThis.document?.activeElement as HTMLElement | null) ?? null
+    await nextTick()
+    fecharVisorRef.value?.focus()
+  } else if (!agora && antes) {
+    abriuVisor?.focus?.()
+    abriuVisor = null
+  }
+})
+// A resposta à devolução do TikTok saiu (18/11/2026): o cartão relê o caso e a
+// conversa mostra a nota interna com quem respondeu.
+function aoResponderDevolucao() {
+  void reclamacaoRef.value?.carregar()
+  if (detalhe.value) void carregar(detalhe.value.conversa.id, true)
 }
 
 // ─── retrato do pedido, produtos e sugestões (spec Duoke 2.4) ───────────────
@@ -1682,6 +1710,9 @@ const bloqueioEnvio = computed(() => {
   // Bloqueio: a frase do backend traz o porquê do caso (janela fechou,
   // comprador bloqueou…). Nos outros, a frase simples da tela.
   if (codigo === 'conversa_bloqueada') {
+    // Devolução do TikTok (18/11/2026): a conversa antiga ainda guarda o "só
+    // leitura"; a decisão agora sai pelo bloco da aba Pedido.
+    if (d.conversa.canal === 'reclamacao' && d.conversa.plataforma === 'tiktok') return FAIXA_DEVOLUCAO_TIKTOK
     // O motivo do ML vem cru ("blocked_by_cancelled_order"): vira frase.
     const porque = bloqueioLegivel(d.envio.motivo)
     return porque && porque !== d.envio.motivo ? `${ERROS.conversa_bloqueada.replace(/\.$/, '')}: ${porque}.` : (d.envio.motivo || ERROS.conversa_bloqueada)
@@ -2826,6 +2857,13 @@ watch(
     void carregarGarantia(id)
   },
 )
+// A faixa da devolução do TikTok: o texto mora no topo (`FAIXA_DEVOLUCAO_TIKTOK`).
+function verBlocoDaDevolucao() {
+  const itens = reclamacoesDados.value?.itens || []
+  const alvo = itens.find((r) => r.do_pedido && r.aberta) || itens.find((r) => r.do_pedido)
+  if (alvo) void verDevolucaoNoPedido(alvo.id)
+  else if (!pedidoVisivel.value) alternarPedido()
+}
 // "ver no pedido" do cartão: abre o painel (se fechado) e rola até o bloco.
 // 17/11/2026: o painel também rola até o "Reembolso ao cliente" (o atalho da faixa).
 const painelPedidoRef = ref<{ mostrarDevolucao: (id: string) => Promise<void>; mostrarReembolso: () => Promise<void> } | null>(null)
@@ -3991,6 +4029,11 @@ watch(() => props.conversaId, (novo, velho) => {
           <template v-if="destinosReclamacao.length">
             <ShieldCheck class="mr-1 inline size-3.5" />Reclamação: a mensagem sai pela própria reclamação, {{ destinosReclamacao.length > 1 ? 'para quem você escolher na caixa' : destinosReclamacao[0].chave === 'mediador' ? 'só para o mediador (na mediação o ML não deixa falar direto com o comprador)' : 'para o comprador' }}. Reembolso, devolução e abrir mediação: {{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome).replace(/^Abrir /, '') }} (botão "{{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome) }}" no cartão).
           </template>
+          <!-- Devolução do TikTok (18/11/2026): a decisão sai pelo bloco da aba Pedido. -->
+          <template v-else-if="conversa.plataforma === 'tiktok'">
+            <Lock class="mr-1 inline size-3.5" />{{ FAIXA_DEVOLUCAO_TIKTOK }}
+            <button v-if="!semPainelDePedido" type="button" class="underline hover:opacity-80" data-faixa-ver-bloco @click="verBlocoDaDevolucao">ver o bloco</button>
+          </template>
           <template v-else>
             <Lock class="mr-1 inline size-3.5" />{{ conversa.situacao === 'bloqueada' && conversa.bloqueio_motivo ? conversa.bloqueio_motivo : 'Reclamação: o Mercado Livre não liberou mensagem da loja agora.' }} Ações: botão "{{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome) }}" no cartão abre no perfil da loja.
           </template>
@@ -4988,6 +5031,7 @@ watch(() => props.conversaId, (novo, velho) => {
         @atualizado="aoAtualizarPedido"
         @ir-para="irPara"
         @abrir-imagem="abrirImagem"
+        @devolucao-respondida="aoResponderDevolucao"
         @recarregar-painel="(atualizar: boolean) => carregarPainel(detalhe!.conversa.id, atualizar)"
       />
     </aside>
@@ -5012,10 +5056,11 @@ watch(() => props.conversaId, (novo, velho) => {
       :aria-label="imagemAberta.nome"
       @click.self="imagemAberta = null"
     >
-      <img :src="imagemAberta.url" :alt="imagemAberta.nome" referrerpolicy="no-referrer" class="max-h-[88vh] max-w-full rounded-md object-contain shadow-2xl" />
+      <video v-if="imagemAberta.tipo === 'video'" :src="imagemAberta.url" :aria-label="imagemAberta.nome" controls autoplay playsinline class="max-h-[88vh] max-w-full rounded-md bg-black shadow-2xl" data-visor-video />
+      <img v-else :src="imagemAberta.url" :alt="imagemAberta.nome" referrerpolicy="no-referrer" class="max-h-[88vh] max-w-full rounded-md object-contain shadow-2xl" />
       <div class="absolute right-3 top-3 flex items-center gap-2">
         <a :href="imagemAberta.url" target="_blank" rel="noopener noreferrer" class="rounded-md bg-white/15 px-2 py-1 text-xs text-white hover:bg-white/25">abrir original</a>
-        <button type="button" class="rounded-md bg-white/15 p-1.5 text-white hover:bg-white/25" title="fechar (Esc)" aria-label="fechar" @click="imagemAberta = null"><X class="size-4" /></button>
+        <button ref="fecharVisorRef" type="button" class="rounded-md bg-white/15 p-1.5 text-white hover:bg-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white" title="fechar (Esc)" aria-label="fechar (Esc)" @click="imagemAberta = null"><X class="size-4" aria-hidden="true" /></button>
       </div>
     </div>
   </div>

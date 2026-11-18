@@ -334,6 +334,13 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   busca da lista vem até aqui: o pedido pesquisado aparece lá, com destaque, ou no
 //   bloco de cima, se for o da conversa. Com compras na lista, o "Conversa sem pedido
 //   ligado" sai: acima dela, parecia contradizê-la.
+// - Devolução do TikTok INTEIRA (18/11/2026; o dono, com o Duoke ao lado: "tão
+//   completo quanto o Duoke"): no lugar do bloco da Shopee, o
+//   AtendimentoDevolucaoTiktok — o produto em devolução, o montante, a volta, o
+//   motivo, o histórico do reembolso com o texto, as fotos e o vídeo do comprador
+//   (lidos na hora) e as respostas da loja (aprovar/recusar, confirmar/recusar o
+//   pacote). Vale também para o caso ENCERRADO do pedido: o histórico é o que o
+//   comprador pergunta depois. A foto e o vídeo abrem no visor da conversa.
 // - Reembolso ao cliente (Novos procedimentos 3/6, 17/11/2026; o dono decidiu o
 //   lugar): o bloco AtendimentoReembolsoCliente logo abaixo de "Valor pago pelo
 //   comprador" e, sem retrato (TikTok, Amazon, Magalu), depois do quadro do pedido.
@@ -455,7 +462,10 @@ const emit = defineEmits<{
   // Reler o painel; `true` = reler as Observações no Bling na hora.
   (e: 'recarregarPainel', atualizar: boolean): void
   // Foto da avaliação: a conversa abre grande (o mesmo visor das fotos do chat).
-  (e: 'abrirImagem', i: { url: string; nome: string }): void
+  // O vídeo do comprador na devolução do TikTok (18/11/2026) também (`tipo`).
+  (e: 'abrirImagem', i: { url: string; nome: string; tipo?: 'imagem' | 'video' }): void
+  // A resposta à devolução saiu (18/11/2026): a conversa relê o cartão e a nota.
+  (e: 'devolucaoRespondida'): void
   // Garantia: abrir o "Vincular à garantia" (o modal mora na conversa, que
   // tem as mensagens) e reler o bloco.
   (e: 'vincularGarantia'): void
@@ -765,8 +775,9 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
 // A conferência do nº é só a rede: o detalhe é relido a cada 15 s e as
 // reclamações a cada 2 min, e a devolução de um pedido não pode aparecer no
 // painel do outro enquanto a resposta nova não chega.
+// TikTok (18/11/2026): a encerrada do pedido também (`detalhe_plataforma`), com o histórico.
 const devolucoesDoPedido = computed(() => ordenarReclamacoes(props.reclamacoes?.itens || [])
-  .filter((r) => r.do_pedido && r.aberta && r.pedido_marketplace === props.conversa.pedido_marketplace))
+  .filter((r) => r.do_pedido && (r.aberta || r.detalhe_plataforma) && r.pedido_marketplace === props.conversa.pedido_marketplace))
 const rolagemPainel = ref<HTMLElement | null>(null)
 const DESTAQUE_PESQUISADO = 'scroll-mt-2 rounded-md ring-2 ring-primary/70 ring-offset-2 ring-offset-card'
 // O código de uma compra digitado com o chat aberto em outra aba: é no Pedido que ela
@@ -968,13 +979,23 @@ defineExpose({ mostrarDevolucao, mostrarReembolso })
           </ul>
 
           <!-- devolução deste pedido: depois dos itens, antes dos valores (a ordem do Duoke) -->
-          <AtendimentoDevolucaoPedido
-            v-for="r in devolucoesDoPedido"
-            :key="r.id"
-            :r="r"
-            :perfil="pnl?.adspower ?? null"
-            :conversa-id="conversa.id"
-          />
+          <template v-for="r in devolucoesDoPedido" :key="r.id">
+            <AtendimentoDevolucaoTiktok
+              v-if="r.detalhe_plataforma"
+              :r="r"
+              :perfil="pnl?.adspower ?? null"
+              :conversa-id="conversa.id"
+              :pode-responder="canEdit"
+              @abrir-midia="(m) => emit('abrirImagem', m)"
+              @respondido="emit('devolucaoRespondida')"
+            />
+            <AtendimentoDevolucaoPedido
+              v-else
+              :r="r"
+              :perfil="pnl?.adspower ?? null"
+              :conversa-id="conversa.id"
+            />
+          </template>
 
           <!-- valores e pagamento -->
           <dl class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5 text-xs">
@@ -1068,13 +1089,23 @@ defineExpose({ mostrarDevolucao, mostrarReembolso })
 
         <!-- sem retrato (o bloco da devolução não some junto) -->
         <template v-else>
-          <AtendimentoDevolucaoPedido
-            v-for="r in devolucoesDoPedido"
-            :key="r.id"
-            :r="r"
-            :perfil="pnl?.adspower ?? null"
-            :conversa-id="conversa.id"
-          />
+          <template v-for="r in devolucoesDoPedido" :key="r.id">
+            <AtendimentoDevolucaoTiktok
+              v-if="r.detalhe_plataforma"
+              :r="r"
+              :perfil="pnl?.adspower ?? null"
+              :conversa-id="conversa.id"
+              :pode-responder="canEdit"
+              @abrir-midia="(m) => emit('abrirImagem', m)"
+              @respondido="emit('devolucaoRespondida')"
+            />
+            <AtendimentoDevolucaoPedido
+              v-else
+              :r="r"
+              :perfil="pnl?.adspower ?? null"
+              :conversa-id="conversa.id"
+            />
+          </template>
           <div
             v-if="!semPedidoComCompras"
             class="space-y-2 rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground"

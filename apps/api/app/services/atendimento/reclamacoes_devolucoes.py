@@ -979,7 +979,16 @@ def _motivo_legado(r: AtendimentoReclamacao) -> bool:
 
 
 def bloqueio_so_leitura(plataforma: str) -> str:
-    """O que a caixa mostra no lugar da resposta (a conversa nasce bloqueada)."""
+    """O que a caixa mostra no lugar da resposta (a conversa nasce bloqueada).
+
+    TikTok (18/11/2026): a DECISÃO (aprovar, recusar, confirmar o pacote) sai pelo
+    bloco da devolução na aba Pedido (`devolucao_detalhe`); mensagem ao comprador
+    não sai por esta conversa."""
+    if plataforma == "tiktok":
+        return (
+            "Devolução do TikTok: aprovar, recusar ou confirmar o pacote pelo bloco da "
+            "devolução, na aba Pedido. Mensagem ao comprador não sai por esta conversa."
+        )
     return (
         f"Devolução {_DA.get(plataforma, plataforma)}: só leitura no DaVinci — as "
         f"respostas e as ações ficam {_NA.get(plataforma, plataforma)}."

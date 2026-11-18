@@ -439,6 +439,11 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/responder"),
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/tratada"),
         ("POST", "/api/atendimento/carrinhos/{carrinho_id}/resolvido"),
+        # A resposta à devolução do TikTok (18/11/2026, o dono: "se der p eles
+        # responder a devolução por ali tbm"): aprovar/recusar o pedido e
+        # confirmar/recusar o pacote, nas lojas da pessoa; a rota ainda exige
+        # `ATENDIMENTO_DEVOLUCAO_ACOES_ATIVA` (`routers/atendimento_reclamacoes.py`).
+        ("POST", "/api/atendimento/conversas/{conversa_id}/reclamacoes/{reclamacao_id}/responder"),
         # A troca de produto e a oferta (03/11/2026): as 3 equipes do atendimento.
         ("POST", "/api/atendimento/pedidos/{numero_bling}/troca/previa"),
         ("POST", "/api/atendimento/pedidos/{numero_bling}/troca"),

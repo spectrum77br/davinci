@@ -76,6 +76,9 @@ export interface Reclamacao {
   moeda?: string | null
   rastreio_volta?: string | null
   situacao_volta?: string | null
+  // O bloco com o histórico lido na hora (TikTok, 18/11/2026): o painel usa o
+  // AtendimentoDevolucaoTiktok, que busca o `/detalhe` do caso.
+  detalhe_plataforma?: boolean
 }
 
 export interface ReclamacoesResposta {

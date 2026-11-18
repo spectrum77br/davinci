@@ -712,6 +712,14 @@ class Settings(BaseSettings):
     # chave E `atendimento_troca_ativa` ligadas, e respeitando o piloto
     # (Eduardo, 07/10/2026). Níveis 1 e 2 sempre pedem o clique de pessoa.
     atendimento_troca_lote_auto: bool = False
+    # A RESPOSTA DA DEVOLUÇÃO DO TIKTOK pelo DaVinci (18/11/2026, o dono: "se der
+    # p eles responder a devolução por ali tbm" → tudo, inclusive o pacote):
+    # aprovar/recusar o pedido e confirmar/recusar o pacote que voltou, no bloco
+    # da devolução da aba Pedido (services/atendimento/devolucao_detalhe.py).
+    # Desligado = a tela mostra os botões travados e a rota responde 409
+    # `devolucao_acoes_desligadas`. Nasce desligado, como a troca: a primeira
+    # resposta é acompanhada pelo dono. Ler o histórico não depende disto.
+    atendimento_devolucao_acoes_ativa: bool = False
     # Aviso no Telegram de conversa com prazo vencendo/vencido.
     atendimento_alerta_telegram: bool = False
     # SÓ LOCAL: o envio vai para um simulador que finge sucesso (externo_id

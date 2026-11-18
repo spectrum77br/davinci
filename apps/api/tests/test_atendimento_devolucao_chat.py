@@ -758,9 +758,11 @@ async def test_tiktok_nao_liga_pelo_comprador_nem_ganha_foco(db, make_user, monk
     assert linha.conversa_id == conversa.id
     await db.refresh(chat)
     assert chat.pedido_marketplace == B and "pedido_citado" not in chat.dados
-    # Sem os campos do bloco.
+    # 18/11/2026: a TikTok também tem o bloco no pedido (o histórico vem na hora,
+    # `devolucao_detalhe`), mas o cron segue sem os campos do bloco da Shopee.
     tela = reclamacoes.para_tela(linha, pedido_da_conversa="TT1")
-    assert tela["do_pedido"] is False
+    assert tela["do_pedido"] is True
+    assert tela["detalhe_plataforma"] is bool(tela["numero"])
     assert "rastreio_volta" not in linha.dados and "valor_lido_em" not in linha.dados
 
     # A linha ligada ao chat da TikTok não prende o pedido dele, sem consulta de foco.

@@ -761,7 +761,8 @@ async def test_tiktok_motivo_pela_linha_do_tempo(db, make_user):
     [conversa] = await _conversas(db, TT)
     conversa_id = conversa.id
     assert conversa.integration_id == integ_id and conversa.comprador_id == "7000"
-    assert conversa.bloqueio_motivo.startswith("Devolução do TikTok: só leitura")
+    # 18/11/2026: a decisão da TikTok sai pelo bloco da aba Pedido (devolucao_detalhe).
+    assert conversa.bloqueio_motivo.startswith("Devolução do TikTok: aprovar, recusar")
     # Sem ação da loja pendente: na caixa, mas fora do "Falta responder".
     assert conversa.aguardando_resposta is False
     textos = [m.texto for m in await _mensagens(db, conversa_id)]

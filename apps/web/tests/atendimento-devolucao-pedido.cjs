@@ -241,6 +241,8 @@ async function principal() {
   {
     const filhos = {
       AtendimentoDevolucaoPedido: { props: ['r', 'perfil', 'conversaId'], setup: (p) => () => Vue.h('section', { 'data-bloco': p.r.id, 'data-conversa': p.conversaId }, `bloco ${p.r.id}`) },
+      // O bloco inteiro do TikTok (18/11/2026), com a permissão de responder.
+      AtendimentoDevolucaoTiktok: { props: ['r', 'perfil', 'conversaId', 'podeResponder'], setup: (p) => () => Vue.h('section', { 'data-bloco-tiktok': p.r.id, 'data-pode-responder': String(p.podeResponder) }, `tiktok ${p.r.id}`) },
     }
     const conversa = (pedido, plataforma = 'shopee') => ({ id: 'c1', plataforma, canal: 'chat', pedido_marketplace: pedido, somente_leitura: false, email: null })
     const retrato = (pedido) => ({
@@ -324,6 +326,30 @@ async function principal() {
     // Sem o elemento (o bloco já saiu): não quebra.
     m.estado.rolagemPainel = null
     await m.estado.mostrarDevolucao('dois')
+
+    // TikTok (18/11/2026): o bloco inteiro (AtendimentoDevolucaoTiktok), da aberta
+    // E da encerrada do pedido (`detalhe_plataforma`); a da Shopee não entra.
+    const tt = (o) => caso({ plataforma: 'tiktok', plataforma_nome: 'TikTok', pedido_marketplace: '586887215793276360', detalhe_plataforma: true, ...o })
+    const doTiktok = {
+      abertas: 1,
+      prazo_mais_curto: null,
+      itens: [
+        tt({ id: 'tt-encerrada', aberta: false, encerrada_em: '2026-11-01T12:00:00Z', prazo_em: null }),
+        tt({ id: 'tt-aberta' }),
+        tt({ id: 'tt-sem-marca', do_pedido: false }),
+        tt({ id: 'tt-sem-historico', aberta: false, encerrada_em: '2026-10-01T12:00:00Z', detalhe_plataforma: false }),
+      ],
+    }
+    m = painel({ conversa: conversa('586887215793276360', 'tiktok'), pedidoMkt: null, reclamacoes: doTiktok })
+    await m.montar()
+    h = await m.html()
+    assert.deepEqual([...h.matchAll(/data-bloco-tiktok="([^"]+)"/g)].map((x) => x[1]), ['tt-aberta', 'tt-encerrada'], 'a aberta antes, a encerrada com histórico depois')
+    assert.ok(!h.includes('data-bloco="'), 'o bloco da Shopee não entra no caso do TikTok')
+    assert.match(h, /data-pode-responder="true"/, 'quem responde na caixa (`canEdit`) decide a devolução')
+    assert.ok(h.indexOf('data-bloco-tiktok=') < h.indexOf('ainda não vem pela API'), 'sem retrato: antes do "sem retrato"')
+    m = painel({ conversa: conversa('586887215793276360', 'tiktok'), pedidoMkt: null, reclamacoes: doTiktok, canEdit: false })
+    await m.montar()
+    assert.match(await m.html(), /data-pode-responder="false"/, 'quem só lê vê, mas não decide')
   }
 
   // ------------------------------------------------ o cartão do topo encolhe

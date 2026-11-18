@@ -943,6 +943,33 @@ class TikTokClient:
             )
         return resp.get("data") or {}
 
+    async def approve_return(
+        self,
+        return_id: str,
+        *,
+        decision: str,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Aprovação da loja — POST /return_refund/202309/returns/{return_id}/approve
+        (documentação oficial 202309, lida em 18/11/2026). `decision`:
+        APPROVE_RETURN (o pedido de devolução + reembolso), APPROVE_REFUND (o
+        pedido de só reembolso) ou APPROVE_RECEIVED_PACKAGE (o pacote que o
+        comprador já mandou de volta). Sem `buyer_keep_item` nem `partial_refund`:
+        o atendimento só aprova o que o comprador pediu. `idempotency_key` na
+        query: a mesma chave na nova tentativa não vira duas decisões. Levanta
+        com o erro da API (25011012/25011013 status, 25020004 tipo, 25011010
+        arbitragem…), como o `reject_return`."""
+        extra = {"idempotency_key": idempotency_key} if idempotency_key else None
+        resp = await self._post(
+            f"/return_refund/202309/returns/{return_id}/approve", {"decision": decision}, extra
+        )
+        if resp.get("code") not in (0, None):
+            raise RuntimeError(
+                f"tiktok_approve_return code={resp.get('code')} "
+                f"msg={str(resp.get('message'))[:300]}"
+            )
+        return resp.get("data") or {}
+
     async def get_tracking(self, order_id: str) -> dict:
         """Eventos de rastreio de UM pedido (Fulfillment API 202309). Retorna o
         `data` com `tracking` = lista de eventos (`description` em inglês,

@@ -1594,6 +1594,9 @@ def para_tela(
     o pedido da conversa pedida; `do_pedido` = caso ABERTO da Shopee desse
     pedido (a tela põe o bloco no painel e encolhe o cartão). `valor_reembolso`,
     `moeda`, `rastreio_volta` e `situacao_volta` vêm None quando não se sabe.
+    TikTok (18/11/2026): o `do_pedido` vale para ele também, aberto ou encerrado
+    com o nº do caso, e `detalhe_plataforma` diz que o bloco busca o histórico
+    completo na hora (`devolucao_detalhe`).
     """
     from app.services.atendimento import reclamacoes_devolucoes
 
@@ -1623,6 +1626,8 @@ def para_tela(
         tipo_nome = reivindicacao.NOME_TIPO.get(_id(dados.get("tipo_caso")), tipo_nome)
     pedido_conversa = _id(pedido_da_conversa)
     valor = dados.get("valor_reembolso")
+    # O bloco com o histórico lido na hora (TikTok com o nº do caso, 18/11/2026).
+    detalhe_plataforma = r.plataforma == "tiktok" and bool(numero)
     return {
         "id": r.id,
         "plataforma": r.plataforma,
@@ -1649,13 +1654,19 @@ def para_tela(
         "conversa_id": r.conversa_id,
         "url_plataforma": url_na_plataforma(r, ids_shopee),
         "do_pedido": (
-            r.encerrada_em is None
-            and r.plataforma == "shopee"
-            and bool(pedido_conversa)
+            bool(pedido_conversa)
             and _id(r.pedido_marketplace) == pedido_conversa
+            and (
+                (r.encerrada_em is None and r.plataforma in ("shopee", "tiktok"))
+                # O TikTok (18/11/2026): a encerrada também mora no painel — o
+                # histórico do reembolso ("Reembolso concluído") é o que o
+                # comprador pergunta depois.
+                or (r.plataforma == "tiktok" and detalhe_plataforma)
+            )
         ),
         "valor_reembolso": float(valor) if isinstance(valor, int | float) else None,
         "moeda": _id(dados.get("moeda")) or None,
         "rastreio_volta": _id(dados.get("rastreio_volta")) or None,
         "situacao_volta": _id(dados.get("situacao_volta")) or None,
+        "detalhe_plataforma": detalhe_plataforma,
     }
