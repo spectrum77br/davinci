@@ -86,7 +86,7 @@ function montarMenu(user, { rota = '/', tarefas = 0, faturas = 0 } = {}) {
     ...nav, useState: (k, ini) => estado[k] ?? Vue.ref(ini()),
     defineProps: () => ({}), withDefaults: (p, d) => ({ ...d, ...p, collapsed: false }), defineEmits: () => () => {},
     useAuthStore: () => ({ user, isAdmin: user.role === 'admin' }), useRoute: () => ({ path: rota }),
-    useRuntimeConfig: () => ({ public: { enableMarketing: false, enableCelulares: false } }), useApi: () => ({ api: async () => ({ count: 0 }) }),
+    useRuntimeConfig: () => ({ public: { enableMarketing: false } }), useApi: () => ({ api: async () => ({ count: 0 }) }),
   }
   for (const n of icones) params[n] = {}
   const nomes = Object.keys(params)

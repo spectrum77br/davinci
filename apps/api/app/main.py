@@ -110,7 +110,6 @@ from app.routers import tarefas as tarefas_router
 from app.routers import imobilizado as imobilizado_router
 from app.routers import garantias as garantias_router
 from app.routers import users as users_router
-from app.routers import celulares as celulares_router
 from app.routers import webhooks as webhooks_router
 from app.routers import whatsapp_webhook as whatsapp_webhook_router
 from app.services.bootstrap import promote_owner_if_needed
@@ -232,7 +231,6 @@ app.add_middleware(
 
 app.include_router(auth_router.router)
 app.include_router(users_router.router)
-app.include_router(celulares_router.router)
 app.include_router(companies_router.router)
 app.include_router(company_certificates_router.router)
 app.include_router(company_proxy_router.router)
