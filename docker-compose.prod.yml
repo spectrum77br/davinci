@@ -68,7 +68,8 @@ services:
         required: false
         format: raw
     environment:
-      ERP_ALLOWED_HOSTS: erp
+      # O Caddy repassa o endereço do próprio DaVinci; o ERP só aceita os da lista.
+      ERP_ALLOWED_HOSTS: "erp,${DOMAIN_APP}"
       ERP_TRUST_PROXY: "1"
     volumes:
       - type: bind

@@ -23,6 +23,21 @@
 {$DOMAIN_APP} {
 	encode zstd gzip
 
+	# ERP próprio (18/11/2026): só administrador logado no DaVinci, em modo consulta enquanto o
+	# Bling manda. Vem antes de @api, porque /api/erp-local/* é do ERP. Sem o serviço erp no ar,
+	# responde erro.
+	@erp path /erp /erp/* /api/erp-local/*
+	handle @erp {
+		# Quem é e qual o papel vêm só do DaVinci: o que o navegador mandar é descartado.
+		request_header -X-ERP-Actor
+		request_header -X-ERP-Role
+		forward_auth api:8000 {
+			uri /api/erp-gate/authorize
+			copy_headers X-ERP-Actor X-ERP-Role
+		}
+		reverse_proxy erp:8765
+	}
+
 	@api path /api /api/*
 	handle @api {
 		reverse_proxy api:8000

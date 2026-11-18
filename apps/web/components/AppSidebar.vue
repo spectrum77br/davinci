@@ -7,7 +7,7 @@ import {
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, Ship, Landmark, Headset,
   ReceiptText, MessagesSquare, Radar, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
-  GitPullRequest,
+  GitPullRequest, Boxes,
 } from 'lucide-vue-next'
 import { allowedTabs, tabRoutes, TABS_CADASTROS, TABS_CONFIGURACOES, TABS_NF } from '~/lib/navGroups'
 
@@ -127,6 +127,8 @@ type Item = {
   to: string
   label: string
   icon: any
+  // ERP próprio (18/11/2026): página fora do Nuxt (rota /erp do Caddy), abre em nova aba.
+  external?: boolean
   resource?: string
   adminOnly?: boolean
   ownerOnly?: boolean
@@ -197,6 +199,8 @@ const sections = computed<Section[]>(() => [
       // Margem continua chegando por aqui (a página aceita conciliacao OU margem).
       { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', tambemCom: ['margem'], soComPermissao: true },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
+      // ERP próprio (18/11/2026): v1 em modo consulta (o Bling manda em tudo), só admin.
+      { to: '/erp', label: 'ERP próprio', icon: Boxes, adminOnly: true, external: true },
     ],
   },
   {
@@ -478,6 +482,9 @@ watch(() => route.path, (p) => openSectionOf(p))
           <li v-for="it in section.items" :key="it.to">
             <NuxtLink
               :to="it.to"
+              :external="it.external"
+              :target="it.external ? '_blank' : undefined"
+              :rel="it.external ? 'noopener' : undefined"
               :title="compact ? it.label : undefined"
               class="group relative flex items-center gap-2.5 rounded-md px-2.5 h-11 lg:h-8 text-[13px] font-medium transition-colors"
               :aria-current="isActive(it) ? 'page' : undefined"

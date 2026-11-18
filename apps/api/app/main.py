@@ -49,6 +49,7 @@ from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolucoes_painel as devolucoes_painel_router
 from app.routers import devolutions as devolutions_router
+from app.routers import erp_gate as erp_gate_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
@@ -406,6 +407,8 @@ app.include_router(juridico_router.router)
 # Sistema › Histórico (25/09/2026): invisível para quem não está na lista.
 app.include_router(historico_router.router)
 app.include_router(dev_router.router)
+# ERP próprio (18/11/2026): o Caddy pergunta aqui quem é antes de abrir /erp (só admin, por enquanto).
+app.include_router(erp_gate_router.router)
 
 if settings.enable_marketing:
     # Optional Marketing module — see config.enable_marketing. Import lazily so
