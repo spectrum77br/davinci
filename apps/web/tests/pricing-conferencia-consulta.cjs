@@ -83,6 +83,11 @@ assert.match(t1, /Última conferência: 18\/11, 10:00\./)
 assert.doesNotMatch(t1, /não leram/)
 const t2 = tituloDe({ job: { ...jobFeito, id: 'J2', status: 'running', processed: 2, finished_at: null }, ultimo_concluido: 'J1', celulas: [] })
 assert.match(t2, /Lendo os anúncios: 2 de 5 contas\./)
+// Revisão M-14: a conferência só de algumas contas diz que foi parcial.
+assert.match(tituloDe({ job: { ...jobFeito, parcial: 3 }, ultimo_concluido: 'J1', celulas: [] }),
+  /Última conferência: 18\/11, 10:00 — parcial \(3 contas\)\./)
+assert.match(tituloDe({ job: { ...jobFeito, parcial: 1 }, ultimo_concluido: 'J1', celulas: [] }), /parcial \(1 conta\)\./)
+assert.doesNotMatch(tituloDe({ job: { ...jobFeito, parcial: null }, ultimo_concluido: 'J1', celulas: [] }), /parcial/)
 console.log('pricing conferência M-7 balão ok')
 
 // ---------- 3) a consulta de 30 s

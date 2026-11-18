@@ -69,14 +69,22 @@ function montar({ podeEnviar = true, podeConf = true, colunas = [A, B, C], filtr
     conferencia: ref(null),
     conferenciaIniciando: ref(false),
     conferenciaRodando: ref(false),
+    department: ref('celular'),
   }
   const passos = []
+  const avisos = []
+  const deps = []
+  s.toast = { warning: (...a) => avisos.push(a) }
   s.contasMarcadasAtualizar = comp('contasMarcadasAtualizar', s)
   s.contasDoAtualizar = comp('contasDoAtualizar', s)
   s.motivoAtualizarBloqueado = comp('motivoAtualizarBloqueado', s)
   s.rotuloAtualizar = comp('rotuloAtualizar', s)
-  s.enviarPrecoDasContas = async (contas) => { passos.push(['anuncio', contas]); return s.desistir !== true }
-  s.conferirAnuncios = async (contas) => { passos.push(['conferir', contas]) }
+  s.enviarPrecoDasContas = async (contas) => {
+    passos.push(['anuncio', contas])
+    if (s.aoEnviar) s.aoEnviar()
+    return s.desistir !== true
+  }
+  s.conferirAnuncios = async (contas, dep) => { passos.push(['conferir', contas]); deps.push(dep) }
   s.loadGrid = async () => { passos.push(['planilha']) }
   const nomes = Object.keys(s)
   const f = new Function(...nomes, [
@@ -84,7 +92,7 @@ function montar({ podeEnviar = true, podeConf = true, colunas = [A, B, C], filtr
     funcao('executarAtualizar'),
     'return { abrirPainelAtualizar, escolherModoContas, alternarContaAtualizar, executarAtualizar }',
   ].join('\n'))(...nomes.map((n) => s[n]))
-  return { s, f, passos }
+  return { s, f, passos, avisos, deps }
 }
 
 ;(async () => {
@@ -189,7 +197,8 @@ function montar({ podeEnviar = true, podeConf = true, colunas = [A, B, C], filtr
     assert.equal(s.atualizando.value, false)
   }
   {
-    // Geral sem filtro nenhum: a conferência do departamento inteiro, como antes.
+    // Geral sem filtro nenhum vai sem `contas`: o servidor confere as colunas
+    // que a pessoa vê (o departamento inteiro para o administrador).
     const m = montar()
     m.f.abrirPainelAtualizar(true)
     m.s.atualizarConferir.value = true
@@ -202,6 +211,30 @@ function montar({ podeEnviar = true, podeConf = true, colunas = [A, B, C], filtr
     n.s.atualizarPlanilha.value = false
     await n.f.executarAtualizar()
     assert.deepEqual(n.passos, [['conferir', ['a1', 'a3']]])
+    assert.deepEqual(n.deps, ['celular'], 'confere o departamento de quando clicou')
+  }
+  {
+    // Revisão M-14: trocou de departamento durante o envio → a conferência e
+    // a planilha (que eram do outro) não rodam, e a tela avisa.
+    const { s, f, passos, avisos, deps } = montar()
+    f.abrirPainelAtualizar(true)
+    s.atualizarConferir.value = true
+    s.atualizarAnuncio.value = true
+    s.aoEnviar = () => { s.department.value = 'mala' }
+    await f.executarAtualizar()
+    assert.deepEqual(passos, [['anuncio', ['a1', 'a2', 'a3']]])
+    assert.deepEqual(deps, [])
+    assert.equal(avisos.length, 1)
+    assert.match(avisos[0][0], /conferência não foi feita/)
+    assert.deepEqual([s.atualizando.value, s.atualizandoEtapa.value], [false, ''])
+    // Sem Conferir marcado: só não recarrega a planilha do outro, sem aviso.
+    const o = montar()
+    o.f.abrirPainelAtualizar(true)
+    o.s.atualizarAnuncio.value = true
+    o.s.aoEnviar = () => { o.s.department.value = 'mala' }
+    await o.f.executarAtualizar()
+    assert.deepEqual(o.passos.map((p) => p[0]), ['anuncio'])
+    assert.equal(o.avisos.length, 0)
   }
   {
     // Desistiu de enviar (o "Enviar o preço…?"): o resto não roda.
@@ -291,6 +324,11 @@ function montar({ podeEnviar = true, podeConf = true, colunas = [A, B, C], filtr
   assert.match(barra, /data-ultima-conferencia[\s\S]*?<AlertCircle v-if="conferirComAviso" class="[^"]*text-amber-600/)
   // A lista Por conta: agrupada, nome à esquerda e plataforma à direita.
   assert.match(barra, /v-for="group in gruposAtualizarContas"[\s\S]*?\{\{ group\.label \}\}[\s\S]*?\{\{ nomeColuna\(acc\) \}\}[\s\S]*?ml-auto/)
+  // Revisão M-14: o motivo do botão apagado aparece escrito no rodapé (o
+  // balão do botão desabilitado não abre) e uma conferência que começa com o
+  // painel aberto desmarca a caixa Conferir (apagada), que travava o resto.
+  assert.match(barra, /data-motivo-atualizar\s*>\s*\{\{ motivoAtualizarBloqueado \}\}[\s\S]*?data-acao="atualizar-executar"/)
+  assert.match(setup, /watch\(conferenciaRodando, \(rodando\) => \{\s*if \(rodando\) atualizarConferir\.value = false/)
   // O rodapé executa o que estiver marcado, na largura do painel.
   assert.match(tagCom('data-acao="atualizar-executar"', 'button'), /w-full[^"]*bg-blue-600/)
   assert.match(barra, /@click="executarAtualizar"/)

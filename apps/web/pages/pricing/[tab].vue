@@ -2987,6 +2987,8 @@ type JobConferencia = {
     sem_leitura?: number
     contas_com_erro?: { conta: string; motivo: string }[]
   } | null
+  // Revisão M-14: conferência só de algumas contas → quantas; null = inteira.
+  parcial?: number | null
 }
 // Margem da conferência (M-2, 17/11/2026): no servidor e igual para todos
 // (decisão do Eduardo). Uma Geral por departamento (padrão 5%) e um % próprio
@@ -3187,12 +3189,14 @@ onBeforeUnmount(() => {
 })
 
 // M-14 (18/11/2026): `contas` = só estas colunas (as das outras ficam com a
-// leitura anterior); sem `contas`, o departamento inteiro, como antes.
-async function conferirAnuncios(contas?: string[]) {
+// leitura anterior); sem `contas`, todas as colunas que a pessoa vê (o
+// departamento inteiro para o administrador). `dep`: o departamento de
+// quando o Atualizar foi clicado (revisão M-14).
+async function conferirAnuncios(contas?: string[], dep = department.value) {
   if (conferenciaIniciando.value || conferenciaRodando.value) return
   conferenciaIniciando.value = true
   try {
-    const body = contas ? { department: department.value, contas } : { department: department.value }
+    const body = contas ? { department: dep, contas } : { department: dep }
     await api('/api/pricing/conferencia', { method: 'POST', body })
     toast.success('Conferência começou', 'Os anúncios estão sendo lidos nos marketplaces.')
   } catch (e: any) {
@@ -3346,7 +3350,10 @@ const tituloConferir = computed(() => {
   } else if (conferenciaRodando.value) {
     linhas.push(`Lendo os anúncios: ${job.processed} de ${job.total || '…'} contas.`)
   } else {
-    linhas.push(`Última conferência: ${fmtQuando(job.finished_at || job.created_at)}.`)
+    // Revisão M-14: a parcial não é o departamento inteiro — as outras contas
+    // ficaram com a leitura anterior (e o aviso delas continua abaixo).
+    const parcial = job.parcial != null ? ` — parcial (${job.parcial === 1 ? '1 conta' : `${job.parcial} contas`})` : ''
+    linhas.push(`Última conferência: ${fmtQuando(job.finished_at || job.created_at)}${parcial}.`)
     if (job.status === 'failed' || job.status === 'cancelled') {
       const cru = job.error && !ERROS_CONFERENCIA[job.error] ? ` (${job.error})` : ''
       linhas.push(`Não terminou${job.error ? `: ${textoErroConferencia(job.error)}${cru}` : ''}.`)
@@ -4674,6 +4681,13 @@ function abrirPainelAtualizar(aberto: boolean) {
   buscaAtualizarContas.value = ''
 }
 
+// Revisão M-14: uma conferência começou com o painel aberto (de outra pessoa,
+// pela consulta de 30 s): a caixa Conferir fica apagada, então sai marcada —
+// senão travava o Atualizar também para a planilha e o anúncio.
+watch(conferenciaRodando, (rodando) => {
+  if (rodando) atualizarConferir.value = false
+})
+
 // Geral e Por conta não andam juntas: marcar uma desmarca a outra.
 function escolherModoContas(modo: 'geral' | 'conta', marcar: boolean) {
   if (marcar) atualizarModoContas.value = modo
@@ -4740,10 +4754,14 @@ const rotuloAtualizar = computed(() => {
 
 // Executa o que está marcado, nesta ordem: Atualizar anúncio, Conferir (lê o
 // preço novo) e Atualizar planilha. Planilha recarrega a tabela inteira; as
-// contas valem para Conferir e Atualizar anúncio. Geral sem filtro nenhum
-// confere o departamento inteiro, como o botão de antes.
+// contas valem para Conferir e Atualizar anúncio. Geral sem filtro nenhum vai
+// sem `contas`: o servidor confere todas as colunas que a pessoa vê (o
+// departamento inteiro para o administrador, como o botão de antes).
+// Revisão M-14: trocou de departamento durante o envio (que leva minutos) →
+// a conferência e a planilha, que eram do outro, não rodam.
 async function executarAtualizar() {
   if (atualizando.value || pushing.value || motivoAtualizarBloqueado.value) return
+  const dep = department.value
   const anuncio = atualizarAnuncio.value && podeEnviarPreco.value
   const conferir = atualizarConferir.value && podeConferir.value
   const planilha = atualizarPlanilha.value
@@ -4757,9 +4775,13 @@ async function executarAtualizar() {
       atualizandoEtapa.value = 'anuncio'
       if (!(await enviarPrecoDasContas(contas))) return
     }
+    if (department.value !== dep) {
+      if (conferir) toast.warning('A conferência não foi feita', 'O departamento mudou durante o envio — confira de novo.')
+      return
+    }
     if (conferir) {
       atualizandoEtapa.value = 'conferir'
-      await conferirAnuncios(contasDaConferencia)
+      await conferirAnuncios(contasDaConferencia, dep)
     }
     if (planilha) {
       atualizandoEtapa.value = 'planilha'
@@ -7009,6 +7031,14 @@ watch(department, async () => {
                 </div>
               </template>
               <div class="mt-1 border-t px-3 pb-1 pt-2">
+                <!-- Revisão M-14: o motivo à vista (o botão apagado não mostra o balão). -->
+                <p
+                  v-if="motivoAtualizarBloqueado && !atualizando && !pushing"
+                  class="pb-1 text-[11px] text-muted-foreground"
+                  data-motivo-atualizar
+                >
+                  {{ motivoAtualizarBloqueado }}
+                </p>
                 <button
                   type="button"
                   class="btn btn-sm h-7 w-full py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
