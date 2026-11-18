@@ -491,6 +491,17 @@ def test_arquivo_fora_das_pastas_permitidas(mundo):
     assert m2["status"] == "precisa_equipe" and "fora das pastas" in m2["erro"], m2
 
 
+def test_rota_dinamica_do_nuxt_passa_no_filtro(mundo):
+    """[tab].vue é a página da Tabela de Preços: o robô devolvia M-8 e M-9 (18/11)
+    só pelo nome. Colchete fora das pastas permitidas continua barrado."""
+    barrar = mundo["rodada"]._barrar
+    arq = lambda c: {"caminho": c, "mais": 3, "menos": 1, "binario": False}  # noqa: E731
+    assert barrar([arq("apps/web/pages/pricing/[tab].vue")]) is None
+    assert barrar([arq("apps/web/pages/produtos/[...slug].vue")]) is None
+    assert "fora das pastas" in barrar([arq("infra/[x].conf")]) or "só a equipe" in barrar([arq("infra/[x].conf")])
+    assert "fora do padrão" in barrar([arq("apps/web/pages/pricing/[tab] x.vue")])
+
+
 def test_caractere_invisivel_vai_para_a_equipe(mundo):
     mundo["acao"].write_text("invisivel")
     r = _fazer(mundo)

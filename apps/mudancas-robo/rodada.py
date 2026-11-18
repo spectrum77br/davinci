@@ -122,15 +122,20 @@ PROIBIDOS = re.compile(
 PERMITIDOS = re.compile(
     r"^(apps/api/(app|tests)/[A-Za-z0-9_./-]+\.(py|sql|json|html|txt|md|csv)"
     r"|apps/web/(pages|components|composables|stores|lib|utils|layouts|middleware|plugins"
-    r"|assets|tests)/[A-Za-z0-9_./@+-]+\.(vue|ts|js|mjs|cjs|css|json|svg))$"
+    r"|assets|tests)/[A-Za-z0-9_./@+\[\]-]+\.(vue|ts|js|mjs|cjs|css|json|svg))$"
 )
 # ruff que BARRA a publicação: só erro grave (sintaxe, nome indefinido) e
 # caractere invisível/bidi; o resto do ruff é só aviso (o código antigo tem).
 RUFF_GRAVE = "E9,F63,F7,F82,PLE2502,PLE2510,PLE2512,PLE2513,PLE2514,PLE2515"
-CAMINHO_OK = re.compile(r"^[A-Za-z0-9_./@+-]+$")
+# Colchetes: rota dinâmica do Nuxt (apps/web/pages/pricing/[tab].vue). Sem
+# eles o robô devolvia TODO pedido da Tabela de Preços (M-8/M-9, 18/11). O nome
+# vem do git (-z, sem curinga) e o testar.sh sempre cita "$@".
+CAMINHO_OK = re.compile(r"^[A-Za-z0-9_./@+\[\]-]+$")
 COMMIT_OK = re.compile(r"^[0-9a-f]{40}$")
-MAX_ARQUIVOS = 12
-MAX_LINHAS = 400
+# 18/11/2026: 12/400 devolvia pedidos comuns da Tabela de Preços (M-8 = 547
+# linhas, M-9 = 528) que o robô tinha feito certo. Quem aprova lê o diff inteiro.
+MAX_ARQUIVOS = 15
+MAX_LINHAS = 800
 MAX_DIFF = 390_000
 TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # git do robô: sem ganchos, sem fsmonitor, sem atributos globais.

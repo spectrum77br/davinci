@@ -34,7 +34,7 @@ fez e só então ela vai para o ar. Você NÃO publica nada.
   `apps/executor*`, `apps/mudancas-robo/`, `apps/ia-de-chamado/`, `.gitattributes`,
   `conftest.py`, dependências e configuração de ferramentas (`pyproject.toml`, `uv.lock`,
   `package.json`, `pnpm-lock.yaml`, `setup.py`, `*.pth`, `.npmrc`, `pytest.ini`…).
-- Pedido grande (mais de ~10 arquivos ou ~300 linhas), ambíguo, ou que precisa de decisão
+- Pedido grande (mais de ~14 arquivos ou ~700 linhas), ambíguo, ou que precisa de decisão
   de negócio que o pedido não traz.
 
 ## Proibido
