@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.erp_local import access
+from app.erp_local import access, consulta
 from app.erp_local.channels import ChannelFlow
 from app.erp_local.core import ERPError, LocalERP
 from app.erp_local.parity import parity_status
@@ -107,6 +107,15 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         denied = _access_denied(request)
         if denied:
             return denied
+        if consulta.refuses(request.method, request.url.path):
+            with erp.connection() as db:
+                reading_only = consulta.active(db)
+            if reading_only:
+                if request.url.path.startswith("/api/erp-local/bling/v3/"):
+                    return bling_compat._error(409, consulta.MESSAGE, code="CONSULTA")
+                return JSONResponse(
+                    {"code": "consulta", "message": consulta.MESSAGE}, status_code=409
+                )
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             # The compat API authenticates each call with its own token instead.
             compat = request.url.path.startswith("/api/erp-local/bling/v3/")
@@ -197,6 +206,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "finance": finance.snapshot(db),
                 "finance_categories": finance_categories.snapshot(db),
                 "homolog": homolog.info(db),
+                "consulta": consulta.state(db),
                 "bling_coverage": bling_coverage.latest(db),
                 "compat_shadow": compat_shadow.latest(db),
                 "cost_changes": price_table.cost_changes(db, limit=200),

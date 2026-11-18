@@ -91,7 +91,7 @@ async function setup(overrides={}) {
     if(options?.method==='POST')requests.push(JSON.parse(options.body));
     return {ok:true,status:200,json:async()=>options?.method==='POST'?(url.endsWith('/price-preview')?snapshot.price_preview:{replayed:false}):url.includes('/reference/')?{items:[],total:0,offset:0,limit:50}:snapshot};
   };
-  dom.window.eval(fs.readFileSync(path.join(assets,'chrome.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'operations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'fulfillment.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'catalog.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'integrations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'contacts.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'returns.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'deposits.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sellers.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inventory.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-characteristics.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-details.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-list.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'price-lists.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'categories.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'production.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'payment-methods.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'cash-register.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'pos.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'proposals.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sales-form.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'access.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inbound.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'tax-guides.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'companies.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'store-sales.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'app.js'),'utf8'));
+  dom.window.eval(fs.readFileSync(path.join(assets,'consulta.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'chrome.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'operations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'fulfillment.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'catalog.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'integrations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'contacts.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'returns.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'deposits.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sellers.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inventory.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-characteristics.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-details.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-list.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'price-lists.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'categories.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'production.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'payment-methods.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'cash-register.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'pos.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'proposals.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sales-form.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'access.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inbound.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'tax-guides.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'companies.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'store-sales.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'app.js'),'utf8'));
   await new Promise(r=>setImmediate(r));
   return {dom,requests,document:dom.window.document};
 }
@@ -1455,4 +1455,37 @@ test('clicking an order number copies it and the customer name opens the order',
   assert.match(d.getElementById('notice').textContent,/Copiado: P1/);
   assert.ok(d.querySelector('[data-edit-sale]').textContent.length>0);
   assert.ok(d.querySelector('.sales-store-name .copy-text'),'número da loja copiável');
+});
+
+test('consulta: the strip says Bling owns, a change is not sent and the page says why',async()=>{
+  const consulta={active:true,reason:'automático',message:'Modo consulta: o Bling manda em estoque, pedidos e cadastro até a troca. Faça a alteração no Bling.',read_posts:['/api/erp-local/price-preview','/api/erp-local/store-sales/tracking','/api/erp-local/reference-refresh','/api/erp-local/store-sales/papers/']};
+  const {dom,document:d,requests}=await setup({consulta,homolog:{started_at:'2026-11-10T18:13:20+00:00'}});
+  const env=d.getElementById('environment');
+  assert.ok(env.classList.contains('consulta')&&!env.classList.contains('homolog'));
+  assert.match(env.textContent,/^CONSULTA · O Bling manda em estoque, pedidos e cadastro até a troca/);
+  assert.equal(d.getElementById('foot-title').textContent,'Consulta');
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[name=product_sku]').value='new.sku';
+  d.querySelector('[name=name]').value='New product';
+  d.querySelector('#product-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.equal(requests.length,0);
+  assert.match(d.getElementById('notice').textContent,/^Modo consulta: o Bling manda/);
+  assert.ok(d.getElementById('notice').classList.contains('error'));
+  assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/price-preview'),false);
+  assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/store-sales/papers/sheet'),false);
+  assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/store-sales/labels'),true);
+  assert.equal(dom.window.erpConsultaRefuses('POST','/erp/api/erp-local/commands'),true);
+  assert.equal(dom.window.erpConsultaRefuses('GET','/api/erp-local/state'),false);
+});
+
+test('outside consulta a change is sent as before',async()=>{
+  const {dom,document:d,requests}=await setup({consulta:{active:false,read_posts:[]}});
+  assert.ok(!d.getElementById('environment').classList.contains('consulta'));
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[name=product_sku]').value='new.sku';
+  d.querySelector('[name=name]').value='New product';
+  d.querySelector('#product-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  assert.equal(requests[0].kind,'product.create');
 });

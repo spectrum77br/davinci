@@ -177,9 +177,12 @@ async function flowAction(action,payload={}){
 function render() {
   const [title,sub]=titles[page];
   const homologSince=state.homolog?new Date(state.homolog.started_at).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}):'';
-  document.getElementById('environment').classList.toggle('homolog',!!state.homolog);
-  for(const [id,text] of [['foot-title',state.homolog?'Homologação':'Banco local separado'],['foot-note',state.homolog?'Pedidos reais a cada minuto; nada sai daqui':'Testes sem movimentar as lojas']]){const el=document.getElementById(id);if(el)el.textContent=text;}
-  document.getElementById('environment').textContent=state.homolog?`HOMOLOGAÇÃO · Cópia da base real desde ${homologSince} · Pedidos das lojas chegam a cada minuto · Nada sai para lojas, Bling ou SEFAZ`:page==='reference'?'REFERÊNCIA REAL · Somente leitura · Bling segue operando':state.catalog_import?'NÚCLEO PRÓPRIO · Carga inicial real · Operações locais sem envio às lojas':'SIMULAÇÃO LOCAL · Dados fictícios · Nenhuma loja conectada';
+  const consulta=!!state.consulta?.active;
+  document.body.classList.toggle('consulta',consulta);
+  document.getElementById('environment').classList.toggle('consulta',consulta);
+  document.getElementById('environment').classList.toggle('homolog',!consulta&&!!state.homolog);
+  for(const [id,text] of [['foot-title',consulta?'Consulta':state.homolog?'Homologação':'Banco local separado'],['foot-note',consulta?'O Bling manda até a troca; aqui só se consulta':state.homolog?'Pedidos reais a cada minuto; nada sai daqui':'Testes sem movimentar as lojas']]){const el=document.getElementById(id);if(el)el.textContent=text;}
+  document.getElementById('environment').textContent=consulta?'CONSULTA · O Bling manda em estoque, pedidos e cadastro até a troca · Aqui só se consulta: alterações são feitas no Bling':state.homolog?`HOMOLOGAÇÃO · Cópia da base real desde ${homologSince} · Pedidos das lojas chegam a cada minuto · Nada sai para lojas, Bling ou SEFAZ`:page==='reference'?'REFERÊNCIA REAL · Somente leitura · Bling segue operando':state.catalog_import?'NÚCLEO PRÓPRIO · Carga inicial real · Operações locais sem envio às lojas':'SIMULAÇÃO LOCAL · Dados fictícios · Nenhuma loja conectada';
   document.getElementById('title').textContent=title;
   document.getElementById('subtitle').textContent=sub;
   document.querySelectorAll('nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
@@ -194,7 +197,7 @@ function message(value,error=false) {
 async function refresh() {
   const response=await fetch('/api/erp-local/state');
   if(!response.ok) throw new Error('Não foi possível ler o banco local.');
-  state=await response.json();applyAccessMenus();if(page==='stock'&&selectedStockSku)stockHistory=null;render();updateReferenceAge();
+  state=await response.json();window.erpConsulta=state.consulta||null;applyAccessMenus();if(page==='stock'&&selectedStockSku)stockHistory=null;render();updateReferenceAge();
   if(page==='stock'&&selectedStockSku)await loadStockHistory();
 }
 
