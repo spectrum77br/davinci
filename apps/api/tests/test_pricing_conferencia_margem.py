@@ -643,6 +643,151 @@ async def test_preco_vivo_e_precos_fixados_so_das_contas_da_equipe(
     }
 
 
+async def test_conferir_de_quem_e_de_equipe_so_nas_colunas_dela(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    make_user,
+    cenario,
+    auth_as: Callable,
+    monkeypatch,
+):
+    """Revisão M-14 (18/11/2026): o POST /conferencia passa pela cerca de
+    equipe da grade. Com `contas`, só as colunas que a pessoa vê; sem
+    `contas` (o "Geral" sem filtro da tela), todas elas — não o departamento
+    inteiro. A conferência não lê a integração de outra equipe nem apaga a
+    leitura dela. O administrador e quem vê todas as contas, como antes."""
+    from app import worker_pool
+    from app.models import CellStatus, LinkSyncStatus, PricingOverride, Product, ProductLink
+    from app.services.pricing import conferencia
+    from app.services.pricing.conferencia_leitores import LeituraAnuncio
+
+    c = cenario
+    monkeypatch.setattr(get_settings(), "env", "production")
+    enfileirados: list[str] = []
+
+    class _Fila:
+        async def enqueue_job(self, nome, job_id, *args):
+            enfileirados.append(job_id)
+            return SimpleNamespace(job_id=f"arq-{len(enfileirados)}")
+
+    async def _pool():
+        return _Fila()
+
+    monkeypatch.setattr(worker_pool, "get_arq_sync_pool", _pool)
+    lidas: list[str] = []
+
+    async def _leitor(cliente, vinculos):
+        lidas.append(cliente.nome)
+        leitura = LeituraAnuncio(preco=Decimal("59"), ativo=True, motivo=None)
+        return {lk.id: leitura for lk in vinculos}
+
+    async def _cliente(integ):
+        return SimpleNamespace(nome=integ.name)
+
+    monkeypatch.setattr(conferencia, "cliente_da_integracao", _cliente)
+    monkeypatch.setattr(conferencia, "carregar_leitores", lambda: {"ml": _leitor})
+    # Anúncio de cel_a nas duas equipes; Israel × cel_b com leitura antiga e
+    # agora NA (só a conferência de Israel pode tirá-la).
+    p = Product(user_id=admin.id, sku="cel-a.sa", name="cel a")
+    db.add(p)
+    await db.flush()
+    for conta, ext in ((c.londres, "MLB-L1"), (c.israel, "MLB-I1")):
+        db.add(
+            ProductLink(
+                user_id=admin.id,
+                product_id=p.id,
+                integration_id=conta.integration_id,
+                platform="ml",
+                external_id=ext,
+                last_sync_status=LinkSyncStatus.OK,
+                listing_type="gold_special",
+                catalog_listing=False,
+            )
+        )
+    db.add(
+        PricingConferencia(
+            pricing_account_id=c.israel.id,
+            pricing_product_id=c.cel_b.id,
+            department="celular",
+            preco_tabela=Decimal("59"),
+            situacao="conferida",
+            anuncios=[{"anuncio": "MLB-velho", "preco": 59.0, "ativo": True}],
+            job_id=c.job.id,
+        )
+    )
+    db.add(
+        PricingOverride(
+            user_id=admin.id,
+            pricing_product_id=c.cel_b.id,
+            pricing_account_id=c.israel.id,
+            cell_status=CellStatus.NA,
+        )
+    )
+    await db.commit()
+
+    londrino = await _londrino(db, make_user, PERM_VER)
+    auth_as(londrino)
+    url = "/api/pricing/conferencia"
+    for contas in ([c.israel.id, c.filha_israel.id], [c.londres.id, c.israel.id]):
+        corpo = {"department": "celular", "contas": [str(i) for i in contas]}
+        r = await client.post(url, json=corpo)
+        assert (r.status_code, r.json()["detail"]) == (400, {"code": "contas_invalidas"})
+    assert enfileirados == []
+
+    # As dele passam.
+    r = await client.post(url, json={"department": "celular", "contas": [str(c.londres.id)]})
+    assert r.status_code == 201, r.text
+    job = await db.get(BackgroundJob, uuid.UUID(r.json()["job_id"]))
+    assert job.payload == {"department": "celular", "contas": [str(c.londres.id)]}
+    job.status, job.finished_at = BackgroundJobStatus.FAILED, datetime.now(UTC)
+    await db.commit()
+
+    # Sem `contas`: as colunas dele, não o departamento inteiro.
+    r = await client.post(url, json={"department": "celular"})
+    assert r.status_code == 201, r.text
+    job_id = uuid.UUID(r.json()["job_id"])
+    job = await db.get(BackgroundJob, job_id)
+    da_equipe = sorted(str(x.id) for x in (c.londres, c.londres_sh, c.filha_londres))
+    assert job.payload == {"department": "celular", "contas": da_equipe}
+    await conferencia.run_conferir_precos(job_id=job_id, department="celular", user_id=londrino.id)
+    await db.refresh(job)
+    assert job.status == BackgroundJobStatus.SUCCEEDED, job.error
+    assert lidas == ["londres ml"]
+    israel_b = (
+        await db.execute(
+            select(PricingConferencia)
+            .where(
+                PricingConferencia.pricing_account_id == c.israel.id,
+                PricingConferencia.pricing_product_id == c.cel_b.id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    assert israel_b is not None and israel_b.job_id == c.job.id
+    corpo = (await _ver(client)).json()
+    assert corpo["job"]["parcial"] == 3
+
+    # Quem vê todas as contas da Tabela e o administrador: o departamento inteiro.
+    for quem in (
+        await make_user(
+            role=UserRole.USER,
+            permissions={
+                **PERM_VER,
+                "tabela_precos_todas_contas": {"view": True, "edit": False, "delete": False},
+            },
+        ),
+        admin,
+    ):
+        auth_as(quem)
+        r = await client.post(url, json={"department": "celular"})
+        assert r.status_code == 201, r.text
+        job = await db.get(BackgroundJob, uuid.UUID(r.json()["job_id"]))
+        assert job.payload == {"department": "celular"}
+        job.status, job.finished_at = BackgroundJobStatus.FAILED, datetime.now(UTC)
+        await db.commit()
+
+
 # =========================================================== Histórico
 
 

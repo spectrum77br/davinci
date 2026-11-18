@@ -485,7 +485,11 @@ async def test_erro_na_conta_marca_erro_conta_e_o_job_segue(
     assert amz.anuncios[0]["preco"] is None
     assert amz.anuncios[0]["motivo"] == "anúncio não encontrado"
     assert job.result["contas_com_erro"] == [
-        {"conta": "ml quebrado", "motivo": "o Mercado Livre recusou o acesso da conta (403)"}
+        {
+            "conta": "ml quebrado",
+            "contas": [str(cenario.quebrada.id)],
+            "motivo": "o Mercado Livre recusou o acesso da conta (403)",
+        }
     ]
     assert (job.result["anuncios"], job.result["lidos"], job.result["sem_leitura"]) == (5, 3, 2)
     assert job.result["situacoes"]["erro_conta"] == 1
@@ -678,6 +682,57 @@ async def test_conferencia_so_das_contas_escolhidas_nao_mexe_nas_outras(
     assert set(depois) == set(antes) - {(c.kit.id, c.x010.id)}
 
 
+async def _rodar_parcial(db: AsyncSession, dono: User, contas: list) -> BackgroundJob:
+    job = BackgroundJob(
+        type=BackgroundJobType.CONFERIR_PRECOS,
+        status=BackgroundJobStatus.PENDING,
+        created_by=dono.id,
+        payload={"department": "celular", "contas": [str(i) for i in contas]},
+    )
+    db.add(job)
+    await db.commit()
+    await conferencia.run_conferir_precos(job_id=job.id, department="celular", user_id=dono.id)
+    await db.refresh(job)
+    assert job.status == BackgroundJobStatus.SUCCEEDED, job.error
+    return job
+
+
+@pytest.mark.asyncio
+async def test_parcial_leva_adiante_o_aviso_das_contas_que_nao_releu(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    cenario,
+    auth_as: Callable,
+    marketplaces,
+):
+    """Revisão M-14: a parcial vira o último job do departamento (a data e o
+    ícone laranja da linha Conferir). A conferência inteira deixou a "ml
+    quebrado" sem leitura; uma parcial só da counhago não pode apagar esse
+    aviso. Quando a parcial relê a "ml quebrado" e dá certo, o aviso sai."""
+    c = cenario
+    marketplaces.ml.falha_em = {"ml quebrado"}
+    inteira = await _rodar(db, admin)
+    (aviso,) = inteira.result["contas_com_erro"]
+    assert (aviso["conta"], aviso["contas"]) == ("ml quebrado", [str(c.quebrada.id)])
+
+    parcial = await _rodar_parcial(db, admin, [c.kit.id])
+    assert parcial.result["contas_com_erro"] == [aviso]
+    auth_as(admin)
+    corpo = (await client.get("/api/pricing/conferencia", params={"department": "celular"})).json()
+    assert corpo["job"]["id"] == str(parcial.id)
+    assert corpo["job"]["parcial"] == 1
+    assert corpo["job"]["result"]["contas_com_erro"] == [aviso]
+
+    # A "ml quebrado" volta a ler: a parcial dela tira o aviso.
+    marketplaces.ml.falha_em = set()
+    assert (await _rodar_parcial(db, admin, [c.quebrada.id])).result["contas_com_erro"] == []
+    # A inteira não é parcial.
+    await _rodar(db, admin)
+    corpo = (await client.get("/api/pricing/conferencia", params={"department": "celular"})).json()
+    assert corpo["job"]["parcial"] is None
+
+
 @pytest.mark.asyncio
 async def test_limpeza_do_fim_nao_apaga_celula_conferida_sozinha_no_meio(
     db: AsyncSession, admin: User, cenario, marketplaces
@@ -759,7 +814,11 @@ async def test_falha_ao_gravar_uma_conta_mantem_a_leitura_anterior_dela(
     segundo = await _rodar(db, admin)
     assert segundo.status == BackgroundJobStatus.SUCCEEDED
     assert segundo.result["contas_com_erro"] == [
-        {"conta": "amazon nexus", "motivo": "falha ao gravar o resultado"}
+        {
+            "conta": "amazon nexus",
+            "contas": [str(cenario.conta_amz.id)],
+            "motivo": "falha ao gravar o resultado",
+        }
     ]
     gravadas = await _gravadas(db)
     # A célula da Amazon fica com a leitura anterior (a limpeza do fim não a
@@ -1426,7 +1485,9 @@ async def test_get_devolve_o_ultimo_job_e_as_celulas(
         "finished_at",
         "error",
         "result",
+        "parcial",
     }
+    assert corpo["job"]["parcial"] is None
     por_par = {(c["pricing_account_id"], c["pricing_product_id"]): c for c in corpo["celulas"]}
     kit = por_par[(str(cenario.kit.id), str(cenario.a003.id))]
     assert kit["preco_tabela"] == 59.0

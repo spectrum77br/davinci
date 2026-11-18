@@ -45,7 +45,10 @@ M-14, 18/11/2026: o botão "Atualizar ▾" da Tabela confere só as contas
 escolhidas: o POST aceita `contas` (ids das colunas, todas do departamento;
 outra → 400 'contas_invalidas'). Elas vão no payload do job e só as células
 delas são relidas e limpas — as das outras contas ficam como estavam. Sem
-`contas`, o departamento inteiro, como antes.
+`contas`, o departamento inteiro, como antes. Revisão M-14: para quem é de
+equipe, `contas` só entre as colunas que vê na grade, e sem `contas` vão
+todas elas (nunca as de outra equipe). O job da parcial vem com `parcial`
+(quantas contas) e leva adiante o aviso das contas que não releu.
 
 M-15, 18/11/2026: clicar no cartão vermelho confere só aquela célula. Mesma
 permissão do "Conferir anúncios" (`tabela_precos` ver) e só nas colunas que a
@@ -90,7 +93,7 @@ from app.models import (
     UserRole,
 )
 from app.models.pricing_conferencia import MARGEM_PADRAO_PCT
-from app.routers.pricing import _contas_da_grade, _resolve_root_segment_id
+from app.routers.pricing import _contas_da_grade, _escopo_precos, _resolve_root_segment_id
 from app.schemas.products import JobCreatedOut
 from app.services.pricing import conferencia
 
@@ -119,6 +122,8 @@ class ConferenciaJobOut(BaseModel):
     finished_at: datetime | None = None
     error: str | None = None
     result: dict[str, Any]
+    # Revisão M-14: conferência só de algumas contas → quantas; None = inteira.
+    parcial: int | None = None
 
 
 class ConferenciaCelulaOut(BaseModel):
@@ -199,11 +204,23 @@ async def _exigir_departamento(session: AsyncSession, department: str) -> UUID:
 
 
 async def _contas_escolhidas(
-    session: AsyncSession, root_id: UUID, pedidas: list[UUID] | None
+    session: AsyncSession, user: User, root_id: UUID, pedidas: list[UUID] | None
 ) -> list[str] | None:
     """M-14: as contas da conferência parcial, em texto e sem repetir (vão no
     payload do job). Todas precisam ser colunas deste departamento; senão
-    400 'contas_invalidas'. None = o departamento inteiro."""
+    400 'contas_invalidas'. None = o departamento inteiro.
+
+    Revisão M-14: quem é de equipe confere só as colunas que vê na grade
+    (`_contas_da_grade`, a cerca do GET e da célula); sem `pedidas`, todas
+    elas, nunca o departamento inteiro — senão leria no marketplace e
+    limparia as células de outra equipe. O administrador, e quem vê todas
+    as contas da Tabela, seguem como antes."""
+    if not _e_admin(user) and not (await _escopo_precos(session, user)).unrestricted:
+        visiveis = {c.id for c in await _contas_da_grade(session, user, root_id)}
+        ids = visiveis if pedidas is None else set(pedidas)
+        if not ids or not ids <= visiveis:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"code": "contas_invalidas"})
+        return sorted(str(i) for i in ids)
     if pedidas is None:
         return None
     ids = set(pedidas)
@@ -282,6 +299,7 @@ def _job_out(job: BackgroundJob | None) -> ConferenciaJobOut | None:
     em_andamento = job.status in (BackgroundJobStatus.PENDING, BackgroundJobStatus.RUNNING)
     if em_andamento and not conferencia.job_vivo(job):
         situacao, erro = BackgroundJobStatus.FAILED.value, ERRO_SEM_SINAL
+    contas = (job.payload or {}).get("contas")
     return ConferenciaJobOut(
         id=job.id,
         status=situacao,
@@ -291,6 +309,7 @@ def _job_out(job: BackgroundJob | None) -> ConferenciaJobOut | None:
         finished_at=job.finished_at,
         error=erro,
         result=job.result or {},
+        parcial=len(contas) if contas is not None else None,
     )
 
 
@@ -306,7 +325,7 @@ async def iniciar_conferencia(
 ) -> JobCreatedOut:
     department = body.department
     root_id = await _exigir_departamento(session, department)
-    contas = await _contas_escolhidas(session, root_id, body.contas)
+    contas = await _contas_escolhidas(session, user, root_id, body.contas)
     if not conferencia.conferencia_liberada():
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "so_no_servidor"})
     await conferencia.travar_departamento(session, department)
@@ -322,7 +341,7 @@ async def iniciar_conferencia(
         type=BackgroundJobType.CONFERIR_PRECOS,
         status=BackgroundJobStatus.PENDING,
         created_by=user.id,
-        payload={"department": department, **({"contas": contas} if contas else {})},
+        payload={"department": department, **({"contas": contas} if contas is not None else {})},
     )
     session.add(job)
     # Commit ANTES de enfileirar: o worker pode pegar o job na hora.

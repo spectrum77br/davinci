@@ -43,6 +43,11 @@ M-14, 18/11/2026 (botão "Atualizar ▾" da Tabela): o job pode trazer
 `contas` no payload (ids das colunas). Aí só as células dessas contas são
 lidas e gravadas, e a limpeza do fim só mexe nelas — o resultado das outras
 contas do departamento fica como estava. Sem `contas`, o departamento inteiro.
+Revisão M-14: a parcial vira o último job do departamento (a data e o ícone
+laranja da linha Conferir), então ela leva adiante o aviso das contas que não
+releu: o `contas_com_erro` dela começa com os da última conferência que
+terminou bem, menos as contas desta (`_avisos_que_ficam`). Cada aviso guarda
+as colunas (`contas`) das células que a integração não leu.
 
 M-15, 18/11/2026: conferir UMA célula (`conferir_celula`, o clique no cartão
 vermelho). Monta só aquela célula com as mesmas regras (`montar_celulas` com
@@ -237,6 +242,8 @@ class _Comeco:
     imediatas: Counter[str]
     # M-14: só estas contas (do payload do job); None = o departamento inteiro.
     contas: frozenset[UUID] | None = None
+    # Revisão M-14: na parcial, os avisos das contas que ela não relê.
+    avisos_de_antes: list[dict[str, Any]] = field(default_factory=list)
     # Quando as células foram montadas: a conferida sozinha (M-15) depois
     # disso tem dado mais novo e a limpeza do fim não a apaga.
     inicio: datetime | None = None
@@ -978,6 +985,9 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
             await _encerrar(job_id, BackgroundJobStatus.FAILED, erro=ERRO_EM_ANDAMENTO)
             return None
         contas = _contas_do_payload(job.payload)
+        avisos_de_antes = (
+            await _avisos_que_ficam(s, department, contas) if contas is not None else []
+        )
         agora = _agora()
         job.status = BackgroundJobStatus.RUNNING
         job.started_at = agora
@@ -1016,8 +1026,30 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
         leitores=leitores,
         imediatas=Counter(ln["situacao"] for ln in imediatas),
         contas=contas,
+        avisos_de_antes=avisos_de_antes,
         inicio=agora,
     )
+
+
+async def _avisos_que_ficam(
+    session: AsyncSession, department: str, contas: frozenset[UUID]
+) -> list[dict[str, Any]]:
+    """Revisão M-14: o `contas_com_erro` da última conferência que terminou
+    bem, sem as contas que a parcial vai reler — as outras continuam sem
+    leitura e o aviso delas não pode sumir só porque a parcial virou o último
+    job. Aviso sem `contas` (gravado antes da revisão) fica inteiro até a
+    próxima conferência do departamento inteiro."""
+    anterior = await ultimo_job(session, department, so_concluido=True)
+    ficam: list[dict[str, Any]] = []
+    for aviso in ((anterior.result or {}).get("contas_com_erro") or []) if anterior else []:
+        ids = aviso.get("contas")
+        if ids is None:
+            ficam.append(aviso)
+            continue
+        restantes = [i for i in ids if UUID(str(i)) not in contas]
+        if restantes:
+            ficam.append({**aviso, "contas": restantes})
+    return ficam
 
 
 def _contas_do_payload(payload: dict[str, Any] | None) -> frozenset[UUID] | None:
@@ -1090,18 +1122,23 @@ async def _conferir(job_id: UUID, department: str, *, prazo: float, log: Any) ->
     situacoes: Counter[str] = Counter(comeco.imediatas)
     gravadas = sum(comeco.imediatas.values())
     lidos = 0
-    contas_com_erro: list[dict[str, str]] = []
+    # Na parcial, começa com o aviso das contas que ela não releu (revisão M-14).
+    contas_com_erro: list[dict[str, Any]] = list(comeco.avisos_de_antes)
     for grupo, desfecho in zip(comeco.grupos, desfechos, strict=True):
         if isinstance(desfecho, BaseException):
             log.error("conferencia_conta_quebrou", erro=_motivo_curto(desfecho))
             desfecho = Desfecho(erro=_motivo_curto(desfecho), gravou=False)
         lidos += desfecho.lidos
+        # As colunas das células que ficaram sem leitura: a parcial seguinte
+        # tira do aviso só as que ela reler.
+        aviso = {
+            "conta": grupo.integracao.name,
+            "contas": sorted({str(c.conta.id) for c in grupo.celulas}),
+        }
         if desfecho.erro is not None:
-            contas_com_erro.append({"conta": grupo.integracao.name, "motivo": desfecho.erro})
+            contas_com_erro.append({**aviso, "motivo": desfecho.erro})
         if not desfecho.gravou:
-            contas_com_erro.append(
-                {"conta": grupo.integracao.name, "motivo": MOTIVO_FALHA_AO_GRAVAR}
-            )
+            contas_com_erro.append({**aviso, "motivo": MOTIVO_FALHA_AO_GRAVAR})
             continue
         gravadas += desfecho.gravadas
         situacao = SITUACAO_ERRO_CONTA if desfecho.erro is not None else SITUACAO_CONFERIDA
