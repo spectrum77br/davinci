@@ -1736,6 +1736,28 @@ async def test_sweep_nf_pega_depois(db, make_user, monkeypatch):
     assert NUMERO in await nf_auto_enfileirar._candidatos(db)
 
 
+def test_aviso_nf_temu_segue_a_chave(monkeypatch):
+    """A prévia da troca num pedido Temu (18/11): com a chave `nf_auto_temu`
+    ligada o sweep pega sozinho (sem aviso); desligada, "enfileire na aba NF"
+    — a mesma fonte do sweep (`plataformas_do_sweep`)."""
+    s = get_settings()
+    monkeypatch.setattr(s, "nf_auto_enfileirar", True, raising=False)
+    monkeypatch.setattr(s, "nf_auto_ml_amazon", False, raising=False)
+    monkeypatch.setattr(s, "nf_auto_ml", False, raising=False)
+    monkeypatch.setattr(s, "nf_auto_temu", True, raising=False)
+    p = troca._Pedido(
+        numero=NUMERO, bling_id=BLING_ID, numeroloja="PO-029-1", loja=LOJA,
+        data=datetime.now(UTC), prazo=None, pino=None, itens=[], pedido=None,
+        motivo=None, conversa=None, plataforma="temu",
+        loja_info=SimpleNamespace(archived_at=None, nf_faturador_id=uuid4()),
+    )
+    assert troca._aviso_nf(p) is None
+    monkeypatch.setattr(s, "nf_auto_temu", False, raising=False)
+    aviso = troca._aviso_nf(p)
+    assert aviso is not None
+    assert aviso.startswith("A loja está fora do envio automático da NF")
+
+
 # ─────────────── o Histórico ───────────────
 
 

@@ -65,6 +65,7 @@ flag `nf_auto_enfileirar` (checada no wrapper do worker) — default DESLIGADO.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -74,7 +75,15 @@ from sqlalchemy import func, or_, select, text
 
 from app.config import Settings, get_settings
 from app.db import session_scope
-from app.models import BlingOrder, NfCommand, NfFaturamento, NfImpressao, Product, StoreInfo
+from app.models import (
+    BlingOrder,
+    NfCommand,
+    NfEtiquetaArquivo,
+    NfFaturamento,
+    NfImpressao,
+    Product,
+    StoreInfo,
+)
 from app.redis_client import redis
 from app.services import nf_emissao_gerar, threema
 from app.services.advisory_lock import SYNC_NAMESPACE
@@ -96,6 +105,9 @@ _SITUACAO_EM_ABERTO = "6"
 # → 83955 com aviso, prioridade de estoque; a NF sai pelo MESMO faturador
 # Upseller e a cadeia da nuvem sobe o XML no pedido original (PO-0xx-…). Fica
 # FORA da janela; `nf_auto_temu` (ligada por padrão) é a chave de emergência.
+# A restrição Apple→RJ é da logística da SHOPEE (`_RESTRICAO_PLATAFORMAS`) e
+# NÃO vale pra Temu até o Eduardo dizer que vale; a Restrição/Exceções da tela
+# Lojas (passo 1b do sweep) vale pra Temu como pra qualquer loja.
 _PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "temu", "ml", "amazon")
 
 # ML e Amazon só entram no automático com a flag `nf_auto_ml_amazon` LIGADA
@@ -366,9 +378,16 @@ async def run_auto_enfileirar_nf() -> dict:
         pendings_por_fat: dict = {}
         for cmd in pendings:
             pendings_por_fat.setdefault(cmd.faturador_id, []).append(cmd)
-        # Fragmentado = algum faturador com MAIS de um pending (vale fundir
-        # mesmo sem candidato novo). 1 pending por faturador já está ótimo.
-        fragmentado = any(len(v) > 1 for v in pendings_por_fat.values())
+        # Fragmentado = MAIS de um pending no mesmo faturador E plataforma (vale
+        # fundir mesmo sem candidato novo). A plataforma entra porque o gerador
+        # nunca junta duas num comando: Shopee + Temu no "upseller 2%" dá 1
+        # pending de cada, que já está ótimo — refazer as duas planilhas a cada
+        # passada só gastaria GET no Bling enquanto a nuvem não pega.
+        plataforma_pend = await _plataforma_dos_comandos(session, pendings)
+        por_chave = Counter(
+            (cmd.faturador_id, plataforma_pend.get(cmd.id)) for cmd in pendings
+        )
+        fragmentado = any(n > 1 for n in por_chave.values())
         if not numeros and not fragmentado:
             return summary
 
@@ -1396,7 +1415,8 @@ async def _candidatos(
     — horário da tela Lojas). ML/Amazon ainda dependem da flag mestre
     `nf_auto_ml_amazon`. `item_index==0` porque bling_orders tem uma linha
     por item. Dedupe duplo: comando ativo na fila OU qualquer
-    status_faturamento já registrado (tentativa única). `limite=None` = todos
+    status_faturamento já registrado (tentativa única); na Temu, também quem já
+    tem etiqueta do fluxo manual (`_temu_feitos_a_mao`). `limite=None` = todos
     (sem o teto do tick). `pular_adiados`: fora quem o sem estoque adiou há
     menos de `_PULAR_ADIADO_S` (sem leitura / dúvida) — senão os adiados de
     número menor tomam as vagas do tick e o pedido novo nunca entra.
@@ -1439,6 +1459,7 @@ async def _candidatos(
 
     agora = _agora_brt()
     numeros: list[str] = []
+    temu: list[str] = []
     # Sábado da agência: guarda os estoques marcados da loja pra filtrar os
     # itens depois (numero → tags).
     sabado: dict[str, set[str]] = {}
@@ -1452,6 +1473,8 @@ async def _candidatos(
         ):
             continue
         numeros.append(numero)
+        if plataforma == "temu":
+            temu.append(numero)
         if (
             plataforma == "ml"
             and impressao != "correios"
@@ -1476,6 +1499,13 @@ async def _candidatos(
 
     em_fila = await _em_fila(session, "import_avulsa")
     numeros = [n for n in numeros if n not in ja_tratados and n not in em_fila]
+    # Temu feito à mão antes do automático (avulso + etiqueta): fora, senão
+    # sai a 2ª NF. Só a Temu — nas outras a etiqueta à parte tem outros usos.
+    restam = set(numeros)
+    temu_a_mao = await _temu_feitos_a_mao(session, [n for n in temu if n in restam])
+    if temu_a_mao:
+        logger.info("nf_auto_enfileirar_temu_feito_a_mao", pedidos=sorted(temu_a_mao))
+        numeros = [n for n in numeros if n not in temu_a_mao]
     # O brinde do pedido não pago (05/11/2026): com a oferta enviada e sem decisão,
     # o pedido espera o botão por até 12 h. Como o adiado, é espera (`pular_adiados`):
     # os avisos ainda o contam como candidato, ele volta sozinho e não toma vaga.
@@ -1490,6 +1520,54 @@ async def _candidatos(
             logger.info("nf_auto_enfileirar_adiados_pulados", pedidos=sorted(recentes))
             numeros = [n for n in numeros if n not in recentes]
     return numeros[:limite]
+
+
+async def _plataforma_dos_comandos(session, cmds) -> dict:
+    """id do comando → plataforma, pelo 1º pedido (loja do Bling → store_info) —
+    a mesma regra do /agent/lease (o gerador nunca mistura plataformas, então o
+    1º pedido vale pelo comando). Sem loja resolvível = None."""
+    primeiros = {cmd.id: str(cmd.numeros[0]) for cmd in cmds if cmd.numeros}
+    if not primeiros:
+        return {}
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, func.lower(func.trim(StoreInfo.platform)))
+            .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+            .where(BlingOrder.numero.in_(set(primeiros.values())))
+        )
+    ).all()
+    por_numero: dict[str, str | None] = {}
+    for numero, plataforma in rows:
+        por_numero.setdefault(numero, plataforma)
+    return {cid: por_numero.get(numero) for cid, numero in primeiros.items()}
+
+
+async def _temu_feitos_a_mao(session, numeros: list[str]) -> set[str]:
+    """Pedidos Temu que JÁ passaram pelo fluxo manual: etiqueta marcada no
+    nf_faturamento (`_etq_manual_marcar.py`, lote) ou guardada no
+    nf_etiqueta_arquivo, sem `status_faturamento`. O avulso manual não deixa
+    rastro no banco, então a etiqueta é o sinal de que a NF já saiu — se o
+    PATCH pra 21 falhou, o pedido segue em 6 e o sweep emitiria a 2ª NF. No
+    automático isso não acontece: o `status_faturamento` nasce no enfileirar,
+    antes de qualquer etiqueta."""
+    if not numeros:
+        return set()
+    com_status = (
+        await session.execute(
+            select(NfFaturamento.pedido_bling).where(
+                NfFaturamento.pedido_bling.in_(numeros),
+                NfFaturamento.status_etiqueta.is_not(None),
+            )
+        )
+    ).scalars().all()
+    com_arquivo = (
+        await session.execute(
+            select(NfEtiquetaArquivo.pedido_bling).where(
+                NfEtiquetaArquivo.pedido_bling.in_(numeros)
+            )
+        )
+    ).scalars().all()
+    return set(com_status) | set(com_arquivo)
 
 
 async def _segurados_pelo_brinde(session, numeros: list[str]) -> set[str]:

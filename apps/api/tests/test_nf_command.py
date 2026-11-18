@@ -518,8 +518,8 @@ async def test_lease_divide_trabalho_por_plataforma(
     db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
     """O robô da nuvem chama o lease SEM plataforma (o código dele não muda) e
-    por isso recebe só Shopee/TikTok; o Mac pede ML/Amazon e recebe só o dele.
-    Sem isso os dois disputariam a mesma fila FIFO."""
+    por isso recebe só Shopee/TikTok/Temu; o Mac pede ML/Amazon e recebe só o
+    dele. Sem isso os dois disputariam a mesma fila FIFO."""
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
     await _seed_loja_e_comando(db, admin, plataforma="shopee", numero="940001", loja="940901")
     await _seed_loja_e_comando(db, admin, plataforma="ml", numero="940002", loja="940902")
@@ -1345,9 +1345,14 @@ async def test_cadeia_temu_inteira_so_com_o_robo_da_nuvem(
 ):
     """Temu é "o mesmo processo da Shopee" (Eduardo, 18/11): com o faturador
     Upseller, o robô da nuvem — lease SEM plataforma, o código dele não muda —
-    leva o pedido Temu do import até a etiqueta. Nenhum elo (lease, /result,
-    emissão, etiqueta) filtra a plataforma, e o nº de busca na fila do Upseller
-    é o do pedido Temu (PO-0xx-…), onde a emissão sobe o XML."""
+    recebe cada elo do pedido Temu, do import até a etiqueta. Nenhum elo
+    (lease, /result, encadeamento) filtra a plataforma, e o nº de busca na fila
+    do Upseller é o do pedido Temu (PO-0xx-…), onde a emissão sobe o XML.
+
+    Prova SÓ o lado do servidor: quem manda 'done' em cada elo é o teste, não
+    o executor. A etiqueta Temu (Anjun) só fecha de verdade com o casamento no
+    passe em lote (CEP+nome/chave) e a página de declaração — sem isso o lote
+    a imprime, ela vira `nao_casadas` e o `imprimir_etiqueta` termina 'erro'."""
     from app.routers import nf as nf_router
 
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)

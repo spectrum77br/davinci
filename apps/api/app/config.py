@@ -997,9 +997,21 @@ class Settings(BaseSettings):
 
     # Temu no sweep, com as MESMAS regras da Shopee (Eduardo, 18/11: contínuo
     # 24/7, sem estoque → Aguardando Cancelamento com aviso, prioridade de
-    # estoque). LIGADA por padrão — é chave de emergência, não de teste:
-    # NF_AUTO_TEMU=false no .env tira a Temu do automático sem deploy. O
+    # estoque). LIGADA por padrão — é chave de emergência, não de teste. O
     # avulso Temu manual parou de ser pedido no mesmo dia (NF em dobro).
+    # PUBLICAR JUNTO com o casamento da etiqueta Anjun no lote + a declaração
+    # da Temu (nf_etiqueta_lote / _declaracao_do_bling): sem ele a etiqueta
+    # Temu some no passe em lote e o painel mostra 'erro' na etiqueta. Se este
+    # código tiver de sair antes, publique com NF_AUTO_TEMU=false.
+    # O QUE A CHAVE FAZ (e o que NÃO faz): NF_AUTO_TEMU=false só impede o sweep
+    # de criar import NOVO da Temu. Vale depois de recriar o worker E a api
+    # (backup do /opt/davinci/.env, depois `docker compose -f docker-compose.yml
+    # -f docker-compose.prod.yml up -d worker api`, sem build). Os comandos
+    # Temu que JÁ estão na fila (import, emitir_nf_upseller, imprimir_etiqueta)
+    # seguem indo pra nuvem (a Temu fica no _PLATAFORMAS_PADRAO do lease) e o
+    # recuperador segue devolvendo os 'failed' com attempts<3. Pra matar esses:
+    # attempts=3 + marca no nf_faturamento — escrita no banco, só com o OK do
+    # Eduardo.
     nf_auto_temu: bool = True
 
     # Conferência de estoque nos marketplaces (ML e Shopee): compara o que o

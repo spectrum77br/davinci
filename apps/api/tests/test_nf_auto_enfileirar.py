@@ -26,6 +26,7 @@ from app.models import (
     BlingKitComponent,
     BlingOrder,
     NfCommand,
+    NfEtiquetaArquivo,
     NfFaturador,
     NfFaturamento,
     NfImpressao,
@@ -536,10 +537,13 @@ def test_temu_ligada_por_padrao_e_fora_da_janela(monkeypatch: pytest.MonkeyPatch
     assert "temu" not in nf_auto_enfileirar.plataformas_do_sweep()
 
 
-async def _seed_temu_e_shopee_no_mesmo_upseller(db: AsyncSession, admin: User) -> None:
+async def _seed_temu_e_shopee_no_mesmo_upseller(
+    db: AsyncSession, admin: User, *, conta_temu: str = "barbosa", conta_shopee: str = "mega"
+) -> uuid.UUID:
     """Como em prod: a loja Temu "barbosa" e uma Shopee no MESMO faturador
     "upseller 2%" (modo upseller, sku_fonte e3), um pedido 'Em aberto' em cada.
-    O Temu com o endereço terminando em vírgula (6 de 60 Temu; 309594)."""
+    O Temu com o endereço terminando em vírgula (6 de 60 Temu; 309594).
+    Devolve o id do faturador."""
     fat = NfFaturador(
         nome="upseller 2%", modo="upseller", nf_cheia=False, percentual="2",
         sku_fonte="e3", nome_fonte="produto", ads_power="58",
@@ -548,9 +552,9 @@ async def _seed_temu_e_shopee_no_mesmo_upseller(db: AsyncSession, admin: User) -
     db.add(fat)
     await db.flush()
     await _seed_loja(db, admin, plataforma="temu", bling_store_id="930071",
-                     account_name="barbosa", faturador_id=fat.id)
+                     account_name=conta_temu, faturador_id=fat.id)
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930072",
-                     account_name="mega", faturador_id=fat.id)
+                     account_name=conta_shopee, faturador_id=fat.id)
     await _seed_pedido(db, numero="830071", loja="930071", sku="a076",
                        bling_id=700071, itemvalor=36.60, endereco_destino="Rua Tucuna,")
     await _seed_pedido(db, numero="830072", loja="930072", sku="a077",
@@ -558,6 +562,17 @@ async def _seed_temu_e_shopee_no_mesmo_upseller(db: AsyncSession, admin: User) -
     db.add(Product(user_id=admin.id, sku="a076", name="Mala A076", stock=3))
     db.add(Product(user_id=admin.id, sku="a077", name="Mala A077", stock=3))
     await db.commit()
+    return fat.id
+
+
+def _celula(planilha: bytes, header: str, row: int = 4):
+    """Célula da coluna `header` (cabeçalho do modelo Upseller) na linha `row`."""
+    from openpyxl import load_workbook
+
+    from app.services import nf_upseller
+
+    ws = load_workbook(io.BytesIO(planilha)).active
+    return ws.cell(row=row, column=nf_upseller._HEADERS.index(header) + 1).value
 
 
 @pytest.mark.asyncio
@@ -606,8 +621,7 @@ async def test_sweep_temu_sai_em_planilha_propria_no_mesmo_faturador(
     assert c("Endereço 1") == "Rua Tucuna"
     assert ws.cell(row=5, column=2).value is None  # só o pedido Temu no arquivo
 
-    shopee = load_workbook(io.BytesIO(por_pedido[("830072",)].planilha)).active
-    assert shopee.cell(row=4, column=nf_upseller._HEADERS.index("Nome da Loja*") + 1).value == "mega"
+    assert _celula(por_pedido[("830072",)].planilha, "Nome da Loja*") == "mega"
 
     fats = {f.pedido_bling: f for f in (await db.execute(select(NfFaturamento))).scalars().all()}
     assert fats["830071"].status_faturamento == "processando"
@@ -633,12 +647,98 @@ async def test_sweep_nf_auto_temu_desligada_so_sai_shopee(
     fats = (await db.execute(select(NfFaturamento.pedido_bling))).scalars().all()
     assert "830071" not in fats
 
+    id_shopee = cmds[0].id
+
+    # Religando: o Temu novo chega com o Shopee ainda pendente no MESMO
+    # faturador (o caso comum em prod) — sai em comando próprio, nunca
+    # misturado, e o comando da Shopee fica o mesmo (anti-churn).
     monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
     summary = await run_auto_enfileirar_nf()
     assert summary["candidatos"] == 1
     db.expire_all()
     cmds = (await db.execute(select(NfCommand))).scalars().all()
-    assert sorted(n for c in cmds for n in c.numeros) == ["830071", "830072"]
+    assert {tuple(c.numeros) for c in cmds} == {("830071",), ("830072",)}
+    shopee = next(c for c in cmds if c.numeros == ["830072"])
+    assert shopee.id == id_shopee
+    assert _celula(next(c for c in cmds if c.numeros == ["830071"]).planilha,
+                   "Nome da Loja*") == "barbosa"
+
+
+@pytest.mark.asyncio
+async def test_sweep_temu_e_shopee_com_o_mesmo_nome_de_loja(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Temu "jlas" e Shopee "atlas" (que no Upseller também chama "jlas") no
+    mesmo faturador: o agrupamento é por faturador+plataforma, nunca pelo nome
+    — 2 comandos, as duas planilhas com Loja = "jlas", cada uma só com o seu
+    pedido."""
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
+    await _seed_temu_e_shopee_no_mesmo_upseller(
+        db, admin, conta_temu="jlas", conta_shopee="atlas"
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["comandos"] == 2
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert {tuple(c.numeros) for c in cmds} == {("830071",), ("830072",)}
+    for cmd in cmds:
+        assert _celula(cmd.planilha, "Nome da Loja*") == "jlas"
+        assert _celula(cmd.planilha, "Nº do Pedido da Loja*") == cmd.numeros[0]
+        assert _celula(cmd.planilha, "Nome da Loja*", row=5) is None
+
+
+@pytest.mark.asyncio
+async def test_sweep_pending_shopee_e_temu_no_mesmo_faturador_nao_refaz(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Anti-churn por faturador+plataforma: 1 pending Shopee + 1 pending Temu
+    no mesmo "upseller 2%" já está ótimo (o gerador nunca junta os dois). Sem
+    candidato novo, a passada não refaz as planilhas — nem GET no Bling."""
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
+    fat_id = await _seed_temu_e_shopee_no_mesmo_upseller(db, admin)
+    for numero in ("830071", "830072"):
+        db.add(NfFaturamento(pedido_bling=numero, status_faturamento="processando"))
+        db.add(_cmd_pending(fat_id, [numero]))
+    await db.commit()
+
+    async def _nao_gera(*_a, **_k):
+        raise AssertionError("não devia refazer as planilhas")
+
+    monkeypatch.setattr(nf_emissao_gerar, "gerar_por_faturador", _nao_gera)
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 0
+    assert summary["comandos"] == 0
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert len(cmds) == 2
+    assert {c.planilha for c in cmds} == {b"velho"}
+
+
+@pytest.mark.asyncio
+async def test_sweep_temu_feito_a_mao_nao_sai_de_novo(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Temu que passou pelo fluxo manual (avulso + etiqueta subida à mão) e
+    ficou em 6 porque o PATCH pra 21 falhou: a etiqueta marcada no
+    nf_faturamento ou guardada no nf_etiqueta_arquivo diz que a NF já saiu —
+    o sweep não pega (seria a 2ª NF). A Shopee nas mesmas condições segue
+    como antes."""
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
+    await _seed_temu_e_shopee_no_mesmo_upseller(db, admin)
+    await _seed_loja(db, admin, plataforma="temu", bling_store_id="930073",
+                     account_name="eron")
+    await _seed_pedido(db, numero="830073", loja="930073", sku="a076", bling_id=700073)
+    await _seed_pedido(db, numero="830074", loja="930073", sku="a076", bling_id=700074)
+    db.add(NfFaturamento(pedido_bling="830071", status_etiqueta="ok"))
+    db.add(NfFaturamento(pedido_bling="830072", status_etiqueta="ok"))
+    db.add(NfEtiquetaArquivo(pedido_bling="830073", filename="830073.pdf",
+                             content_type="application/pdf", size_bytes=3, blob=b"pdf"))
+    await db.commit()
+
+    assert await nf_auto_enfileirar._candidatos(db) == ["830072", "830074"]
 
 
 @pytest.mark.asyncio
