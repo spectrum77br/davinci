@@ -290,6 +290,7 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     erp = LocalERP(args.database)
+    log.info("leituras destravadas na partida %s", native_ingest.release_leases(erp))
     rounds, checked_on, previewed_on, last_full = 0, None, None, None
     while True:
         full = last_full is None or time.monotonic() - last_full >= max(60, args.every)

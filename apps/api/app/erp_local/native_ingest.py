@@ -7,6 +7,7 @@ window using the last update already seen.
 """
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -110,6 +111,20 @@ def _account(db, channel, store):
     if not row:
         raise ERPError("ingest_store", "Conta sem recepção configurada.", 404)
     return row
+
+
+def release_leases(erp):
+    """At the worker's start: locks left by a process that was stopped mid-read (a deploy) would
+    hold that store for up to LEASE. One worker reads the stores, so none of them is in use."""
+    with erp.connection() as db:
+        try:
+            held = db.execute(
+                "UPDATE ingest_accounts SET lease_until=NULL WHERE lease_until IS NOT NULL"
+            ).rowcount
+        except sqlite3.OperationalError:  # base without the reception yet
+            return 0
+        db.commit()
+    return held
 
 
 def _take_lease(erp, channel, store, now):

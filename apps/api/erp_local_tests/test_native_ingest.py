@@ -712,3 +712,13 @@ def test_own_order_numbers_start_after_bling_range():
 
     assert bling_compat.own_number(bling_compat.FIRST_OWN_ID + 1) == 900_001
     assert bling_compat.own_number(27263613894) == 27263613894
+
+
+def test_a_new_worker_releases_locks_left_by_a_stopped_one(account):
+    """A deploy stops the worker mid-read: the next one must not wait the lock out."""
+    assert native_ingest._take_lease(account, CHANNEL, ACCOUNT, NOW) is not None
+    assert native_ingest._take_lease(account, CHANNEL, ACCOUNT, NOW + timedelta(minutes=1)) is None
+    assert native_ingest.release_leases(account) == 1
+    assert (
+        native_ingest._take_lease(account, CHANNEL, ACCOUNT, NOW + timedelta(minutes=1)) is not None
+    )
