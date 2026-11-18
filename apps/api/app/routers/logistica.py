@@ -124,6 +124,7 @@ from app.services import (
     logistica_robo,
     logistica_rules,
     logistica_shopee,
+    logistica_suspensao_me,
     logistica_tiktok,
     logistica_track,
     logistica_track_sync,
@@ -1345,15 +1346,16 @@ async def suspender_entrega(
     user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> LogisticaOut:
     """Botão "Suspender entrega" (Amazon Envio próprio com rastreio dos
-    Correios, ainda não entregue): enfileira o comando pro robô clicar no
-    painel do Melhor Envio. Irreversível lá; o frete não volta."""
+    Correios, ainda não entregue). Desde 18/11/2026 pede direto na API do Melhor
+    Envio e a linha volta com o resultado (`logistica_suspensao_me`); sem o token
+    do ME, enfileira pro robô como antes. Irreversível lá; o frete não volta."""
     c = (
         await session.execute(select(Logistica).where(Logistica.id == logistica_id))
     ).scalar_one_or_none()
     if c is None:
         raise HTTPException(404, detail={"code": "logistica_not_found"})
     try:
-        await logistica_robo.solicitar_suspensao(session, c, user_id=user.id)
+        await logistica_suspensao_me.suspender(session, c, user_id=user.id)
     except logistica_robo.RoboError as e:
         raise HTTPException(422, detail={"code": e.code}) from e
     await session.refresh(c)

@@ -1863,7 +1863,13 @@ async function suspenderEntrega(c: Logistica) {
     const updated = await api<Logistica>(`/api/logistica/${c.id}/suspender-entrega`, { method: 'POST' })
     const i = rows.value.findIndex((x) => x.id === c.id)
     if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
-    toasts.success('Suspensão enviada ao robô', 'O executor vai clicar no Melhor Envio e a linha mostra o resultado.')
+    // 18/11/2026: o servidor pede direto na API do Melhor Envio e já volta com o
+    // resultado; só sem o acesso ao ME ele cai na fila do robô (pendente).
+    if (updated.suspensao_status === 'solicitada')
+      toasts.success('Suspensão pedida ao Melhor Envio', 'Eles repassam à transportadora; o rastreio dos Correios mostra quando for recebida.')
+    else if (updated.suspensao_status === 'falhou')
+      toasts.error('O Melhor Envio não aceitou a suspensão', resumoDetalheRobo(updated.suspensao_detalhe))
+    else toasts.success('Suspensão enviada ao robô', 'O executor vai clicar no Melhor Envio e a linha mostra o resultado.')
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     toasts.error('Não foi possível pedir a suspensão', code)

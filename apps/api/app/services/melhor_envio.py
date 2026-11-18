@@ -570,3 +570,42 @@ async def abrir_atendimento(
         )
     corpo = _json_ou_texto(r)
     return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}
+
+
+# ---------------------------------------------------------------------------
+# Suspender a entrega pela API (18/11/2026)
+# ---------------------------------------------------------------------------
+# O robô de tela (executor no Mac mini) falhava no 309193 e no 298281 ("o menu de
+# ações abriu, mas Suspender entrega não apareceu") com a opção visível no site. O
+# JS do painel do ME (dash.js, `suspendOrder`) não clica em nada mágico: é
+# `POST /api/v2/me/orders/{id do envio}/suspend` com {reason, reason_description};
+# os motivos vêm de `GET /api/v2/me/freight-arrangements/suspension-delivery/reasons`
+# (lidos na tela em 18/11). `reason_description` é obrigatório só no "other" (≤280).
+# A resposta traz `order` e `suspended_at`; o site mostra "Solicitação enviada para
+# transportadora" — o ME não garante que a transportadora aceite.
+MOTIVOS_SUSPENSAO: dict[str, str] = {
+    "customer_payment_not_cleared": "O pagamento do meu cliente não compensou",
+    "suspected_fraud": "Suspeita de fraude",
+    "customer_withdrew_purchase": "Meu cliente desistiu da compra",
+    "product_sent_error": "Erro no produto enviado",
+    "wrong_address": "Endereço errado",
+    "other": "Outro",
+}
+# O mesmo do robô (`MELHORENVIO_MOTIVO` do executor).
+MOTIVO_SUSPENSAO_PADRAO = "customer_withdrew_purchase"
+
+
+async def suspender_envio(
+    token: str, envio_id: str, *, motivo: str, descricao: str = ""
+) -> tuple[int, dict]:
+    """POST /api/v2/me/orders/{envio}/suspend — o "Solicitar" da janela do ME."""
+    if not _ENVIO_ID_OK.match(envio_id or "") or motivo not in MOTIVOS_SUSPENSAO:
+        return 400, {"message": "envio ou motivo inválido"}
+    async with httpx.AsyncClient(timeout=30) as cli:
+        r = await cli.post(
+            f"{ME_BASE_PROD}/api/v2/me/orders/{envio_id}/suspend",
+            headers=_headers_leitura(token),
+            json={"reason": motivo, "reason_description": (descricao or "")[:280]},
+        )
+    corpo = _json_ou_texto(r)
+    return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}
