@@ -12,10 +12,15 @@ from app.erp_local.initial_load import bootstrap_missing_prices, bootstrap_real_
 from app.erp_local.reference import SSHReference
 
 
+def local_data(source=None):
+    """data/erp-local of the repository; in a container (/app/app/erp_local) the working folder."""
+    parents = Path(source or __file__).resolve().parents
+    return (parents[4] if len(parents) > 4 else Path.cwd()) / "data/erp-local"
+
+
 def main():
     parser = argparse.ArgumentParser(description="DaVinci ERP local, com dados fictícios")
-    default = Path(__file__).resolve().parents[4] / "data/erp-local/local.sqlite3"
-    parser.add_argument("--database", type=Path, default=default)
+    parser.add_argument("--database", type=Path, default=local_data() / "local.sqlite3")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--empty", action="store_true", help="Não carregar cenário inicial")

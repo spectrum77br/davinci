@@ -67,7 +67,9 @@ def render(erp, identifier):
 
 
 def readiness():
-    path = Path(__file__).resolve().parents[4] / "data/erp-local/certificate-verification-read.json"
+    parents = Path(__file__).resolve().parents  # in the container the code is 3 folders deep
+    base = parents[4] if len(parents) > 4 else Path.cwd()
+    path = base / "data/erp-local/certificate-verification-read.json"
     if not path.is_file():
         return {"captured_at": None, "certificates": [], "external_emission": False}
     data = json.loads(path.read_text())
