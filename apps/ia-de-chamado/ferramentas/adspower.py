@@ -169,7 +169,11 @@ def achar(conta: str, plataforma: str | None) -> dict:
             continue
         if plat and plat not in plats_p:
             continue
-        operacao = _sem_acento(p["grupo"]) in GRUPOS_OPERACAO
+        grupo = _sem_acento(p["grupo"])
+        # 17/11/2026: os grupos de operação viraram "Equipe 1 - <Londres|Israel|
+        # Marrocos> - Vendedor N" — sem isto a cópia da Contabilidade empatava de
+        # novo e a IA parou em "confiança baixa" (307238 Poofy, 304380 Inova).
+        operacao = grupo in GRUPOS_OPERACAO or grupo.startswith("equipe ")
         # nome "Loja - Plataforma" exato no grupo de operação é o preferido
         so_essa = len(plats_p) == 1
         candidatos.append((0 if operacao else 1, 0 if so_essa else 1, p))
