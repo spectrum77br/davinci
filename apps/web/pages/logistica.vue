@@ -3713,11 +3713,23 @@ async function aplicarStatusBling(c: Logistica) {
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
                   <td v-if="ehAmazonTab" class="truncate px-1.5 py-1.5 text-center text-[11px]" :title="c.suspensao_detalhe || ''">
-                    <span
+                    <div
                       v-if="suspensaoResumo(c)"
+                      class="truncate"
                       :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
-                    >{{ suspensaoResumo(c) }}</span>
-                    <span v-else class="text-muted-foreground">—</span>
+                    >{{ suspensaoResumo(c) }}</div>
+                    <span v-else-if="!podeSuspender(c)" class="text-muted-foreground">—</span>
+                    <!-- 18/11/2026 (Vinicius: "coloca o suspender entrega também na primeira
+                         tela"): o mesmo botão do Raio-X, com a mesma confirmação. -->
+                    <button
+                      v-if="podeSuspender(c)"
+                      type="button"
+                      class="mt-0.5 inline-flex items-center gap-0.5 whitespace-nowrap rounded-md border border-rose-300 bg-background px-1.5 py-0.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-700 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                      title="Pede ao Melhor Envio a suspensão da entrega (o pacote volta). Não tem volta e o frete não é devolvido."
+                      :disabled="suspendendo.has(c.id)"
+                      data-suspender-linha
+                      @click.stop="suspenderEntrega(c)"
+                    ><Ban class="size-3" /> {{ suspendendo.has(c.id) ? 'Pedindo…' : 'Suspender' }}</button>
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
