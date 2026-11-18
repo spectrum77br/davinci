@@ -116,7 +116,7 @@ function storeSaleDetailPage(d){
   const fc=(label,value,wide)=>`<div class="detail-field${wide?' wide':''}"><span>${label}</span><strong>${value===undefined||value===null||value===''?'—':copyText(String(value),label.toLowerCase())}</strong></div>`;
   const grid=fields=>`<div class="detail-grid">${fields.join('')}</div>`,r=d.recipient||{},b=d.buyer||{},money=v=>v===null||v===undefined?'—':brl(v).replace(/^R\$\s*/,'');
   const pickJson=esc(JSON.stringify({channel:d.channel,store:d.store_id,number:d.number}));
-    const items=rowsHtml(d.items.map(i=>[esc(i.name||i.seller_sku||'Sem descrição')+(i.linked?'':' <span class="badge warn">sem vínculo</span>'),esc(i.sku||i.seller_sku||'—'),'UN',esc(i.quantity||'—'),money(i.unit_price),money(i.total)]));
+    const items=rowsHtml(d.items.map(i=>[esc(i.name||i.seller_sku||'Sem descrição')+(i.linked?'':' <span class="badge warn">sem vínculo</span>'),esc(i.sku||i.seller_sku||'—')+(i.lot_from_bling?' <span class="badge" title="Lote que está no Bling">lote do Bling</span>':''),'UN',esc(i.quantity||'—'),money(i.unit_price),money(i.total)]));
   return `<section class="panel sale-detail"><div class="sale-detail-head"><button type="button" class="secondary" id="store-sale-back">Voltar</button><h2>Pedido de venda - ${esc(d.number)}</h2><span class="store-cell">${storeMark(d.channel)}${esc(d.store)}</span></div>
 <h3>Dados do cliente</h3>${grid([f('Cliente',b.name,true),f('CPF/CNPJ',b.document),f('Loja',d.store),f('Situação na loja',d.status)])}
 <div class="reference-tabs"><button class="active">Itens do pedido de venda</button></div>${table(['Descrição','Código','Un','Quantidade','Preço un','Preço total'],items)}

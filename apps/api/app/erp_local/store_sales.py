@@ -114,6 +114,8 @@ def _copied(db, bling):
 
 
 def listing(db, query="", offset=0, limit=50, situation=None):
+    from app.erp_local import bling_mirror
+
     names, sales, bling = _names(db), [], _bling_orders(db)
     accounts = db.execute("SELECT DISTINCT channel,store FROM native_order_observations").fetchall()
     for channel, store in accounts:
@@ -147,6 +149,7 @@ def listing(db, query="", offset=0, limit=50, situation=None):
                     "total": f"{total:.2f}",
                     "buyer": (captured or {}).get("buyer", {}).get("name") or "",
                     "skus": skus,
+                    "bling_skus": sorted({b["sku"] for b in bling_mirror.items(db, key)}),
                     "blocked": [REASONS.get(r, r) for r in sorted(reasons)],
                     "bling_number": str((bling.get(key) or {}).get("number") or ""),
                     "bling_situation": _situation_id((bling.get(key) or {}).get("situation")),
@@ -159,7 +162,16 @@ def listing(db, query="", offset=0, limit=50, situation=None):
             s
             for s in sales
             if text
-            in " ".join([s["number"], s["store"], s["status"], s["buyer"], *s["skus"]]).casefold()
+            in " ".join(
+                [
+                    s["number"],
+                    s["store"],
+                    s["status"],
+                    s["buyer"],
+                    *s["skus"],
+                    *s.get("bling_skus", []),
+                ]
+            ).casefold()
         ]
     if situation is not None:
         sales = [s for s in sales if s["bling_situation"] == situation]

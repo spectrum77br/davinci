@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS bling_mirror_stock (
  sku TEXT PRIMARY KEY, available TEXT NOT NULL, reserved TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bling_mirror_orders (
  store_number TEXT PRIMARY KEY, number TEXT NOT NULL, situation TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bling_mirror_items (store_number TEXT PRIMARY KEY, items TEXT NOT NULL);
 """
 STOCK_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM (SELECT bling_product_id::text AS id,"
@@ -25,7 +26,10 @@ STOCK_SQL = (
 )
 ORDERS_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM (SELECT DISTINCT ON (numeroloja)"
-    " numeroloja::text AS store_number, numero::text AS number, situacao::text AS situation"
+    " numeroloja::text AS store_number, numero::text AS number, situacao::text AS situation,"
+    " (SELECT coalesce(json_agg(json_build_object('sku', i->>'codigo', 'quantity',"
+    " i->>'quantidade')), '[]') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(itens)='array'"
+    " THEN itens ELSE '[]'::jsonb END) i) AS items"
     " FROM davinci.bling_orders WHERE data >= current_date - 30 AND numeroloja IS NOT NULL"
     " ORDER BY numeroloja, numero DESC) t"
 )
@@ -150,8 +154,96 @@ def apply_orders(erp, rows):
                 if r.get("store_number")
             ],
         )
+        db.execute("DELETE FROM bling_mirror_items")
+        db.executemany(
+            "INSERT OR REPLACE INTO bling_mirror_items VALUES (?,?)",
+            [
+                (str(r["store_number"]), json.dumps(lines))
+                for r in rows
+                if r.get("store_number") and (lines := _lines(r.get("items")))
+            ],
+        )
         db.commit()
     return {"orders": len(rows)}
+
+
+def _lines(raw):
+    """Bling's items of a sale (code with its lot, quantity), or [] when they do not read well."""
+    if not isinstance(raw, list):
+        return []
+    lines = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return []
+        sku, quantity = str(item.get("sku") or "").strip(), _number(item.get("quantity"))
+        if not sku or len(sku) > 120 or quantity is None or quantity <= 0:
+            return []
+        lines.append({"sku": sku, "quantity": str(quantity)})
+    return lines
+
+
+def family(sku):
+    """The product without its lot: dg078.pi+a001.pi and dg078.sp+a001.sp are one family."""
+    from app.erp_local import stock_families
+
+    parts = [p.strip() for p in (sku or "").lower().split("+") if p.strip()]
+    return "+".join(
+        p[: -(len(stock_families.lot(p)) + 1)] if stock_families.lot(p) else p for p in parts
+    )
+
+
+def items(db, store_number):
+    try:
+        row = db.execute(
+            "SELECT items FROM bling_mirror_items WHERE store_number=?", (str(store_number),)
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - table appears with the first mirror pass
+        return []
+    return json.loads(row[0]) if row else []
+
+
+def with_bling_lots(db, store_number, lines):
+    """While Bling has the sale, its items show the lot Bling has (the one DaVinci's robot chose),
+    not the lot the listing points to. Paired by product and quantity: a line Bling split in two
+    lots shows both. Only what is shown changes; the store's values stay as read."""
+    left = [{"sku": b["sku"], "quantity": Decimal(b["quantity"])} for b in items(db, store_number)]
+    if not left:
+        return lines
+    shown = []
+    for line in lines:
+        mine = family(line.get("sku") or line.get("seller_sku"))
+        need = line.get("quantity")
+        taken = []
+        for b in left:
+            if not mine or family(b["sku"]) != mine or b["quantity"] <= 0:
+                continue
+            if need is not None and need <= 0:
+                break
+            use = b["quantity"] if need is None else min(b["quantity"], need)
+            taken.append((b["sku"], use))
+            b["quantity"] -= use
+            if need is not None:
+                need -= use
+        if not taken or (len(taken) == 1 and taken[0][0] == line.get("sku")):
+            shown.append(line)
+            continue
+        if need:  # Bling has fewer of this product: the rest stays as the store has it
+            taken.append((line.get("sku") or "", need))
+        price = line.get("unit_price")
+        for sku, quantity in taken:
+            row = db.execute("SELECT name FROM products WHERE sku=?", (sku,)).fetchone()
+            shown.append(
+                {
+                    **line,
+                    "sku": sku,
+                    "name": row["name"] if row else line.get("name", ""),
+                    "quantity": quantity,
+                    "total": quantity * price if price is not None else None,
+                    "erp_sku": line.get("sku") or "",
+                    "lot_from_bling": sku != (line.get("sku") or ""),
+                }
+            )
+    return shown
 
 
 def stock_of(db, sku):

@@ -124,3 +124,70 @@ def test_papers_refuse_bad_selection_and_change_nothing(erp):
                 store_sales_docs.sheet_csv(db, bad)
         store_sales_docs.declaration_html(db, [PICK])
         assert db.execute("SELECT count(*) FROM documents").fetchone()[0] == before
+
+
+def test_while_bling_has_the_sale_its_items_show_the_lot_bling_has(erp):
+    from decimal import Decimal
+
+    from app.erp_local import bling_mirror, store_sales
+
+    assert bling_mirror.family("dg078.pi+a001.pi") == bling_mirror.family("DG078.sp+a001.sp")
+    assert bling_mirror.family("dg078") == "dg078"
+    observe(erp, "D1", "paid", sku="dg078.sp")
+    observe(erp, "D2", "paid", sku="dg078.sp")
+    bling_mirror.apply_orders(
+        erp,
+        [
+            {
+                "store_number": "D1",
+                "number": "9001",
+                "situation": "6",
+                "items": [{"sku": "dg078.pi", "quantity": "1"}],
+            },
+            {"store_number": "D2", "number": "9002", "situation": "6", "items": "não é lista"},
+        ],
+    )
+    with erp.connection() as db:
+        sale = store_sales_docs.as_json(store_sales_docs.detail(db, "ml", "conta", "D1"))
+        (line,) = sale["items"]
+        assert line["sku"] == "dg078.pi" and line["lot_from_bling"] is True
+        assert line["seller_sku"] == "dg078.sp" and sale["items_total"] == "10.00"
+        (kept,) = store_sales_docs.detail(db, "ml", "conta", "D2")["items"]
+        assert "lot_from_bling" not in kept
+        found = store_sales.listing(db, "dg078.pi")
+        assert [s["number"] for s in found["items"]] == ["D1"]
+        # Bling split two units in two lots: both show, each with its quantity and price.
+        lines = [
+            {
+                "sku": "dg078.sp",
+                "seller_sku": "x",
+                "name": "",
+                "quantity": Decimal(2),
+                "unit_price": Decimal(10),
+                "total": Decimal(20),
+                "linked": True,
+            }
+        ]
+    bling_mirror.apply_orders(
+        erp,
+        [
+            {
+                "store_number": "D3",
+                "number": "9003",
+                "situation": "6",
+                "items": [
+                    {"sku": "dg078.sp", "quantity": "1"},
+                    {"sku": "dg078.ra", "quantity": "1"},
+                ],
+            }
+        ],
+    )
+    with erp.connection() as db:
+        shown = bling_mirror.with_bling_lots(db, "D3", lines)
+        assert [(s["sku"], s["quantity"], s["total"]) for s in shown] == [
+            ("dg078.sp", Decimal(1), Decimal(10)),
+            ("dg078.ra", Decimal(1), Decimal(10)),
+        ]
+        assert bling_mirror.with_bling_lots(db, "sem-bling", lines) == lines
+        same = bling_mirror.with_bling_lots(db, "D3", [{**lines[0], "quantity": Decimal(1)}])
+        assert same[0]["sku"] == "dg078.sp" and "lot_from_bling" not in same[0]

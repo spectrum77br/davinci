@@ -11,7 +11,7 @@ import json
 from decimal import Decimal, InvalidOperation
 from html import escape
 
-from app.erp_local import native_ingest, recipient_capture, store_sales
+from app.erp_local import bling_mirror, native_ingest, recipient_capture, store_sales
 from app.erp_local.core import ERPError
 
 MAX_PICKS = 200
@@ -88,6 +88,7 @@ def detail(db, channel, store, number):
                 }
             )
     items_total = sum((i["total"] for i in items if i["total"] is not None), Decimal(0))
+    items = bling_mirror.with_bling_lots(db, number, items)
     live = [o for o in orders if not native_ingest._is_cancelled(o)] or orders
     charges = native_ingest.store_charges(db, channel, store, number, live)
     if channel in native_ingest.CHARGED:
