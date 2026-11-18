@@ -327,9 +327,12 @@ def test_ler_etiqueta_temu_nome_nao_e_a_chave():
     linhas = [ln for ln in _anjun() if ln != "veralucia Soares Goncalves Soares"]
     etq = nf_etiqueta_lote.ler_etiqueta_temu("\n".join(linhas))
     assert etq.nome is None
-    assert nf_etiqueta_lote.casa_por_cep_nome(
-        "\n".join(linhas), [("309001", "VERALUCIA SOARES", "35661072")]
-    ) is None
+    assert (
+        nf_etiqueta_lote.casa_por_cep_nome(
+            "\n".join(linhas), [_c("309001", "VERALUCIA SOARES", "35661072")]
+        )
+        is None
+    )
 
 
 def test_fatia_anjun_sozinha_nao_casa_pelos_casamentos_antigos():
@@ -342,10 +345,17 @@ def test_fatia_anjun_sozinha_nao_casa_pelos_casamentos_antigos():
     assert nf_etiqueta_lote.ler_etiqueta_temu(fatias[0].texto).cep == "35661072"
 
 
+def _c(numero, nome, cep, **kw) -> nf_etiqueta_lote.CandidatoTemu:
+    return nf_etiqueta_lote.CandidatoTemu(numero=numero, nome=nome, cep=cep, **kw)
+
+
+_VERA = "Veralucia Soares Goncalves Soares"
+
+
 def test_casa_por_cep_nome_casa_no_temu_certo():
     candidatos = [
-        ("309001", "VERALUCIA SOARES GONCALVES SOARES", "35661072"),
-        ("309002", "Maria Aparecida Silva", "01001000"),
+        _c("309001", "VERALUCIA SOARES GONCALVES SOARES", "35661072"),
+        _c("309002", "Maria Aparecida Silva", "01001000"),
     ]
     assert nf_etiqueta_lote.casa_por_cep_nome("\n".join(_anjun()), candidatos) == "309001"
 
@@ -354,8 +364,8 @@ def test_casa_por_cep_nome_dois_no_mesmo_cep_desempata_pelo_nome():
     """Vizinhos de prédio (mesmo CEP): o nome normalizado decide — sem acento
     e sem caixa; nome abreviado de um lado casa (palavras contidas)."""
     candidatos = [
-        ("309001", "Vera Lúcia Pereira", "35661072"),
-        ("309002", "VERALUCIA SOARES GONÇALVES SOARES", "35661-072"),
+        _c("309001", "Vera Lúcia Pereira", "35661072"),
+        _c("309002", "VERALUCIA SOARES GONÇALVES SOARES", "35661-072"),
     ]
     texto = "\n".join(_anjun(nome="Veralúcia Soares Gonçalves"))
     assert nf_etiqueta_lote.casa_por_cep_nome(texto, candidatos) == "309002"
@@ -363,10 +373,7 @@ def test_casa_por_cep_nome_dois_no_mesmo_cep_desempata_pelo_nome():
 
 def test_casa_por_cep_nome_ambiguo_nao_casa():
     """Mesmo cliente com 2 pedidos Temu no mesmo CEP → ambíguo → None."""
-    candidatos = [
-        ("309001", "Veralucia Soares Goncalves Soares", "35661072"),
-        ("309005", "Veralucia Soares Goncalves Soares", "35661072"),
-    ]
+    candidatos = [_c("309001", _VERA, "35661072"), _c("309005", _VERA, "35661072")]
     assert nf_etiqueta_lote.casa_por_cep_nome("\n".join(_anjun()), candidatos) is None
 
 
@@ -374,23 +381,79 @@ def test_casa_por_cep_nome_exige_nome_mesmo_com_um_pedido_no_cep():
     """Um pedido só no CEP, mas de OUTRA pessoa → não casa (o pedido certo
     pode ainda não ter chegado ao espelho). Candidato sem nome não casa."""
     texto = "\n".join(_anjun())
-    assert nf_etiqueta_lote.casa_por_cep_nome(
-        texto, [("309001", "Joao Batista", "35661072")]
-    ) is None
-    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [("309001", None, "35661072")]) is None
+    assert (
+        nf_etiqueta_lote.casa_por_cep_nome(texto, [_c("309001", "Joao Batista", "35661072")])
+        is None
+    )
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [_c("309001", None, "35661072")]) is None
     # CEP diferente, mesmo nome → não casa
-    assert nf_etiqueta_lote.casa_por_cep_nome(
-        texto, [("309001", "Veralucia Soares Goncalves Soares", "35661073")]
-    ) is None
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [_c("309001", _VERA, "35661073")]) is None
 
 
 def test_casa_por_cep_nome_fatia_com_declaracao_nao_entra():
     """Fatia com declaração de conteúdo é etiqueta do Upseller (Shopee/TikTok),
     não a da Anjun — o casamento por CEP + nome não olha."""
     texto = "\n".join([*_anjun(), "DECLARAÇÃO DE CONTEÚDO", "b101.14"])
-    candidatos = [("309001", "Veralucia Soares Goncalves Soares", "35661072")]
+    candidatos = [_c("309001", _VERA, "35661072")]
     assert nf_etiqueta_lote.casa_por_cep_nome(texto, candidatos) is None
     assert nf_etiqueta_lote.casa_por_cep_nome("\n".join(_anjun()), candidatos) == "309001"
+
+
+def test_e_etiqueta_anjun_exige_as_duas_marcas():
+    """Código AJ… E o nome da transportadora: outro layout sem declaração
+    (Shein "PUDO-PGK-FM", Correios com NF) não entra no caminho da Temu."""
+    assert nf_etiqueta_lote.e_etiqueta_anjun("\n".join(_anjun()))
+    sem_nome = [ln for ln in _anjun() if "Anjun" not in ln]
+    sem_aj = [ln for ln in _anjun() if not ln.startswith(("AJ", "Pedido:"))]
+    candidatos = [_c("309001", _VERA, "35661072")]
+    for linhas in (sem_nome, sem_aj):
+        texto = "\n".join(linhas)
+        assert not nf_etiqueta_lote.e_etiqueta_anjun(texto)
+        assert nf_etiqueta_lote.casa_por_cep_nome(texto, candidatos) is None
+
+
+def test_casa_por_cep_nome_cancelado_concorre():
+    """Cancelado (ou Aguardando Cancelamento) do MESMO cliente no mesmo CEP
+    concorre: a etiqueta pode ser dele → ambíguo, não casa no ativo. Sozinho,
+    o cancelado também não é escolhido."""
+    texto = "\n".join(_anjun())
+    ativo = _c("309001", _VERA, "35661072")
+    cancelado = _c("309005", _VERA, "35661072", valido=False)
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [ativo, cancelado]) is None
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [cancelado]) is None
+    # cancelado de OUTRA pessoa no mesmo CEP não atrapalha
+    outro = _c("309006", "Joao Batista", "35661072", valido=False)
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [ativo, outro]) == "309001"
+
+
+def test_casa_por_cep_nome_pedido_sem_cep_no_espelho_concorre_mas_nao_casa():
+    texto = "\n".join(_anjun())
+    ativo = _c("309001", _VERA, "35661072")
+    sem_cep = _c("309007", _VERA, None)
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [ativo, sem_cep]) is None
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [sem_cep]) is None
+
+
+def test_casa_por_cep_nome_cliente_recorrente_pedido_ja_etiquetado_sai_da_disputa():
+    """Cliente recorrente: o pedido antigo já tem a etiqueta dele gravada
+    (outro código AJ) — a nova casa no pedido sem etiqueta. Se só o antigo
+    está na lista (o novo ainda não chegou ao espelho), NÃO casa: nunca
+    sobrescreve a etiqueta de outro código. Mesmo código AJ = reimpressão."""
+    texto = "\n".join(_anjun())  # AJ261111162691701
+    antigo = _c("309001", _VERA, "35661072", rastreios=frozenset({"AJ261105000000001"}))
+    novo = _c("309002", _VERA, "35661072")
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [antigo, novo]) == "309002"
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [antigo]) is None
+    # gravada sem código AJ (outro layout) também já é a etiqueta dele
+    sem_aj = _c("309001", _VERA, "35661072", rastreios=frozenset())
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [sem_aj]) is None
+    # reimpressão: a gravada tem ESTE código → casa nele (válido), mesmo com o novo na lista
+    mesma = _c("309001", _VERA, "35661072", rastreios=frozenset({"AJ261111162691701"}))
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [mesma, novo]) == "309001"
+    cancelada = _c(
+        "309001", _VERA, "35661072", valido=False, rastreios=frozenset({"AJ261111162691701"})
+    )
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [cancelada, novo]) is None
 
 
 def test_casa_por_chave():
@@ -400,3 +463,14 @@ def test_casa_por_chave():
     assert nf_etiqueta_lote.casa_por_chave([], por_chave) is None
     # duas chaves no papel apontando pra pedidos diferentes → ambíguo
     assert nf_etiqueta_lote.casa_por_chave([_CHAVE_TEMU, "1" * 44], por_chave) is None
+
+
+def test_chave_conhecida_de_pedido_que_nao_serve_decide_nao_casar():
+    """Chave no nf_nota de pedido cancelado/de outra loja (None no mapa):
+    é conhecida — o router não cai no CEP + nome — e não casa."""
+    por_chave = {_CHAVE_TEMU: None, "1" * 44: "309002"}
+    assert nf_etiqueta_lote.chave_conhecida([_CHAVE_TEMU], por_chave)
+    assert nf_etiqueta_lote.casa_por_chave([_CHAVE_TEMU], por_chave) is None
+    assert nf_etiqueta_lote.casa_por_chave([_CHAVE_TEMU, "1" * 44], por_chave) is None
+    assert not nf_etiqueta_lote.chave_conhecida(["9" * 44], por_chave)
+    assert not nf_etiqueta_lote.chave_conhecida([], por_chave)

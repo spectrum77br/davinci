@@ -82,6 +82,7 @@ from app.services.nf_etiqueta_picking import (
     escrever_picking_livre,
     ler_picking,
 )
+from app.services.nf_etiqueta_temu import PedidoTemu, acrescentar_declaracao, pedidos_temu
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
 from app.services.sku_tags import classify_sku_tag as _classify_sku_tag
 from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
@@ -1109,12 +1110,29 @@ def _picking_para_impressao(
     return novo
 
 
+def _declaracao_temu_impressao(
+    pdf: bytes, pedido: str, temu: PedidoTemu, itens: list[ItemDeclaracao]
+) -> bytes:
+    """Etiqueta da Temu (Anjun) gravada SEM a declaração de conteúdo — a
+    consulta dos itens falhou ou voltou vazia na subida (18/11/2026): a cópia
+    impressa ganha a página com os itens de agora (o blob não é regravado).
+    `acrescentar_declaracao` só mexe na etiqueta da Anjun e nunca levanta."""
+    novo, status, detalhe = acrescentar_declaracao(pdf, temu, itens)
+    log = {"pedido": pedido, "status": status, "detalhe": detalhe, "origem": "impressao"}
+    if status == "erro":
+        logger.warning("nf_etiqueta_declaracao_temu", **log)
+    elif status == "ok":
+        logger.info("nf_etiqueta_declaracao_temu", **log)
+    return novo
+
+
 def _pdf_para_impressao(
     row: NfEtiquetaArquivo,
     itens: list[ItemDeclaracao] | None = None,
     *,
     shopee: bool = False,
     plataforma: str | None = None,
+    temu: PedidoTemu | None = None,
 ) -> bytes:
     """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
 
@@ -1137,6 +1155,10 @@ def _pdf_para_impressao(
     28/09/2026: depois da NF de 1% vem a de 100% que vai DENTRO DA CAIXA
     (`nf_caixa_pdf`), sem nenhuma marca no papel — quem avisa é a tela. Cada
     junção degrada sozinha: falhar a da caixa não tira a de 1%.
+
+    18/11/2026: pedido TEMU (`temu`) cuja etiqueta da Anjun foi gravada sem a
+    declaração (`sem_declaracao`) ganha a página na cópia impressa
+    (`_declaracao_temu_impressao`) — exceto no fluxo com NF juntada.
     """
     base = row.blob
     if itens:
@@ -1155,6 +1177,8 @@ def _pdf_para_impressao(
             logger.warning("nf_etiqueta_declaracao", **log)
         elif status not in ("igual", "sem_declaracao"):
             logger.info("nf_etiqueta_declaracao", **log)
+        if status == "sem_declaracao" and temu is not None and not row.nf_pdf:
+            base = _declaracao_temu_impressao(base, row.pedido_bling, temu, itens)
         base = _picking_para_impressao(
             base, row.pedido_bling, itens, shopee=shopee, plataforma=plataforma
         )
@@ -1350,6 +1374,12 @@ async def get_pedidos_etiquetas_lote(
     plataformas = await plataformas_dos_pedidos(
         session, [r.pedido_bling for r in ordenados], origem="impressao_lote"
     )
+    # Pedidos Temu (declaração da etiqueta da Anjun gravada sem a página).
+    temus = await pedidos_temu(
+        session,
+        [n for n, p in plataformas.items() if p == "temu"],
+        origem="impressao_lote",
+    )
     try:
         partes = [
             _pdf_para_impressao(
@@ -1357,6 +1387,7 @@ async def get_pedidos_etiquetas_lote(
                 itens_por_pedido.get(r.pedido_bling),
                 shopee=plataformas.get(r.pedido_bling) == "shopee",
                 plataforma=plataformas.get(r.pedido_bling),
+                temu=temus.get(r.pedido_bling),
             )
             for r in ordenados
         ]
@@ -1433,11 +1464,19 @@ async def get_pedido_etiqueta(
     plataforma = (
         await plataformas_dos_pedidos(session, [row.pedido_bling], origem="impressao")
     ).get(row.pedido_bling)
+    temu = (
+        (await pedidos_temu(session, [row.pedido_bling], origem="impressao")).get(
+            row.pedido_bling
+        )
+        if plataforma == "temu"
+        else None
+    )
     conteudo = _pdf_para_impressao(
         row,
         itens_por_pedido.get(row.pedido_bling),
         shopee=plataforma == "shopee",
         plataforma=plataforma,
+        temu=temu,
     )
     if row.impressa_em is None and carimbar:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"

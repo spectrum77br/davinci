@@ -10,11 +10,13 @@ e a etiqueta de pedido Temu sem declaração ganha a 2ª página no modelo do
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import fitz
 import pytest
 import pytest_asyncio
+import structlog
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +33,7 @@ from app.models import (
     UserRole,
     UserStatus,
 )
+from app.routers import nf as nf_router
 from app.services import nf_emissao_gerar, nf_etiqueta_temu
 from app.services.nf_etiqueta_declaracao import (
     ItemDeclaracao,
@@ -42,6 +45,7 @@ from app.services.nf_etiqueta_declaracao import (
 )
 from app.services.nf_etiqueta_temu import PedidoTemu, acrescentar_declaracao, pagina_declaracao
 from app.services.nf_etiqueta_transform import transformar_etiqueta
+from tests.declaracao_sintetica import etiqueta_shopee
 
 _TOKEN = "nf-agent-test-token"  # noqa: S105
 _CHAVE = "35261159882322000154550020000020281154723552"
@@ -545,3 +549,369 @@ async def test_upload_temu_que_ja_vem_com_declaracao_nao_duplica(
     blob = await _blob(db, "309001")
     assert fitz.open(stream=blob, filetype="pdf").page_count == 2
     assert [i.sku for i in ler_declaracao(blob)] == ["b101.14"]
+
+
+# --- revisão: chave decide, concorrentes, recorrente, Anjun, impressão ------------
+
+
+def _junta(*pdfs: bytes) -> bytes:
+    lote = fitz.open()
+    for pdf in pdfs:
+        lote.insert_pdf(fitz.open(stream=pdf, filetype="pdf"))
+    return lote.tobytes()
+
+
+def _etiqueta_gravada(numero: str, rastreio: str) -> NfEtiquetaArquivo:
+    blob = _anjun(rastreio=rastreio)
+    return NfEtiquetaArquivo(
+        pedido_bling=numero,
+        filename=f"etiqueta_{numero}.pdf",
+        content_type="application/pdf",
+        size_bytes=len(blob),
+        blob=blob,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("situacao", ["12", "83955"])
+async def test_lote_chave_de_pedido_cancelado_nao_cai_no_gemeo_ativo(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling, situacao: str
+):
+    """A chave impressa é do pedido CANCELADO (nf_nota) e o mesmo cliente tem
+    outro pedido Temu ativo no mesmo CEP: a chave decide sozinha — a etiqueta
+    não cai no CEP + nome e não vai pro gêmeo ativo."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    db.add(_pedido("309005", situacao=situacao))
+    db.add(NfNota(chave=_CHAVE, pedido_bling="309005", numero="2028", serie="2", xml=b"<x/>"))
+    await db.commit()
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == []
+    assert len(body["nao_casadas"]) == 1
+    assert fake_bling.chamadas == []
+    gravada = await db.execute(
+        select(NfEtiquetaArquivo).where(NfEtiquetaArquivo.pedido_bling == "309001")
+    )
+    assert gravada.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_lote_consulta_da_chave_que_falha_nao_casa_por_cep(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    fake_bling: _FakeBling,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Sem saber o que a chave diz (consulta falhou), o CEP + nome podia
+    errar: a etiqueta fica pra mão, o lote responde normal."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+
+    async def _falha(_session, _chaves, *, origem):
+        return None
+
+    monkeypatch.setattr(nf_etiqueta_temu, "pedidos_por_chave", _falha)
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == []
+    assert len(body["nao_casadas"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_lote_cancelado_e_repedido_do_mesmo_cliente(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """Cancelado + repedido do mesmo cliente no mesmo CEP, sem a chave no
+    nf_nota: a etiqueta pode ser do cancelado → ambíguo, fica pra mão. Com a
+    chave do repedido no nf_nota, casa nele."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001", situacao="12"))
+    db.add(_pedido("309002"))
+    await db.commit()
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == []
+    assert fake_bling.chamadas == []
+
+    db.add(NfNota(chave=_CHAVE, pedido_bling="309002", numero="2029", serie="2", xml=b"<x/>"))
+    await db.commit()
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == ["309002"]
+
+
+@pytest.mark.asyncio
+async def test_lote_duas_etiquetas_diferentes_no_mesmo_pedido_vao_pra_mao(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """Duas etiquetas da Anjun DIFERENTES (outro código AJ, outra chave) do
+    mesmo cliente caem no único pedido Temu dele: uma está errada e a 2ª
+    sobrescreveria a 1ª — as duas voltam pra mão."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+    body = await _lote(
+        client,
+        _pdf(
+            [
+                _linhas_anjun(),
+                _linhas_anjun(rastreio="AJ261111162691799", chave="2" * 44),
+            ]
+        ),
+    )
+    assert body["casadas"] == []
+    assert len(body["nao_casadas"]) == 2
+    assert fake_bling.chamadas == []
+
+
+@pytest.mark.asyncio
+async def test_lote_mesma_etiqueta_impressa_duas_vezes_casa(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+    body = await _lote(client, _pdf([_linhas_anjun(), _linhas_anjun()]))
+    assert body["casadas"] == ["309001"]
+    assert body["nao_casadas"] == []
+
+
+@pytest.mark.asyncio
+async def test_lote_cliente_recorrente_casa_no_pedido_sem_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """Cliente recorrente (caso real 307445/308411): o pedido antigo já tem a
+    etiqueta DELE gravada (outro código AJ) — a nova casa no pedido novo, e a
+    do antigo fica intacta."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001", data=datetime.now(UTC) - timedelta(days=6)))
+    db.add(_pedido("309002"))
+    db.add(_etiqueta_gravada("309001", "AJ261105000000001"))
+    await db.commit()
+    antigo = await _blob(db, "309001")
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == ["309002"]
+    assert await _blob(db, "309001") == antigo
+
+
+@pytest.mark.asyncio
+async def test_lote_recorrente_so_o_antigo_no_espelho_nao_sobrescreve(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """O pedido novo ainda não chegou ao espelho: o único candidato é o antigo,
+    já etiquetado com OUTRO código AJ — não casa, a etiqueta dele fica e ele
+    não volta pra 21."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001", data=datetime.now(UTC) - timedelta(days=6)))
+    db.add(_etiqueta_gravada("309001", "AJ261105000000001"))
+    await db.commit()
+    antigo = await _blob(db, "309001")
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == []
+    assert len(body["nao_casadas"]) == 1
+    assert await _blob(db, "309001") == antigo
+    assert fake_bling.chamadas == []
+
+
+@pytest.mark.asyncio
+async def test_lote_reimpressao_da_mesma_etiqueta_casa_no_mesmo_pedido(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """A etiqueta gravada do pedido tem O MESMO código AJ: é reimpressão —
+    casa nele (mesmo com outro pedido do cliente sem etiqueta na lista)."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001", data=datetime.now(UTC) - timedelta(days=2)))
+    db.add(_pedido("309002"))
+    db.add(_etiqueta_gravada("309001", _RASTREIO))
+    await db.commit()
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == ["309001"]
+
+
+@pytest.mark.asyncio
+async def test_lote_etiqueta_sem_a_marca_da_anjun_nao_casa_por_cep(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """Outro layout sem declaração (nome antes do "DESTINATÁRIO" + CEP), sem o
+    código AJ nem "Anjun": não disputa o casamento com os pedidos Temu."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+    linhas = [
+        ln for ln in _linhas_anjun() if "Anjun" not in ln and not ln.startswith(("AJ", "Pedido:"))
+    ]
+    body = await _lote(client, _pdf([linhas]))
+    assert body["casadas"] == []
+    assert len(body["nao_casadas"]) == 1
+    assert fake_bling.chamadas == []
+
+
+@pytest.mark.asyncio
+async def test_upload_por_pedido_temu_etiqueta_que_nao_e_da_anjun_fica_sem_pagina(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """Pedido Temu que sair por outro layout sem declaração (ex.: Correios com
+    a NF juntada) não ganha a página da Temu."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+    await _upload(client, "309001", _pdf([["DESTINATÁRIO", "Fulano", "CEP:35661-072"]]))
+    assert fitz.open(stream=await _blob(db, "309001"), filetype="pdf").page_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lote_temu_sem_itens_avisa_e_a_impressao_acrescenta_a_pagina(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    fake_bling: _FakeBling,
+    auth_as: Callable[[User | None], None],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Consulta dos itens vazia na subida: a etiqueta grava sem a página e
+    loga WARNING. Na impressão (individual e em lote), a cópia impressa ganha
+    a declaração com os itens de agora — o blob não é regravado."""
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+
+    async def _sem_itens(_session, _numeros, *, origem):
+        return {}
+
+    monkeypatch.setattr(nf_router, "itens_para_declaracao", _sem_itens)
+    with structlog.testing.capture_logs() as logs:
+        body = await _lote(client, _anjun())
+    assert body["casadas"] == ["309001"]
+    blob = await _blob(db, "309001")
+    assert fitz.open(stream=blob, filetype="pdf").page_count == 1
+    avisos = [
+        e
+        for e in logs
+        if e["event"] == "nf_etiqueta_declaracao_temu" and e["log_level"] == "warning"
+    ]
+    assert [e["status"] for e in avisos] == ["sem_itens"]
+
+    await db.refresh(admin)  # o _blob expirou a sessão
+    auth_as(admin)
+    r = await client.get("/api/estoque/pedidos/309001/etiqueta")
+    assert r.status_code == 200, r.text
+    assert fitz.open(stream=r.content, filetype="pdf").page_count == 2
+    assert [i.sku for i in ler_declaracao(r.content)] == ["b101.14"]
+    r = await client.post("/api/estoque/pedidos/etiquetas", json={"pedidos": ["309001"]})
+    assert r.status_code == 200, r.text
+    assert fitz.open(stream=r.content, filetype="pdf").page_count == 2
+    assert await _blob(db, "309001") == blob
+
+
+@pytest.mark.asyncio
+async def test_impressao_temu_que_ja_tem_a_pagina_nao_duplica(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    fake_bling: _FakeBling,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(admin)
+    await _lojas(db, admin)
+    db.add(_pedido("309001"))
+    await db.commit()
+    await _upload(client, "309001", _anjun())
+    r = await client.get("/api/estoque/pedidos/309001/etiqueta")
+    assert r.status_code == 200, r.text
+    assert fitz.open(stream=r.content, filetype="pdf").page_count == 2
+
+
+# --- bordas (revisão) --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lote_pedido_temu_com_dois_itens(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    await _lojas(db, admin)
+    p0 = _pedido("309001")
+    db.add(p0)
+    await db.flush()
+    db.add(
+        BlingOrder(
+            bling_id=p0.bling_id,
+            numero="309001",
+            numeroloja=p0.numeroloja,
+            data=p0.data,
+            loja=_LOJA_TEMU,
+            situacao="15",
+            item_index=1,
+            item_codigo="a076",
+            item_descricao="Cadeado TSA - Preto",
+            item_quantidade=3,
+            itemvalor=10,
+            nome_destinatario=p0.nome_destinatario,
+            documento_destinatario="79882030610",
+            cep_destino="35661072",
+        )
+    )
+    await db.commit()
+    body = await _lote(client, _anjun())
+    assert body["casadas"] == ["309001"]
+    blob = await _blob(db, "309001")
+    assert fitz.open(stream=blob, filetype="pdf").page_count == 2
+    assert [i.sku for i in ler_declaracao(blob)] == ["b101.14", "a076"]
+    assert total_declaracao(blob) == 4
+
+
+@pytest.mark.asyncio
+async def test_lote_cep_sem_hifen_no_papel_e_nome_com_acento_no_bling(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    await _lojas(db, admin)
+    db.add(_pedido("309001", nome="VERALÚCIA SOARES GONÇALVES SOARES", cep="35661-072"))
+    await db.commit()
+    body = await _lote(client, _anjun(cep="35661072", nome="veralucia soares goncalves soares"))
+    assert body["casadas"] == ["309001"]
+
+
+@pytest.mark.asyncio
+async def test_lote_misto_shopee_e_temu_da_mesma_conta_e_cliente(
+    db: AsyncSession, client: AsyncClient, admin: User, fake_bling: _FakeBling
+):
+    """barbosa Temu × barbosa Shopee, o mesmo cliente com 1 pedido em cada; o
+    lote traz a etiqueta da Shopee (com declaração) e a da Anjun: cada uma no
+    seu pedido; a da Shopee sem página da Temu."""
+    await _lojas(db, admin)
+    db.add(
+        _pedido("309010", loja=_LOJA_SHOPEE, numeroloja="261107AB12CD34", sku="dg054.ci+a001.ci")
+    )
+    db.add(_pedido("309001"))
+    await db.commit()
+    body = await _lote(client, _junta(etiqueta_shopee(), _anjun()))
+    assert sorted(body["casadas"]) == ["309001", "309010"]
+    shopee = fitz.open(stream=await _blob(db, "309010"), filetype="pdf")
+    assert shopee.page_count == 2
+    assert "Temu" not in shopee[1].get_text()
+    assert fitz.open(stream=await _blob(db, "309001"), filetype="pdf").page_count == 2
+
+
+@pytest.mark.asyncio
+async def test_lote_falha_da_temu_nao_impede_gravar_a_shopee_do_mesmo_lote(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    fake_bling: _FakeBling,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from sqlalchemy import text
+
+    async def _aborta(session, **_kw):
+        await session.execute(text("SELECT 1/0"))
+        return {}
+
+    await _lojas(db, admin)
+    db.add(
+        _pedido("309010", loja=_LOJA_SHOPEE, numeroloja="261107AB12CD34", sku="dg054.ci+a001.ci")
+    )
+    db.add(_pedido("309001"))
+    await db.commit()
+    monkeypatch.setattr(nf_etiqueta_temu, "_pedidos", _aborta)
+    body = await _lote(client, _junta(etiqueta_shopee(), _anjun()))
+    assert body["casadas"] == ["309010"]
+    assert len(body["nao_casadas"]) == 1
+    assert fitz.open(stream=await _blob(db, "309010"), filetype="pdf").page_count == 2

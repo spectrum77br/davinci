@@ -32,12 +32,14 @@ módulo é a camada PURA (sem rede, sem banco) que:
 4. Etiqueta da TEMU (Anjun Express, "DANFE SIMPLIFICADO-ETIQUETA", 18/11/2026):
    não traz CPF, nem o nº do pedido na Temu (o "Pedido: AJ…" é o código da
    Anjun), nem declaração de conteúdo — nenhum dos 3 casamentos acima pega.
-   `ler_etiqueta_temu(texto)` lê a chave da NF (44 dígitos), o CEP e o nome
-   do destinatário (a linha ANTES do rótulo "DESTINATÁRIO", como no
-   `~/nf-executor/temu_declaracao.py`); `casa_por_chave` casa pela chave
-   (`nf_nota.chave`, quando o XML já foi coletado) e `casa_por_cep_nome`
-   pelo CEP + nome entre os pedidos Temu que o router passa. Os dois só
-   casam quando o resultado é INEQUÍVOCO.
+   Só entra fatia que é MESMO da Anjun (`e_etiqueta_anjun`: código AJ… e o
+   nome da transportadora). `ler_etiqueta_temu(texto)` lê a chave da NF (44
+   dígitos), o CEP e o nome do destinatário (a linha ANTES do rótulo
+   "DESTINATÁRIO", como no `~/nf-executor/temu_declaracao.py`);
+   `casa_por_chave` casa pela chave (`nf_nota.chave`, quando o XML já foi
+   coletado — chave conhecida DECIDE sozinha) e `casa_por_cep_nome` pelo
+   CEP + nome entre os pedidos Temu que o router passa (`CandidatoTemu`). Os
+   dois só casam quando o resultado é INEQUÍVOCO.
 
 Quem consome é o endpoint `/agent/etiqueta-lote` (routers/nf.py), que casa
 contra `bling_orders`, transforma cada fatia e grava por pedido.
@@ -47,6 +49,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import fitz  # PyMuPDF
@@ -323,6 +326,24 @@ def ler_etiqueta_temu(texto: str) -> EtiquetaTemu:
     )
 
 
+def e_etiqueta_anjun(texto: str) -> bool:
+    """A fatia é a etiqueta da Anjun: traz o código de rastreio AJ… E o nome
+    da transportadora ("Anjun Express"). As 45 etiquetas reais de
+    `~/nf-executor/saidas/etiquetas/` têm as duas marcas, também depois do
+    transform. Sem elas, nada da Temu (casamento por chave ou CEP + nome,
+    página da declaração) mexe na etiqueta — outro layout sem declaração
+    (Shein, Correios com a NF juntada…) segue o caminho de antes."""
+    t = texto or ""
+    return bool(_RE_RASTREIO_ANJUN.search(t)) and "ANJUN" in _sem_acento(t).upper()
+
+
+def identidade_etiqueta(etq: EtiquetaTemu) -> str | None:
+    """O que distingue uma etiqueta da Anjun de outra: o código AJ… (senão a
+    chave da NF). Duas fatias com a mesma identidade são a MESMA etiqueta
+    impressa duas vezes."""
+    return etq.rastreio or (etq.chaves[0] if etq.chaves else None)
+
+
 def _tokens_nome(nome: str | None) -> set[str]:
     """Nome → palavras sem acento, minúsculas, só letras (como o
     `temu_declaracao._norm`)."""
@@ -334,43 +355,88 @@ def _so_digitos(s: str | None) -> str:
     return "".join(c for c in (s or "") if c.isdigit())
 
 
-def casa_por_chave(chaves: list[str], por_chave: dict[str, str]) -> str | None:
+def chave_conhecida(chaves: list[str], por_chave: Mapping[str, str | None]) -> bool:
+    """Alguma chave impressa na etiqueta já está no `nf_nota` com pedido?
+    Então a chave DECIDE: casa por ela ou não casa — nunca cai no CEP + nome
+    (que poderia pôr a etiqueta de um pedido cancelado no gêmeo ativo do
+    mesmo cliente)."""
+    return any(c in por_chave for c in chaves)
+
+
+def casa_por_chave(chaves: list[str], por_chave: Mapping[str, str | None]) -> str | None:
     """Casamento pela chave da NF impressa na etiqueta.
 
     `por_chave` = {chave → numero do pedido} que o router montou de
-    `nf_nota` (só notas já casadas com pedido Temu válido). Devolve o pedido
-    quando as chaves do papel apontam pra UM pedido só; senão None."""
-    numeros = list(dict.fromkeys(por_chave[c] for c in chaves if c in por_chave))
+    `nf_nota`: o número quando a nota é de pedido Temu fora de Cancelado/
+    Aguardando Cancelamento, None quando a nota é de pedido que não serve
+    (cancelado, outra plataforma, fora do espelho). Devolve o pedido quando
+    as chaves do papel apontam pra UM pedido válido só; senão None."""
+    vistos = [por_chave[c] for c in chaves if c in por_chave]
+    if not vistos or any(n is None for n in vistos):
+        return None
+    numeros = list(dict.fromkeys(vistos))
     return numeros[0] if len(numeros) == 1 else None
 
 
-def casa_por_cep_nome(
-    texto: str, candidatos: list[tuple[str, str | None, str | None]]
-) -> str | None:
+@dataclass(frozen=True)
+class CandidatoTemu:
+    """Pedido de loja Temu na janela do lote, pro casamento por CEP + nome."""
+
+    numero: str
+    nome: str | None
+    cep: str | None
+    # Fora de Cancelado (12) e Aguardando Cancelamento (83955). Os de dentro
+    # CONCORREM (a etiqueta pode ser deles), mas nunca são escolhidos.
+    valido: bool = True
+    # Códigos AJ… da etiqueta JÁ gravada do pedido (nf_etiqueta_arquivo):
+    # None = sem etiqueta gravada; vazio = gravada sem código AJ.
+    rastreios: frozenset[str] | None = None
+
+
+def casa_por_cep_nome(texto: str, candidatos: Sequence[CandidatoTemu]) -> str | None:
     """Casamento reserva da etiqueta da Temu: CEP + nome do destinatário.
 
-    `candidatos` = [(numero, nome_destinatario, cep_destino)] — o router já
-    restringe a pedidos de loja Temu, fora de Cancelado (12) e Aguardando
-    Cancelamento (83955), na janela do lote. Casa quando EXATAMENTE UM pedido
-    tem o MESMO CEP e o nome compatível: as palavras de um contidas nas do
-    outro, sem acento/caixa (o mesmo critério do `temu_declaracao.py`). O nome
-    confere SEMPRE, mesmo com um pedido só no CEP — CEP sozinho casaria o
-    vizinho de prédio cujo pedido ainda não chegou ao espelho. Mesmo cliente
-    com 2 pedidos no CEP = ambíguo → None (fica pra mão). Fatia COM
-    declaração de conteúdo não é a etiqueta da Anjun (Shopee/TikTok do
-    Upseller) e não entra."""
-    if _e_declaracao(texto):
+    `candidatos` = os pedidos de loja Temu da janela do lote, em QUALQUER
+    situação. Conta como concorrente todo pedido com o nome compatível (as
+    palavras de um contidas nas do outro, sem acento/caixa — o critério do
+    `temu_declaracao.py`) e o MESMO CEP (ou CEP vazio no espelho: pode ser
+    ele). O nome confere SEMPRE — CEP sozinho casaria o vizinho de prédio
+    cujo pedido ainda não chegou ao espelho. Então:
+
+    1. reimpressão: se a etiqueta já gravada de um concorrente tem ESTE
+       código AJ…, é dele (se ele for o único assim e estiver válido);
+    2. senão, o concorrente que já tem etiqueta gravada (com outro código)
+       já despachou a dele e sai da disputa — cliente recorrente não fica
+       ambíguo pra sempre, e a etiqueta nova não sobrescreve a do pedido
+       antigo quando o novo ainda nem chegou ao espelho;
+    3. casa quando sobra EXATAMENTE UM concorrente, válido (fora de 12/
+       83955) e com o mesmo CEP. Cancelado + repedido do mesmo cliente =
+       ambíguo → None (fica pra mão; a chave do `nf_nota` resolve).
+
+    Só etiqueta da Anjun entra (`e_etiqueta_anjun`); fatia COM declaração de
+    conteúdo (Shopee/TikTok do Upseller, fluxo manual) não entra."""
+    if _e_declaracao(texto) or not e_etiqueta_anjun(texto):
         return None
     etq = ler_etiqueta_temu(texto)
     alvo = _tokens_nome(etq.nome)
-    if not etq.cep or not alvo:
+    if not etq.cep or not alvo or not etq.rastreio:
         return None
-    hits: list[str] = []
-    for numero, nome, cep in candidatos:
-        if _so_digitos(cep) != etq.cep:
+    hits: dict[str, CandidatoTemu] = {}
+    for c in candidatos:
+        cep = _so_digitos(c.cep)
+        if cep and cep != etq.cep:
             continue
-        toks = _tokens_nome(nome)
+        toks = _tokens_nome(c.nome)
         if toks and (alvo <= toks or toks <= alvo):
-            hits.append(numero)
-    unicos = list(dict.fromkeys(hits))
-    return unicos[0] if len(unicos) == 1 else None
+            hits.setdefault(c.numero, c)
+
+    def _escolhe(cs: list[CandidatoTemu]) -> str | None:
+        if len(cs) != 1:
+            return None
+        c = cs[0]
+        return c.numero if c.valido and _so_digitos(c.cep) == etq.cep else None
+
+    reimpressao = [c for c in hits.values() if c.rastreios and etq.rastreio in c.rastreios]
+    if reimpressao:
+        return _escolhe(reimpressao)
+    return _escolhe([c for c in hits.values() if c.rastreios is None])

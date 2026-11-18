@@ -20,6 +20,10 @@ por-pedido (`/agent/etiqueta`) — este módulo leva aquele script pra API:
   rodam num SAVEPOINT e a falha vira "nenhum pedido" (a etiqueta segue o
   caminho de antes — não casa / sobe sem a página), com warning no log.
 
+Só a etiqueta da ANJUN (`nf_etiqueta_lote.e_etiqueta_anjun`) ganha a página:
+pedido Temu que um dia sair por outro layout sem declaração (Correios com a
+NF juntada…) fica como estava.
+
 Shopee, TikTok, ML e Amazon não passam por aqui: só pedido de loja Temu entra
 nas listas.
 """
@@ -37,7 +41,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, NfNota, StoreInfo
+from app.models import BlingOrder, NfEtiquetaArquivo, NfNota, StoreInfo
 from app.services.bling_situacoes import (
     SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
     SITUACAO_CANCELADO,
@@ -52,7 +56,14 @@ from app.services.nf_etiqueta_declaracao import (
     _texto_imprimivel,
     assinatura_itens,
 )
-from app.services.nf_etiqueta_lote import ler_etiqueta_temu
+from app.services.nf_etiqueta_lote import (
+    _RE_RASTREIO_ANJUN,
+    CandidatoTemu,
+    _e_declaracao,
+    _so_digitos,
+    e_etiqueta_anjun,
+    ler_etiqueta_temu,
+)
 
 logger = structlog.get_logger()
 
@@ -284,8 +295,10 @@ def acrescentar_declaracao(
 ) -> tuple[bytes, str, str]:
     """Etiqueta da Temu (já transformada) + a página da declaração atrás.
 
-    Devolve (bytes, status, detalhe); só `ok` traz bytes novos — `sem_itens`
-    e `erro` devolvem os de ENTRADA (a etiqueta sobe como veio, nunca trava).
+    Devolve (bytes, status, detalhe); só `ok` traz bytes novos — `nao_anjun`
+    (a 1ª página não é a etiqueta da Anjun), `ja_tem_declaracao` (alguma
+    página já é a declaração: nunca duplica), `sem_itens` e `erro` devolvem os
+    de ENTRADA (a etiqueta sobe como veio, nunca trava).
 
     O REMETENTE da página sai com o nome do DESTINATÁRIO: é a regra 1 da
     visualização (`nf_etiqueta_transform`), que no fluxo manual troca o
@@ -298,14 +311,19 @@ def acrescentar_declaracao(
     reescrita: na impressão, com os mesmos itens, ela devolve `igual`; com
     item trocado no Bling, reescreve esta tabela (layout "nossa")."""
     lista = list(itens or [])
-    if not lista:
-        return pdf_bytes, "sem_itens", ""
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         if doc.page_count == 0:
             return pdf_bytes, "erro", "pdf_sem_paginas"
         etiqueta = doc[0]
-        etq = ler_etiqueta_temu(etiqueta.get_text())
+        texto = etiqueta.get_text()
+        if not e_etiqueta_anjun(texto):
+            return pdf_bytes, "nao_anjun", ""
+        if any(_e_declaracao(doc[i].get_text()) for i in range(doc.page_count)):
+            return pdf_bytes, "ja_tem_declaracao", ""
+        if not lista:
+            return pdf_bytes, "sem_itens", ""
+        etq = ler_etiqueta_temu(texto)
         nome = (etq.nome or nome_destinatario or pedido.nome or "").strip()
         pagina_declaracao(
             doc,
@@ -415,31 +433,77 @@ async def pedidos_temu(
         return {}
 
 
+def _rastreios_do_pdf(blob: bytes) -> frozenset[str]:
+    """Códigos AJ… impressos na etiqueta gravada (vazio = sem código ou PDF
+    que não abre — conta como "já tem etiqueta" de qualquer jeito)."""
+    try:
+        doc = fitz.open(stream=blob, filetype="pdf")
+        texto = "\n".join(doc[i].get_text() for i in range(doc.page_count))
+    except Exception:  # noqa: BLE001 — blob ilegível = etiqueta de outro código
+        return frozenset()
+    return frozenset(_RE_RASTREIO_ANJUN.findall(texto))
+
+
 async def candidatos_cep_nome(
-    session: AsyncSession, desde: datetime, *, origem: str
-) -> list[tuple[str, str | None, str | None]]:
-    """[(numero, nome_destinatario, cep_destino)] dos pedidos Temu com data
-    a partir de `desde`, fora de Cancelado/Aguardando Cancelamento — a lista
-    do `nf_etiqueta_lote.casa_por_cep_nome`. NUNCA levanta (falha → [])."""
+    session: AsyncSession, desde: datetime, *, ceps: Iterable[str], origem: str
+) -> list[CandidatoTemu]:
+    """Os pedidos de loja Temu com data a partir de `desde`, em QUALQUER
+    situação (os de Cancelado/Aguardando Cancelamento vêm com
+    `valido=False`: concorrem, mas não são escolhidos), com o CEP de alguma
+    etiqueta do lote (`ceps`, só dígitos) ou sem CEP no espelho — a lista do
+    `nf_etiqueta_lote.casa_por_cep_nome`. Pra cada um, os códigos AJ… da
+    etiqueta JÁ gravada (`rastreios`; None = sem etiqueta), lidos só dos
+    pedidos desses CEPs. NUNCA levanta (falha → [], nada casa por CEP)."""
+    alvo_ceps = {c for c in ceps if c}
+    if not alvo_ceps:
+        return []
     try:
         async with session.begin_nested():
-            pedidos = await _pedidos(session, desde=desde)
+            pedidos = [
+                p
+                for p in (await _pedidos(session, desde=desde)).values()
+                if not _so_digitos(p.cep) or _so_digitos(p.cep) in alvo_ceps
+            ]
+            blobs = (
+                (
+                    await session.execute(
+                        select(NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.blob).where(
+                            NfEtiquetaArquivo.pedido_bling.in_([p.numero for p in pedidos]),
+                            NfEtiquetaArquivo.blob.is_not(None),
+                        )
+                    )
+                ).all()
+                if pedidos
+                else []
+            )
     except Exception as exc:  # noqa: BLE001 — o casamento reserva nunca trava o lote
         _avisar("nf_etiqueta_temu_candidatos_falhou", origem, exc)
         return []
+    # blob vazio = sem etiqueta (como no botão Imprimir Etiqueta)
+    gravadas = {b.pedido_bling: _rastreios_do_pdf(b.blob) for b in blobs if b.blob}
     return [
-        (p.numero, p.nome, p.cep)
-        for p in pedidos.values()
-        if p.situacao not in SITUACOES_FORA and p.cep
+        CandidatoTemu(
+            numero=p.numero,
+            nome=p.nome,
+            cep=p.cep,
+            valido=p.situacao not in SITUACOES_FORA,
+            rastreios=gravadas.get(p.numero),
+        )
+        for p in pedidos
     ]
 
 
 async def pedidos_por_chave(
     session: AsyncSession, chaves: Iterable[str], *, origem: str
-) -> dict[str, str]:
+) -> dict[str, str | None] | None:
     """{chave da NF → numero do pedido} das `chaves` que estão em `nf_nota`
-    já casadas com pedido de loja Temu fora de Cancelado/Aguardando
-    Cancelamento (o XML entra pelo coletor, `run_xml.sh`). NUNCA levanta."""
+    já casadas com pedido (o XML entra pelo coletor, `run_xml.sh`): o número
+    quando o pedido é de loja Temu fora de Cancelado/Aguardando
+    Cancelamento, None quando não serve (cancelado, outra plataforma, fora
+    do espelho) — a chave conhecida decide sozinha
+    (`nf_etiqueta_lote.chave_conhecida`). Chave que não está no `nf_nota`
+    não aparece. NUNCA levanta: na falha devolve None (o router não casa
+    nada pela Temu nesse lote — sem a chave, o CEP + nome podia errar)."""
     lista = [c for c in dict.fromkeys(chaves) if c]
     if not lista:
         return {}
@@ -457,9 +521,12 @@ async def pedidos_por_chave(
             pedidos = await _pedidos(session, numeros=list({n.pedido_bling for n in notas}))
     except Exception as exc:  # noqa: BLE001 — o casamento reserva nunca trava o lote
         _avisar("nf_etiqueta_temu_chave_falhou", origem, exc, chaves=len(lista))
-        return {}
+        return None
     return {
-        n.chave: n.pedido_bling
+        n.chave: (
+            n.pedido_bling
+            if n.pedido_bling in pedidos and pedidos[n.pedido_bling].situacao not in SITUACOES_FORA
+            else None
+        )
         for n in notas
-        if n.pedido_bling in pedidos and pedidos[n.pedido_bling].situacao not in SITUACOES_FORA
     }

@@ -2452,16 +2452,22 @@ def _declaracao_temu(
 ) -> bytes:
     """Etiqueta de pedido TEMU que chegou SEM declaração de conteúdo (a da
     Anjun nunca traz — 18/11/2026): acrescenta a 2ª página com os itens do
-    Bling, no modelo do `~/nf-executor/temu_declaracao.py`. Só chamada quando
-    `_declaracao_do_bling` devolveu `sem_declaracao`; pedido que não é Temu
-    (`temu` None — Amazon, SEDEX…) passa direto, como antes. Nunca trava a
+    Bling, no modelo do `~/nf-executor/temu_declaracao.py`. Chamada quando
+    `_declaracao_do_bling` devolveu `sem_declaracao` ou `sem_itens`; pedido
+    que não é Temu (`temu` None — Amazon, SEDEX…), etiqueta que não é da
+    Anjun ou que já tem a declaração passam direto, como antes. Nunca trava a
     subida: falha guarda a etiqueta como estava (warning no log)."""
     if temu is None:
         return pdf
     novo, status, detalhe = nf_etiqueta_temu.acrescentar_declaracao(
         pdf, temu, itens, nome_destinatario=nome
     )
-    log = logger.warning if status == "erro" else logger.info
+    if status in ("nao_anjun", "ja_tem_declaracao"):
+        return novo
+    # `sem_itens` (consulta dos itens falhou/voltou vazia) também é warning:
+    # a etiqueta da Anjun fica gravada sem a página — a impressão acrescenta
+    # (`estoque._pdf_para_impressao`), mas precisa aparecer no filtro.
+    log = logger.warning if status in ("erro", "sem_itens") else logger.info
     log(
         "nf_etiqueta_declaracao_temu",
         pedido=numero, status=status, detalhe=detalhe, origem=origem,
@@ -2541,7 +2547,7 @@ async def nf_agent_etiqueta(
     transformado, st_decl = _declaracao_do_bling(
         transformado, pedido_bling, itens_pedido, "upload"
     )
-    if st_decl == "sem_declaracao":
+    if st_decl in ("sem_declaracao", "sem_itens"):
         # Temu (Anjun) vem sem declaração: a página entra aqui (18/11/2026).
         temu = (
             await nf_etiqueta_temu.pedidos_temu(session, [pedido_bling], origem="upload")
@@ -2593,10 +2599,12 @@ async def nf_agent_etiqueta_lote(
     ("Pedido: X" → bling_orders.numeroloja, Shopee); 2º pelo CPF/CNPJ da
     declaração de conteúdo → bling_orders.documento_destinatario (chave mais
     específica, cobre os layouts sem o nº da plataforma); 3º pelo NOME do
-    destinatário + SKU da declaração (TikTok); 4º, só pra quem sobrou e só
-    entre pedidos de loja TEMU fora de Cancelado/Aguardando Cancelamento
-    (etiqueta da Anjun, 18/11/2026): pela chave da NF impressa →
-    `nf_nota.chave`, depois pelo CEP + nome do destinatário. Todos só quando
+    destinatário + SKU da declaração (TikTok); 4º, só pra etiqueta da ANJUN
+    que sobrou e só entre pedidos de loja TEMU (18/11/2026): pela chave da NF
+    impressa → `nf_nota.chave` (chave conhecida decide sozinha), senão pelo
+    CEP + nome do destinatário (`casa_por_cep_nome`: cancelados concorrem,
+    pedido já etiquetado com outro código AJ sai da disputa). Duas etiquetas
+    Anjun DIFERENTES no mesmo pedido voltam as duas pra mão. Todos só quando
     inequívoco — o que não casar volta em `nao_casadas` pra tratamento humano,
     nunca chuta. Etiqueta de pedido Temu sem declaração ganha a 2ª página
     (`_declaracao_temu`).
@@ -2691,32 +2699,85 @@ async def nf_agent_etiqueta_lote(
         achados.append((numero, nome) if numero is not None else None)
 
     # 3) Etiqueta da TEMU (Anjun, 18/11/2026: sem CPF, sem o nº do pedido na
-    #    Temu e sem declaração — nada acima casa). Só pras fatias que sobraram
-    #    e só entre pedidos de loja Temu fora de 12/83955: 1º pela chave da NF
-    #    impressa (nf_nota, quando o XML já foi coletado), 2º pelo CEP + nome
-    #    do destinatário. As consultas só rodam quando sobrou fatia.
-    sobras = [i for i, a in enumerate(achados) if a is None]
+    #    Temu e sem declaração — nada acima casa). Só pras fatias da Anjun que
+    #    sobraram e só entre pedidos de loja Temu: 1º pela chave da NF impressa
+    #    (nf_nota, quando o XML já foi coletado) — chave conhecida DECIDE, nunca
+    #    cai no CEP + nome —, 2º pelo CEP + nome do destinatário. As consultas
+    #    só rodam quando sobrou fatia da Anjun.
+    sobras = [
+        i
+        for i, a in enumerate(achados)
+        if a is None and nf_etiqueta_lote.e_etiqueta_anjun(fatias[i].texto)
+    ]
+    temu_ident: dict[int, str] = {}
     if sobras:
         temu_etq = {i: nf_etiqueta_lote.ler_etiqueta_temu(fatias[i].texto) for i in sobras}
         por_chave = await nf_etiqueta_temu.pedidos_por_chave(
             session, [c for e in temu_etq.values() for c in e.chaves], origem="upload_lote"
         )
-        cand_temu = await nf_etiqueta_temu.candidatos_cep_nome(
-            session, cutoff, origem="upload_lote"
+        if por_chave is None:
+            sobras = []  # consulta falhou: sem a chave, o CEP + nome podia errar
+        cand_temu = (
+            await nf_etiqueta_temu.candidatos_cep_nome(
+                session,
+                cutoff,
+                ceps={e.cep for e in temu_etq.values() if e.cep},
+                origem="upload_lote",
+            )
+            if sobras
+            else []
         )
-        nome_temu = {n: nm for n, nm, _cep in cand_temu}
+        nome_temu = {c.numero: c.nome for c in cand_temu}
         for i in sobras:
-            via = "chave"
-            numero = nf_etiqueta_lote.casa_por_chave(temu_etq[i].chaves, por_chave)
-            if numero is None:
+            etq = temu_etq[i]
+            if nf_etiqueta_lote.chave_conhecida(etq.chaves, por_chave or {}):
+                via = "chave"
+                numero = nf_etiqueta_lote.casa_por_chave(etq.chaves, por_chave or {})
+            else:
                 via = "cep_nome"
                 numero = nf_etiqueta_lote.casa_por_cep_nome(fatias[i].texto, cand_temu)
-            if numero is not None:
-                nome = nome_temu.get(numero) or cand_map.get(numero, (None, None, set()))[0]
-                achados[i] = (numero, nome)
-                logger.info(
-                    "nf_etiqueta_lote_temu_casou",
-                    fatia=i, pedido=numero, via=via, rastreio=temu_etq[i].rastreio,
+            if numero is None:
+                if via == "chave":
+                    # a NF impressa é de pedido cancelado/de outra loja: fica pra mão
+                    logger.warning(
+                        "nf_etiqueta_lote_temu_chave_sem_pedido",
+                        fatia=i, rastreio=etq.rastreio,
+                    )
+                continue
+            nome = nome_temu.get(numero) or cand_map.get(numero, (None, None, set()))[0]
+            achados[i] = (numero, nome)
+            temu_ident[i] = nf_etiqueta_lote.identidade_etiqueta(etq) or f"#{i}"
+            logger.info(
+                "nf_etiqueta_lote_temu_casou",
+                fatia=i, pedido=numero, via=via, rastreio=etq.rastreio,
+            )
+
+    # Duas etiquetas DIFERENTES (outro código AJ/outra chave) no mesmo pedido:
+    # uma está no pedido errado e a 2ª sobrescreveria a 1ª no blob. As que
+    # casaram pelo caminho da Temu voltam pra mão; as dos 3 casamentos de
+    # antes ficam como sempre. A mesma etiqueta impressa 2 vezes segue.
+    if temu_ident:
+        por_pedido: dict[str, list[int]] = {}
+        for i, a in enumerate(achados):
+            if a is not None:
+                por_pedido.setdefault(a[0], []).append(i)
+        for numero, idxs in por_pedido.items():
+            if len(idxs) < 2 or not any(i in temu_ident for i in idxs):
+                continue
+            idents = {
+                temu_ident.get(i)
+                or nf_etiqueta_lote.identidade_etiqueta(
+                    nf_etiqueta_lote.ler_etiqueta_temu(fatias[i].texto)
+                )
+                or f"#{i}"
+                for i in idxs
+            }
+            if len(idents) > 1:
+                for i in idxs:
+                    if i in temu_ident:
+                        achados[i] = None
+                logger.warning(
+                    "nf_etiqueta_lote_temu_conflito", pedido=numero, fatias=idxs
                 )
 
     for i, (fatia, achado) in enumerate(zip(fatias, achados, strict=True)):
@@ -2736,7 +2797,8 @@ async def nf_agent_etiqueta_lote(
     itens_por_pedido = await itens_para_declaracao(
         session, [n for _f, n, _nm in casadas], origem="upload_lote"
     )
-    # Pedidos Temu do lote — só consultado se alguma fatia vier sem declaração.
+    # Pedidos Temu do lote — só consultado se alguma fatia vier sem declaração
+    # (ou sem itens do Bling).
     temu_por_pedido: dict[str, nf_etiqueta_temu.PedidoTemu] | None = None
     for fatia, numero, nome in casadas:
         rodape = ler_picking(fatia.pdf)  # na fatia CRUA, antes do transform
@@ -2753,7 +2815,7 @@ async def nf_agent_etiqueta_lote(
         transformado, st_decl = _declaracao_do_bling(
             transformado, numero, itens_pedido, "upload_lote"
         )
-        if st_decl == "sem_declaracao":
+        if st_decl in ("sem_declaracao", "sem_itens"):
             if temu_por_pedido is None:
                 temu_por_pedido = await nf_etiqueta_temu.pedidos_temu(
                     session, [n for _f, n, _nm in casadas], origem="upload_lote"
