@@ -200,7 +200,7 @@ const sections = computed<Section[]>(() => [
       { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', tambemCom: ['margem'], soComPermissao: true },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
       // ERP próprio (18/11/2026): v1 em modo consulta (o Bling manda em tudo), só admin.
-      { to: '/erp', label: 'ERP próprio', icon: Boxes, adminOnly: true, external: true },
+      { to: '/erp', label: 'DaVinci ERP', icon: Boxes, adminOnly: true, external: true },
     ],
   },
   {
