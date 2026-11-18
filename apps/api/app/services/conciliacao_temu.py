@@ -8,28 +8,32 @@ perfil da loja no AdsPower, navega como uma pessoa e guarda o que a PRÓPRIA PÁ
 - Extratos → uma linha por lançamento, com o nº do pedido PO-… (`/mms/statement/order/list`);
 - Pedidos não processados → o que a Temu estima pagar por pedido, antes de pagar
   (`/mms/settle/query/amount/selfproduce`);
-- Pagamentos → os saques (`/mms/payment/disbursement/list`).
+- Pagamentos → os saques pro banco (`/mms/payment/disbursement/list`).
 
 Ele envia tudo num JSON pra `POST /api/conciliacao/temu/leitura` e aqui vira:
 
 - linhas do extrato em `conciliacao_movimentos` (origem `temu_extrato`), com o saldo
   depois de cada uma. A linha mais nova fica com o Saldo total que a tela informou e as
   anteriores são calculadas pra trás; linha que já estava gravada NÃO é reescrita — se a
-  Temu mexer no saldo sem linha (um saque que este leitor ainda não conhece, uma linha
-  que faltou), a conta do dia não fecha e aparece no painel;
+  Temu mexer no saldo sem linha (uma linha que faltou), a conta do dia não fecha e
+  aparece no painel;
+- cada SAQUE da aba Pagamentos numa linha "Saque" (18/11, Barbosa): o saque NÃO aparece
+  no Extrato da Temu, só lá. A Temu saca a cada 14 dias e deixa no extrato um par de
+  reserva — −X às 23:59:59 do fim do período ("Reserve amount", nº do saque + "_in") e
+  +X às 00:00 ("Released amount", "_off") — que soma zero; quem tira o dinheiro do saldo
+  é o saque. O par vira "Reserva (vai e volta)" só quando a saída e a volta existem
+  (`conciliacao_calculo._reservas_vai_e_volta`); só a saída fica sem dono;
 - o previsto por pedido em `conciliacao_previstos` — fora da Margem, de propósito (ver o
   modelo). Acompanha a tela até a Temu pagar; depois de pago não muda mais, e é com ele
   que o recebido é comparado (essência do painel: comparar, não copiar).
 
-O que ainda NÃO se sabe (a Eron não tem): o formato do saque e como chegam etiqueta,
-reserva e publicidade. O que não tem regra vira "outro" sem dono, e saque lido sem
-formato conhecido fica no aviso da leitura — nada some.
+O que ainda NÃO se sabe (nenhuma loja teve até 18/11): como chegam etiqueta, publicidade,
+o saque que falha e volta ("Payment Refund") e a reserva que não é a do saque. O que não
+tem regra vira "outro" sem dono — nada some.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -56,17 +60,25 @@ BRT = ZoneInfo("America/Sao_Paulo")
 ZERO = Decimal("0")
 
 # "Tipo de transação" da tela (biz_category, em inglês na chamada) → tipo do painel.
-# O resto (Payment Refund, Seller repayment, Reserve amount, Released amount, Others e o
-# que aparecer de novo) fica "outro": sem pedido, sem dono até uma pessoa classificar.
+# O resto (Payment Refund, Seller repayment, Others e o que aparecer de novo) fica
+# "outro": sem pedido, sem dono até uma pessoa classificar.
+TIPO_RESERVA = "reserva_temu"  # está em `conciliacao_extrato.TIPOS_RESERVA`
 TIPOS = {
     "order payment": "venda_liberada",
     "refund": "estorno",
     "shipping label purchase": "frete",
     "shipping label purchase adjustment": "frete",
     "advertising service fee": "publicidade",
+    "reserve amount": TIPO_RESERVA,
+    "released amount": TIPO_RESERVA,
 }
 CLASSIFICACAO_AUTOMATICA = {"publicidade": "publicidade"}
 _PEDIDO = re.compile(r"^PO-\d{3}-\d{5,30}$")
+# nº do saque ("LWO0026111708406002980128860014"); nas linhas de reserva do extrato ele
+# vem com "_in" (a saída) ou "_off" (a volta) no fim
+_SAQUE = re.compile(r"^(LWO[0-9A-Za-z]{6,60})(?:_(?:in|off))?$")
+# situações do saque já vistas na tela (18/11): criado → em processamento → pago
+SITUACOES_DO_SAQUE = {"CREATED", "PROCESSING", "PAID"}
 # datas da tela vêm em milissegundos: de 2020 a 2100 (fora disso não é data dela)
 _MS_MINIMO = 1_577_836_800_000
 _MS_MAXIMO = 4_102_444_800_000
@@ -128,6 +140,14 @@ def _pedido(*candidatos: Any) -> str | None:
     return None
 
 
+def _saque_id(*candidatos: Any) -> str | None:
+    for c in candidatos:
+        m = _SAQUE.match(str(c or "").strip())
+        if m:
+            return m.group(1)
+    return None
+
+
 def saldo_da_tela(saldo: Any) -> dict[str, Decimal | None]:
     """Visão geral: Saldo total = Reserva + Fundos disponíveis."""
     r = saldo.get("result") if isinstance(saldo, dict) and "result" in saldo else saldo
@@ -157,10 +177,24 @@ def linha_para_movimento(item: dict[str, Any]) -> dict[str, Any] | None:
     pedido = _pedido(item.get("parent_order_sn"), item.get("order_id"))
     nome = str(item.get("biz_category_text") or categoria or "Lançamento").strip()
     nota = str(item.get("note") or "").strip()
+    saque = None
     if tipo == "venda_liberada":
         descricao = f"Pagamento do pedido {pedido}" if pedido else nome
     elif tipo == "estorno":
         descricao = f"Reembolso do pedido {pedido}" if pedido else nome
+    elif tipo == TIPO_RESERVA:
+        # o nº do saque junta a saída com a volta (é o "pagamento" do par); a nota aqui
+        # é só o nome do tipo outra vez
+        # (o nº do saque fica na coluna "Nº pagamento": repetir na descrição empurrava as
+        # colunas do Extrato pra fora da tela)
+        saque = _saque_id(item.get("order_id"), item.get("trans_sn"))
+        if saque:
+            descricao = (
+                "Reserva segurada no saque" if total < ZERO else "Reserva devolvida ao saldo"
+            )
+        else:
+            descricao = f"{'Reserva segurada' if total < ZERO else 'Reserva devolvida'} · {nome}"
+        nota = ""
     else:
         descricao = nome + (f" · pedido {pedido}" if pedido else "")
     if nota:
@@ -178,8 +212,9 @@ def linha_para_movimento(item: dict[str, Any]) -> dict[str, Any] | None:
         "descricao": descricao[:500],
         "sub_tipo": (str(item.get("sub_biz_category") or categoria)[:120] or None),
         # o lote (`batch_id`) junta todos os pedidos pagos na mesma hora: não é o
-        # "pagamento" do pedido — fica só na linha original
-        "pagamento_id": None,
+        # "pagamento" do pedido — fica só na linha original. Só o par de reserva tem
+        # "pagamento": o saque que o deixou
+        "pagamento_id": saque,
         "pedido_marketplace": pedido,
         "pack_id": None,
         "shipping_id": None,
@@ -202,6 +237,85 @@ def linha_para_movimento(item: dict[str, Any]) -> dict[str, Any] | None:
         "vinculado_em": None,
         "raw": {**item, "_tipo_temu": categoria},
     }
+
+
+def _tempos_do_saque(item: dict[str, Any]) -> dict[str, Any]:
+    tempos = item.get("status_time_map")
+    return tempos if isinstance(tempos, dict) else {}
+
+
+def data_do_saque(item: dict[str, Any]) -> datetime | None:
+    """Quando o saque foi criado."""
+    return _quando(item.get("created_at")) or _quando(_tempos_do_saque(item).get("CREATED"))
+
+
+def saque_pago(item: dict[str, Any]) -> bool:
+    """A Temu já marcou o saque como pago (o único estado em que a conta foi conferida)."""
+    return _quando(_tempos_do_saque(item).get("PAID")) is not None
+
+
+def saque_para_movimento(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Um saque da aba Pagamentos (`mall_withdraw_order_simple_volist`) → linha "Saque".
+
+    A data é a da CRIAÇÃO do saque (não muda depois; a do pagamento só existe quando o
+    banco confirma): é quando o dinheiro sai do saldo da Temu."""
+    saque = _saque_id(item.get("withdraw_order_id"))
+    valor = centavos(item.get("amount"))
+    quando = data_do_saque(item)
+    if saque is None or valor is None or valor <= ZERO or quando is None:
+        return None
+    descricao = "Saque pro banco"
+    conta = str(item.get("bank_account_suffix") or "").strip()
+    if conta:
+        descricao += f" · conta final {conta[:8]}"
+    de, ate = _quando(item.get("statement_begin_time")), _quando(item.get("statement_end_time"))
+    if de and ate:
+        descricao += f" · período {de.astimezone(BRT):%d/%m} a {ate.astimezone(BRT):%d/%m}"
+    return {
+        "origem": ORIGEM_TEMU,
+        "id_externo": f"saque:{saque}"[:80],
+        "data": quando,
+        "tipo": "saque",
+        "descricao": descricao[:500],
+        "sub_tipo": "withdraw",
+        # sem "nº de pagamento" na tela: o nº do saque (31 letras) empurrava as colunas do
+        # Extrato pra fora; ele está no `id_externo` e na linha original
+        "pagamento_id": None,
+        "pedido_marketplace": None,
+        "pack_id": None,
+        "shipping_id": None,
+        "pedido_bling": None,
+        "bling_id": None,
+        "bruto": None,
+        "tarifa": None,
+        "parcelamento": None,
+        "frete": None,
+        "cupom": None,
+        "credito": ZERO,
+        "debito": valor,
+        "saldo_apos": None,
+        "descontado_da_venda": None,
+        "sku": None,
+        "item_id": None,
+        "data_aprovacao": None,
+        "classificacao": "saque",
+        "vinculado_por": None,
+        "vinculado_em": None,
+        "raw": {**item, "_tipo_temu": "saque"},
+    }
+
+
+def _saque_do_movimento(m: dict[str, Any]) -> str | None:
+    """O nº do saque de um movimento "saque" montado aqui."""
+    return _saque_id((m.get("raw") or {}).get("withdraw_order_id"))
+
+
+def situacao_estranha_do_saque(item: dict[str, Any]) -> str | None:
+    """Situação do saque que este leitor nunca viu (falhou? voltou?) — vira aviso."""
+    novas = sorted(set(_tempos_do_saque(item)) - SITUACOES_DO_SAQUE)
+    if novas:
+        return ", ".join(str(x)[:30] for x in novas[:3])
+    return "devolvido" if item.get("is_refund") else None
 
 
 def _ordem(m: dict[str, Any]) -> tuple:
@@ -263,17 +377,12 @@ def _confere_total(leitura: dict[str, Any], chave: str, lidas: int) -> None:
 
 
 def identidade_da_loja(linhas: list[dict[str, Any]]) -> str | None:
-    """O nº da loja na Temu (`mall_id`) que vem em cada linha do extrato. Linhas de duas
-    lojas na mesma leitura = leitura inválida."""
+    """O nº da loja na Temu (`mall_id`) que vem em cada linha do extrato e em cada saque.
+    Linhas de duas lojas na mesma leitura = leitura inválida."""
     ids = {str(x["mall_id"]) for x in linhas if x.get("mall_id") not in (None, "")}
     if len(ids) > 1:
         raise LeituraInvalidaError(f"linhas de mais de uma loja da Temu na mesma leitura: {ids}")
     return next(iter(ids)) if ids else None
-
-
-def _marca_do_saque(item: dict[str, Any]) -> str:
-    bruto = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha1(bruto.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
 
 
 async def previstos_dos_pedidos(
@@ -370,6 +479,31 @@ async def _gravar_previstos(
 CHAVE_IDENTIDADE = "identidade"
 
 
+async def _recusar_outra_loja(
+    session: AsyncSession, loja: ConciliacaoLoja, mall_id: str | None, nome_na_tela: str | None
+) -> None:
+    """Só a conferência (não grava): roda antes das outras, pra leitura de perfil trocado
+    sair com o motivo certo e não com o de um saque que não é desta loja."""
+    if not mall_id:
+        return
+    detalhe = (
+        await session.execute(
+            select(ConciliacaoSync.detalhe).where(
+                ConciliacaoSync.integration_id == loja.integration_id,
+                ConciliacaoSync.origem == ORIGEM_TEMU,
+                ConciliacaoSync.chave == CHAVE_IDENTIDADE,
+            )
+        )
+    ).scalar_one_or_none()
+    guardado = str((detalhe or {}).get("mall_id") or "")
+    if guardado and guardado != mall_id:
+        raise LeituraInvalidaError(
+            f"a tela lida é de outra loja da Temu (loja {mall_id}"
+            f"{' · ' + nome_na_tela if nome_na_tela else ''}); esta é a {guardado}: "
+            "confira o perfil do AdsPower"
+        )
+
+
 async def _conferir_identidade(
     session: AsyncSession,
     loja: ConciliacaoLoja,
@@ -421,34 +555,47 @@ DIAS_QUE_A_TELA_MOSTRA = 25
 
 
 async def _conferir_linhas_gravadas(
-    session: AsyncSession, loja: ConciliacaoLoja, movs: list[dict[str, Any]], agora: datetime
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    movs: list[dict[str, Any]],
+    agora: datetime,
+    saques_lidos: set[str],
 ) -> None:
     """Leitura que NÃO traz linha já gravada do mesmo período é de outra tela (conta
     errada sem linhas pra entregar o `mall_id`, período trocado) ou veio pela metade —
-    recusada. Sem isto, uma leitura vazia contava como "lida" e apagava o aviso."""
+    recusada. Sem isto, uma leitura vazia contava como "lida" e apagava o aviso.
+
+    O período é o das linhas do EXTRATO (`movs`); o saque gravado dentro dele tem que
+    estar na aba Pagamentos desta leitura (`saques_lidos`, todos os que vieram)."""
     mov = ConciliacaoMovimento
     if movs:
         datas = [m["data"] for m in movs]
         de, ate = min(datas), max(datas)
     else:
         de, ate = agora - timedelta(days=DIAS_QUE_A_TELA_MOSTRA), agora
-    gravadas = set(
-        (
-            await session.execute(
-                select(mov.id_externo).where(
-                    mov.integration_id == loja.integration_id,
-                    mov.origem == ORIGEM_TEMU,
-                    mov.data >= de,
-                    mov.data <= ate,
-                )
+    gravadas = (
+        await session.execute(
+            select(mov.id_externo, mov.tipo).where(
+                mov.integration_id == loja.integration_id,
+                mov.origem == ORIGEM_TEMU,
+                mov.data >= de,
+                mov.data <= ate,
             )
-        ).scalars()
-    )
-    faltam = gravadas - {m["id_externo"] for m in movs}
+        )
+    ).all()
+    lidas = {m["id_externo"] for m in movs}
+    faltam = {i for i, tipo in gravadas if tipo != "saque"} - lidas
     if faltam:
         raise LeituraInvalidaError(
             f"a leitura não traz {len(faltam)} linha(s) já gravada(s) do mesmo período: "
             "tela de outra loja, período trocado ou leitura pela metade"
+        )
+    sumidos = sorted({i for i, tipo in gravadas if tipo == "saque"} - saques_lidos)
+    if sumidos:
+        raise LeituraInvalidaError(
+            f"a aba Pagamentos não traz o saque {sumidos[0].removeprefix('saque:')}, que já "
+            "está gravado: leitura pela metade, ou a Temu tirou o saque da lista — conferir "
+            "na Temu"
         )
 
 
@@ -472,23 +619,149 @@ async def _saldo_da_ultima_linha(session: AsyncSession, loja: ConciliacaoLoja) -
     return await _saldo_anterior(session, loja, ultima.astimezone(BRT).date() + timedelta(days=1))
 
 
-async def _saques_ja_vistos(session: AsyncSession, loja: ConciliacaoLoja) -> set[str] | None:
-    """As marcas dos saques da leitura anterior (None = ainda não houve leitura)."""
-    row = (
+async def _ultima_gravada(session: AsyncSession, loja: ConciliacaoLoja) -> datetime | None:
+    """A data da linha mais nova já gravada da loja."""
+    mov = ConciliacaoMovimento
+    return (
         await session.execute(
-            select(ConciliacaoSync)
-            .where(
-                ConciliacaoSync.integration_id == loja.integration_id,
-                ConciliacaoSync.origem == ORIGEM_TEMU,
-                ConciliacaoSync.chave.like("leitura:%"),
-            )
-            .order_by(ConciliacaoSync.lido_em.desc())
+            select(mov.data)
+            .where(mov.integration_id == loja.integration_id, mov.origem == ORIGEM_TEMU)
+            .order_by(mov.data.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
-    if row is None:
-        return None
-    return {str(x) for x in ((row.detalhe or {}).get("saques_vistos") or [])}
+
+
+# reserva do extrato que cita um saque que a aba Pagamentos não mostra: enquanto é recente
+# a leitura espera (a Temu pode estar fechando o saque); depois disso grava e avisa — sem
+# isto, uma reserva que nunca ganhasse saque na lista travaria a loja até sair da tela
+HORAS_ESPERANDO_O_SAQUE = 48
+
+
+async def _saques_do_periodo(
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    leitura: dict[str, Any],
+    itens: list[dict[str, Any]],
+    movs: list[dict[str, Any]],
+    agora: datetime,
+) -> tuple[set[str], list[dict[str, Any]], list[str]]:
+    """(`id_externo` de todos os saques que a lista trouxe, os que entram na conta, avisos).
+
+    A aba Pagamentos é o histórico inteiro. Entra na conta o saque feito DEPOIS da linha
+    mais antiga do extrato lido ou depois da última linha gravada (o que vier antes) —
+    mais velho que isso é passado, como o saldo de abertura. Levanta
+    `LeituraInvalidaError` quando gravar com esta lista deixaria o saldo de alguma linha
+    errado pra sempre (linha gravada não é reescrita)."""
+    ultima = await _ultima_gravada(session, loja)
+    primeira = min((m["data"] for m in movs), default=None)
+    cortes = [d for d in (primeira, ultima) if d is not None]
+    corte = min(cortes) if cortes else None
+
+    def entra(quando: datetime) -> bool:
+        return (primeira is not None and quando >= primeira) or (
+            ultima is not None and quando > ultima
+        )
+
+    mov = ConciliacaoMovimento
+    gravados = set(
+        (
+            await session.execute(
+                select(mov.id_externo).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_TEMU,
+                    mov.tipo == "saque",
+                )
+            )
+        ).scalars()
+    )
+    por_id: dict[str, dict[str, Any]] = {}
+    vistos: set[str] = set()  # todo saque com nº legível, mesmo que o resto não seja
+    datas: list[datetime] = []
+    ilegiveis = antigos_ilegiveis = 0
+    for item in itens:
+        nome = _saque_id(item.get("withdraw_order_id"))
+        if nome:
+            vistos.add(f"saque:{nome}"[:80])
+        quando = data_do_saque(item)
+        if quando is not None:
+            datas.append(quando)
+        lido = saque_para_movimento(item)
+        if lido is not None:
+            por_id.setdefault(lido["id_externo"], lido)  # a mesma página lida duas vezes
+        elif (
+            corte is None
+            or (quando is not None and not entra(quando))
+            or (nome and f"saque:{nome}"[:80] in gravados)
+        ):
+            # passado, ou já está no painel: não entraria na conta de jeito nenhum. O
+            # histórico volta em toda leitura — um saque antigo num formato novo não
+            # pode travar a loja
+            antigos_ilegiveis += 1
+        else:
+            ilegiveis += 1
+    if ilegiveis:
+        raise LeituraInvalidaError(
+            f"{ilegiveis} saque(s) do período sem data, valor ou identificação na aba Pagamentos"
+        )
+    total = leitura.get("saques_total")
+    try:
+        total = len(itens) if total is None else int(total)
+    except (TypeError, ValueError) as e:
+        raise LeituraInvalidaError("'saques_total' não é número") from e
+    if corte is not None and len(itens) < total and not any(d < corte for d in datas):
+        # o robô parou antes do fim da lista e não passou do começo do período: pode
+        # haver saque do período que não veio
+        raise LeituraInvalidaError(
+            f"leitura incompleta dos saques: a tela tem {total}, vieram {len(itens)} e "
+            "nenhum é anterior ao período do extrato"
+        )
+    no_periodo = [x for x in por_id.values() if entra(x["data"])]
+    avisos: list[str] = []
+    for x in no_periodo:
+        nome, estranha = _saque_do_movimento(x), situacao_estranha_do_saque(x["raw"])
+        if x["id_externo"] in gravados:
+            if estranha:
+                # já está no painel como a Temu mostrou; a volta, se houver, vem em linha
+                avisos.append(
+                    f"o saque {nome}, já gravado, mudou de situação na Temu ({estranha}): conferir"
+                )
+            continue
+        # saque que ainda não está no painel: só entra do jeito que a conta foi conferida
+        # (pago). Em qualquer outro estado não se sabe se o Saldo total da tela já desceu
+        if estranha:
+            raise LeituraInvalidaError(
+                f"o saque {nome} está numa situação que o leitor não conhece ({estranha}): "
+                "não gravei nada — conferir na Temu"
+            )
+        if not saque_pago(x["raw"]):
+            raise LeituraInvalidaError(
+                f"o saque {nome} ainda está em andamento na Temu (não consta como pago): a "
+                "leitura espera o pagamento pra gravar o dia; a próxima leitura pega"
+            )
+
+    conhecidos = {_saque_id(x.get("withdraw_order_id")) for x in itens}
+    orfas = {
+        m["pagamento_id"]: m["data"]
+        for m in sorted(movs, key=_ordem)
+        if m["tipo"] == TIPO_RESERVA and m["pagamento_id"] and m["pagamento_id"] not in conhecidos
+    }
+    if orfas:
+        # a reserva cita o saque que a deixou; sem ele a conta fica errada
+        nome, quando = max(orfas.items(), key=lambda par: par[1])
+        if agora - quando < timedelta(hours=HORAS_ESPERANDO_O_SAQUE):
+            raise LeituraInvalidaError(
+                f"o extrato cita o saque {nome} e a aba Pagamentos não mostra esse saque: a "
+                "Temu ainda está fechando o saque ou a leitura veio pela metade; a próxima "
+                "leitura pega"
+            )
+        avisos.append(
+            f"o extrato cita {len(orfas)} saque(s) que a aba Pagamentos não mostra "
+            f"({nome}): o saldo do dia dele pode não fechar — conferir na Temu"
+        )
+    if antigos_ilegiveis:
+        logger.info("conciliacao_temu_saque_antigo_ilegivel", loja=loja.conta, n=antigos_ilegiveis)
+    return vistos, no_periodo, avisos
 
 
 async def ingerir_leitura(
@@ -507,7 +780,7 @@ async def ingerir_leitura(
         raise LeituraInvalidaError("leitura fora do formato")
     linhas = _lista(leitura, "extrato")
     itens_previsto = _lista(leitura, "previstos")
-    saques = _lista(leitura, "saques")
+    itens_saque = _lista(leitura, "saques")
     _confere_total(leitura, "extrato", len(linhas))
     total_previstos = _total_da_tela(leitura, "previstos")
     saldo = saldo_da_tela(leitura.get("saldo"))
@@ -532,7 +805,11 @@ async def ingerir_leitura(
         vistos.add(p["pedido_marketplace"])
         previstos.append(p)
     nome_na_tela = str(leitura.get("loja_na_tela") or "")[:120] or None
-    mall_id = identidade_da_loja(linhas)
+    mall_id = identidade_da_loja(linhas + itens_saque)
+    await _recusar_outra_loja(session, loja, mall_id, nome_na_tela)
+    saques_lidos, saques, avisos_saques = await _saques_do_periodo(
+        session, loja, leitura, itens_saque, movs, agora
+    )
     avisos: list[str] = []
     if ilegiveis:
         # não trava o extrato por causa do previsto, mas não some calado: o pedido
@@ -547,10 +824,15 @@ async def ingerir_leitura(
             f"{len(itens_previsto)}"
         )
 
-    await _conferir_linhas_gravadas(session, loja, movs, agora)
+    avisos.extend(avisos_saques)
+
+    await _conferir_linhas_gravadas(session, loja, movs, agora, saques_lidos)
 
     # ----- a partir daqui grava -----
     await _conferir_identidade(session, loja, mall_id, nome_na_tela, agora)
+    # os saques do período entram na corrente do saldo junto com as linhas do extrato
+    movs_extrato = movs
+    movs = sorted(movs_extrato + saques, key=_ordem)
     encadear_saldo(movs, saldo["total"])
     lojas_bling = await bling_store_ids_da_loja(session, await _integracao(session, loja))
     mapa = await resolver_pedidos_bling(
@@ -563,9 +845,6 @@ async def ingerir_leitura(
     por_tipo: dict[str, int] = {}
     for m in movs:
         por_tipo[m["tipo"]] = por_tipo.get(m["tipo"], 0) + 1
-    marcas_saques = sorted({_marca_do_saque(x) for x in saques})
-    ja_vistos = await _saques_ja_vistos(session, loja)
-    saques_novos = [x for x in marcas_saques if ja_vistos is None or x not in ja_vistos]
     # linha de antes do início da loja não entra no painel (como no arquivo da KFA)
     no_painel = [m for m in movs if m["data"].astimezone(BRT).date() >= loja.inicio]
     inseridos = await inserir_movimentos(session, loja, no_painel) if no_painel else 0
@@ -575,8 +854,8 @@ async def ingerir_leitura(
         if m["tipo"] == "venda_liberada" and m["pedido_marketplace"]
     }
     stats_previstos = await _gravar_previstos(session, loja, previstos, pagos_agora, agora)
-    # o saldo andou sem linha nova? (um saque que o leitor ainda não lê, um ajuste sem
-    # linha): com linha nova o dia dela já acusa; sem linha nenhuma, só este aviso mostra
+    # o saldo andou sem linha nova? (um ajuste sem linha, um saque que a aba Pagamentos
+    # não mostrou): com linha nova o dia dela já acusa; sem linha nenhuma, só este aviso
     saldo_gravado = await _saldo_da_ultima_linha(session, loja)
     if saldo_gravado is not None and abs(saldo_gravado - saldo["total"]) > Decimal("0.05"):
         avisos.append(
@@ -585,14 +864,6 @@ async def ingerir_leitura(
         )
 
     datas: list[date] = [m["data"].astimezone(BRT).date() for m in movs]
-    if saques_novos:
-        # a Eron (piloto) nunca sacou: o formato do saque ainda não é conhecido. O saldo
-        # da tela já desceu; sem a linha, o dia não fecha — e o aviso diz por quê. Só o
-        # saque NOVO avisa: a aba Pagamentos é um histórico, o antigo volta em toda leitura.
-        avisos.append(
-            f"{len(saques_novos)} saque(s) novo(s) na tela da Temu ainda sem leitura: "
-            "o saldo do dia pode não fechar"
-        )
     stats: dict[str, Any] = {
         "linhas": len(linhas),
         "no_painel": len(no_painel),
@@ -607,9 +878,11 @@ async def ingerir_leitura(
             "repetidos": len(itens_previsto) - ilegiveis - len(previstos),
             **stats_previstos,
         },
-        "saques": len(saques),
-        "saques_novos": len(saques_novos),
-        "saques_vistos": marcas_saques[:500],
+        "saques": {
+            "lidos": len(itens_saque),
+            "no_periodo": len(saques),
+            "no_painel": sum(1 for m in no_painel if m["tipo"] == "saque"),
+        },
         "de": min(datas).isoformat() if datas else None,
         "ate": max(datas).isoformat() if datas else None,
         "saldo_temu": {
@@ -622,8 +895,6 @@ async def ingerir_leitura(
     }
     if avisos:
         stats["aviso"] = " · ".join(avisos)
-    if saques:
-        stats["saques_brutos"] = saques[:20]
     session.add(
         ConciliacaoSync(
             integration_id=loja.integration_id,
@@ -649,7 +920,6 @@ async def ingerir_leitura(
         inseridos=inseridos,
         previstos=stats_previstos,
         saques=len(saques),
-        saques_novos=len(saques_novos),
         saldo=str(saldo["total"]),
     )
     return stats

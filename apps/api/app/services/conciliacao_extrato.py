@@ -139,6 +139,9 @@ TIPOS_RESERVA = {
     "reserva_frete_devolucao",
     "reserva_saque",
     "reserva_pagamento",
+    # Temu (18/11): o par que o saque deixa no extrato — −X no fim do período, +X no
+    # começo do seguinte (`conciliacao_temu.TIPO_RESERVA`)
+    "reserva_temu",
 }
 REGISTROS_IGNORADOS = {"initial_available_balance", "total", "available_balance"}
 

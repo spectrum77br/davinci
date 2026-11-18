@@ -16,7 +16,7 @@ const rodape = computed(() =>
     : props.plataforma === 'amazon'
       ? { inicial: 'Soma do painel (início do dia)', creditos: 'Lançamentos e ajustes', debitos: 'Estornos, tarifas e repasses', final: 'Soma do painel (fim do dia)', informado: 'Saldo encadeado', diferenca: 'Diferença' }
       : props.plataforma === 'temu'
-        ? { inicial: 'Saldo inicial', creditos: 'Entradas (pagamentos de pedidos)', debitos: 'Saídas (reembolsos e cobranças)', final: 'Saldo final calculado', informado: 'Saldo total da tela da Temu', diferenca: 'Diferença' }
+        ? { inicial: 'Saldo inicial', creditos: 'Entradas (pedidos pagos e reserva que volta)', debitos: 'Saídas (saques, reserva, reembolsos e cobranças)', final: 'Saldo final calculado', informado: 'Saldo total da tela da Temu', diferenca: 'Diferença' }
         : { inicial: 'Saldo inicial', creditos: 'Entradas (créditos)', debitos: 'Saídas (débitos)', final: 'Saldo final calculado', informado: `Saldo informado pelo ${quemInforma.value}`, diferenca: 'Diferença' },
 )
 const notaRodape = computed(() =>
@@ -25,7 +25,7 @@ const notaRodape = computed(() =>
     : props.plataforma === 'amazon'
       ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Cada pedido entra 3 a 4 dias depois do envio e fica "preso na reserva" até ~7 dias depois da entrega; o saldo aqui é reserva + disponível, e a cada 14 dias o repasse pro banco sai dele.'
       : props.plataforma === 'temu'
-        ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). A Temu paga cada pedido 7 dias depois da entrega. O saldo é o Saldo total de Finanças › Pagamentos (reserva + fundos disponíveis), que o robô lê na tela; se ele andar sem linha no extrato (um saque, por exemplo), a diferença aparece aqui e o dia não fecha.'
+        ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). A Temu paga cada pedido 7 dias depois da entrega. O saldo é o Saldo total de Finanças › Pagamentos (reserva + fundos disponíveis), que o robô lê na tela. O saque pro banco entra como linha (lido da aba Pagamentos): a Temu saca a cada 14 dias e segura uma reserva, que sai no último dia do período e volta no dia seguinte. Se o saldo andar sem linha no extrato, a diferença aparece aqui e o dia não fecha.'
         : 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.',
 )
 // 16/10, revisão: `update:dia` deixa a página saber o dia que as setas escolheram
@@ -112,9 +112,12 @@ const pendentes = computed(() => dados.value?.contagem.pendente || 0)
 // (`reserva_aberta`) ou ainda sem dono é dinheiro retido e aparece sempre (injox 15/10:
 // a única linha pendente do dia estava escondida atrás de "vão e voltam, somam zero").
 const mostrarReservas = ref(false)
-const escondivel = (m: Mov) => m.tipo.startsWith('reserva_') && m.reserva_aberta !== true && m.status !== 'pendente'
+// 18/11: a reserva da Temu NUNCA se esconde — a saída cai num dia e a volta no dia seguinte,
+// então dentro do dia ela não soma zero: escondida, o saldo do dia andava sem linha à vista.
+const escondivel = (m: Mov) => m.tipo.startsWith('reserva_') && m.tipo !== 'reserva_temu' && m.reserva_aberta !== true && m.status !== 'pendente'
 const reservas = computed(() => (dados.value?.movimentos || []).filter(escondivel).length)
-const reservasRetidas = computed(() => (dados.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_') && !escondivel(m)).length)
+// retida = saiu e não voltou, ou ainda sem dono (o par fechado da Temu fica à mostra, mas não é retido)
+const reservasRetidas = computed(() => (dados.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_') && (m.reserva_aberta === true || m.status === 'pendente')).length)
 const movimentosVisiveis = computed(() => {
   const todos = dados.value?.movimentos || []
   return mostrarReservas.value ? todos : todos.filter((m) => !escondivel(m))
@@ -371,7 +374,8 @@ onMounted(() => {
                 @click="abrir(m)"
               >
                 <td class="whitespace-nowrap px-1.5 py-1 tabular-nums">{{ fmtHora(m.data) }}</td>
-                <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ m.pagamento_id }}</td>
+                <!-- reserva da Temu: o "pagamento" é o nº do saque (31 letras), que empurrava os valores pra fora da tela; ele aparece no detalhe da linha -->
+                <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground" :title="m.pagamento_id || undefined">{{ m.tipo === 'reserva_temu' ? '' : m.pagamento_id }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1"><b>{{ m.tipo_label }}</b><span v-if="m.descricao && m.descricao !== m.tipo" class="ml-1 text-muted-foreground">{{ m.descricao }}</span><span v-if="(m.pago_com_reserva || 0) > 0.005" class="ml-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="essa parte da fatura foi paga com o dinheiro que o Mercado Pago já tinha segurado pra dívida: não saiu do saldo disponível">{{ fmtMoney(m.pago_com_reserva) }} pagos com o segurado</span></td>
                 <td class="whitespace-nowrap px-1.5 py-1">
                   <button v-if="m.pedido_bling" type="button" class="font-bold underline decoration-dotted" :title="m.pedido_situacao_label || ''" @click.stop="emit('ver-pedido', m.pedido_bling)">{{ m.pedido_bling }}</button>

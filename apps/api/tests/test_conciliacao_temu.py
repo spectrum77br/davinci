@@ -46,6 +46,8 @@ from app.services.conciliacao_temu import (
     previsto_do_item,
     reais,
     saldo_da_tela,
+    saque_para_movimento,
+    situacao_estranha_do_saque,
 )
 
 LOJA_BLING = "206288707"
@@ -57,6 +59,12 @@ PO_SEM_DATA = "PO-029-11520224554871191"  # previsto "Entregue em + 7 dias"
 PO_NOVO = "PO-029-20000000000000001"  # vendido, a Temu ainda não mostra
 PO_REEMBOLSO = "PO-029-13244443285111217"  # pago e reembolsado no mesmo segundo
 AGORA = datetime(2026, 11, 17, 15, 5, tzinfo=UTC)
+# saques no formato da Barbosa (18/11): a Temu saca a cada 14 dias
+SAQUE_VELHO = "LWO0026110308407002700094840014"
+SAQUE = "LWO0026111708406002980128860014"
+FIM_DO_PERIODO = datetime(2026, 11, 17, 2, 59, 59, 999000, tzinfo=UTC)  # 16/11 23:59:59,999
+COMECO_DO_SEGUINTE = datetime(2026, 11, 17, 3, 0, tzinfo=UTC)  # 17/11 00:00
+SAQUE_CRIADO = datetime(2026, 11, 17, 8, 42, 7, tzinfo=UTC)  # 17/11 05:42
 
 
 def _v(c: int) -> dict:
@@ -98,6 +106,81 @@ def _linha(
         "sub_biz_category_text": texto,
         "note": "Travesseiro de Pescoço para Viagem",
     }
+
+
+def _reserva(flow: str, saque: str, valor: int, quando: datetime, *, volta: bool = False) -> dict:
+    """A linha de reserva que o saque deixa no extrato: sai no fim do período ("_in") e
+    volta no começo do seguinte ("_off")."""
+    c = valor if volta else -valor
+    nome = "Released amount" if volta else "Reserve amount"
+    texto = "Montante libertado" if volta else "Montante de reserva"
+    ref = f"{saque}_{'off' if volta else 'in'}"
+    return {
+        "flow_id": flow,
+        "mall_id": 635517739909443,
+        "batch_id": "",
+        "prod_amount": _v(0),
+        "fee_amount": _v(0),
+        "other_amount": _v(c),
+        "total_amount": _v(c),
+        "created_at": int(quando.timestamp() * 1000),
+        "trans_sn": ref,
+        "order_id": ref,
+        "parent_order_sn": "",
+        "biz_category": nome,
+        "ori_biz_category": "Reserve",
+        "sub_biz_category": nome,
+        "biz_category_text": texto,
+        "sub_biz_category_text": texto,
+        "note": nome,
+    }
+
+
+def _saque(saque: str, valor: int, criado: datetime) -> dict:
+    """Um saque da aba Pagamentos (`mall_withdraw_order_simple_volist`)."""
+    ms = int(criado.timestamp() * 1000)
+    return {
+        "id": 899286,
+        "mall_id": 635517739909443,
+        "withdraw_order_id": saque,
+        "amount": _v(valor),
+        "currency": "BRL",
+        "service_fee_amount": _v(0),
+        "receive_amount": _v(0),
+        "withdraw_type": 1,
+        "business_type": 1,
+        "status": 2,
+        "status_time_map": {"CREATED": ms, "PROCESSING": ms + 8_745_000, "PAID": ms + 8_765_000},
+        "created_at": ms,
+        "bank_account_suffix": "5685",
+        "is_refund": 0,
+        "statement_begin_time": ms - 14 * 86_400_000 - 20_527_000,
+        "statement_end_time": ms - 20_527_001,
+        "source_id": "STC0026111708404002980406730014",
+        "source_type": 1,
+    }
+
+
+def _ciclo_com_saque() -> dict:
+    """Um período inteiro como o da Barbosa: abre com 57,40, entram 83,00 e 26,00
+    (166,40); a Temu segura 78,50 de reserva, saca 87,90 e devolve a reserva; depois
+    entra mais 26,00 → 104,50. O saque de 03/11 é anterior à primeira linha."""
+    return _leitura(
+        [
+            _linha("PFI-1", PO_PAGO, 8300, datetime(2026, 11, 3, 14, 56, tzinfo=UTC)),
+            _linha("PFI-2", PO_ESPERA, 2600, datetime(2026, 11, 11, 4, 47, tzinfo=UTC)),
+            _reserva("PFI-3", SAQUE, 7850, FIM_DO_PERIODO),
+            _reserva("PFI-4", SAQUE, 7850, COMECO_DO_SEGUINTE, volta=True),
+            _linha("PFI-5", PO_SEM_DATA, 2600, datetime(2026, 11, 17, 17, 56, tzinfo=UTC)),
+        ],
+        [],
+        total=10450,
+        reserva=7850,
+        saques=[
+            _saque(SAQUE, 8790, SAQUE_CRIADO),
+            _saque(SAQUE_VELHO, 51030, datetime(2026, 11, 3, 8, 42, tzinfo=UTC)),
+        ],
+    )
 
 
 def _previsto(po: str, valor: str = "R$26,00", quando: datetime | None = None) -> dict:
@@ -282,10 +365,10 @@ def test_linha_do_extrato_vira_movimento():
         "publicidade",
         None,
     )
-    reserva = linha_para_movimento(
-        _linha("PFI-4", None, -5000, quando, categoria="Reserve amount", texto="Reserva")
+    devolvido = linha_para_movimento(
+        _linha("PFI-4", None, 5000, quando, categoria="Payment Refund", texto="Saque devolvido")
     )
-    assert (reserva["tipo"], reserva["classificacao"]) == ("outro", None)
+    assert (devolvido["tipo"], devolvido["classificacao"]) == ("outro", None)
     etiqueta = linha_para_movimento(
         _linha("PFI-5", PO_PAGO, -900, quando, categoria="Shipping label purchase", texto="E")
     )
@@ -372,8 +455,12 @@ async def test_leitura_grava_linhas_saldo_e_previsto_e_nao_duplica(db, make_user
         ("PFI-B", Decimal("252.00"), "307141"),
     ]
     assert loja.ultimo_extrato_em == AGORA and loja.ultimo_erro is None
-    # a Margem não é tocada: nenhuma venda da Temu gravada lá
-    assert (await db.execute(select(MarketplaceOrderFinancial))).scalars().all() == []
+    # a Margem não é tocada: nenhuma venda da Temu gravada lá (só as da Temu: rodando
+    # junto com outros arquivos, o banco de teste guarda venda de outra plataforma)
+    da_temu = select(MarketplaceOrderFinancial).where(
+        MarketplaceOrderFinancial.platform == IntegrationPlatform.TEMU
+    )
+    assert (await db.execute(da_temu)).scalars().all() == []
     # a mesma leitura de novo: nada entra em dobro
     r2 = await ingerir_leitura(db, loja, _primeira_leitura(), agora=AGORA + timedelta(hours=1))
     await db.commit()
@@ -529,21 +616,413 @@ async def test_previsto_ilegivel_repetido_ou_a_menos_avisa_sem_travar_o_extrato(
     }
 
 
-async def test_saque_que_ja_estava_na_tela_nao_avisa_de_novo(db, make_user):
+# ---------- saque e reserva (18/11, Barbosa) ----------
+
+
+def test_saque_e_reserva_viram_movimentos():
+    s = saque_para_movimento(_saque(SAQUE, 19690, SAQUE_CRIADO))
+    assert (s["tipo"], s["classificacao"], s["id_externo"], s["pagamento_id"]) == (
+        "saque",
+        "saque",
+        f"saque:{SAQUE}",
+        None,
+    )
+    assert (s["credito"], s["debito"], s["data"]) == (Decimal("0"), Decimal("196.90"), SAQUE_CRIADO)
+    assert s["descricao"] == "Saque pro banco · conta final 5685 · período 03/11 a 16/11"
+    # sem nº, sem valor ou sem data não é saque que dê pra gravar
+    assert (
+        saque_para_movimento({**_saque(SAQUE, 100, SAQUE_CRIADO), "withdraw_order_id": ""}) is None
+    )
+    assert saque_para_movimento({**_saque(SAQUE, 100, SAQUE_CRIADO), "amount": None}) is None
+    assert saque_para_movimento({**_saque(SAQUE, 0, SAQUE_CRIADO)}) is None
+    sem_data = {**_saque(SAQUE, 100, SAQUE_CRIADO), "created_at": None, "status_time_map": {}}
+    assert saque_para_movimento(sem_data) is None
+    assert situacao_estranha_do_saque(_saque(SAQUE, 100, SAQUE_CRIADO)) is None
+    falhou = _saque(SAQUE, 100, SAQUE_CRIADO)
+    falhou["status_time_map"]["FAILED"] = 1
+    assert situacao_estranha_do_saque(falhou) == "FAILED"
+    assert situacao_estranha_do_saque({**_saque(SAQUE, 100, SAQUE_CRIADO), "is_refund": 1})
+
+    saida = linha_para_movimento(_reserva("PFI-3", SAQUE, 7850, FIM_DO_PERIODO))
+    volta = linha_para_movimento(_reserva("PFI-4", SAQUE, 7850, COMECO_DO_SEGUINTE, volta=True))
+    assert (saida["tipo"], saida["pagamento_id"], saida["debito"], saida["credito"]) == (
+        "reserva_temu",
+        SAQUE,
+        Decimal("78.50"),
+        Decimal("0"),
+    )
+    assert (volta["tipo"], volta["pagamento_id"], volta["credito"]) == (
+        "reserva_temu",
+        SAQUE,
+        Decimal("78.50"),
+    )
+    # sem pedido e SEM classificação: quem decide se é "vai e volta" é o par, no recálculo
+    assert saida["classificacao"] is None and saida["pedido_marketplace"] is None
+    assert saida["descricao"] == "Reserva segurada no saque"
+    assert volta["descricao"] == "Reserva devolvida ao saldo"
+    # reserva que não cita saque: continua reserva, sem "pagamento" pra formar par
+    solta = _reserva("PFI-9", SAQUE, 500, FIM_DO_PERIODO)
+    solta["order_id"] = solta["trans_sn"] = "TT-029-1"
+    solta = linha_para_movimento(solta)
+    assert (solta["pagamento_id"], solta["descricao"]) == (
+        None,
+        "Reserva segurada · Montante de reserva",
+    )
+
+
+async def test_saque_vira_linha_o_saldo_fecha_e_a_reserva_vai_e_volta(
+    db, make_user, auth_as, client
+):
+    from app.services.conciliacao_jobs import fechar_dias_prontos
+
     loja = await _loja_temu(db, make_user)
-    saque = {"withdraw_sn": "W1", "amount": _v(10000), "status": 3}
-    com = _primeira_leitura()
-    com["saques"], com["saques_total"] = [saque], 1
-    r = await ingerir_leitura(db, loja, com, agora=AGORA)
-    assert r["saques_novos"] == 1 and "1 saque(s) novo(s)" in r["aviso"]
-    # a aba Pagamentos é um histórico: o mesmo saque volta em toda leitura
-    r = await ingerir_leitura(db, loja, com, agora=AGORA + timedelta(days=1))
-    assert (r["saques"], r["saques_novos"]) == (1, 0) and "aviso" not in r
+    r = await ingerir_leitura(db, loja, _ciclo_com_saque(), agora=AGORA + timedelta(days=1))
+    await recalcular_loja(db, loja, agora=AGORA + timedelta(days=1))
+    await db.commit()
+    # o saque de 03/11 é anterior à primeira linha do extrato: passado, não entra
+    assert r["saques"] == {"lidos": 2, "no_periodo": 1, "no_painel": 1}
+    assert (r["linhas"], r["inseridos"]) == (5, 6) and "aviso" not in r
     assert loja.ultimo_erro is None
-    # um saque novo avisa de novo
-    com["saques"], com["saques_total"] = [saque, {**saque, "withdraw_sn": "W2"}], 2
-    r = await ingerir_leitura(db, loja, com, agora=AGORA + timedelta(days=2))
-    assert r["saques_novos"] == 1 and "1 saque(s) novo(s)" in r["aviso"]
+    movs = {
+        m.id_externo: m
+        for m in (
+            await db.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id
+                )
+            )
+        ).scalars()
+    }
+    assert set(movs) == {"PFI-1", "PFI-2", "PFI-3", "PFI-4", "PFI-5", f"saque:{SAQUE}"}
+    # 57,40 → +83 → +26 → reserva −78,50 → +78,50 → saque −87,90 → +26 = saldo da tela
+    assert [movs[k].saldo_apos for k in ("PFI-1", "PFI-2", "PFI-3", "PFI-4")] == [
+        Decimal("140.40"),
+        Decimal("166.40"),
+        Decimal("87.90"),
+        Decimal("166.40"),
+    ]
+    saque = movs[f"saque:{SAQUE}"]
+    assert (saque.tipo, saque.classificacao, saque.debito, saque.saldo_apos) == (
+        "saque",
+        "saque",
+        Decimal("87.90"),
+        Decimal("78.50"),
+    )
+    assert saque.data == SAQUE_CRIADO and saque.pedido_bling is None
+    assert movs["PFI-5"].saldo_apos == Decimal("104.50")
+    # o par (saída e volta do mesmo saque) fechou: "Reserva (vai e volta)"
+    assert (movs["PFI-3"].tipo, movs["PFI-3"].classificacao) == ("reserva_temu", "reserva")
+    assert movs["PFI-4"].classificacao == "reserva"
+
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r16 = await client.get("/api/conciliacao/extrato", params={"loja": CONTA, "dia": "2026-11-16"})
+    assert r16.status_code == 200, r16.text
+    t = r16.json()["totais"]
+    assert (t["saldo_inicial"], t["saldo_final"], t["diferenca"]) == (166.4, 87.9, 0.0)
+    r17 = await client.get("/api/conciliacao/extrato", params={"loja": CONTA, "dia": "2026-11-17"})
+    t = r17.json()["totais"]
+    assert (t["saldo_inicial"], t["saldo_final"], t["saldo_informado"], t["diferenca"]) == (
+        87.9,
+        104.5,
+        104.5,
+        0.0,
+    )
+    linhas = {m["tipo"]: m for m in r17.json()["movimentos"]}
+    assert set(linhas) == {"reserva_temu", "saque", "venda_liberada"}
+    assert (linhas["saque"]["status"], linhas["saque"]["debito"]) == ("classificado", 87.9)
+    # par fechado: a tela pode esconder (não é dinheiro retido)
+    volta = linhas["reserva_temu"]
+    assert (volta["status"], volta["reserva_aberta"], volta["credito"]) == (
+        "classificado",
+        False,
+        78.5,
+    )
+    dias = await fechar_dias_prontos(db, loja, maximo_dias=3650)
+    await db.commit()
+    assert {"2026-11-16", "2026-11-17"} <= set(dias["fechados"])
+
+    # a mesma tela lida de novo: nada duplica, nada é reescrito
+    r = await ingerir_leitura(db, loja, _ciclo_com_saque(), agora=AGORA + timedelta(days=2))
+    await db.commit()
+    assert (r["inseridos"], r["ja_existiam"]) == (0, 6) and "aviso" not in r
+
+
+async def test_reserva_que_so_saiu_fica_sem_dono_ate_a_volta_chegar(db, make_user, auth_as, client):
+    from app.services.conciliacao_jobs import fechar_dias_prontos
+
+    loja = await _loja_temu(db, make_user)
+    # 57,40 + 83,00 = 140,40; a Temu segurou 78,50, sacou 61,90 e NÃO devolveu a reserva
+    so_saida = _leitura(
+        [
+            _linha("PFI-1", PO_PAGO, 8300, datetime(2026, 11, 3, 14, 56, tzinfo=UTC)),
+            _reserva("PFI-3", SAQUE, 7850, FIM_DO_PERIODO),
+        ],
+        [],
+        total=0,
+        saques=[_saque(SAQUE, 6190, SAQUE_CRIADO)],
+    )
+    await ingerir_leitura(db, loja, so_saida, agora=AGORA + timedelta(days=1))
+    await recalcular_loja(db, loja, agora=AGORA + timedelta(days=1))
+    await db.commit()
+    saida = (
+        await db.execute(
+            select(ConciliacaoMovimento)
+            .where(ConciliacaoMovimento.id_externo == "PFI-3")
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert (saida.tipo, saida.classificacao) == ("reserva_temu", None)
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.get("/api/conciliacao/extrato", params={"loja": CONTA, "dia": "2026-11-16"})
+    linha = next(m for m in r.json()["movimentos"] if m["tipo"] == "reserva_temu")
+    # dinheiro retido: aparece sempre e o dia não fecha sozinho
+    assert (linha["status"], linha["reserva_aberta"]) == ("pendente", True)
+    dias = await fechar_dias_prontos(db, loja, maximo_dias=3650)
+    await db.commit()
+    assert "2026-11-16" not in dias["fechados"]
+
+    # a volta chega numa leitura seguinte: aí o par fecha
+    com_volta = _leitura(
+        [
+            *so_saida["extrato"],
+            _reserva("PFI-4", SAQUE, 7850, datetime(2026, 11, 18, 3, 0, tzinfo=UTC), volta=True),
+        ],
+        [],
+        total=7850,
+        saques=so_saida["saques"],
+    )
+    r2 = await ingerir_leitura(db, loja, com_volta, agora=AGORA + timedelta(days=2))
+    await recalcular_loja(db, loja, agora=AGORA + timedelta(days=2))
+    await db.commit()
+    assert r2["inseridos"] == 1 and "aviso" not in r2
+    par = (
+        (
+            await db.execute(
+                select(ConciliacaoMovimento.classificacao)
+                .where(ConciliacaoMovimento.tipo == "reserva_temu")
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert par == ["reserva", "reserva"]
+
+
+async def test_leitura_com_saque_pela_metade_e_recusada_inteira(db, make_user):
+    loja = await _loja_temu(db, make_user)
+
+    async def _gravadas() -> int:
+        return len((await db.execute(select(ConciliacaoMovimento.id))).scalars().all())
+
+    # o extrato cita um saque que a aba Pagamentos não trouxe (e a reserva é de hoje)
+    sem_o_saque = _ciclo_com_saque()
+    sem_o_saque["saques"] = sem_o_saque["saques"][1:]
+    sem_o_saque["saques_total"] = 1
+    with pytest.raises(LeituraInvalidaError, match=f"cita o saque {SAQUE}"):
+        await ingerir_leitura(db, loja, sem_o_saque, agora=AGORA)
+    # saque sem data (a Temu mudou o formato): não dá pra saber se é do período
+    ilegivel = _ciclo_com_saque()
+    ilegivel["saques"][1] = {"withdraw_sn": "W1", "amount": _v(10000)}
+    with pytest.raises(LeituraInvalidaError, match="1 saque\\(s\\) do período sem data"):
+        await ingerir_leitura(db, loja, ilegivel, agora=AGORA)
+    # saque do período com data mas sem valor
+    sem_valor = _ciclo_com_saque()
+    sem_valor["saques"][0]["amount"] = None
+    with pytest.raises(LeituraInvalidaError, match="1 saque\\(s\\) do período sem data, valor"):
+        await ingerir_leitura(db, loja, sem_valor, agora=AGORA)
+    # o robô parou antes do fim da lista e nenhum saque lido é anterior ao extrato
+    cortada = _ciclo_com_saque()
+    cortada["saques"] = cortada["saques"][:1]
+    cortada["saques_total"] = 30
+    with pytest.raises(LeituraInvalidaError, match="leitura incompleta dos saques"):
+        await ingerir_leitura(db, loja, cortada, agora=AGORA)
+    # saque de outra loja da Temu no meio
+    de_outra = _ciclo_com_saque()
+    de_outra["saques"][0]["mall_id"] = 111
+    with pytest.raises(LeituraInvalidaError, match="mais de uma loja"):
+        await ingerir_leitura(db, loja, de_outra, agora=AGORA)
+    await db.rollback()
+    await db.refresh(loja)
+    assert await _gravadas() == 0
+    assert (await db.execute(select(ConciliacaoPrevisto.id))).scalars().all() == []
+
+    # lista cortada, mas já passou do começo do extrato (o saque de 03/11): serve. E o
+    # saque ANTIGO num formato que o leitor não lê não trava a loja: é passado
+    serve = _ciclo_com_saque()
+    serve["saques_total"] = 30
+    serve["saques"][1]["amount"] = None
+    r = await ingerir_leitura(db, loja, serve, agora=AGORA + timedelta(days=1))
+    await db.commit()
+    assert r["saques"] == {"lidos": 2, "no_periodo": 1, "no_painel": 1}
+    assert await _gravadas() == 6 and "aviso" not in r
+
+
+async def test_saque_que_a_temu_ainda_nao_pagou_espera_e_o_devolvido_nao_e_gravado(db, make_user):
+    loja = await _loja_temu(db, make_user)
+
+    async def _gravadas() -> int:
+        return len((await db.execute(select(ConciliacaoMovimento.id))).scalars().all())
+
+    # 06:00 do dia do saque: a Temu criou o saque às 05:42 e ainda não pagou. Não se sabe
+    # se o Saldo total da tela já desceu — a leitura espera
+    criado = _ciclo_com_saque()
+    criado["saques"][0]["status_time_map"] = {"CREATED": criado["saques"][0]["created_at"]}
+    with pytest.raises(LeituraInvalidaError, match=f"o saque {SAQUE} ainda está em andamento"):
+        await ingerir_leitura(db, loja, criado, agora=AGORA)
+    # saque marcado como devolvido, ou numa situação nova: o leitor não adivinha o sinal
+    devolvido = _ciclo_com_saque()
+    devolvido["saques"][0]["is_refund"] = 1
+    with pytest.raises(LeituraInvalidaError, match="situação que o leitor não conhece"):
+        await ingerir_leitura(db, loja, devolvido, agora=AGORA)
+    falhou = _ciclo_com_saque()
+    falhou["saques"][0]["status_time_map"]["FAILED"] = 1
+    with pytest.raises(LeituraInvalidaError, match="não conhece \\(FAILED\\)"):
+        await ingerir_leitura(db, loja, falhou, agora=AGORA)
+    await db.rollback()
+    await db.refresh(loja)
+    assert await _gravadas() == 0
+
+    # pago: entra. Se DEPOIS de gravado a Temu mudar a situação dele, só avisa — a volta
+    # do dinheiro, se houver, vem em linha do extrato
+    await ingerir_leitura(db, loja, _ciclo_com_saque(), agora=AGORA + timedelta(days=1))
+    await db.commit()
+    assert await _gravadas() == 6
+    r = await ingerir_leitura(db, loja, devolvido, agora=AGORA + timedelta(days=2))
+    await db.commit()
+    assert r["inseridos"] == 0 and await _gravadas() == 6
+    assert f"o saque {SAQUE}, já gravado, mudou de situação na Temu (devolvido)" in r["aviso"]
+
+    # saque já gravado que some da aba Pagamentos: a lista veio pela metade
+    sumiu = _ciclo_com_saque()
+    sumiu["saques"] = sumiu["saques"][1:]
+    sumiu["saques_total"] = 1
+    sumiu["extrato"] = [x for x in sumiu["extrato"] if x["flow_id"] not in ("PFI-3", "PFI-4")]
+    sumiu["extrato_total"] = 3
+    with pytest.raises(LeituraInvalidaError, match="linha\\(s\\) já gravada"):
+        await ingerir_leitura(db, loja, sumiu, agora=AGORA + timedelta(days=3))
+    sumiu = _ciclo_com_saque()
+    sumiu["saques"] = sumiu["saques"][1:]
+    sumiu["saques_total"] = 1
+    # (a reserva que cita o saque já tem mais de 48 h: sozinha ela só avisaria)
+    with pytest.raises(LeituraInvalidaError, match=f"não traz o saque {SAQUE}, que já"):
+        await ingerir_leitura(db, loja, sumiu, agora=AGORA + timedelta(days=5))
+
+
+async def test_o_saque_chega_numa_leitura_depois_e_a_reserva_cai_no_dia_anterior(
+    db, make_user, auth_as, client
+):
+    """O caso real: a leitura das 06:00 de um dia pega as vendas; a do dia seguinte traz o
+    saque e o par de reserva, com a saída DATADA do dia anterior (23:59:59,999)."""
+    loja = await _loja_temu(db, make_user)
+    inteiro = _ciclo_com_saque()
+    antes = _leitura(inteiro["extrato"][:2], [], total=16640, saques=inteiro["saques"][1:])
+    r1 = await ingerir_leitura(db, loja, antes, agora=datetime(2026, 11, 16, 9, 0, tzinfo=UTC))
+    await recalcular_loja(db, loja, agora=datetime(2026, 11, 16, 9, 0, tzinfo=UTC))
+    await db.commit()
+    assert (r1["inseridos"], r1["saques"]["no_painel"]) == (2, 0) and "aviso" not in r1
+    r2 = await ingerir_leitura(db, loja, inteiro, agora=AGORA + timedelta(days=1))
+    await recalcular_loja(db, loja, agora=AGORA + timedelta(days=1))
+    await db.commit()
+    assert (r2["inseridos"], r2["ja_existiam"]) == (4, 2) and "aviso" not in r2
+    saldos = {
+        m.id_externo: m.saldo_apos
+        for m in (await db.execute(select(ConciliacaoMovimento))).scalars()
+    }
+    # as linhas da 1ª leitura não foram reescritas e a corrente continua nelas
+    assert saldos == {
+        "PFI-1": Decimal("140.40"),
+        "PFI-2": Decimal("166.40"),
+        "PFI-3": Decimal("87.90"),
+        "PFI-4": Decimal("166.40"),
+        f"saque:{SAQUE}": Decimal("78.50"),
+        "PFI-5": Decimal("104.50"),
+    }
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    for dia, inicial, final in (("2026-11-16", 166.4, 87.9), ("2026-11-17", 87.9, 104.5)):
+        t = (
+            await client.get("/api/conciliacao/extrato", params={"loja": CONTA, "dia": dia})
+        ).json()["totais"]
+        assert (t["saldo_inicial"], t["saldo_final"], t["diferenca"]) == (inicial, final, 0.0)
+
+
+async def test_reserva_que_cita_saque_fora_da_lista_so_espera_48_horas(db, make_user):
+    loja = await _loja_temu(db, make_user)
+    # o par cita um saque que a aba Pagamentos nunca mostrou (outro tipo de saque?); o
+    # Saldo total não desceu: 57,40 + 83,00 = 140,40
+    orfa = _leitura(
+        [
+            _linha("PFI-1", PO_PAGO, 8300, datetime(2026, 11, 3, 14, 56, tzinfo=UTC)),
+            _reserva("PFI-3", SAQUE, 7850, FIM_DO_PERIODO),
+            _reserva("PFI-4", SAQUE, 7850, COMECO_DO_SEGUINTE, volta=True),
+        ],
+        [],
+        total=14040,
+    )
+    with pytest.raises(LeituraInvalidaError, match=f"cita o saque {SAQUE}"):
+        await ingerir_leitura(db, loja, orfa, agora=COMECO_DO_SEGUINTE + timedelta(hours=47))
+    await db.rollback()
+    await db.refresh(loja)
+    # depois de 48 h não trava mais a loja: grava e avisa
+    r = await ingerir_leitura(db, loja, orfa, agora=COMECO_DO_SEGUINTE + timedelta(hours=49))
+    await db.commit()
+    assert r["inseridos"] == 3
+    assert f"cita 1 saque(s) que a aba Pagamentos não mostra ({SAQUE})" in r["aviso"]
+    assert loja.ultimo_erro.startswith("temu: o extrato cita 1 saque(s)")
+
+
+async def test_saque_depois_da_ultima_linha_gravada_entra_mesmo_sem_reserva(db, make_user):
+    loja = await _loja_temu(db, make_user)
+    await ingerir_leitura(db, loja, _primeira_leitura(), agora=AGORA)  # termina em 252,00
+    await db.commit()
+    # 45 dias depois o extrato da tela está vazio (nenhuma linha em 30 dias) e a Temu
+    # sacou 200,00 sem deixar reserva: o saque mais novo que a última linha gravada
+    # entra; o de 03/11, mais velho que ela, não
+    velho = _saque(SAQUE_VELHO, 51030, datetime(2026, 11, 3, 8, 42, tzinfo=UTC))
+    saque = _saque(SAQUE, 20000, datetime(2026, 12, 20, 8, 42, tzinfo=UTC))
+    vazia = _leitura([], [], total=5200, saques=[saque, velho])
+    r = await ingerir_leitura(db, loja, vazia, agora=AGORA + timedelta(days=45))
+    await db.commit()
+    assert r["saques"] == {"lidos": 2, "no_periodo": 1, "no_painel": 1}
+    assert r["inseridos"] == 1 and "aviso" not in r
+
+    async def _saldo_do_saque() -> tuple:
+        m = (
+            await db.execute(
+                select(ConciliacaoMovimento)
+                .where(ConciliacaoMovimento.tipo == "saque")
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        return (m.debito, m.saldo_apos)
+
+    assert await _saldo_do_saque() == (Decimal("200.00"), Decimal("52.00"))
+
+
+async def test_saque_entre_a_ultima_linha_gravada_e_a_primeira_da_tela_entra(db, make_user):
+    loja = await _loja_temu(db, make_user)
+    await ingerir_leitura(db, loja, _primeira_leitura(), agora=AGORA)  # termina em 252,00
+    await db.commit()
+    # o robô ficou 60 dias sem ler: a única linha da tela (10/01) é mais nova que o saque
+    # de 20/12, que não deixou reserva. Ele entra do mesmo jeito — senão o dia ficaria
+    # com a diferença do saque e sem linha pra explicar
+    com_linha = _leitura(
+        [_linha("PFI-C", PO_ESPERA, 2600, datetime(2027, 1, 10, 15, 0, tzinfo=UTC))],
+        [],
+        total=7800,
+        saques=[
+            _saque(SAQUE, 20000, datetime(2026, 12, 20, 8, 42, tzinfo=UTC)),
+            _saque(SAQUE_VELHO, 51030, datetime(2026, 11, 3, 8, 42, tzinfo=UTC)),
+        ],
+    )
+    r = await ingerir_leitura(db, loja, com_linha, agora=AGORA + timedelta(days=60))
+    await db.commit()
+    assert (r["inseridos"], r["saques"]["no_painel"]) == (2, 1) and "aviso" not in r
+    saldos = {
+        m.id_externo: m.saldo_apos
+        for m in (await db.execute(select(ConciliacaoMovimento))).scalars()
+    }
+    assert saldos[f"saque:{SAQUE}"] == Decimal("52.00") and saldos["PFI-C"] == Decimal("78.00")
 
 
 # ---------- os pedidos ----------
@@ -734,8 +1213,8 @@ async def test_dia_fecha_com_o_saldo_da_tela_e_acusa_saldo_que_andou_sem_linha(
     await db.commit()
     assert set(dias["fechados"]) == {"2026-10-24", "2026-11-14"}
 
-    # a Temu tirou 100,00 do saldo sem linha nenhuma (um saque que o leitor ainda não
-    # conhece): a linha nova termina no saldo novo e o dia dela NÃO fecha
+    # a Temu tirou 100,00 do saldo sem linha nenhuma e sem saque na aba Pagamentos: a
+    # linha nova termina no saldo novo e o dia dela NÃO fecha
     depois = AGORA + timedelta(days=2)
     com_saque = _leitura(
         [
@@ -744,13 +1223,11 @@ async def test_dia_fecha_com_o_saldo_da_tela_e_acusa_saldo_que_andou_sem_linha(
         ],
         [],
         total=1400 + 21200 + 2600 + 2600 - 10000,
-        saques=[{"withdraw_sn": "W1", "amount": _v(10000)}],
     )
     r3 = await ingerir_leitura(db, loja, com_saque, agora=depois)
     await recalcular_loja(db, loja, agora=depois)
     await db.commit()
-    assert (r3["saques"], r3["saques_novos"]) == (1, 1) and "saque" in r3["aviso"]
-    assert loja.ultimo_erro.startswith("temu: 1 saque(s) novo(s) na tela")
+    assert r3["saques"]["lidos"] == 0
     r = await client.get("/api/conciliacao/extrato", params={"loja": CONTA, "dia": "2026-11-18"})
     totais = r.json()["totais"]
     assert (totais["saldo_inicial"], totais["saldo_final"], totais["saldo_informado"]) == (
@@ -1064,4 +1541,88 @@ async def test_0495_liga_a_eron_numa_ancora_arquivada_e_o_downgrade_desfaz(db, m
             )
         )
         await db.commit()
+        mod.SCHEMA = "davinci"
+
+
+_MIGRATION_LOJAS = _MIGRATION.with_name("0501_conciliacao_temu_lojas.py")
+
+
+async def test_0501_liga_barbosa_e_jlas_e_o_downgrade_deixa_a_eron(db, make_user):
+    spec = importlib.util.spec_from_file_location("migration_0501", _MIGRATION_LOJAS)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.revision == "0501_conciliacao_temu_lojas"
+    assert mod.down_revision == "0500_organizar_ocultos"
+    schema = Base.metadata.schema
+    # a Eron já está no ar (0495) na âncora de um dono; outro usuário tem mais integrações
+    eron = await _loja_temu(db, make_user)
+    dono_da_eron = (await db.get(Integration, eron.integration_id)).user_id
+    outro = await make_user()
+    for nome in ("kia", "injox", "mega"):
+        db.add(
+            Integration(
+                user_id=outro.id,
+                platform=IntegrationPlatform.ML,
+                name=nome,
+                status="active",
+                credentials=encrypt_json({"access_token": "tok"}),
+            )
+        )
+    await db.commit()
+
+    def _rodar(conn, passo: str) -> None:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            getattr(mod, passo)()
+
+    mod.SCHEMA = schema
+    try:
+        await (await db.connection()).run_sync(_rodar, "upgrade")
+        await db.commit()
+        await (await db.connection()).run_sync(_rodar, "upgrade")  # de novo: não duplica
+        await db.commit()
+        lojas = (
+            await db.execute(
+                text(
+                    f"SELECT c.conta, c.platform::text AS platform, c.ativa, c.inicio,"
+                    f" c.modo_extrato, c.bling_loja, i.name, i.status, i.archived_at,"
+                    f" i.user_id, length(i.credentials) AS cred,"
+                    f" (SELECT s.detalhe->>'mall_id' FROM \"{schema}\".conciliacao_sync s"
+                    f"   WHERE s.integration_id = i.id AND s.chave = 'identidade') AS mall_id"
+                    f' FROM "{schema}".conciliacao_lojas c'
+                    f' JOIN "{schema}".integrations i ON i.id = c.integration_id'
+                    f" WHERE c.conta <> 'eron (temu)' ORDER BY c.conta"
+                )
+            )
+        ).all()
+        assert [(x.conta, x.bling_loja, x.mall_id) for x in lojas] == [
+            ("barbosa (temu)", "205925390", "635517739923741"),
+            ("jlas (temu)", "206288651", "635517739909677"),
+        ]
+        for x in lojas:
+            assert (x.platform, x.ativa, x.inicio, x.modo_extrato) == (
+                "temu",
+                True,
+                date(2026, 10, 24),
+                "upload",
+            )
+            # âncora arquivada, sem credencial, do mesmo dono da âncora da Eron
+            assert (x.status, x.cred, x.user_id) == ("ancora", 0, dono_da_eron)
+            assert x.archived_at is not None and x.name == f"{x.conta} · só conciliação"
+
+        await (await db.connection()).run_sync(_rodar, "downgrade")
+        await db.commit()
+        restam = (
+            (await db.execute(text(f'SELECT conta FROM "{schema}".conciliacao_lojas')))
+            .scalars()
+            .all()
+        )
+        assert restam == ["eron (temu)"]
+        assert (
+            await db.execute(
+                text(f"SELECT count(*) FROM \"{schema}\".integrations WHERE platform = 'temu'")
+            )
+        ).scalar_one() == 1
+    finally:
+        await db.rollback()
         mod.SCHEMA = "davinci"

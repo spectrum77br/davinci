@@ -110,8 +110,12 @@ export const cfg: Config = {
   // Conciliação (16/10): loja por arquivo → perfil do AdsPower. Ex.:
   // CONCILIACAO_PERFIS="kfa (amazon)=k1doch5a;outra (amazon)=k1xxxxxx"
   // 17/11: a Temu lida da tela entra aqui também (eron = perfil 126 "Eron - Temu").
+  // 18/11: barbosa = perfil 115 "Barbosa - Temu"; jlas = perfil 143 "JLAS - Temu".
   conciliacaoPerfis: Object.fromEntries(
-    str("CONCILIACAO_PERFIS", "kfa (amazon)=k1doch5a;eron (temu)=k1dkfq5y")
+    str(
+      "CONCILIACAO_PERFIS",
+      "kfa (amazon)=k1doch5a;eron (temu)=k1dkfq5y;barbosa (temu)=k1dkegpc;jlas (temu)=k1dof4hk"
+    )
       .split(";")
       .map((par) => par.split("=").map((x) => x.trim()))
       .filter((par) => par.length === 2 && par[0] && par[1])

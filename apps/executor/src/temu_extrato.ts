@@ -69,6 +69,7 @@ const CAMINHOS: Record<string, Nome> = {
 const POR_PAGINA = 10;
 /** 60 páginas = 600 linhas em 30 dias; acima disso a leitura falha explicada. */
 const TETO_PAGINAS = 60;
+/** 5 páginas = 50 saques; a Temu saca a cada 14 dias (o extrato cobre 30). */
 const TETO_PAGINAS_SAQUES = 5;
 const MARCAS = path.join(os.tmpdir(), "davinci-temu-perfis");
 
@@ -235,6 +236,10 @@ async function lerLista(
     }
     pagina += 1;
   }
+  // saques: a aba Pagamentos é o histórico inteiro e só os do período do extrato entram na
+  // conta — parar no teto é normal. O DaVinci confere se a lista passou do começo do
+  // período (o total da tela vai junto) e recusa a leitura se não passou.
+  if (nome === "saques") return { corpos };
   return { corpos, erro: `${nome} passou de ${teto} páginas` };
 }
 

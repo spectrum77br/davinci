@@ -2691,6 +2691,7 @@ TIPO_LABELS = {
     "reserva_saque": "Reserva pro saque",
     "reserva_pagamento": "Reserva de pagamento",
     "reserva_outra": "Reserva (outra)",
+    "reserva_temu": "Reserva da Temu (fica no saque e volta)",
     "fatura_cobrada": "Fatura do ML cobrada do saldo",
     "cobranca_divida": "Segurado pra pagar a fatura (dívida)",
     "saque": "Saque",

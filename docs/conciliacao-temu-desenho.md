@@ -80,8 +80,47 @@ A própria página chama (POST, JSON):
 - **Data de início da loja:** decidido, 24/10 como as outras. Na Eron isso dá 10 pedidos já
   pagos "sem previsto" pra finalizar à mão, 1 estornado (308104) e 4 linhas de pedidos
   anteriores ao início.
-- Formato da linha de saque e das linhas de etiqueta/reserva/publicidade: só com a Barbosa logada.
+- Formato das linhas de etiqueta e de publicidade, e do saque que falha e volta ("Payment
+  Refund"): nenhuma loja teve até 18/11. Saque e reserva: resolvidos abaixo.
 - A Eron não tem conta bancária cadastrada na Temu (não dá pra sacar).
+
+## Saque e reserva (18/11, lojas Barbosa e JLAS)
+
+Vinicius logou Barbosa (perfil 115 `k1dkegpc`), JLAS (143 `k1dof4hk`) e Atv (138 `k1docw56`)
+no AdsPower do Mac mini. Lidas pelo mesmo caminho do robô, sem enviar.
+
+- **O saque não é linha do Extrato da Temu.** Só aparece na aba Pagamentos
+  (`/mms/payment/disbursement/list`, o histórico inteiro, mais novo primeiro): `withdraw_order_id`
+  ("LWO…"), `amount`, `created_at`, `status` 2 = pago, `status_time_map` (CREATED, PROCESSING,
+  PAID), `statement_begin_time`/`statement_end_time` (o período de 14 dias que ele paga),
+  `bank_account_suffix`, `is_refund`, `mall_id`. Na Barbosa a Temu saca sozinha a cada 14 dias.
+- **O saque deixa um par de reserva no extrato:** "Reserve amount" −X às 23:59:59,999 do último
+  dia do período (`order_id` = nº do saque + `_in`) e "Released amount" +X às 00:00 (`_off`).
+  X é o que a Temu segura pro período seguinte. O par soma zero; quem tira o dinheiro é o saque.
+- **A conta que fecha** (Barbosa, 03/11 → 17/11): 57,40 + vendas 218,00 = 275,40; reserva −78,50;
+  +78,50; saque −196,90 → 78,50; depois +26,00 e +183,00 → 287,50 = Saldo total da tela.
+  Conferida nos três saques da janela (20/10, 03/11, 17/11).
+- **No painel:** cada saque vira uma linha "Saque" (`tipo`/`classificacao` = `saque`,
+  `id_externo` = `saque:<nº>`, data = a criação do saque). As linhas de reserva viram
+  `reserva_temu` com o nº do saque em `pagamento_id`; `_reservas_vai_e_volta` classifica o par
+  como "Reserva (vai e volta)" só quando a saída e a volta existem — só a saída fica sem dono.
+- **Período dos saques:** os feitos depois da linha mais antiga do extrato lido ou depois da
+  última linha gravada (o que vier antes); mais velho que isso é passado, como o saldo de
+  abertura.
+- **Quais saques entram:** só saque que a Temu já marcou como PAGO (o estado em que a conta
+  foi conferida). Ela cria o saque ~05:40 e paga ~2 h depois; lido "criado", a leitura espera.
+- **Leitura recusada inteira** quando: um saque do período vem sem nº, valor ou data; a lista
+  de saques veio cortada sem nenhum saque anterior ao período; um saque já gravado sumiu da
+  lista; um saque novo não está pago ou está numa situação desconhecida; o extrato cita um
+  saque que a aba Pagamentos não trouxe e a reserva tem menos de 48 h (gravar sem ele
+  deixaria o saldo das linhas errado pra sempre). Saque antigo ilegível não trava a loja.
+- **Login:** a sessão da Temu Seller vence 24 h depois do login (medido em 18/11); não há
+  "manter conectado". O robô só lê a loja em que alguém logou nas últimas 24 h.
+- **JLAS:** nunca sacou; 4 pagamentos de 348,80 na janela + 348,80 de antes de 18/10 = 1.744,00.
+- **Atv fica de fora:** saldo 0,00, extrato vazio, nenhum pedido a receber, sem conta bancária.
+  A tela dela nem chama o saldo (`/mms/statement/amount/detail`), então o robô não a leria.
+- **Lojas no painel:** migration 0501 (`barbosa (temu)` = loja 205925390 do Bling, nº
+  635517739923741 na Temu; `jlas (temu)` = 206288651, nº 635517739909677), desde 24/10.
 
 ## Anexo — roteiro do ensaio (base do módulo `apps/executor/src/temu_extrato.ts`)
 

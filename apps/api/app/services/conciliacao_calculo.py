@@ -47,6 +47,7 @@ from app.models.conciliacao import (
     ORIGEM_CARTEIRA,
     ORIGEM_EXTRATO,
     ORIGEM_FATURA,
+    ORIGEM_TEMU,
     ORIGEM_TIKTOK,
     ORIGENS_EXTRATO,
 )
@@ -1212,14 +1213,16 @@ def etapa_do_pedido(
 async def _reservas_vai_e_volta(session: AsyncSession, loja: ConciliacaoLoja) -> tuple[int, int]:
     """Reserva sem pedido no Bling: o par −X/+X do mesmo pagamento (soma zero) vira
     "reserva"; reserva sozinha (dinheiro retido) fica sem dono — e a que o robô tinha
-    classificado antes volta a sem dono, reabrindo o dia."""
+    classificado antes volta a sem dono, reabrindo o dia. Na Temu o "pagamento" do par é
+    o nº do saque que o deixou."""
     linhas = (
         (
             await session.execute(
                 select(ConciliacaoMovimento)
                 .where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
-                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    # Mercado Pago e Temu (18/11: o par de reserva que o saque da Temu deixa)
+                    ConciliacaoMovimento.origem.in_((ORIGEM_EXTRATO, ORIGEM_TEMU)),
                     ConciliacaoMovimento.tipo.in_(tuple(TIPOS_RESERVA)),
                     ConciliacaoMovimento.pedido_bling.is_(None),
                     ConciliacaoMovimento.vinculado_por.is_(None),

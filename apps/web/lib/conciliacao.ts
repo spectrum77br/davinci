@@ -48,6 +48,7 @@ export const TIPOS_MOV: Record<string, string> = {
   reserva_frete_devolucao: 'Reserva do frete de devolução',
   reserva_saque: 'Reserva pro saque',
   reserva_pagamento: 'Reserva de pagamento',
+  reserva_temu: 'Reserva da Temu (fica no saque e volta)',
   reserva_outra: 'Reserva (outra)',
   fatura_cobrada: 'Fatura do ML cobrada do saldo',
   cobranca_divida: 'Segurado pra pagar a fatura (dívida)',
