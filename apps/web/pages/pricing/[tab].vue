@@ -381,6 +381,12 @@ type Account = {
   ads: string | null
   coupon: string | null
   offer: string | null
+  // M-11 (18/11/2026): campos próprios da aba Contas ("26/06" e % de 0 a 100;
+  // o % vem como texto decimal do servidor, "4.00").
+  desconto_ate: string | null
+  cupom_ate: string | null
+  afiliado_pct: string | number | null
+  oferta_limite_pct: string | number | null
   has_password: boolean
   integration_id: string | null
   segment_id: string | null
@@ -1159,17 +1165,69 @@ async function focusEditInput() {
 
 // =========================================================== account inline edit
 
-// 5 campos livres exibidos embaixo do nome da loja (grade de preço + aba
-// Contas). Substituem os antigos obs1/obs2/obs3. `observation` é reusado como
-// "obs"; desconto/afiliado/ads/cupom são colunas próprias (migration 0173).
-const STORE_NOTE_FIELDS: { key: string; label: string }[] = [
-  { key: 'discount', label: 'desconto' },
-  { key: 'affiliate', label: 'afiliado' },
-  { key: 'ads', label: 'ads' },
-  { key: 'coupon', label: 'cupom' },
-  { key: 'offer', label: 'oferta' },
-  { key: 'observation', label: 'obs' },
+// Anotações da conta na aba Contas. `observation` é a "Obs"; Ads é texto
+// livre. Desconto até / Cupom até ("dd/mm") e Afiliado / Oferta limite (%)
+// são campos próprios, sempre à mostra e fora do cálculo (M-11, 18/11/2026,
+// migration 0502); os textos antigos discount/affiliate/coupon/offer ficam no
+// banco, fora da tela.
+type TipoAnotacao = 'data' | 'pct'
+type CampoAnotacao = { key: string; label: string; tipo?: TipoAnotacao; titulo?: string }
+const STORE_NOTE_FIELDS: CampoAnotacao[] = [
+  { key: 'desconto_ate', label: 'Desconto até', tipo: 'data', titulo: 'Até que dia e mês vai o desconto da conta' },
+  { key: 'afiliado_pct', label: 'Afiliado', tipo: 'pct', titulo: 'Quanto pode gastar com afiliado (%)' },
+  { key: 'ads', label: 'Ads' },
+  { key: 'cupom_ate', label: 'Cupom até', tipo: 'data', titulo: 'Até que dia e mês vai o cupom da conta' },
+  { key: 'oferta_limite_pct', label: 'Oferta limite', tipo: 'pct', titulo: 'Limite de oferta que pode colocar (%)' },
+  { key: 'observation', label: 'Obs' },
 ]
+
+const DIAS_NO_MES = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+// Desconto até / Cupom até: "26/06", "26.06", "26,06" (teclado do celular),
+// "26/6" → "26/06" (sem ano: 29/02 vale). Vazio → null; dia ou mês que não
+// existe → undefined (não grava).
+function lerDiaMes(raw: string): string | null | undefined {
+  const s = raw.trim()
+  if (!s) return null
+  const m = /^(\d{1,2})\s*[./,-]\s*(\d{1,2})$/.exec(s)
+  if (!m) return undefined
+  const dia = Number(m[1])
+  const mes = Number(m[2])
+  if (mes < 1 || mes > 12 || dia < 1 || dia > DIAS_NO_MES[mes - 1]) return undefined
+  return `${String(dia).padStart(2, '0')}/${String(mes).padStart(2, '0')}`
+}
+
+function textoAnotacao(acc: Account, f: CampoAnotacao): string {
+  const v = (acc as any)[f.key]
+  if (v == null || v === '') return ''
+  return f.tipo === 'pct' ? String(Number(v)).replace('.', ',') : String(v)
+}
+
+// Campos próprios: gravam ao sair do campo (o Enter tira o foco). Afiliado e
+// Oferta limite usam o `lerPct` da margem (só número de 0 a 100, com decimal).
+// Valor inválido volta ao que estava, com aviso; igual ao atual não grava.
+function gravarAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
+  if (!canEditContas.value) return
+  const el = ev.target as HTMLInputElement
+  const valor = f.tipo === 'data' ? lerDiaMes(el.value) : lerPct(el.value)
+  if (valor === undefined) {
+    toast.error(
+      `${f.label}: valor inválido`,
+      f.tipo === 'data' ? 'Use dia e mês que existem, ex.: 26/06' : 'Use só número de 0 a 100, ex.: 4 ou 4,5',
+    )
+    el.value = textoAnotacao(acc, f)
+    return
+  }
+  el.value = valor == null ? '' : String(valor).replace('.', ',')
+  if (el.value === textoAnotacao(acc, f)) return
+  void _patchAccount(acc.id, f.key, el.value)
+}
+
+function desfazerAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
+  const el = ev.target as HTMLInputElement
+  el.value = textoAnotacao(acc, f)
+  el.blur()
+}
 
 function startEditAccount(acc: Account, field: string) {
   if (!canEditContas.value) return
@@ -1286,6 +1344,14 @@ async function _patchAccount(id: string, field: string, raw: string) {
     }
   } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'offer' || field === 'email' || field === 'phone' || field === 'listing_type') {
     payload[field] = raw || null
+  } else if (field === 'desconto_ate' || field === 'cupom_ate') {
+    const v = lerDiaMes(raw)
+    if (v === undefined) return
+    payload[field] = v
+  } else if (field === 'afiliado_pct' || field === 'oferta_limite_pct') {
+    const v = lerPct(raw)
+    if (v === undefined) return
+    payload[field] = v
   } else {
     return
   }
@@ -4725,10 +4791,15 @@ watch(department, async () => {
                 </div>
               </th>
               </template>
+              <!-- Desconto até / Afiliado / Cupom até / Oferta limite: colunas de ~84px,
+                   centralizadas (M-11); Ads e Obs à esquerda. -->
               <th
                 v-for="f in STORE_NOTE_FIELDS"
                 :key="`h-${f.key}`"
-                class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px] capitalize"
+                class="px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
+                :class="f.tipo ? 'text-center w-[84px] min-w-[84px]' : 'text-left min-w-[120px]'"
+                :title="f.titulo"
+                :data-coluna-anotacao="f.key"
               >{{ f.label }}</th>
               <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-16"></th>
             </tr>
@@ -5079,9 +5150,35 @@ watch(department, async () => {
                 </td>
               </template>
               </template>
-              <!-- desconto / afiliado / ads / cupom / obs -->
+              <!-- desconto até / afiliado / ads / cupom até / oferta limite / obs -->
               <template v-for="f in STORE_NOTE_FIELDS" :key="`c-${f.key}`">
+                <!-- Campos próprios (M-11): sempre à mostra, 24px, gravam ao sair ou com
+                     Enter; quem não edita Contas só vê. -->
                 <td
+                  v-if="f.tipo"
+                  class="border border-border px-1 py-1 text-center w-[84px] min-w-[84px]"
+                  :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, f.key) }"
+                >
+                  <div class="flex items-center justify-center gap-0.5">
+                    <input
+                      :value="textoAnotacao(acc, f)"
+                      type="text"
+                      inputmode="decimal"
+                      :maxlength="f.tipo === 'data' ? 5 : 6"
+                      :placeholder="f.tipo === 'data' ? 'dd/mm' : ''"
+                      :readonly="!canEditContas"
+                      class="h-6 w-full min-w-0 rounded border px-1 text-center text-xs"
+                      :class="canEditContas ? 'bg-background' : 'bg-transparent cursor-default'"
+                      :data-campo="`conta-${f.key}`"
+                      @blur="gravarAnotacao(acc, f, $event)"
+                      @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+                      @keydown.escape.prevent="desfazerAnotacao(acc, f, $event)"
+                    />
+                    <span v-if="f.tipo === 'pct'" class="text-xs text-muted-foreground">%</span>
+                  </div>
+                </td>
+                <td
+                  v-else
                   class="border border-border px-2 py-1.5 text-xs cursor-pointer text-left max-w-[260px]"
                   :class="{
                     'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, f.key),

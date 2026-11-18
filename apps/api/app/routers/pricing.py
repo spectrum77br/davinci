@@ -254,6 +254,7 @@ _CAMPOS_HERDADOS_DA_BASE = (
     "margin4", "shipping4",
     "margin5", "shipping5",
     "discount", "affiliate", "ads", "coupon", "offer",
+    "desconto_ate", "cupom_ate", "afiliado_pct", "oferta_limite_pct",
     "observation", "observation2", "observation3",
 )
 

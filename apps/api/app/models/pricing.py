@@ -41,6 +41,11 @@ def _enum(py_enum, name: str):
 CANAL_KIT = "kit"
 CANAL_CATALOGO = "catalogo"
 
+# Dia/mês válido sem ano ("26/06"; 29/02 vale), o CHECK de desconto_ate e
+# cupom_ate (M-11, migration 0502): 01–29 em todo mês, 30 fora fevereiro, 31
+# nos meses de 31 dias.
+DIA_MES_REGEX = "^((0[1-9]|1[0-9]|2[0-9])/(0[1-9]|1[0-2])|30/(0[13-9]|1[0-2])|31/(0[13578]|1[02]))$"
+
 
 class PricingAccount(Base, TimestampMixin):
     __tablename__ = "pricing_accounts"
@@ -58,6 +63,12 @@ class PricingAccount(Base, TimestampMixin):
             unique=True,
             postgresql_where=text("canal = 'catalogo'"),
         ),
+        # M-11 (18/11/2026, migration 0502): "DD/MM" com dia e mês que existem
+        # (sem ano: 29/02 vale) e percentuais de 0 a 100.
+        CheckConstraint(f"desconto_ate ~ '{DIA_MES_REGEX}'", name="desconto_ate"),
+        CheckConstraint(f"cupom_ate ~ '{DIA_MES_REGEX}'", name="cupom_ate"),
+        CheckConstraint("afiliado_pct BETWEEN 0 AND 100", name="afiliado_pct"),
+        CheckConstraint("oferta_limite_pct BETWEEN 0 AND 100", name="oferta_limite_pct"),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -108,6 +119,15 @@ class PricingAccount(Base, TimestampMixin):
     coupon: Mapped[str | None] = mapped_column(Text, nullable=True)
     # "Oferta" — mesmo padrão dos 4 acima. Migration 0213.
     offer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # M-11 (18/11/2026, migration 0502): campos próprios da aba Contas no
+    # lugar dos textos livres discount/coupon/affiliate/offer (que ficam no
+    # banco, fora da tela). Até que dia/mês vão o desconto e o cupom ("26/06")
+    # e quanto pode gastar com afiliado / limite de oferta, em % (4 = 4%).
+    # Não entram no cálculo de preço.
+    desconto_ate: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cupom_ate: Mapped[str | None] = mapped_column(Text, nullable=True)
+    afiliado_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    oferta_limite_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     store_info_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("store_info.id", ondelete="SET NULL"),

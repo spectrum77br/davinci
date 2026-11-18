@@ -1,13 +1,32 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.users import STOCK_TAGS, CommercialTeam
 
 # --------------------------------------------------------------- pricing accounts
+
+_DIAS_NO_MES = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+def _dia_mes(valor: str) -> str:
+    """Desconto até / Cupom até (M-11): só "DD/MM" com dia e mês que existem
+    (sem ano: 29/02 vale)."""
+    m = re.fullmatch(r"(\d{2})/(\d{2})", valor)
+    if not m or not 1 <= int(m[2]) <= 12 or not 1 <= int(m[1]) <= _DIAS_NO_MES[int(m[2]) - 1]:
+        raise ValueError("use dia/mês válido, ex.: 26/06")
+    return valor
+
+
+# "26/06" (sem ano) e % de 0 a 100 (4 = 4%; o banco guarda 2 casas) — o mesmo
+# CHECK do banco (migration 0502); fora disso, 422 em vez de erro do banco.
+DiaMes = Annotated[str, AfterValidator(_dia_mes)]
+PctConta = Annotated[Decimal, Field(ge=0, le=100)]
+
 
 class PricingAccountBase(BaseModel):
     name: str = Field(min_length=1, max_length=128)
@@ -42,6 +61,11 @@ class PricingAccountBase(BaseModel):
     ads: str | None = None
     coupon: str | None = None
     offer: str | None = None
+    # M-11: os campos da tela no lugar de discount/coupon/affiliate/offer.
+    desconto_ate: DiaMes | None = None
+    cupom_ate: DiaMes | None = None
+    afiliado_pct: PctConta | None = None
+    oferta_limite_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
@@ -92,6 +116,11 @@ class PricingAccountPatch(BaseModel):
     ads: str | None = None
     coupon: str | None = None
     offer: str | None = None
+    # M-11: os campos da tela no lugar de discount/coupon/affiliate/offer.
+    desconto_ate: DiaMes | None = None
+    cupom_ate: DiaMes | None = None
+    afiliado_pct: PctConta | None = None
+    oferta_limite_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None

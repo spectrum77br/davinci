@@ -522,6 +522,11 @@ CAMPOS: dict[str, str] = {
     "ean": "EAN",
     "segment_id": "Segmento",
     "discount": "Desconto",
+    # Aba Contas da Tabela de Preços (M-11, 18/11/2026, migration 0502).
+    "desconto_ate": "Desconto até",
+    "cupom_ate": "Cupom até",
+    "afiliado_pct": "Afiliado (%)",
+    "oferta_limite_pct": "Oferta limite (%)",
     "platform": "Plataforma",
     "server": "Servidor",
     "password_enc": "Senha",

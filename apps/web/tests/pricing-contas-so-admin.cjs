@@ -90,11 +90,11 @@ assert.match(contas, /<template v-if="isAdmin">\s*<td[^>]*>\s*<input\s+v-model\.
 // Linha da conta: kit, comissão e pares dentro do mesmo v-if.
 const linha = contas.slice(contas.indexOf('<!-- kit, comissão e pares marg/frete: só ADM (M-10) -->'))
 assert.match(linha, /^<!-- kit, comissão e pares marg\/frete: só ADM \(M-10\) -->\s*<template v-if="isAdmin">/)
-const bloco = linha.slice(0, linha.indexOf('<!-- desconto / afiliado / ads / cupom / obs -->'))
+const bloco = linha.slice(0, linha.indexOf('<!-- desconto até / afiliado / ads / cupom até / oferta limite / obs -->'))
 for (const campo of ["'kit_number'", "'commission'", '`margin${t}`', '`shipping${t}`']) {
   assert.ok(bloco.includes(campo), `${campo} dentro do bloco só ADM`)
 }
-assert.ok(!contas.slice(contas.indexOf('<!-- desconto / afiliado')).includes("'commission'"))
+assert.ok(!contas.slice(contas.indexOf('<!-- desconto até / afiliado')).includes("'commission'"))
 // "% margens" do Catálogo ML: só ADM.
 assert.match(contas, /v-if="catalogoAtivo\(acc\) && isAdmin"\s*type="button"\s*data-margens-catalogo/)
 // Subtítulo sem a contagem de pares para quem não é ADM.
