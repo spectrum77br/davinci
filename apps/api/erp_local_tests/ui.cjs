@@ -91,7 +91,7 @@ async function setup(overrides={},address='http://127.0.0.1:8765') {
     if(options?.method==='POST')requests.push(JSON.parse(options.body));
     return {ok:true,status:200,json:async()=>options?.method==='POST'?(url.endsWith('/price-preview')?snapshot.price_preview:{replayed:false}):url.includes('/reference/')?{items:[],total:0,offset:0,limit:50}:snapshot};
   };
-  dom.window.eval(fs.readFileSync(path.join(assets,'consulta.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'chrome.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'operations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'fulfillment.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'catalog.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'integrations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'contacts.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'returns.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'deposits.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sellers.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inventory.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-characteristics.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-details.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-list.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'price-lists.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'categories.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'production.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'payment-methods.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'cash-register.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'pos.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'proposals.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sales-form.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'access.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inbound.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'tax-guides.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'companies.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'store-sales.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'app.js'),'utf8'));
+  dom.window.eval(fs.readFileSync(path.join(assets,'consulta.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'chrome.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'operations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'fulfillment.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'catalog.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'integrations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'contacts.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'returns.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'deposits.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sellers.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inventory.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-characteristics.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-details.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-list.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'price-lists.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'categories.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'production.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'payment-methods.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'cash-register.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'pos.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'proposals.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sales-form.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'access.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inbound.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'tax-guides.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'companies.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'store-sales.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'app.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'navigation.js'),'utf8'));
   await new Promise(r=>setImmediate(r));
   return {dom,requests,document:dom.window.document};
 }
@@ -1530,4 +1530,27 @@ test('Atualizar on the store sales list fetches the list again, keeping the old 
  d.getElementById('refresh').click();
  for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
  assert.equal(asked.length,2);
+});
+
+test('Voltar and the browser back return one step: page, tab and opened record, not the start',async()=>{
+ const {dom,document:d}=await setup();
+ const back=d.getElementById('back'),active=()=>d.querySelector('nav [data-page].active').dataset.page;
+ const listings=()=>!!d.querySelector('[data-products-view=listings].active,[data-products-view=listings][aria-selected=true]')||/Carregando os anúncios|Os anúncios das lojas/.test(d.getElementById('content').textContent);
+ assert.ok(back.disabled);
+ d.querySelector('nav [data-page=products]').click();
+ assert.ok(!back.disabled);
+ d.querySelector('[data-products-view=listings]').click();
+ assert.ok(listings());
+ const popped=()=>new Promise(r=>dom.window.addEventListener('popstate',()=>setTimeout(r,0),{once:true}));
+ let wait=popped();back.click();await wait;
+ assert.equal(active(),'products');assert.ok(!listings());
+ wait=popped();dom.window.history.back();await wait;
+ assert.equal(active(),'inicio');
+ assert.ok(back.disabled);
+ assert.equal(dom.window.location.hash,'#inicio');
+});
+
+test('F5 on a page reopens that page',async()=>{
+ const {document:d}=await setup({},'http://127.0.0.1:8765/#stock');
+ assert.equal(d.querySelector('nav [data-page].active').dataset.page,'stock');
 });

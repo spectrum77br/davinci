@@ -128,7 +128,8 @@ function purchases() { return procurementPage(); }
 
 function accounts() { return financePage(); }
 
-function history() {
+// Not named `history`: a global function with that name would hide window.history (the back button).
+function historyPage() {
   return panel('Movimentos de peças','Últimos 500 movimentos. Variações de físico e reserva são registradas separadamente.',table(['Quando','Produto / depósito','Físico Δ','Reserva Δ','Motivo'],state.movements.map(m=>`<tr><td>${when(m.created_at)}</td><td><strong>${esc(m.sku)}</strong><small>${esc(m.depot)}</small></td><td class="num ${Number(m.physical_delta)<0?'negative':'positive'}">${qty(m.physical_delta)}</td><td class="num">${qty(m.reserved_delta)}</td><td>${esc(m.reason)}</td></tr>`).join('')||empty(5,'Sem movimentos.')))+panel('Operações confirmadas','Últimas 100 operações. O identificador impede uma segunda aplicação da mesma solicitação.',table(['Quando','Operação','Operador','Identificador'],state.events.map(e=>`<tr><td>${when(e.created_at)}</td><td>${esc(e.kind)}</td><td>${esc(e.actor)}</td><td class="small-code">${esc(e.operation_key)}</td></tr>`).join('')||empty(4,'Sem operações.')));
 }
 
@@ -186,7 +187,7 @@ function render() {
   document.getElementById('title').textContent=title;
   document.getElementById('subtitle').textContent=sub;
   document.querySelectorAll('nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
-  content.innerHTML=({inicio:inicioPage,overview,access:accessPage,inbound:inboundPage,guides:guidesPage,companies:companiesPage,products,contacts:contactsPage,cash_register:cashRegisterPage,pos:posPage,proposals:proposalsPage,returns:returnsPage,deposits:depositsPage,sellers:sellersPage,commissions:commissionsPage,price_lists:priceListsPage,categories:categoriesPage,production:productionPage,payment_methods:paymentMethodsPage,inventory:inventoryPage,stock,orders,purchases,accounts,history,connections,reference,channels,parity,costs:costsPage,fiscal:fiscalPage,logistics:logisticsPage,release:releasePage,integrations:integrationsWithIngest}[page])();
+  content.innerHTML=({inicio:inicioPage,overview,access:accessPage,inbound:inboundPage,guides:guidesPage,companies:companiesPage,products,contacts:contactsPage,cash_register:cashRegisterPage,pos:posPage,proposals:proposalsPage,returns:returnsPage,deposits:depositsPage,sellers:sellersPage,commissions:commissionsPage,price_lists:priceListsPage,categories:categoriesPage,production:productionPage,payment_methods:paymentMethodsPage,inventory:inventoryPage,stock,orders,purchases,accounts,history:historyPage,connections,reference,channels,parity,costs:costsPage,fiscal:fiscalPage,logistics:logisticsPage,release:releasePage,integrations:integrationsWithIngest}[page])();
   applyBlingLayout();
 }
 

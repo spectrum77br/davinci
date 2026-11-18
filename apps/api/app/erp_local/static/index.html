@@ -34,6 +34,7 @@
   <script src="/assets/companies.js" defer></script>
   <script src="/assets/store-sales.js" defer></script>
   <script src="/assets/app.js" defer></script>
+  <script src="/assets/navigation.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
@@ -66,7 +67,7 @@
   <div class="workspace">
     <div class="erp-topbar"><div class="top-menus"><button type="button" data-top-menu="cadastros" aria-expanded="false" aria-controls="top-menu-cadastros">Cadastros <span>⌄</span></button><button type="button" data-top-menu="vendas" aria-expanded="false" aria-controls="top-menu-vendas">Vendas <span>⌄</span></button><button type="button" data-top-menu="estoque" aria-expanded="false" aria-controls="top-menu-estoque">Estoque <span>⌄</span></button><button type="button" data-top-menu="financeiro" aria-expanded="false" aria-controls="top-menu-financeiro">Financeiro <span>⌄</span></button></div><form id="quick-search"><input name="query" placeholder="Pesquisar" aria-label="Pesquisa rápida"><button aria-label="Buscar na operação">⌕</button></form><div class="top-tools"><button data-page="parity" aria-label="Ajuda">?</button><button data-page="connections" aria-label="Configurações">⚙</button><span class="profile-dot">D</span></div></div>
     <div class="environment" id="environment"><span>ERP EM PREPARAÇÃO</span> Carregando o banco local…</div>
-    <header><div><p class="eyebrow">DAVINCI / ERP</p><h1 id="title">Controle da operação</h1><p id="subtitle">Teste o caminho do produto ao recebimento, com histórico de cada ação.</p></div><button id="refresh" class="secondary">Atualizar</button></header>
+    <header><div><p class="eyebrow">DAVINCI / ERP</p><h1 id="title">Controle da operação</h1><p id="subtitle">Teste o caminho do produto ao recebimento, com histórico de cada ação.</p></div><div class="header-actions"><button id="back" class="secondary" type="button" title="Voltar para a tela anterior" disabled>← Voltar</button><button id="refresh" class="secondary">Atualizar</button></div></header>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <main id="content" aria-label="Conteúdo do ERP"></main>
     <aside id="action-rail" aria-label="Ações da tela"></aside>

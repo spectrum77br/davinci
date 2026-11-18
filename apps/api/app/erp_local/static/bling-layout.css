@@ -197,3 +197,5 @@ body[data-screen=products] #subtitle{display:none}
 @keyframes ab-espera{to{opacity:1}}
 @media (prefers-reduced-motion:reduce){.ab-d,.ab-v,.abertura-nome{animation:none}.ab-v{stroke-dashoffset:0}.abertura{transition:opacity .3s ease,visibility 0s linear .3s}.abertura.pronta{transform:none}}
 @media print{.abertura{display:none!important}}
+
+.header-actions{display:flex;gap:8px;align-items:center;flex:none}header #back{padding:7px 10px;font-size:11px;border-color:#c9d6e7;background:white;color:#4c66a1}header #back:disabled{opacity:.45;cursor:default}
