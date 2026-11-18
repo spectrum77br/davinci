@@ -72,7 +72,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PASTA = Path(os.environ.get("DAVINCI_CEREBRO_DIR", "~/DaVinci/ia-de-chamado")).expanduser()
@@ -98,6 +98,20 @@ TESTES_ABRIR = PASTA / "estado" / "teste-abrir-ml"
 PULADAS_LOJA = PASTA / "estado" / "abrir-loja-puladas.json"
 PULADA_VALE_S = 30 * 60
 PROTOCOLO_TELA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$")
+# 18/11/2026 (304380): o atendente humano da Shopee só atende de segunda a sexta,
+# das 8h às 22h (Brasília). A IA tentou 3× às 23h de terça, gastou as 3 tentativas
+# e o chamado foi pra pessoa. Fora do horário a abertura da Shopee nem é oferecida
+# (fica na fila); começa às 8h e para às 21h30, pra caber a conversa.
+BRASILIA = timezone(timedelta(hours=-3))  # sem horário de verão desde 2019
+SHOPEE_ATENDE_DE = (8, 0)
+SHOPEE_ATENDE_ATE = (21, 30)
+
+
+def _shopee_atendendo(agora: datetime | None = None) -> bool:
+    a = (agora or datetime.now(timezone.utc)).astimezone(BRASILIA)
+    if a.weekday() >= 5:  # sábado, domingo
+        return False
+    return SHOPEE_ATENDE_DE <= (a.hour, a.minute) < SHOPEE_ATENDE_ATE
 
 
 def _cfg() -> dict[str, str]:
@@ -303,6 +317,8 @@ def _aberturas_loja(cfg: dict[str, str]) -> list[dict]:
         return []
     agora = time.time()
     puladas = {k: v for k, v in _ler(PULADAS_LOJA).items() if agora - v < PULADA_VALE_S}
+    if not _shopee_atendendo():
+        tarefas = [t for t in tarefas if (t.get("plataforma") or "").strip().lower() != "shopee"]
     return [t for t in tarefas if t["mensagem_id"] not in puladas][:3]
 
 
