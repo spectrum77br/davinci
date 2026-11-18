@@ -37,6 +37,7 @@ from app.models import (
     Product,
     ProductLink,
     Segment,
+    UserRole,
 )
 from app.deps.auth import user_scope
 from app.security.cipher import decrypt_json, encrypt_json
@@ -96,6 +97,25 @@ class PushOutcome:
             "cached": self.cached,
             "payload": self.payload,
         }
+
+
+# M-10 (18/11/2026): kit, comissão, margem e frete da conta são só do ADM.
+# As entradas do cálculo ("inputs" no bloqueio, "calc" no envio) não saem na
+# resposta de quem não é; preço, código, detalhe e anúncios seguem.
+_PAYLOAD_SO_ADMIN = ("inputs", "calc")
+
+
+def payload_para(user: User, payload: dict | None) -> dict | None:
+    if not payload or user.role == UserRole.ADMIN:
+        return payload
+    return {k: v for k, v in payload.items() if k not in _PAYLOAD_SO_ADMIN}
+
+
+def resultado_para(user: User, outcome: PushOutcome) -> dict:
+    """`outcome.to_dict()` como esta pessoa pode ver (`payload_para`)."""
+    resultado = outcome.to_dict()
+    resultado["payload"] = payload_para(user, resultado["payload"])
+    return resultado
 
 
 def _hash_request(
@@ -555,7 +575,13 @@ async def push_one(
     account_id: UUID,
     product_id: UUID,
     idempotency_key: str | None = None,
+    contas_permitidas: set[UUID] | None = None,
 ) -> PushOutcome:
+    # Cerca de equipe (revisão M-7, 18/11/2026): quem chama passa as colunas
+    # da grade da pessoa (`routers.pricing._contas_que_envia`); fora delas a
+    # conta "não existe". None = sem cerca (ADM, auditoria).
+    if contas_permitidas is not None and account_id not in contas_permitidas:
+        return PushOutcome(ok=False, code="account_not_found")
     account = (
         await session.execute(
             select(PricingAccount).where(

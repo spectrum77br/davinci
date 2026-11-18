@@ -220,6 +220,11 @@ async def test_batch_service_records_progress_and_skips_telegram_when_no_chat(
     assert job.total == 1
     assert job.result["summary"]["ok"] == 1
     assert job.result["summary"]["failed"] == 0
+    # Quem não é ADM lê o job sem as entradas do cálculo (kit, comissão,
+    # margem e frete — M-10); os anúncios continuam.
+    payload = job.result["details"][0]["payload"]
+    assert "calc" not in payload
+    assert [lk["externalId"] for lk in payload["links"]] == ["MLB1"]
 
 
 @pytest.mark.asyncio

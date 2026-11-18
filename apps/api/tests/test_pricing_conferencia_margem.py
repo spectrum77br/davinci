@@ -504,6 +504,145 @@ async def test_get_e_conferir_exigem_ver_a_tabela(
     assert (r.status_code, r.json()["detail"]) == (400, {"code": "invalid_department"})
 
 
+# =========================================================== cerca nas outras rotas
+#
+# Revisão M-7..M-12 (18/11/2026): a cerca de equipe da grade valia no
+# `/accounts`, no `/grid` e na conferência, mas não em editar/mudar de aba/
+# excluir conta, no Enviar, no preço vivo e nos preços fixados.
+
+PERM_CONTAS_TUDO = {
+    **PERM_VER,
+    "tabela_precos_contas": {"view": True, "edit": True, "delete": True},
+}
+
+
+async def _londrino(db: AsyncSession, make_user, permissoes: dict) -> User:
+    u = await make_user(role=UserRole.USER, permissions=permissoes)
+    u.sales_teams = [101]
+    await db.commit()
+    return u
+
+
+async def test_conta_de_outra_equipe_nao_se_edita_nem_muda_de_aba_nem_se_exclui(
+    db: AsyncSession, client: AsyncClient, admin: User, make_user, cenario, auth_as: Callable
+):
+    auth_as(await _londrino(db, make_user, PERM_CONTAS_TUDO))
+    contas = "/api/pricing/accounts"
+    for conta in (cenario.israel, cenario.filha_israel):
+        r = await client.patch(f"{contas}/{conta.id}", json={"observation": "mexido pela equipe 1"})
+        assert (r.status_code, r.json()["detail"]) == (404, {"code": "account_not_found"}), r.text
+        r = await client.post(f"{contas}/{conta.id}/department", json={"department": "mala"})
+        assert (r.status_code, r.json()["detail"]) == (404, {"code": "account_not_found"}), r.text
+        r = await client.delete(f"{contas}/{conta.id}")
+        assert (r.status_code, r.json()["detail"]) == (404, {"code": "account_not_found"}), r.text
+    for conta in (cenario.israel, cenario.filha_israel):
+        await db.refresh(conta)
+        assert (conta.observation, conta.segment_id) == (None, cenario.seg["celular"].id)
+
+    # A conta da equipe dele segue como antes.
+    r = await client.patch(f"{contas}/{cenario.londres.id}", json={"observation": "da equipe 1"})
+    assert (r.status_code, r.json()["observation"]) == (200, "da equipe 1")
+
+    # O ADM mexe em qualquer uma.
+    auth_as(admin)
+    r = await client.patch(f"{contas}/{cenario.israel.id}", json={"observation": "do ADM"})
+    assert (r.status_code, r.json()["observation"]) == (200, "do ADM")
+
+
+async def test_enviar_para_conta_de_outra_equipe_nao_passa(
+    db: AsyncSession, client: AsyncClient, make_user, cenario, auth_as: Callable
+):
+    from app.models import CellStatus, PricingOverride
+    from app.services.pricing.batch import run_push_prices_batch
+
+    londrino = await _londrino(db, make_user, PERM_TUDO)
+    auth_as(londrino)
+
+    def item(conta) -> dict:
+        return {"pricing_account_id": str(conta.id), "pricing_product_id": str(cenario.cel_a.id)}
+
+    corpo = {"items": [item(cenario.israel), item(cenario.filha_israel), item(cenario.londres)]}
+    r = await client.post("/api/pricing/push", json=corpo)
+    assert r.status_code == 200, r.text
+    res = r.json()["results"]
+    assert [(x["code"], x["price"], x["payload"]) for x in res[:2]] == [
+        ("account_not_found", None, None)
+    ] * 2
+    # A da equipe dele passa da cerca (aqui sem anúncio vinculado).
+    assert res[2]["code"] == "no_link"
+    marcadas = (
+        await db.execute(
+            select(PricingOverride.pricing_account_id).where(
+                PricingOverride.cell_status == CellStatus.NO_LINK
+            )
+        )
+    ).scalars().all()
+    assert marcadas == [cenario.londres.id]
+
+    # Enviar em lote: mesma cerca.
+    job = BackgroundJob(
+        type=BackgroundJobType.PUSH_PRICES_BATCH,
+        status=BackgroundJobStatus.PENDING,
+        created_by=londrino.id,
+        payload={"count": 2},
+        total=2,
+    )
+    db.add(job)
+    await db.commit()
+    await run_push_prices_batch(
+        db,
+        job_id=job.id,
+        user_id=londrino.id,
+        items=[item(cenario.israel), item(cenario.filha_israel)],
+        notify_telegram=False,
+    )
+    await db.refresh(job)
+    assert [d["code"] for d in job.result["details"]] == ["account_not_found"] * 2
+
+
+async def test_preco_vivo_e_precos_fixados_so_das_contas_da_equipe(
+    db: AsyncSession, client: AsyncClient, admin: User, make_user, cenario, auth_as: Callable
+):
+    from app.models import PricingOverride
+
+    for conta, preco in ((cenario.israel, "123"), (cenario.londres, "77")):
+        db.add(
+            PricingOverride(
+                user_id=admin.id,
+                pricing_account_id=conta.id,
+                pricing_product_id=cenario.cel_a.id,
+                price_override=Decimal(preco),
+            )
+        )
+    await db.commit()
+    da_equipe = {str(cenario.londres.id), str(cenario.londres_sh.id), str(cenario.filha_londres.id)}
+
+    auth_as(await _londrino(db, make_user, PERM_VER))
+    r = await client.get(
+        f"/api/pricing/actual-prices/{cenario.cel_a.id}", params={"department": "celular"}
+    )
+    assert r.status_code == 200, r.text
+    assert set(r.json()) == da_equipe
+    r = await client.get("/api/pricing/overrides", params={"department": "celular"})
+    assert r.status_code == 200, r.text
+    assert [(o["pricing_account_id"], o["price_override"]) for o in r.json()] == [
+        (str(cenario.londres.id), "77.00")
+    ]
+    r = await client.get("/api/pricing/overrides")
+    assert [o["pricing_account_id"] for o in r.json()] == [str(cenario.londres.id)]
+
+    # O ADM vê todas.
+    auth_as(admin)
+    r = await client.get(
+        f"/api/pricing/actual-prices/{cenario.cel_a.id}", params={"department": "celular"}
+    )
+    assert set(r.json()) == {str(c.id) for c in cenario.contas}
+    r = await client.get("/api/pricing/overrides", params={"department": "celular"})
+    assert {o["pricing_account_id"] for o in r.json()} == {
+        str(cenario.israel.id), str(cenario.londres.id)
+    }
+
+
 # =========================================================== Histórico
 
 

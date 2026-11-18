@@ -24,7 +24,7 @@ from app.models import (
     User,
     UserSettings,
 )
-from app.services.pricing.push import push_one
+from app.services.pricing.push import push_one, resultado_para
 from app.services.telegram import TelegramClient, TelegramConfigError
 
 logger = structlog.get_logger()
@@ -162,6 +162,10 @@ async def run_push_prices_batch(
         await session.commit()
         return
 
+    # Mesma cerca de equipe do Enviar (`POST /push`).
+    from app.routers.pricing import _contas_que_envia  # tardio: roteador pesado
+
+    permitidas = await _contas_que_envia(session, user)
     summary = {"total": len(items), "ok": 0, "failed": 0, "cached": 0}
     failures: list[dict] = []
     details: list[dict] = []
@@ -183,15 +187,19 @@ async def run_push_prices_batch(
             account_id=account_id,
             product_id=product_id,
             idempotency_key=key,
+            contas_permitidas=permitidas,
         )
+        # O job fica legível para quem o criou: sem kit/comissão/margem/frete
+        # se não for ADM (M-10).
+        resultado = resultado_para(user, outcome)
         if outcome.ok:
             summary["ok"] += 1
         else:
             summary["failed"] += 1
-            failures.append(outcome.to_dict())
+            failures.append(resultado)
         if outcome.cached:
             summary["cached"] += 1
-        details.append(outcome.to_dict())
+        details.append(resultado)
 
         job.processed = i + 1
         if job.processed % 10 == 0:

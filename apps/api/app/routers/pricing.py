@@ -109,6 +109,7 @@ from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import (
     bases_com_catalogo_ligado,
     integracoes_com_marca_lida,
+    payload_para,
     push_one,
 )
 from app.services.pricing.sku_match import ml_listing_type_for_account, variants_of
@@ -657,6 +658,38 @@ async def _contas_da_grade(
     )
 
 
+async def _contas_que_envia(session: AsyncSession, user: User) -> set[UUID] | None:
+    """Contas para onde esta pessoa manda preço (Enviar e Enviar em lote): as
+    colunas da grade dela (`_contas_da_grade`: cerca de equipe, catálogo só
+    com a base). ADM: None = sem cerca, como antes."""
+    if _e_admin(user):
+        return None
+    return {c.id for c in await _contas_da_grade(session, user, None)}
+
+
+async def _conta_da_cerca(
+    session: AsyncSession, user: User, account_id: UUID
+) -> PricingAccount:
+    """A conta, se está dentro da cerca de equipe da Tabela (a do `/accounts`;
+    a coluna de catálogo vale pela base). Fora dela → 404, como se não
+    existisse (revisão M-7, 18/11/2026: editar, mudar de aba e excluir)."""
+    escopo = await _escopo_precos(session, user)
+    stmt = select(PricingAccount).where(
+        and_(
+            PricingAccount.id == account_id,
+            user_scope(PricingAccount, user),
+        )
+    )
+    row = (await session.execute(_team_scope_accounts(stmt, escopo))).scalar_one_or_none()
+    if row is not None and row.canal == CANAL_CATALOGO and not escopo.unrestricted:
+        base = select(PricingAccount.id).where(PricingAccount.id == row.conta_base_id)
+        if (await session.execute(_team_scope_accounts(base, escopo))).first() is None:
+            row = None
+    if row is None:
+        raise HTTPException(404, detail={"code": "account_not_found"})
+    return row
+
+
 @router.get("/accounts", response_model=list[PricingAccountOut])
 async def list_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -735,18 +768,7 @@ async def patch_account(
     ],
 ) -> PricingAccountOut:
     _recusar_campos_so_admin(user, body)
-    row = (
-        await session.execute(
-            select(PricingAccount).where(
-                and_(
-                    PricingAccount.id == account_id,
-                    user_scope(PricingAccount, user),
-                )
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(404, detail={"code": "account_not_found"})
+    row = await _conta_da_cerca(session, user, account_id)
     if row.canal == CANAL_CATALOGO:
         return await _patch_margens_da_filha(session, user, row, body)
 
@@ -798,16 +820,8 @@ async def delete_account(
         User, Depends(require_permission("tabela_precos_contas", "delete"))
     ],
 ) -> None:
-    res = await session.execute(
-        delete(PricingAccount).where(
-            and_(
-                PricingAccount.id == account_id,
-                user_scope(PricingAccount, user),
-            )
-        )
-    )
-    if res.rowcount == 0:
-        raise HTTPException(404, detail={"code": "account_not_found"})
+    row = await _conta_da_cerca(session, user, account_id)
+    await session.execute(delete(PricingAccount).where(PricingAccount.id == row.id))
     await session.commit()
     return None
 
@@ -1228,14 +1242,20 @@ async def list_overrides(
     department: str | None = Query(None),
 ) -> list[PricingOverrideOut]:
     stmt = select(PricingOverride).where(user_scope(PricingOverride, user))
+    rid = None
     if department:
         _, leaves_by_id, root_id_by_slug = await _segment_index(session)
-        if root_id_by_slug.get(department) is None:
+        rid = root_id_by_slug.get(department)
+        if rid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
         leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
         stmt = stmt.join(
             PricingProduct, PricingProduct.id == PricingOverride.pricing_product_id
         ).where(PricingProduct.segment_id.in_(leaf_ids))
+    if not _e_admin(user):
+        # Só as células das colunas da grade dela (cerca de equipe).
+        contas = [a.id for a in await _contas_da_grade(session, user, rid)]
+        stmt = stmt.where(PricingOverride.pricing_account_id.in_(contas))
     rows = (await session.execute(stmt)).scalars().all()
     return [PricingOverrideOut.model_validate(r) for r in rows]
 
@@ -1504,6 +1524,7 @@ async def push_prices(
         return PricingPushOut(results=[])
 
     results: list[PricingPushItemOut] = []
+    permitidas = await _contas_que_envia(session, user)
     for i, item in enumerate(body.items):
         # Per-item key when batch has >1 entry — keeps each (acct,prod) replay-safe.
         key = (
@@ -1516,6 +1537,7 @@ async def push_prices(
             account_id=item.pricing_account_id,
             product_id=item.pricing_product_id,
             idempotency_key=key,
+            contas_permitidas=permitidas,
         )
         results.append(
             PricingPushItemOut(
@@ -1528,7 +1550,7 @@ async def push_prices(
                 item_id=outcome.item_id,
                 variation_id=outcome.variation_id,
                 cached=outcome.cached,
-                payload=outcome.payload or None,
+                payload=payload_para(user, outcome.payload) or None,
             )
         )
     await session.commit()
@@ -2127,24 +2149,15 @@ async def get_actual_prices(
         raise HTTPException(404, detail={"code": "product_not_found"})
 
     roots_by_id, leaves_by_id, root_id_by_slug = await _segment_index(session)
-    accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
+    rid = None
     if department:
         rid = root_id_by_slug.get(department)
         if rid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
-        accounts_stmt = accounts_stmt.where(PricingAccount.segment_id == rid)
-    accounts = (await session.execute(accounts_stmt)).scalars().all()
+    # As colunas da grade desta pessoa (cerca de equipe; catálogo só com a
+    # base): conta de outra equipe não tem o preço vivo lido nem devolvido.
+    accounts = await _contas_da_grade(session, user, rid)
     contas_por_id = {a.id: a for a in accounts}
-    faltam = {
-        a.conta_base_id
-        for a in accounts
-        if a.canal == CANAL_CATALOGO and a.conta_base_id not in contas_por_id
-    }
-    if faltam:
-        for a in (
-            await session.execute(select(PricingAccount).where(PricingAccount.id.in_(faltam)))
-        ).scalars().all():
-            contas_por_id[a.id] = a
 
     result: dict[str, float | None] = {str(acc.id): None for acc in accounts}
 
@@ -2549,18 +2562,7 @@ async def set_account_department(
     sid = await _resolve_root_segment_id(session, body.department)
     if sid is None:
         raise HTTPException(400, detail={"code": "invalid_department"})
-    row = (
-        await session.execute(
-            select(PricingAccount).where(
-                and_(
-                    PricingAccount.id == account_id,
-                    user_scope(PricingAccount, user),
-                )
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(404, detail={"code": "account_not_found"})
+    row = await _conta_da_cerca(session, user, account_id)
     _recusar_edicao_da_filha(row)
     row.segment_id = sid
     await _sincronizar_filha(session, row)

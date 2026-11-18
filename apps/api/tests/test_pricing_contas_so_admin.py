@@ -251,3 +251,67 @@ async def test_nao_admin_nao_muda_nem_zera(
     assert r.status_code == 200, r.text
     assert Decimal(r.json()["commission"]) == Decimal("0.12")
     assert r.json()["kit_number"] == 2
+
+
+async def test_enviar_de_quem_nao_e_adm_sai_sem_os_numeros_da_conta(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, make_user, cenario
+):
+    """Revisão M-7..M-12: o Enviar devolvia as entradas do cálculo (kit,
+    comissão, margem e frete) em `payload.inputs`/`payload.calc` e o Enviar
+    em lote as gravava no job que o criador lê. Quem não é ADM recebe o
+    resto (código, detalhe, bloqueio, anúncios); o ADM, tudo como antes."""
+    from app.models import BackgroundJob, BackgroundJobStatus, BackgroundJobType
+    from app.services.pricing.batch import run_push_prices_batch
+    from app.services.pricing.push import payload_para
+
+    enviar_tabela = {"tabela_precos": {"view": True, "edit": True, "delete": False}}
+    enviador = await make_user(role=UserRole.USER, permissions={**PERM_VENDEDOR, **enviar_tabela})
+    # Sem custo nem preço de catálogo: o cálculo para antes do marketplace.
+    sem_custo = PricingProduct(
+        user_id=cenario.admin.id, sku="z999", name="Sem custo",
+        segment_id=cenario.a003.segment_id,
+    )
+    db.add(sem_custo)
+    await db.commit()
+    kit = {"pricing_account_id": str(cenario.kia.id), "pricing_product_id": str(sem_custo.id)}
+    cat = {"pricing_account_id": str(cenario.catalogo.id), "pricing_product_id": str(sem_custo.id)}
+
+    async def enviar(item: dict) -> dict:
+        r = await client.post("/api/pricing/push", json={"items": [item]})
+        assert r.status_code == 200, r.text
+        return r.json()["results"][0]
+
+    auth_as(enviador)
+    r = await enviar(kit)
+    assert (r["code"], r["payload"]) == ("missing_inputs", None)
+    r = await enviar(cat)
+    assert (r["code"], r["payload"]) == ("bloqueado", {"bloqueio": "sem_preco_catalogo"})
+
+    # O envio que chega ao marketplace leva "calc" junto dos anúncios.
+    envio = {"calc": {"commission": "0.1000"}, "links": [{"externalId": "MLB1"}], "pending": True}
+    assert payload_para(enviador, envio) == {"links": [{"externalId": "MLB1"}], "pending": True}
+    assert payload_para(cenario.admin, envio) == envio
+
+    # Enviar em lote: o job que o criador lê também sai sem os números.
+    job = BackgroundJob(
+        type=BackgroundJobType.PUSH_PRICES_BATCH,
+        status=BackgroundJobStatus.PENDING,
+        created_by=enviador.id,
+        payload={"count": 2},
+        total=2,
+    )
+    db.add(job)
+    await db.commit()
+    await run_push_prices_batch(
+        db, job_id=job.id, user_id=enviador.id, items=[kit, cat], notify_telegram=False
+    )
+    await db.refresh(job)
+    assert job.result["summary"]["failed"] == 2
+    assert [d["payload"] for d in job.result["details"]] == [{}, {"bloqueio": "sem_preco_catalogo"}]
+
+    # O ADM continua recebendo as entradas.
+    auth_as(cenario.admin)
+    r = await enviar(kit)
+    assert r["payload"]["inputs"]["commission"] == "0.1000"
+    r = await enviar(cat)
+    assert r["payload"]["inputs"]["margem_propria"] is True
