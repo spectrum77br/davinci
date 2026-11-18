@@ -2946,8 +2946,15 @@ type CelulaConferida = {
   motivo: string | null
   conferido_em: string
   anuncios: AnuncioConferido[]
-  // O job que gravou a célula (null em linha antiga, sem job).
+  // O job que gravou a célula (null em linha antiga, sem job, ou conferida
+  // sozinha pelo clique no cartão — M-15).
   job_id: string | null
+}
+// POST /api/pricing/conferencia/celula (M-15): a célula como ficou gravada
+// (null = não manda mais preço e saiu) ou o erro da leitura (nada gravado).
+type ConferirCelulaResposta = {
+  celula: CelulaConferida | null
+  erro: string | null
 }
 type JobConferencia = {
   id: string
@@ -3014,6 +3021,15 @@ let desmontado = false
 const margem = ref<MargemConferencia | null>(null)
 const salvandoMargem = ref(false)
 let seqMargem = 0
+// Conferir uma célula só (M-15, 18/11/2026): as células sendo lidas
+// (produto::conta), o erro da última leitura de cada uma (o balão do cartão
+// mostra) e os resultados que chegaram, com a ordem em que chegaram — uma
+// leitura inteira da conferência que saiu antes não volta a célula para o
+// dado mais antigo.
+const celulasConferindo = ref<Set<string>>(new Set())
+const errosDaCelula = ref<Record<string, string>>({})
+let seqCelula = 0
+const celulasRecentes = new Map<string, { seq: number; celula: CelulaConferida | null }>()
 
 const conferenciaRodando = computed(() => {
   const s = conferencia.value?.job?.status
@@ -3045,9 +3061,11 @@ async function carregarConferencia() {
   const dep = department.value
   const seq = ++seqConferencia
   const margemAntes = seqMargem
+  const celulasAntes = seqCelula
   try {
     const r = await api<ConferenciaResposta>(`/api/pricing/conferencia?department=${encodeURIComponent(dep)}`)
     if (seq !== seqConferencia || desmontado) return
+    r.celulas = comCelulasRecentes(r.celulas ?? [], celulasAntes)
     conferencia.value = r
     conferenciaEstado.value = 'ok'
     releitura.value = 'ok'
@@ -3189,6 +3207,106 @@ const ERROS_CONFERENCIA: Record<string, string> = {
 // cru: o balão mostra o texto genérico e o código entre parênteses.
 function textoErroConferencia(codigo: string | null | undefined): string {
   return codigo ? ERROS_CONFERENCIA[codigo] ?? 'erro inesperado no servidor — confira de novo' : ''
+}
+
+// ---------- Conferir só uma célula (M-15, 18/11/2026)
+// Clique no cartão vermelho: o servidor lê na hora só os anúncios vinculados
+// daquela célula (aquele produto naquela conta) e grava só ela, sem mexer no
+// job nem na data da última conferência do departamento. A célula atualiza
+// aqui sem reler a conferência inteira. Mesma permissão do "Conferir
+// anúncios" (`pode_conferir`); conta sem integração não tem o que ler.
+const ERROS_CELULA: Record<string, string> = {
+  so_no_servidor: 'a conferência só roda no servidor',
+  celula_em_conferencia: 'esta célula já está sendo conferida',
+  account_not_found: 'esta conta não aparece mais na sua Tabela',
+  product_not_found: 'este produto não existe mais',
+  produto_sem_departamento: 'este produto não está em nenhuma aba',
+}
+function textoErroCelula(codigo: string | null | undefined): string {
+  return (codigo && ERROS_CELULA[codigo]) || 'não deu para ler agora — tente de novo'
+}
+
+// A lista da conferência com a célula `chave` (produto::conta) trocada pela
+// nova, ou sem ela (null: a célula não manda mais preço).
+function trocarCelula(celulas: CelulaConferida[], chave: string, nova: CelulaConferida | null): CelulaConferida[] {
+  const outras = celulas.filter((c) => `${c.pricing_product_id}::${c.pricing_account_id}` !== chave)
+  return nova ? [...outras, nova] : outras
+}
+
+// A célula conferida sozinha DEPOIS que uma leitura inteira saiu (`desde`) é
+// mais nova que a resposta dela: fica a da célula. As de antes já vieram do
+// servidor e saem da lista.
+function comCelulasRecentes(celulas: CelulaConferida[], desde: number): CelulaConferida[] {
+  let lista = celulas
+  for (const [chave, r] of celulasRecentes) {
+    if (r.seq > desde) lista = trocarCelula(lista, chave, r.celula)
+    else celulasRecentes.delete(chave)
+  }
+  return lista
+}
+
+// O balão do cartão: os motivos, o erro da última leitura da célula e, quando
+// dá para clicar, o convite.
+function tituloDoCartao(motivos: string, clicavel: boolean, erro: string | null): string {
+  const linhas = [motivos]
+  if (erro) linhas.push(`A conferência desta célula falhou: ${erro}`)
+  if (clicavel) linhas.push('Clique para conferir só esta célula')
+  return linhas.join('\n')
+}
+
+function conferindoCelula(prodId: string, accId: string): boolean {
+  return celulasConferindo.value.has(`${prodId}::${accId}`)
+}
+
+function erroDaCelula(prodId: string, accId: string): string | null {
+  return errosDaCelula.value[`${prodId}::${accId}`] ?? null
+}
+
+// Dá para conferir a célula: quem pode conferir, e a conta tem integração
+// (na coluna de catálogo, a conta de kit dela).
+function celulaConferivel(prodId: string, acc: Account): boolean {
+  if (!conferencia.value?.pode_conferir) return false
+  if (contaParametros(acc).integration_id == null) return false
+  const cat = cellOf(prodId, acc.id)?.catalogo
+  return !(cat?.bloqueio === 'sem_anuncio' && tipoSemAnuncio(cat.texto) === 'sem_integracao')
+}
+
+function trocarErroDaCelula(chave: string, erro: string | null) {
+  const erros = { ...errosDaCelula.value }
+  if (erro) erros[chave] = erro
+  else delete erros[chave]
+  errosDaCelula.value = erros
+}
+
+async function conferirCelula(prodId: string, acc: Account) {
+  const chave = `${prodId}::${acc.id}`
+  // Dois cliques seguidos: uma leitura só.
+  if (celulasConferindo.value.has(chave) || !celulaConferivel(prodId, acc)) return
+  const dep = department.value
+  celulasConferindo.value = new Set([...celulasConferindo.value, chave])
+  trocarErroDaCelula(chave, null)
+  try {
+    const r = await api<ConferirCelulaResposta>('/api/pricing/conferencia/celula', {
+      method: 'POST',
+      body: { pricing_account_id: acc.id, pricing_product_id: prodId },
+    })
+    if (desmontado || dep !== department.value) return
+    if (r.erro) {
+      // Nada foi gravado: o cartão continua e o balão mostra o erro.
+      trocarErroDaCelula(chave, r.erro)
+      return
+    }
+    const celula = r.celula ?? null
+    celulasRecentes.set(chave, { seq: ++seqCelula, celula })
+    if (conferencia.value) conferencia.value.celulas = trocarCelula(conferencia.value.celulas, chave, celula)
+  } catch (e: any) {
+    if (desmontado || dep !== department.value) return
+    trocarErroDaCelula(chave, textoErroCelula(e?.data?.detail?.code))
+  } finally {
+    const s = new Set(celulasConferindo.value)
+    s.delete(chave)
+    celulasConferindo.value = s
+  }
 }
 
 // Balão do botão "Conferir anúncios": o que antes ficava escrito na faixa
@@ -4692,6 +4810,10 @@ function carregarExtrasDaTabela() {
   conferenciaEstado.value = 'carregando'
   releitura.value = 'ok'
   tentativasReleitura = 0
+  // M-15: os erros e os resultados das células conferidas sozinhas eram do
+  // departamento de antes.
+  errosDaCelula.value = {}
+  celulasRecentes.clear()
   void carregarConferencia()
 }
 
@@ -7132,13 +7254,32 @@ watch(department, async () => {
                     <!-- Cartão e aviãozinho em espaços fixos (sempre reservados):
                          ficam alinhados em todas as linhas e colunas. -->
                     <div class="flex shrink-0 items-center gap-0.5">
+                      <!-- M-15: clicar no cartão confere só esta célula; enquanto
+                           lê, o indicador girando fica no lugar do cartão (o
+                           espaço é fixo: o preço e o aviãozinho não se mexem). -->
                       <span class="inline-flex h-4 w-2.5 items-center justify-center">
+                        <Loader2
+                          v-if="conferindoCelula(prod.id, acc.id)"
+                          class="block h-[10px] w-[10px] animate-spin text-red-600"
+                          aria-label="Conferindo esta célula…"
+                          data-cartao-conferindo
+                        />
+                        <button
+                          v-else-if="cartaoDe(prod.id, acc.id) && celulaConferivel(prod.id, acc)"
+                          type="button"
+                          class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm cursor-pointer hover:bg-red-700"
+                          :title="tituloDoCartao(cartaoDe(prod.id, acc.id)!, true, erroDaCelula(prod.id, acc.id))"
+                          :aria-label="tituloDoCartao(cartaoDe(prod.id, acc.id)!, true, erroDaCelula(prod.id, acc.id))"
+                          data-cartao
+                          data-cartao-clicavel
+                          @click.stop="conferirCelula(prod.id, acc)"
+                        />
                         <span
-                          v-if="cartaoDe(prod.id, acc.id)"
+                          v-else-if="cartaoDe(prod.id, acc.id)"
                           class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm cursor-help"
                           role="img"
-                          :title="cartaoDe(prod.id, acc.id)!"
-                          :aria-label="cartaoDe(prod.id, acc.id)!"
+                          :title="tituloDoCartao(cartaoDe(prod.id, acc.id)!, false, erroDaCelula(prod.id, acc.id))"
+                          :aria-label="tituloDoCartao(cartaoDe(prod.id, acc.id)!, false, erroDaCelula(prod.id, acc.id))"
                           data-cartao
                         />
                         <span v-else class="invisible block h-[10px] w-[7px]" aria-hidden="true" />

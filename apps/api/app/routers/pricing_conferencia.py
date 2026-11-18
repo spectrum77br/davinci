@@ -40,6 +40,16 @@ conferência termina.
   PUT /api/pricing/conferencia/margem                {"department", "margem_pct"?,
                                                       "geral_ligada"?, "por_produto_ligada"?}
   PUT /api/pricing/conferencia/margem/produto/{id}   {"margem_pct": n | null}
+
+M-15, 18/11/2026: clicar no cartão vermelho confere só aquela célula. Mesma
+permissão do "Conferir anúncios" (`tabela_precos` ver) e só nas colunas que a
+pessoa vê na grade (`_contas_da_grade`). Lê na hora (sem job) só os anúncios
+vinculados da célula e devolve a célula como ficou gravada (`job_id` null);
+não mexe no job nem na data da última conferência do departamento. Leitura
+que falhou → 200 com `erro` e nada gravado (o cartão continua).
+
+  POST /api/pricing/conferencia/celula   {"pricing_account_id", "pricing_product_id"}
+                                         → 200 {"celula": {...} | null, "erro": str | null}
 """
 
 from __future__ import annotations
@@ -111,6 +121,20 @@ class ConferenciaCelulaOut(BaseModel):
     conferido_em: datetime
     anuncios: list[dict[str, Any]]
     job_id: UUID | None = None
+
+
+class ConferirCelulaIn(BaseModel):
+    pricing_account_id: UUID
+    pricing_product_id: UUID
+
+
+class ConferirCelulaOut(BaseModel):
+    """M-15: a célula como ficou gravada; null = ela não manda mais preço e
+    saiu da conferência. `erro`: a leitura falhou e nada foi gravado (a
+    célula fica com a leitura anterior)."""
+
+    celula: ConferenciaCelulaOut | None = None
+    erro: str | None = None
 
 
 class MargemOut(BaseModel):
@@ -339,6 +363,67 @@ async def ver_conferencia(
             for c in linhas
         ],
     )
+
+
+@router.post("/conferencia/celula", response_model=ConferirCelulaOut)
+async def conferir_celula(
+    body: ConferirCelulaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
+) -> ConferirCelulaOut:
+    """Confere só uma célula (M-15): o clique no cartão vermelho."""
+    prod = await session.get(PricingProduct, body.pricing_product_id)
+    if prod is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "product_not_found"})
+    aba = await _departamento_da_linha(session, prod)
+    if aba is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"code": "produto_sem_departamento"}
+        )
+    department, root_id = aba
+    # Só as colunas que esta pessoa vê na grade (a mesma régua do /grid).
+    visiveis = {c.id for c in await _contas_da_grade(session, user, root_id)}
+    if body.pricing_account_id not in visiveis:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    if not conferencia.conferencia_liberada():
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "so_no_servidor"})
+    # Solta a conexão antes de chamar o marketplace (o serviço abre as dele).
+    await session.commit()
+    try:
+        linha = await conferencia.conferir_celula(
+            department, body.pricing_account_id, body.pricing_product_id
+        )
+    except conferencia.CelulaEmConferenciaError as e:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"code": "celula_em_conferencia"}
+        ) from e
+    except conferencia.LeituraDaCelulaFalhouError as e:
+        return ConferirCelulaOut(erro=str(e))
+    logger.info(
+        "conferencia_celula_pedida",
+        department=department,
+        pricing_account_id=str(body.pricing_account_id),
+        pricing_product_id=str(body.pricing_product_id),
+        user_id=str(user.id),
+    )
+    if linha is None:
+        return ConferirCelulaOut()
+    return ConferirCelulaOut(
+        celula=ConferenciaCelulaOut(
+            pricing_account_id=linha["pricing_account_id"],
+            pricing_product_id=linha["pricing_product_id"],
+            preco_tabela=_numero(linha["preco_tabela"]),
+            situacao=linha["situacao"],
+            motivo=linha["motivo"],
+            conferido_em=linha["conferido_em"],
+            anuncios=linha["anuncios"],
+            job_id=linha["job_id"],
+        )
+    )
+
+
+def _numero(valor: Decimal | None) -> float | None:
+    return float(valor) if valor is not None else None
 
 
 @router.put("/conferencia/margem", response_model=MargemOut)

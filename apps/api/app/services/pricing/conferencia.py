@@ -38,6 +38,15 @@ não mandam mais preço. A que não terminou — passou do prazo
 Só no servidor (`conferencia_liberada`): o refresh token do ML e da Shopee é
 de uso único, e o banco local pode ter as credenciais da produção — uma
 leitura daqui renovaria o token e derrubaria a loja lá.
+
+M-15, 18/11/2026: conferir UMA célula (`conferir_celula`, o clique no cartão
+vermelho). Monta só aquela célula com as mesmas regras (`montar_celulas` com
+`so_celula`), lê só os anúncios vinculados dela e grava só a linha dela, com
+`job_id` NULL: não mexe no job nem na data da última conferência do
+departamento. Leitura que falhou não grava nada (a célula fica com a leitura
+anterior). Com uma conferência do departamento rodando, a gravação dela não
+passa por cima da célula conferida sozinha depois que aquela conta começou a
+ser lida (`lido_desde` no `_gravar`): dado mais antigo não sobrescreve o novo.
 """
 
 from __future__ import annotations
@@ -164,6 +173,20 @@ MOTIVO_FALHA_AO_GRAVAR = "falha ao gravar o resultado"
 
 class DepartamentoInvalidoError(ValueError):
     """O slug não é de nenhuma aba (segmento raiz)."""
+
+
+class CelulaEmConferenciaError(RuntimeError):
+    """Esta célula já está sendo conferida sozinha (dois cliques seguidos)."""
+
+
+class LeituraDaCelulaFalhouError(RuntimeError):
+    """A leitura da célula falhou (token, acesso, leitor): nada foi gravado."""
+
+
+# M-15: as células sendo conferidas sozinhas neste processo (conta, linha).
+# A tela já não deixa clicar duas vezes; isto segura o segundo pedido que
+# chegar mesmo assim.
+_CELULAS_EM_CONFERENCIA: set[tuple[UUID, UUID]] = set()
 
 
 @dataclass(slots=True)
@@ -461,10 +484,19 @@ def _motivo_sem_anuncio(canal: str, resolucao: Resolucao, *, marca_nao_lida: boo
 
 
 async def montar_celulas(
-    session: AsyncSession, department: str, plataformas_lidas: Collection[str]
+    session: AsyncSession,
+    department: str,
+    plataformas_lidas: Collection[str],
+    *,
+    so_celula: tuple[UUID, UUID] | None = None,
 ) -> list[Celula]:
     """As células do departamento que mandariam preço, cada uma com os
-    anúncios que receberiam o preço (ou a situação já decidida)."""
+    anúncios que receberiam o preço (ou a situação já decidida).
+
+    `so_celula` (conta, linha) — M-15: só aquela célula, com as mesmas regras
+    (na coluna de catálogo as outras linhas da coluna entram no cálculo, para
+    a disputa do mesmo anúncio valer como no envio). Lista vazia = a célula
+    não manda preço (ou a conta/linha não é deste departamento)."""
     # Os mesmos filtros do GET /grid (import tardio, como os outros serviços
     # que reaproveitam regra de router).
     from app.routers.pricing import (
@@ -504,6 +536,14 @@ async def montar_celulas(
         return []
 
     por_id = {a.id: a for a in contas}
+    if so_celula is not None:
+        conta_alvo, linha_alvo = so_celula
+        # `por_id` fica com todas: a coluna de catálogo usa a conta base.
+        contas = [a for a in contas if a.id == conta_alvo]
+        if not contas or not any(p.id == linha_alvo for p in produtos):
+            return []
+        if contas[0].canal != CANAL_CATALOGO:
+            produtos = [p for p in produtos if p.id == linha_alvo]
     overrides = {
         (o.pricing_product_id, o.pricing_account_id): o
         for o in (
@@ -605,6 +645,8 @@ async def montar_celulas(
             resolucao,
             marca_nao_lida=celula.integracao.id not in marca_lida,
         )
+    if so_celula is not None:
+        celulas = [c for c in celulas if (c.conta.id, c.produto.id) == so_celula]
     return celulas
 
 
@@ -651,7 +693,8 @@ def _linha(
     celula: Celula,
     *,
     department: str,
-    job_id: UUID,
+    # None = conferência de uma célula só (M-15), sem job.
+    job_id: UUID | None,
     agora: datetime,
     leituras: dict[UUID, LeituraAnuncio] | None = None,
     erro: str | None = None,
@@ -677,14 +720,29 @@ def _linha(
     }
 
 
-async def _gravar(session: AsyncSession, linhas: list[dict[str, Any]]) -> None:
-    """Upsert por célula (a chave é a conta × a linha)."""
+async def _gravar(
+    session: AsyncSession,
+    linhas: list[dict[str, Any]],
+    *,
+    lido_desde: datetime | None = None,
+) -> None:
+    """Upsert por célula (a chave é a conta × a linha).
+
+    `lido_desde` (a conferência do departamento: quando a leitura daquela
+    conta começou) — M-15: a célula conferida sozinha (`job_id` NULL) depois
+    disso tem dado mais novo e fica como está. Sem `lido_desde` (a célula
+    conferida sozinha), grava sempre."""
     if not linhas:
         return
     tabela = PricingConferencia.__table__
     stmt = pg_insert(tabela)
     stmt = stmt.on_conflict_do_update(
         index_elements=[tabela.c.pricing_account_id, tabela.c.pricing_product_id],
+        where=(
+            or_(tabela.c.job_id.is_not(None), tabela.c.conferido_em <= lido_desde)
+            if lido_desde is not None
+            else None
+        ),
         set_={
             nome: stmt.excluded[nome]
             for nome in (
@@ -717,12 +775,17 @@ async def _ids_que_existem(session: AsyncSession, modelo: Any, ids: set[UUID]) -
 
 
 async def _gravar_vivas(
-    session: AsyncSession, linhas: list[dict[str, Any]]
+    session: AsyncSession,
+    linhas: list[dict[str, Any]],
+    *,
+    lido_desde: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Upsert só das células cuja conta e linha ainda existem. A linha da
     Tabela, a conta ou a coluna de catálogo excluída enquanto as contas eram
     lidas (minutos) perde só as células dela — antes a violação de FK
-    derrubava a gravação da integração inteira. Devolve as linhas gravadas."""
+    derrubava a gravação da integração inteira. Devolve as linhas gravadas
+    (com `lido_desde`, a célula conferida sozinha depois dele fica como está,
+    ver `_gravar`, e conta como gravada)."""
     contas = await _ids_que_existem(
         session, PricingAccount, {ln["pricing_account_id"] for ln in linhas}
     )
@@ -736,7 +799,7 @@ async def _gravar_vivas(
     ]
     if len(vivas) < len(linhas):
         logger.info("conferencia_celulas_excluidas_no_meio", descartadas=len(linhas) - len(vivas))
-    await _gravar(session, vivas)
+    await _gravar(session, vivas, lido_desde=lido_desde)
     return vivas
 
 
@@ -818,6 +881,8 @@ async def _conferir_grupo(
     # espera a vez não ocupa vaga das outras plataformas, e a leitura de quem
     # tem a vez conta nas 3 vagas como qualquer outra.
     async with vez_da_plataforma or nullcontext(), semaforo:
+        # M-15: a célula conferida sozinha depois disto tem dado mais novo.
+        lido_desde = _agora()
         try:
             cliente = await cliente_da_integracao(integ)
             leituras = await leitor(cliente, grupo.links)
@@ -845,7 +910,7 @@ async def _conferir_grupo(
     gravou = True
     try:
         async with _db.SessionLocal() as s:
-            gravadas = len(await _gravar_vivas(s, linhas))
+            gravadas = len(await _gravar_vivas(s, linhas, lido_desde=lido_desde))
             await s.commit()
     except Exception:  # noqa: BLE001 — as outras contas seguem
         gravou, gravadas = False, 0
@@ -906,6 +971,7 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
                 for c in celulas
                 if c.situacao is not None
             ],
+            lido_desde=agora,
         )
         grupos = agrupar(celulas)
         job.total = len(grupos)
@@ -1015,3 +1081,73 @@ async def _conferir(job_id: UUID, department: str, *, prazo: float, log: Any) ->
         celulas_que_sairam=saidas,
         **{k: v for k, v in resultado.items() if k != "situacoes"},
     )
+
+
+# ------------------------------------------------------------ uma célula (M-15)
+
+
+async def conferir_celula(
+    department: str, conta_id: UUID, produto_id: UUID
+) -> dict[str, Any] | None:
+    """Confere só a célula (conta × linha): o clique no cartão vermelho.
+
+    Devolve a linha gravada, ou None quando a célula não manda mais preço (NA,
+    desligada, sem preço, conta arquivada) — aí a leitura antiga dela sai,
+    como no fim da conferência do departamento. A leitura que falhou levanta
+    `LeituraDaCelulaFalhouError` sem gravar nada; a mesma célula pedida de novo
+    antes de terminar, `CelulaEmConferenciaError`. Quem chama confere
+    `conferencia_liberada` antes. Nenhuma sessão do banco fica aberta durante
+    a chamada ao marketplace."""
+    chave = (conta_id, produto_id)
+    if chave in _CELULAS_EM_CONFERENCIA:
+        raise CelulaEmConferenciaError(str(chave))
+    _CELULAS_EM_CONFERENCIA.add(chave)
+    try:
+        return await _conferir_celula(department, conta_id, produto_id)
+    finally:
+        _CELULAS_EM_CONFERENCIA.discard(chave)
+
+
+async def _conferir_celula(
+    department: str, conta_id: UUID, produto_id: UUID
+) -> dict[str, Any] | None:
+    log = logger.bind(
+        department=department, pricing_account_id=str(conta_id), pricing_product_id=str(produto_id)
+    )
+    leitores = carregar_leitores()
+    async with _db.SessionLocal() as s:
+        celulas = await montar_celulas(
+            s, department, set(leitores), so_celula=(conta_id, produto_id)
+        )
+    if not celulas:
+        async with _db.SessionLocal() as s:
+            await s.execute(
+                delete(PricingConferencia).where(
+                    PricingConferencia.pricing_account_id == conta_id,
+                    PricingConferencia.pricing_product_id == produto_id,
+                )
+            )
+            await s.commit()
+        log.info("conferencia_celula_nao_manda_preco")
+        return None
+    celula = celulas[0]
+    leituras: dict[UUID, LeituraAnuncio] | None = None
+    if celula.situacao is None:
+        # Tem anúncio e a plataforma tem leitor: lê só os vínculos desta célula.
+        integ = celula.integracao
+        plataforma = _plataforma(integ)
+        try:
+            cliente = await cliente_da_integracao(integ)
+            leituras = await leitores[plataforma](cliente, celula.links)
+            if not isinstance(leituras, dict):
+                raise TypeError(f"o leitor de {plataforma} não devolveu as leituras")
+        except Exception as e:  # noqa: BLE001 — a célula fica com a leitura anterior
+            motivo = _motivo_curto(e)
+            log.warning("conferencia_celula_falhou", plataforma=plataforma, erro=motivo)
+            raise LeituraDaCelulaFalhouError(motivo) from e
+    linha = _linha(celula, department=department, job_id=None, agora=_agora(), leituras=leituras)
+    async with _db.SessionLocal() as s:
+        gravadas = await _gravar_vivas(s, [linha])
+        await s.commit()
+    log.info("conferencia_celula", situacao=linha["situacao"], anuncios=len(linha["anuncios"]))
+    return gravadas[0] if gravadas else None

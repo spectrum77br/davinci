@@ -625,13 +625,13 @@ async def test_falha_ao_gravar_uma_conta_mantem_a_leitura_anterior_dela(
     primeiro = await _rodar(db, admin)
     original = conferencia._gravar_vivas
 
-    async def _banco_pisca_na_amazon(session, linhas):
+    async def _banco_pisca_na_amazon(session, linhas, **kw):
         if any(
             ln["pricing_account_id"] == cenario.conta_amz.id and ln["situacao"] == "conferida"
             for ln in linhas
         ):
             raise RuntimeError("o banco piscou")
-        return await original(session, linhas)
+        return await original(session, linhas, **kw)
 
     monkeypatch.setattr(conferencia, "_gravar_vivas", _banco_pisca_na_amazon)
     segundo = await _rodar(db, admin)
@@ -1381,6 +1381,223 @@ async def test_clique_da_baixa_no_pendente_que_sumiu_do_arq_mas_nao_pergunta_ced
     await conferencia.run_conferir_precos(job_id=job.id, department="celular", user_id=admin.id)
     await db.refresh(job)
     assert (job.status, job.error) == (BackgroundJobStatus.FAILED, "worker_nao_executou")
+
+
+# =========================================================== uma célula (M-15)
+
+
+def _retrato(gravadas: dict[tuple, PricingConferencia]) -> dict[tuple, tuple]:
+    """O que cada célula tem agora (o `_gravadas` reaproveita os objetos)."""
+    return {
+        chave: (g.job_id, g.conferido_em, g.situacao, g.motivo, g.anuncios)
+        for chave, g in gravadas.items()
+    }
+
+
+@pytest.mark.asyncio
+async def test_conferir_uma_celula_le_e_grava_so_ela(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """Clique no cartão da x010 na counhago: só o anúncio dela é lido, só a
+    linha dela é regravada (sem job), e o job e a data da última conferência
+    do departamento ficam como estavam."""
+    c = cenario
+    job = await _rodar(db, admin)
+    terminou_em = job.finished_at
+    antes = _retrato(await _gravadas(db))
+    marketplaces.ml.chamadas.clear()
+    marketplaces.montados.clear()
+    marketplaces.ml.precos = {**marketplaces.ml.precos, "MLB300": "140"}
+
+    linha = await conferencia.conferir_celula("celular", c.kit.id, c.x010.id)
+
+    assert (linha["situacao"], linha["job_id"]) == ("conferida", None)
+    assert [(a["anuncio"], a["preco"]) for a in linha["anuncios"]] == [("MLB300", 140.0)]
+    lidos = [(nome, [lk.external_id for lk in lks]) for nome, lks in marketplaces.ml.chamadas]
+    assert lidos == [("counhago", ["MLB300"])]
+    assert marketplaces.montados == ["counhago"]
+    depois = _retrato(await _gravadas(db))
+    assert set(depois) == set(antes)
+    job_id, conferido_em, situacao, _motivo, anuncios = depois[(c.kit.id, c.x010.id)]
+    assert (job_id, situacao, anuncios[0]["preco"]) == (None, "conferida", 140.0)
+    assert conferido_em > antes[(c.kit.id, c.x010.id)][1]
+    for chave, velha in antes.items():
+        if chave != (c.kit.id, c.x010.id):
+            assert depois[chave] == velha, chave
+    await db.refresh(job)
+    assert job.finished_at == terminou_em
+    assert len((await db.execute(select(BackgroundJob))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_conferir_celula_do_catalogo_e_leitura_que_falha(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    c = cenario
+    await _rodar(db, admin)
+    marketplaces.ml.chamadas.clear()
+    # Coluna de catálogo: pela integração da base, só o anúncio de catálogo.
+    linha = await conferencia.conferir_celula("celular", c.filha.id, c.a003.id)
+    assert [a["anuncio"] for a in linha["anuncios"]] == ["MLB200"]
+    lidos = [[lk.external_id for lk in lks] for _, lks in marketplaces.ml.chamadas]
+    assert lidos == [["MLB200"]]
+    # A leitura falhou: nada é gravado, a célula fica com a leitura anterior.
+    antes = _retrato(await _gravadas(db))
+    marketplaces.ml.falha_em = {"counhago"}
+    with pytest.raises(conferencia.LeituraDaCelulaFalhouError, match="403"):
+        await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
+    assert _retrato(await _gravadas(db)) == antes
+
+
+@pytest.mark.asyncio
+async def test_conferir_celula_sem_anuncio_para_ler(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    c = cenario
+    linha = await conferencia.conferir_celula("celular", c.sem_integ.id, c.a003.id)
+    assert (linha["situacao"], linha["motivo"]) == ("sem_anuncio", "conta sem integração")
+    linha = await conferencia.conferir_celula("celular", c.kit.id, c.z999.id)
+    assert (linha["situacao"], linha["motivo"]) == ("sem_anuncio", "sem anúncio vinculado")
+    assert marketplaces.montados == []
+    # NA na counhago: a célula não manda preço — a leitura antiga dela sai.
+    db.add(
+        PricingConferencia(
+            pricing_account_id=c.kit.id,
+            pricing_product_id=c.b200.id,
+            department="celular",
+            situacao="conferida",
+        )
+    )
+    await db.commit()
+    assert await conferencia.conferir_celula("celular", c.kit.id, c.b200.id) is None
+    assert (c.kit.id, c.b200.id) not in await _gravadas(db)
+    assert marketplaces.montados == []
+
+
+@pytest.mark.asyncio
+async def test_departamento_nao_passa_por_cima_da_celula_conferida_no_meio(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """A counhago já começou a ser lida pelo departamento quando a pessoa
+    clica no cartão da x010: a célula grava o preço novo, e a gravação do
+    departamento (lida antes) não passa por cima dela."""
+    c = cenario
+    ml = marketplaces.ml
+    clicou = asyncio.Event()
+
+    async def _ml(cliente, vinculos):
+        if cliente.nome == "counhago" and not clicou.is_set():
+            clicou.set()
+            ml.precos = {**ml.precos, "MLB300": "140"}
+            await conferencia.conferir_celula("celular", c.kit.id, c.x010.id)
+            ml.precos = {**ml.precos, "MLB300": "128"}
+        return await ml(cliente, vinculos)
+
+    marketplaces.leitores["ml"] = _ml
+    job = await _rodar(db, admin)
+    assert job.status == BackgroundJobStatus.SUCCEEDED
+    gravadas = await _gravadas(db)
+    x010 = gravadas[(c.kit.id, c.x010.id)]
+    assert (x010.job_id, x010.anuncios[0]["preco"]) == (None, 140.0)
+    # O resto da conta grava normalmente.
+    assert gravadas[(c.kit.id, c.a003.id)].job_id == job.id
+    # A próxima conferência do departamento (lida depois) regrava a célula.
+    seguinte = await _rodar(db, admin)
+    x010 = (await _gravadas(db))[(c.kit.id, c.x010.id)]
+    assert (x010.job_id, x010.anuncios[0]["preco"]) == (seguinte.id, 128.0)
+
+
+@pytest.mark.asyncio
+async def test_dois_cliques_na_mesma_celula_fazem_uma_leitura(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    liberar = asyncio.Event()
+
+    async def _lento(cliente, vinculos):
+        await liberar.wait()
+        return await marketplaces.ml(cliente, vinculos)
+
+    marketplaces.leitores["ml"] = _lento
+    primeira = asyncio.create_task(
+        conferencia.conferir_celula("celular", cenario.kit.id, cenario.x010.id)
+    )
+    await asyncio.sleep(0)
+    with pytest.raises(conferencia.CelulaEmConferenciaError):
+        await conferencia.conferir_celula("celular", cenario.kit.id, cenario.x010.id)
+    liberar.set()
+    linha = await asyncio.wait_for(primeira, timeout=10)
+    assert linha["situacao"] == "conferida"
+    assert len(marketplaces.ml.chamadas) == 1
+    # Terminou: a célula pode ser conferida de novo.
+    await conferencia.conferir_celula("celular", cenario.kit.id, cenario.x010.id)
+    assert len(marketplaces.ml.chamadas) == 2
+
+
+@pytest.mark.asyncio
+async def test_rota_da_celula_para_quem_ve_a_tabela(
+    db: AsyncSession,
+    client: AsyncClient,
+    make_user,
+    cenario,
+    auth_as: Callable,
+    marketplaces,
+    monkeypatch,
+):
+    c = cenario
+    url = "/api/pricing/conferencia/celula"
+    corpo = {"pricing_account_id": str(c.kit.id), "pricing_product_id": str(c.x010.id)}
+    vendedor = await make_user(role=UserRole.USER, permissions=PERM_VER)
+    auth_as(vendedor)
+    r = await client.post(url, json=corpo)
+    assert r.status_code == 200, r.text
+    assert r.json()["erro"] is None
+    cel = r.json()["celula"]
+    assert (cel["pricing_account_id"], cel["pricing_product_id"]) == (
+        str(c.kit.id),
+        str(c.x010.id),
+    )
+    assert (cel["situacao"], cel["job_id"], cel["anuncios"][0]["preco"]) == (
+        "conferida",
+        None,
+        128.0,
+    )
+    # Sem job: a conferência do departamento não muda.
+    assert (await db.execute(select(BackgroundJob))).scalars().all() == []
+    # A leitura falhou: 200 com o erro e nada gravado.
+    marketplaces.ml.falha_em = {"counhago"}
+    r = await client.post(url, json=corpo)
+    assert r.json() == {"celula": None, "erro": "o Mercado Livre recusou o acesso da conta (403)"}
+    # Célula que não manda preço (NA): celula null.
+    r = await client.post(
+        url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(c.b200.id)}
+    )
+    assert r.json() == {"celula": None, "erro": None}
+    # Linha que não existe.
+    r = await client.post(
+        url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(uuid.uuid4())}
+    )
+    assert (r.status_code, r.json()["detail"]) == (404, {"code": "product_not_found"})
+    # Conta de outro departamento (a linha é do celular).
+    r = await client.post(
+        url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(c.mala.id)}
+    )
+    assert (r.status_code, r.json()["detail"]) == (404, {"code": "account_not_found"})
+
+    # Cerca de equipe: equipe sem loja nenhuma não vê a coluna.
+    de_fora = await make_user(role=UserRole.USER, permissions=PERM_VER)
+    de_fora.sales_teams = [999]
+    await db.commit()
+    auth_as(de_fora)
+    r = await client.post(url, json=corpo)
+    assert (r.status_code, r.json()["detail"]) == (404, {"code": "account_not_found"})
+    # Sem a Tabela: 403.
+    auth_as(await make_user(role=UserRole.USER, permissions={}))
+    assert (await client.post(url, json=corpo)).status_code == 403
+    # Fora do servidor não lê nada.
+    monkeypatch.setattr(get_settings(), "env", "development")
+    auth_as(vendedor)
+    r = await client.post(url, json=corpo)
+    assert (r.status_code, r.json()["detail"]) == (409, {"code": "so_no_servidor"})
 
 
 # =========================================================== job e migration

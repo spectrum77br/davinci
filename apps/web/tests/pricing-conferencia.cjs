@@ -277,3 +277,136 @@ for (const fora of ['data-nao-conferida', 'Editar override', 'Desabilitar', "'NA
   assert.ok(!celulaTpl.includes(fora), `${fora} saiu da célula`)
 }
 console.log('pricing conferencia template ok')
+
+// ---------- M-15 (18/11/2026): clicar no cartão confere só aquela célula
+{
+  const celC = (p, acc, preco) => ({
+    pricing_product_id: p, pricing_account_id: acc, preco_tabela: 100, situacao: 'conferida',
+    motivo: null, conferido_em: '2026-11-18T12:00:00Z', anuncios: [a(preco)], job_id: null,
+  })
+  const precos = (lista) => lista.map((c) => [c.pricing_product_id, c.anuncios[0].preco])
+
+  // Troca (ou tira) só a célula pedida, sem mexer na lista de entrada.
+  const trocarCelula = new Function(`${pegar('trocarCelula')}\nreturn trocarCelula`)()
+  const lista = [celC('P1', 'C1', 100), celC('P2', 'C1', 100)]
+  assert.deepEqual(precos(trocarCelula(lista, 'P1::C1', celC('P1', 'C1', 130))), [['P2', 100], ['P1', 130]])
+  assert.deepEqual(precos(trocarCelula(lista, 'P1::C1', null)), [['P2', 100]])
+  assert.equal(lista.length, 2)
+
+  // Leitura inteira que saiu antes do resultado da célula não volta a célula
+  // para o dado mais antigo; a que saiu depois vale como veio do servidor.
+  const recentes = new Map([
+    ['P1::C1', { seq: 3, celula: celC('P1', 'C1', 130) }],
+    ['P2::C1', { seq: 1, celula: null }],
+  ])
+  const comCelulasRecentes = new Function('trocarCelula', 'celulasRecentes',
+    `${pegar('comCelulasRecentes')}\nreturn comCelulasRecentes`)(trocarCelula, recentes)
+  assert.deepEqual(precos(comCelulasRecentes([celC('P1', 'C1', 100), celC('P2', 'C1', 100)], 2)),
+    [['P2', 100], ['P1', 130]])
+  assert.deepEqual([...recentes.keys()], ['P1::C1'])
+  assert.deepEqual(precos(comCelulasRecentes([celC('P1', 'C1', 150)], 3)), [['P1', 150]])
+  assert.equal(recentes.size, 0)
+
+  // O balão: o motivo e, embaixo, o convite; o erro da leitura aparece também.
+  const tituloDoCartao = new Function(`${pegar('tituloDoCartao')}\nreturn tituloDoCartao`)()
+  assert.equal(tituloDoCartao('Sem anúncio vinculado nesta conta', true, null),
+    'Sem anúncio vinculado nesta conta\nClique para conferir só esta célula')
+  assert.equal(tituloDoCartao(SEM_INTEGRACAO, false, null), SEM_INTEGRACAO)
+  assert.equal(tituloDoCartao('M', true, 'recusou (403)'),
+    'M\nA conferência desta célula falhou: recusou (403)\nClique para conferir só esta célula')
+
+  // Quem pode conferir e conta com integração: clicável. Sem permissão, conta
+  // sem integração (ou catálogo de conta de kit sem integração): só o motivo.
+  const conferivel = ({ pode = true, integ = 'I1', catalogo = null } = {}) => new Function(
+    'conferencia', 'contaParametros', 'cellOf',
+    [
+      ...['MOTIVO_SEM_INTEGRACAO', 'MOTIVO_SEM_VINCULO', 'PREFIXOS_SEM_INTEGRACAO', 'PREFIXOS_SEM_VINCULO',
+        'PREFIXOS_CATALOGO_NAO_LIDO'].map(pegarConst),
+      ...['tipoSemAnuncio', 'celulaConferivel'].map(pegar),
+      'return celulaConferivel',
+    ].join('\n'),
+  )({ value: { pode_conferir: pode } }, () => ({ integration_id: integ }), () => ({ cell_status: 'auto', catalogo }))('P1', { id: 'C1' })
+  assert.equal(conferivel(), true)
+  assert.equal(conferivel({ pode: false }), false)
+  assert.equal(conferivel({ integ: null }), false)
+  assert.equal(conferivel({ catalogo: catSemInteg.catalogo }), false)
+  assert.equal(conferivel({ catalogo: catSemAnuncio.catalogo }), true)
+
+  // O clique, com a API simulada.
+  const corpoClique = [
+    pegarConst('ERROS_CELULA'),
+    ...['textoErroCelula', 'trocarCelula', 'trocarErroDaCelula', 'conferirCelula'].map(pegar),
+    'return conferirCelula',
+  ].join('\n')
+  const montarClique = (respostas, { podeLer = true } = {}) => {
+    const env = {
+      celulasConferindo: { value: new Set() },
+      errosDaCelula: { value: {} },
+      department: { value: 'celular' },
+      desmontado: false,
+      seqCelula: 0,
+      celulasRecentes: new Map(),
+      conferencia: { value: { celulas: [celC('P1', 'C1', 100), celC('P2', 'C1', 100)], pode_conferir: true } },
+      celulaConferivel: () => podeLer,
+      api: async (url, opcoes) => {
+        chamadas.push([url, opcoes.method, opcoes.body])
+        const r = respostas.shift()
+        if (r instanceof Error) throw r
+        return typeof r === 'function' ? r() : r
+      },
+    }
+    const chamadas = []
+    const nomes = Object.keys(env)
+    const clicar = new Function(...nomes, corpoClique)(...nomes.map((n) => env[n]))
+    return { clicar, env, chamadas }
+  }
+  const conta = { id: 'C1' }
+
+  ;(async () => {
+    // Dois cliques seguidos: uma leitura só; o indicador fica enquanto lê.
+    let soltar
+    const m = montarClique([() => new Promise((ok) => { soltar = ok })])
+    const primeiro = m.clicar('P1', conta)
+    assert.ok(m.env.celulasConferindo.value.has('P1::C1'))
+    await m.clicar('P1', conta)
+    assert.deepEqual(m.chamadas, [['/api/pricing/conferencia/celula', 'POST', { pricing_account_id: 'C1', pricing_product_id: 'P1' }]])
+    soltar({ celula: celC('P1', 'C1', 130), erro: null })
+    await primeiro
+    assert.equal(m.env.celulasConferindo.value.size, 0)
+    // Só a célula muda, sem reler a conferência inteira.
+    assert.deepEqual(precos(m.env.conferencia.value.celulas), [['P2', 100], ['P1', 130]])
+    assert.equal(m.env.celulasRecentes.get('P1::C1').seq, 1)
+
+    // A leitura falhou: a célula fica como estava e o erro vai para o balão;
+    // o próximo clique limpa o erro. Célula que não manda mais preço sai.
+    const n = montarClique([{ celula: null, erro: 'recusou (403)' }, { celula: null, erro: null }])
+    await n.clicar('P1', conta)
+    assert.deepEqual(precos(n.env.conferencia.value.celulas), [['P1', 100], ['P2', 100]])
+    assert.deepEqual(n.env.errosDaCelula.value, { 'P1::C1': 'recusou (403)' })
+    assert.equal(n.env.celulasRecentes.size, 0)
+    await n.clicar('P1', conta)
+    assert.deepEqual(n.env.errosDaCelula.value, {})
+    assert.deepEqual(precos(n.env.conferencia.value.celulas), [['P2', 100]])
+
+    // Recusa do servidor: o código vira texto de gente.
+    const o = montarClique([Object.assign(new Error('409'), { data: { detail: { code: 'so_no_servidor' } } })])
+    await o.clicar('P2', conta)
+    assert.deepEqual(o.env.errosDaCelula.value, { 'P2::C1': 'a conferência só roda no servidor' })
+    assert.equal(o.env.celulasConferindo.value.size, 0)
+
+    // Sem permissão ou conta sem integração: o clique não lê nada.
+    const q = montarClique([], { podeLer: false })
+    await q.clicar('P1', conta)
+    assert.deepEqual([q.chamadas, q.env.celulasConferindo.value.size], [[], 0])
+    console.log('pricing conferencia célula ok')
+  })().catch((e) => { console.error(e); process.exit(1) })
+
+  // O template: o indicador no lugar do cartão; o cartão clicável só para
+  // quem pode conferir a célula; o outro só mostra o motivo.
+  assert.ok(celulaTpl.indexOf('data-cartao-conferindo') < celulaTpl.indexOf('data-cartao-clicavel'))
+  assert.match(celulaTpl, /v-if="conferindoCelula\(prod\.id, acc\.id\)"/)
+  assert.match(celulaTpl, /v-else-if="cartaoDe\(prod\.id, acc\.id\) && celulaConferivel\(prod\.id, acc\)"/)
+  assert.match(celulaTpl, /@click\.stop="conferirCelula\(prod\.id, acc\)"/)
+  assert.match(celulaTpl, /cursor-pointer/)
+  assert.match(celulaTpl, /cursor-help/)
+}
