@@ -43,7 +43,11 @@ const tagCom = (atributo, tag) => {
   return tpl.slice(ini, tpl.indexOf('>', i) + 1)
 }
 assert.match(tagCom('data-prazo-reposicao', 'label'), /v-if="isAdmin"/, 'Reposição [N] dias só do administrador')
-assert.doesNotMatch(tagCom('data-acao="conferir-anuncios"', 'button'), /v-if/, 'Conferir anúncios para todos')
+// M-14 (18/11/2026): o "Conferir anúncios" virou a linha Conferir do
+// Atualizar ▾; aparece para quem o servidor deixa conferir (todos desde o M-7).
+const linhaConferir = tagCom('data-campo="atualizar-conferir"', 'label')
+assert.match(linhaConferir, /v-if="podeConferir"/, 'Conferir segue o pode_conferir do servidor')
+assert.doesNotMatch(linhaConferir, /isAdmin/, 'Conferir para todos')
 // A Margem continua só do administrador (o PopoverRoot em volta do botão).
 const iMargem = tpl.indexOf('data-acao="margem"')
 assert.match(tpl.slice(tpl.lastIndexOf('<PopoverRoot', iMargem), iMargem), /^<PopoverRoot v-if="isAdmin"/)

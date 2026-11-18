@@ -3,7 +3,7 @@ import {
   Plus, Trash2, RefreshCw, X, AlertCircle, Loader2, Eye,
   Send, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, DollarSign, Settings2, Upload, Coins,
-  ChevronDown, Download, Search, Tags, Camera, FolderPlus, ScanSearch,
+  ChevronDown, Download, Search, Tags, Camera, FolderPlus,
 } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { isoToday } from '~/lib/date'
@@ -82,6 +82,10 @@ const canEditContas = useCan('tabela_precos_contas', 'edit')
 const canDeleteContas = useCan('tabela_precos_contas', 'delete')
 const canEditProdutos = useCan('tabela_precos_produtos', 'edit')
 const canDeleteProdutos = useCan('tabela_precos_produtos', 'delete')
+// "Atualizar anúncio" do botão Atualizar ▾ (M-14, 18/11/2026): a mesma regra
+// do envio de sempre (o POST /api/pricing/push pede tabela_precos editar).
+// Sem ela a opção não aparece; o aviãozinho da célula não mudou.
+const podeEnviarPreco = useCan('tabela_precos', 'edit')
 // Conferência de preços dos anúncios (02/11/2026): o botão "Margem" é só do
 // administrador. Desde o M-3 (17/11/2026) o resultado — cartão vermelho e
 // "(!) anúncio X" — aparece para todos que veem a Tabela; desde o M-7
@@ -2547,9 +2551,21 @@ const plataformasDesmarcadas = ref<Set<string>>(new Set())
 const contasDesmarcadas = ref<Set<string>>(new Set())
 const buscaContas = ref('')
 
-// ---------- Feature 8: push dropdown
-const showPushMenu = ref(false)
-const pushLabel = ref('')
+// ---------- Feature 8: botão Atualizar ▾ (M-14, 18/11/2026; era o Enviar ▾)
+// O painel junta Atualizar planilha (o antigo Recarregar), Conferir (o antigo
+// Conferir anúncios) e Atualizar anúncio (o antigo Enviar). Contas: Geral =
+// as colunas visíveis; Por conta = as marcadas na lista. As duas não andam
+// juntas. Tudo volta ao padrão cada vez que o painel abre (abrirPainelAtualizar).
+const painelAtualizarAberto = ref(false)
+const atualizarPlanilha = ref(true)
+const atualizarConferir = ref(false)
+const atualizarAnuncio = ref(false)
+const atualizarModoContas = ref<'geral' | 'conta' | null>('geral')
+const atualizarContasMarcadas = ref<Set<string>>(new Set())
+const buscaAtualizarContas = ref('')
+// Enquanto executa: o botão mostra a etapa e o andamento.
+const atualizando = ref(false)
+const atualizandoEtapa = ref<'' | 'anuncio' | 'conferir' | 'planilha'>('')
 
 // ---------- Feature 11: keyboard nav
 // Só o anel azul e as setas: a paleta "Cor:" (M-2) e o Enter que abria o
@@ -3170,18 +3186,21 @@ onBeforeUnmount(() => {
   if (timerConferencia) clearTimeout(timerConferencia)
 })
 
-async function conferirAnuncios() {
+// M-14 (18/11/2026): `contas` = só estas colunas (as das outras ficam com a
+// leitura anterior); sem `contas`, o departamento inteiro, como antes.
+async function conferirAnuncios(contas?: string[]) {
   if (conferenciaIniciando.value || conferenciaRodando.value) return
   conferenciaIniciando.value = true
   try {
-    await api('/api/pricing/conferencia', { method: 'POST', body: { department: department.value } })
+    const body = contas ? { department: department.value, contas } : { department: department.value }
+    await api('/api/pricing/conferencia', { method: 'POST', body })
     toast.success('Conferência começou', 'Os anúncios estão sendo lidos nos marketplaces.')
   } catch (e: any) {
     const code = e?.data?.detail?.code
     if (code === 'so_no_servidor') {
       toast.warning('A conferência só roda no servidor', 'Ela lê os anúncios ao vivo nos marketplaces.')
     } else if (code === 'conferencia_em_andamento') {
-      toast.warning('Já há uma conferência rodando', 'O andamento aparece no balão do botão "Conferir anúncios".')
+      toast.warning('Já há uma conferência rodando', 'O andamento aparece no botão "Atualizar", na linha Conferir.')
     } else {
       toast.error('A conferência não começou', textoErroConferencia(code) || 'erro desconhecido')
     }
@@ -3202,6 +3221,7 @@ const ERROS_CONFERENCIA: Record<string, string> = {
   fila_indisponivel: 'a fila do servidor não respondeu — confira de novo',
   conferencia_em_andamento: 'já havia outra conferência rodando',
   invalid_department: 'departamento inválido',
+  contas_invalidas: 'alguma conta escolhida não está mais neste departamento — atualize a planilha',
 }
 // Código desconhecido (ex.: o texto de uma exceção do servidor) não aparece
 // cru: o balão mostra o texto genérico e o código entre parênteses.
@@ -3309,9 +3329,10 @@ async function conferirCelula(prodId: string, acc: Account) {
   }
 }
 
-// Balão do botão "Conferir anúncios": o que antes ficava escrito na faixa
-// roxa (última conferência, andamento, não terminou, contas que não leram,
-// não carregou). A faixa e o resumo saíram no M-2.
+// Balão da conferência (desde o M-14 na linha Conferir do Atualizar ▾; antes
+// no botão "Conferir anúncios"): o que antes ficava escrito na faixa roxa
+// (última conferência, andamento, não terminou, contas que não leram, não
+// carregou). A faixa e o resumo saíram no M-2.
 const tituloConferir = computed(() => {
   const linhas = ['Lê agora o preço de cada anúncio deste departamento nos marketplaces e compara com a Tabela.']
   const conf = conferencia.value
@@ -3351,6 +3372,21 @@ const conferirComAviso = computed(() => {
   if (releitura.value !== 'ok') return true
   if (!job || conferenciaRodando.value) return false
   return job.status === 'failed' || job.status === 'cancelled' || !!job.result?.contas_com_erro?.length
+})
+
+// Linha "Conferir" do Atualizar ▾ (M-14): aparece para quem pode conferir (o
+// servidor diz; todos que veem a Tabela desde o M-7). Enquanto a resposta
+// não chega, aparece, como o botão de antes.
+const podeConferir = computed(() => conferencia.value?.pode_conferir !== false)
+
+// À direita da linha "Conferir": "última 18/11 12:06" ou o andamento.
+const textoUltimaConferencia = computed(() => {
+  const conf = conferencia.value
+  const job = conf?.job
+  if (!conf) return conferenciaEstado.value === 'erro' ? 'não carregou' : '…'
+  if (!job) return 'nunca'
+  if (conferenciaRodando.value) return `lendo ${job.processed}/${job.total || '…'}`
+  return `última ${fmtQuando(job.finished_at || job.created_at).replace(',', '')}`
 })
 
 const conferenciaPorCelula = computed(() => {
@@ -4053,28 +4089,20 @@ async function pushItemsBatch(
   }
 }
 
-async function pushAccountColumn(accId: string) {
-  if (!grid.value) return
-  const elegiveis = filteredGridProducts.value
-    .map((p) => ({ pricing_account_id: accId, pricing_product_id: p.id }))
-    .filter((it) => {
-      const c = cellOf(it.pricing_product_id, it.pricing_account_id)
-      return c && c.price != null && c.source !== 'locked' && c.source !== 'disabled'
-    })
-  const { items, bloqueadas } = separarBloqueadas(elegiveis)
-  const aviso = bloqueadas > 0 ? `\n\n${bloqueadas} célula(s) de catálogo bloqueada(s) serão puladas.` : ''
-  if (!confirm(`Disparar push para todos os produtos desta conta?${aviso}`)) return
-  await pushItemsBatch(items, `col:${accId}`, bloqueadas)
-}
-
-async function pushAllVisible() {
-  if (!grid.value) return
+// "Atualizar anúncio" do Atualizar ▾ (M-14, 18/11/2026; antes "Enviar todas
+// as contas" e "Enviar" de uma conta): manda o preço de cada linha da tela
+// (com a busca) às colunas escolhidas. Pergunta antes, como o Enviar de
+// sempre. false = a pessoa desistiu (aí o resto do Atualizar não roda).
+async function enviarPrecoDasContas(contaIds: string[]): Promise<boolean> {
+  if (!grid.value) return false
+  const escolhidas = new Set(contaIds)
   const items: { pricing_account_id: string; pricing_product_id: string }[] = []
   // gridAccounts.value carries the visual left-to-right order; iterating
   // products × gridAccounts means the queue walks the table the same way
   // the user reads it, so the per-cell spinners march in a predictable path.
   for (const p of filteredGridProducts.value) {
     for (const a of gridAccounts.value) {
+      if (!escolhidas.has(a.id)) continue
       const c = cellOf(p.id, a.id)
       if (c && c.price != null && c.source !== 'locked' && c.source !== 'disabled') {
         items.push({ pricing_account_id: a.id, pricing_product_id: p.id })
@@ -4083,8 +4111,10 @@ async function pushAllVisible() {
   }
   const fila = separarBloqueadas(items)
   const aviso = fila.bloqueadas > 0 ? ` (${fila.bloqueadas} bloqueada(s) de catálogo serão puladas)` : ''
-  if (!confirm(`Push ${fila.items.length} célula(s)?${aviso}`)) return
-  await pushItemsBatch(fila.items, 'all-visible', fila.bloqueadas)
+  const contas = escolhidas.size === 1 ? '1 conta' : `${escolhidas.size} contas`
+  if (!confirm(`Enviar o preço de ${fila.items.length} célula(s) para ${contas}?${aviso}`)) return false
+  await pushItemsBatch(fila.items, 'atualizar', fila.bloqueadas)
+  return true
 }
 
 // =========================================================== grid: conta de catálogo
@@ -4631,24 +4661,113 @@ function handleExportExcel() {
   URL.revokeObjectURL(url)
 }
 
-// Feature 8: push dropdown helpers
-async function pushAllAndClose() {
-  showPushMenu.value = false
-  pushLabel.value = 'Todas'
-  try {
-    await pushAllVisible()
-  } finally {
-    pushLabel.value = ''
-  }
+// Feature 8: o painel do Atualizar ▾ (M-14, 18/11/2026).
+// Toda vez que abre: só "Atualizar planilha" marcado e Contas em Geral.
+function abrirPainelAtualizar(aberto: boolean) {
+  painelAtualizarAberto.value = aberto
+  if (!aberto) return
+  atualizarPlanilha.value = true
+  atualizarConferir.value = false
+  atualizarAnuncio.value = false
+  atualizarModoContas.value = 'geral'
+  atualizarContasMarcadas.value = new Set()
+  buscaAtualizarContas.value = ''
 }
 
-async function pushAccountAndClose(accId: string, accName: string) {
-  showPushMenu.value = false
-  pushLabel.value = accName
+// Geral e Por conta não andam juntas: marcar uma desmarca a outra.
+function escolherModoContas(modo: 'geral' | 'conta', marcar: boolean) {
+  if (marcar) atualizarModoContas.value = modo
+  else if (atualizarModoContas.value === modo) atualizarModoContas.value = null
+}
+
+// Marcar uma conta na lista já passa para "Por conta".
+function alternarContaAtualizar(accId: string, marcar: boolean) {
+  const s = new Set(atualizarContasMarcadas.value)
+  if (marcar) s.add(accId)
+  else s.delete(accId)
+  atualizarContasMarcadas.value = s
+  if (marcar) atualizarModoContas.value = 'conta'
+}
+
+// A lista "Por conta": as colunas visíveis, agrupadas como no cabeçalho
+// (Shopee kit 1, Shopee kit 2...), com a busca pelo nome ou pelo grupo.
+const gruposAtualizarContas = computed(() => {
+  const q = buscaAtualizarContas.value.trim().toLocaleLowerCase('pt-BR')
+  if (!q) return accountGroups.value
+  return accountGroups.value
+    .map((g) => ({
+      ...g,
+      accounts: g.accounts.filter((a) =>
+        `${nomeColuna(a)} ${g.label}`.toLocaleLowerCase('pt-BR').includes(q)),
+    }))
+    .filter((g) => g.accounts.length > 0)
+})
+
+// As marcadas que continuam na tela (na ordem da tabela).
+const contasMarcadasAtualizar = computed(() =>
+  gridAccounts.value.filter((a) => atualizarContasMarcadas.value.has(a.id)).map((a) => a.id),
+)
+
+// As colunas que Conferir e Atualizar anúncio usam.
+const contasDoAtualizar = computed<string[]>(() => {
+  if (atualizarModoContas.value === 'geral') return gridAccounts.value.map((a) => a.id)
+  if (atualizarModoContas.value === 'conta') return contasMarcadasAtualizar.value
+  return []
+})
+
+// Por que o "Atualizar" do rodapé está apagado ('' = pode).
+const motivoAtualizarBloqueado = computed(() => {
+  const anuncio = atualizarAnuncio.value && podeEnviarPreco.value
+  const conferir = atualizarConferir.value && podeConferir.value
+  if (!atualizarPlanilha.value && !anuncio && !conferir) return 'Marque o que atualizar.'
+  if ((anuncio || conferir) && !contasDoAtualizar.value.length) return 'Escolha as contas.'
+  if (anuncio && !grid.value?.cells.length) return 'A planilha ainda não carregou: atualize só a planilha antes.'
+  if (conferir && (conferenciaIniciando.value || conferenciaRodando.value)) return 'Já há uma conferência rodando.'
+  return ''
+})
+
+// O texto do botão: "Atualizar" parado; a etapa e o andamento enquanto roda.
+const rotuloAtualizar = computed(() => {
+  if (atualizandoEtapa.value === 'anuncio' || (pushing.value && !atualizando.value)) {
+    return bulkPushProgress.value ? `Enviando ${bulkPushProgress.value}…` : 'Enviando…'
+  }
+  if (atualizandoEtapa.value === 'conferir') return 'Iniciando conferência…'
+  if (atualizandoEtapa.value === 'planilha') return 'Atualizando planilha…'
+  const job = conferencia.value?.job
+  if (conferenciaRodando.value && job) return `Conferindo ${job.processed}/${job.total || '…'}…`
+  return 'Atualizar'
+})
+
+// Executa o que está marcado, nesta ordem: Atualizar anúncio, Conferir (lê o
+// preço novo) e Atualizar planilha. Planilha recarrega a tabela inteira; as
+// contas valem para Conferir e Atualizar anúncio. Geral sem filtro nenhum
+// confere o departamento inteiro, como o botão de antes.
+async function executarAtualizar() {
+  if (atualizando.value || pushing.value || motivoAtualizarBloqueado.value) return
+  const anuncio = atualizarAnuncio.value && podeEnviarPreco.value
+  const conferir = atualizarConferir.value && podeConferir.value
+  const planilha = atualizarPlanilha.value
+  const contas = contasDoAtualizar.value.slice()
+  const semFiltro = !plataformasDesmarcadas.value.size && !contasDesmarcadas.value.size
+  const contasDaConferencia = atualizarModoContas.value === 'geral' && semFiltro ? undefined : contas
+  painelAtualizarAberto.value = false
+  atualizando.value = true
   try {
-    await pushAccountColumn(accId)
+    if (anuncio) {
+      atualizandoEtapa.value = 'anuncio'
+      if (!(await enviarPrecoDasContas(contas))) return
+    }
+    if (conferir) {
+      atualizandoEtapa.value = 'conferir'
+      await conferirAnuncios(contasDaConferencia)
+    }
+    if (planilha) {
+      atualizandoEtapa.value = 'planilha'
+      await loadGrid()
+    }
   } finally {
-    pushLabel.value = ''
+    atualizando.value = false
+    atualizandoEtapa.value = ''
   }
 }
 
@@ -6594,18 +6713,18 @@ watch(department, async () => {
     <!-- ============================================ TABELA DE PREÇOS (grid) -->
     <section v-else-if="tab === 'tabela'" class="space-y-3">
       <!-- Barra (M-2, 17/11/2026; M-8, 18/11/2026: Plataforma ▾ e Contas ▾
-           com caixas): Buscar | Plataforma ▾ | Contas ▾ | Layout ▾ | Excel |
-           Enviar ▾ | Recarregar | Reposição [N] dias | Margem N% ▾ |
-           Conferir anúncios. Saíram Desfazer, Refazer, Custo Bling, Enviar
-           relatório e a paleta Cor; a caixa amarela da Reposição e a faixa
-           roxa da conferência viraram o campo e os dois botões do fim. -->
+           com caixas; M-14, 18/11/2026): Buscar | Plataforma ▾ | Contas ▾ |
+           Layout ▾ | Excel | Atualizar ▾ | Reposição [N] dias | Margem N% ▾.
+           Todos com 28px (h-7) e o mesmo espaço. Recarregar, Enviar e
+           Conferir anúncios viraram as opções do Atualizar ▾. Saíram antes
+           Desfazer, Refazer, Custo Bling, Enviar relatório e a paleta Cor. -->
       <div class="flex flex-wrap items-center gap-2">
         <div class="relative flex-1 min-w-[200px] max-w-sm">
           <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <input
             v-model="gridSearch"
             placeholder="Buscar por SKU ou nome..."
-            class="border rounded pl-7 pr-2 py-1 text-sm bg-background w-full"
+            class="h-7 border rounded pl-7 pr-2 py-0 text-sm bg-background w-full"
           />
         </div>
         <!-- Plataforma ▾ (M-8, 18/11/2026; antes um select): uma caixa por
@@ -6613,7 +6732,7 @@ watch(department, async () => {
              dela somem. Recarregar a página volta tudo marcado. -->
         <PopoverRoot>
           <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm" data-filtro="plataforma" title="Escolher as plataformas que a grade mostra">
+            <button type="button" class="btn btn-sm h-7 py-0" data-filtro="plataforma" title="Escolher as plataformas que a grade mostra">
               Plataforma
               <ChevronDown class="h-3 w-3 ml-1" />
             </button>
@@ -6661,7 +6780,7 @@ watch(department, async () => {
              aparece com as duas marcadas. Filtro parcial: "Contas (2)". -->
         <PopoverRoot>
           <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm" data-filtro="contas" title="Escolher as contas que a grade mostra">
+            <button type="button" class="btn btn-sm h-7 py-0" data-filtro="contas" title="Escolher as contas que a grade mostra">
               {{ rotuloContas }}
               <ChevronDown class="h-3 w-3 ml-1" />
             </button>
@@ -6715,7 +6834,7 @@ watch(department, async () => {
              no Celular (Mala e Eletro não têm kits). Lembrado neste navegador. -->
         <PopoverRoot>
           <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm" data-acao="layout" title="Escolher as colunas que a grade mostra">
+            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout" title="Escolher as colunas que a grade mostra">
               Layout
               <ChevronDown class="h-3 w-3 ml-1" />
             </button>
@@ -6752,57 +6871,158 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
-        <button class="btn btn-sm" :disabled="!grid?.products.length" @click="handleExportExcel">
+        <button class="btn btn-sm h-7 py-0" :disabled="!grid?.products.length" @click="handleExportExcel">
           <Download class="h-4 w-4 mr-1" /> Excel
         </button>
-        <div class="relative inline-block">
-          <button
-            class="btn btn-sm bg-blue-600 text-white hover:bg-blue-700"
-            :disabled="pushing || !grid?.cells.length"
-            @click="showPushMenu = !showPushMenu"
-          >
-            <Send class="h-4 w-4 mr-1" />
-            {{ pushLabel || 'Enviar' }}
-            <ChevronDown class="h-3 w-3 ml-1" />
-          </button>
-          <div
-            v-if="showPushMenu"
-            class="absolute right-0 mt-1 w-64 bg-background border rounded-md shadow-lg z-50 max-h-80 overflow-y-auto"
-          >
+        <!-- Atualizar ▾ (M-14, 18/11/2026; era o Enviar ▾, e ganhou o que
+             faziam Recarregar e Conferir anúncios). Toda vez que abre:
+             só "Atualizar planilha" marcado e Contas em Geral — ninguém envia
+             preço sem querer. Opção sem permissão não aparece. -->
+        <PopoverRoot :open="painelAtualizarAberto" @update:open="abrirPainelAtualizar">
+          <PopoverTrigger as-child>
             <button
-              class="w-full text-left px-3 py-2 text-sm hover:bg-muted font-medium"
-              title="Envia só para as colunas que estão na tela (filtros Plataforma e Contas)"
-              @click="pushAllAndClose"
+              type="button"
+              class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+              data-acao="atualizar"
+              :disabled="atualizando || pushing"
+              :title="rotuloAtualizar === 'Atualizar' ? 'Atualizar a planilha, conferir os anúncios ou enviar o preço aos anúncios' : rotuloAtualizar"
             >
-              Enviar todas as contas
+              <Loader2 v-if="atualizando || pushing || conferenciaRodando" class="h-4 w-4 mr-1 animate-spin" />
+              <RefreshCw v-else class="h-4 w-4 mr-1" />
+              {{ rotuloAtualizar }}
+              <ChevronDown class="h-3 w-3 ml-1" />
             </button>
-            <div class="border-t" />
-            <template v-for="group in accountGroups" :key="group.label">
-              <div class="px-3 py-1 text-xs text-muted-foreground font-semibold bg-muted/30">
-                {{ group.label }}
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-atualizar
+              class="z-[70] w-[300px] max-w-[calc(100vw-16px)] rounded-md border bg-background py-1 shadow-lg"
+            >
+              <div class="flex h-[26px] items-center px-3 text-[11px] font-semibold text-muted-foreground">
+                O que atualizar
               </div>
-              <button
-                v-for="acc in group.accounts"
-                :key="acc.id"
-                class="w-full text-left px-3 py-1.5 text-sm hover:bg-muted flex justify-between items-center gap-2"
-                @click="pushAccountAndClose(acc.id, ehCatalogo(acc) ? `${nomeComTipo(acc)} catálogo` : nomeComTipo(acc))"
+              <label
+                class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50"
+                title="Recarrega a tabela inteira"
               >
-                <span class="truncate">{{ nomeColuna(acc) }}</span>
-                <span class="text-[10px] text-muted-foreground shrink-0">
-                  {{ ehCatalogo(acc) ? `${tipoDe(acc) || 'sem tipo'} · catálogo` : (acc.listing_type || acc.platform) }}
+                <input v-model="atualizarPlanilha" type="checkbox" class="size-4 shrink-0" data-campo="atualizar-planilha" />
+                Atualizar planilha
+              </label>
+              <label
+                v-if="podeConferir"
+                class="flex h-[26px] items-center gap-2 px-3 text-sm"
+                :class="conferenciaIniciando || conferenciaRodando ? 'cursor-not-allowed text-muted-foreground' : 'cursor-pointer hover:bg-muted/50'"
+              >
+                <input
+                  v-model="atualizarConferir"
+                  type="checkbox"
+                  class="size-4 shrink-0"
+                  data-campo="atualizar-conferir"
+                  :disabled="conferenciaIniciando || conferenciaRodando"
+                />
+                Conferir
+                <span
+                  class="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
+                  data-ultima-conferencia
+                  :title="tituloConferir"
+                >
+                  {{ textoUltimaConferencia }}
+                  <AlertCircle v-if="conferirComAviso" class="h-3.5 w-3.5 text-amber-600" data-aviso-conferencia />
                 </span>
-              </button>
-            </template>
-          </div>
-        </div>
-        <span v-if="pushing" class="text-sm text-muted-foreground flex items-center gap-1">
-          <Loader2 class="h-3 w-3 animate-spin" />
-          {{ bulkPushProgress ? `enviando ${bulkPushProgress}…` : 'enviando…' }}
-        </span>
-        <button class="btn btn-sm" :disabled="gridLoading" @click="loadGrid">
-          <RefreshCw class="h-4 w-4 mr-1" :class="{ 'animate-spin': gridLoading }" />
-          Recarregar
-        </button>
+              </label>
+              <label
+                v-if="podeEnviarPreco"
+                class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50"
+                title="Envia o preço da Tabela aos anúncios das contas escolhidas"
+              >
+                <input v-model="atualizarAnuncio" type="checkbox" class="size-4 shrink-0" data-campo="atualizar-anuncio" />
+                Atualizar anúncio
+              </label>
+              <div class="mt-1 flex h-[26px] items-center border-t px-3 text-[11px] font-semibold text-muted-foreground">
+                Contas
+              </div>
+              <label
+                class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50"
+                title="As colunas que estão aparecendo pelos filtros Plataforma e Contas"
+              >
+                <input
+                  type="checkbox"
+                  class="size-4 shrink-0"
+                  data-campo="atualizar-geral"
+                  :checked="atualizarModoContas === 'geral'"
+                  @change="escolherModoContas('geral', ($event.target as HTMLInputElement).checked)"
+                />
+                Geral
+                <span class="ml-auto shrink-0 text-[11px] text-muted-foreground">todas as visíveis</span>
+              </label>
+              <label class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50">
+                <input
+                  type="checkbox"
+                  class="size-4 shrink-0"
+                  data-campo="atualizar-por-conta"
+                  :checked="atualizarModoContas === 'conta'"
+                  @change="escolherModoContas('conta', ($event.target as HTMLInputElement).checked)"
+                />
+                Por conta
+                <span class="ml-auto shrink-0 text-[11px] text-muted-foreground">{{ contasMarcadasAtualizar.length }} marcadas</span>
+              </label>
+              <template v-if="atualizarModoContas === 'conta'">
+                <div class="relative px-3 py-1">
+                  <Search class="absolute left-5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <input
+                    v-model="buscaAtualizarContas"
+                    placeholder="Buscar conta…"
+                    class="h-7 w-full border rounded pl-7 pr-2 text-sm bg-background"
+                    data-campo="atualizar-contas-busca"
+                  />
+                </div>
+                <div class="max-h-60 overflow-y-auto" data-lista-atualizar-contas>
+                  <template v-for="group in gruposAtualizarContas" :key="group.label">
+                    <div class="flex h-[26px] items-center bg-muted/30 px-3 text-xs font-semibold text-muted-foreground">
+                      {{ group.label }}
+                    </div>
+                    <label
+                      v-for="acc in group.accounts"
+                      :key="acc.id"
+                      class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50"
+                    >
+                      <input
+                        type="checkbox"
+                        class="size-4 shrink-0"
+                        :checked="atualizarContasMarcadas.has(acc.id)"
+                        :data-conta-atualizar="acc.id"
+                        @change="alternarContaAtualizar(acc.id, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span class="truncate">{{ nomeColuna(acc) }}</span>
+                      <span class="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                        {{ ehCatalogo(acc) ? `${tipoDe(acc) || 'sem tipo'} · catálogo` : (acc.listing_type || acc.platform) }}
+                      </span>
+                    </label>
+                  </template>
+                  <p v-if="!gruposAtualizarContas.length" class="px-3 py-1 text-[11px] text-muted-foreground">
+                    {{ buscaAtualizarContas.trim() ? 'Nenhuma conta encontrada.' : 'Nenhuma conta na tela.' }}
+                  </p>
+                </div>
+              </template>
+              <div class="mt-1 border-t px-3 pb-1 pt-2">
+                <button
+                  type="button"
+                  class="btn btn-sm h-7 w-full py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+                  data-acao="atualizar-executar"
+                  :disabled="atualizando || pushing || !!motivoAtualizarBloqueado"
+                  :title="motivoAtualizarBloqueado || 'Faz o que está marcado: primeiro o anúncio, depois a conferência, por último a planilha'"
+                  @click="executarAtualizar"
+                >
+                  <RefreshCw class="h-4 w-4 mr-1" /> Atualizar
+                </button>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
         <!-- Reposição única (M-2): o MESMO prazo da Importação, por
              departamento — mudar aqui muda lá. Reposição = Estoque − vendas
              30d × Reposição ÷ 30. A explicação da conta está no balão.
@@ -6839,7 +7059,7 @@ watch(department, async () => {
              Geral. O (!) e o cartão vermelho usam a margem da linha. -->
         <PopoverRoot v-if="isAdmin" @update:open="(aberto: boolean) => { if (!aberto) gravarCampoMargemComFoco() }">
           <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm" data-acao="margem" :title="tituloMargem">
+            <button type="button" class="btn btn-sm h-7 py-0" data-acao="margem" :title="tituloMargem">
               {{ rotuloMargem }}
               <ChevronDown class="h-3 w-3 ml-1" />
             </button>
@@ -6946,22 +7166,6 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
-        <!-- Conferir anúncios: de todos que veem a Tabela desde o M-7
-             (18/11/2026). O andamento, a última conferência e os erros
-             ficam no balão do botão (as contas que não leram, só para o
-             administrador: o servidor não manda o resumo aos outros). -->
-        <button
-          class="btn btn-sm"
-          data-acao="conferir-anuncios"
-          :disabled="conferenciaIniciando || conferenciaRodando"
-          :title="tituloConferir"
-          @click="conferirAnuncios"
-        >
-          <Loader2 v-if="conferenciaIniciando || conferenciaRodando" class="h-4 w-4 mr-1 animate-spin" />
-          <ScanSearch v-else class="h-4 w-4 mr-1" />
-          {{ conferenciaRodando ? 'Conferindo…' : 'Conferir anúncios' }}
-          <AlertCircle v-if="conferirComAviso" class="h-3.5 w-3.5 ml-1 text-amber-600" data-aviso-conferencia />
-        </button>
       </div>
 
       <div

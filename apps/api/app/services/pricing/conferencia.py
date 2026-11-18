@@ -39,6 +39,11 @@ Só no servidor (`conferencia_liberada`): o refresh token do ML e da Shopee é
 de uso único, e o banco local pode ter as credenciais da produção — uma
 leitura daqui renovaria o token e derrubaria a loja lá.
 
+M-14, 18/11/2026 (botão "Atualizar ▾" da Tabela): o job pode trazer
+`contas` no payload (ids das colunas). Aí só as células dessas contas são
+lidas e gravadas, e a limpeza do fim só mexe nelas — o resultado das outras
+contas do departamento fica como estava. Sem `contas`, o departamento inteiro.
+
 M-15, 18/11/2026: conferir UMA célula (`conferir_celula`, o clique no cartão
 vermelho). Monta só aquela célula com as mesmas regras (`montar_celulas` com
 `so_celula`), lê só os anúncios vinculados dela e grava só a linha dela, com
@@ -47,6 +52,8 @@ departamento. Leitura que falhou não grava nada (a célula fica com a leitura
 anterior). Com uma conferência do departamento rodando, a gravação dela não
 passa por cima da célula conferida sozinha depois que aquela conta começou a
 ser lida (`lido_desde` no `_gravar`): dado mais antigo não sobrescreve o novo.
+Nem a limpeza do fim a apaga quando ela foi conferida depois que as células
+do job foram montadas (`desde` no `_limpar_celulas_que_sairam`).
 """
 
 from __future__ import annotations
@@ -228,6 +235,11 @@ class _Comeco:
     leitores: dict[str, Leitor]
     # Situação das células gravadas já no começo (as que não precisam de leitura).
     imediatas: Counter[str]
+    # M-14: só estas contas (do payload do job); None = o departamento inteiro.
+    contas: frozenset[UUID] | None = None
+    # Quando as células foram montadas: a conferida sozinha (M-15) depois
+    # disso tem dado mais novo e a limpeza do fim não a apaga.
+    inicio: datetime | None = None
 
 
 def conferencia_liberada() -> bool:
@@ -803,26 +815,42 @@ async def _gravar_vivas(
     return vivas
 
 
-async def _limpar_celulas_que_sairam(job_id: UUID, department: str, celulas: list[Celula]) -> int:
+async def _limpar_celulas_que_sairam(
+    job_id: UUID,
+    department: str,
+    celulas: list[Celula],
+    *,
+    contas: Collection[UUID] | None = None,
+    desde: datetime | None = None,
+) -> int:
     """Fim da conferência com sucesso: tira do departamento as células de
     conferências anteriores que não estão nesta — não mandam mais preço (NA,
     desligada, sem preço, conta arquivada, linha que mudou de aba). A célula
-    desta conferência que não conseguiu gravar fica com a leitura anterior."""
+    desta conferência que não conseguiu gravar fica com a leitura anterior.
+    `contas` (M-14, conferência parcial): só as células dessas contas; as das
+    outras contas do departamento ficam. `desde` (quando as células desta
+    foram montadas): a célula conferida sozinha (M-15, `job_id` NULL) depois
+    disso é mais nova que a montagem desta e fica."""
     tipo = ARRAY(PG_UUID(as_uuid=True))
     desta = select(
         func.unnest(bindparam("contas", [c.conta.id for c in celulas], type_=tipo)),
         func.unnest(bindparam("linhas", [c.produto.id for c in celulas], type_=tipo)),
     )
-    async with _db.SessionLocal() as s:
-        apagadas = await s.execute(
-            delete(PricingConferencia).where(
-                PricingConferencia.department == department,
-                PricingConferencia.job_id.is_distinct_from(job_id),
-                tuple_(
-                    PricingConferencia.pricing_account_id, PricingConferencia.pricing_product_id
-                ).not_in(desta),
-            )
+    condicoes = [
+        PricingConferencia.department == department,
+        PricingConferencia.job_id.is_distinct_from(job_id),
+        tuple_(PricingConferencia.pricing_account_id, PricingConferencia.pricing_product_id).not_in(
+            desta
+        ),
+    ]
+    if contas is not None:
+        condicoes.append(PricingConferencia.pricing_account_id.in_(list(contas)))
+    if desde is not None:
+        condicoes.append(
+            or_(PricingConferencia.job_id.is_not(None), PricingConferencia.conferido_em <= desde)
         )
+    async with _db.SessionLocal() as s:
+        apagadas = await s.execute(delete(PricingConferencia).where(*condicoes))
         await s.commit()
     return apagadas.rowcount
 
@@ -949,6 +977,7 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
             await s.rollback()
             await _encerrar(job_id, BackgroundJobStatus.FAILED, erro=ERRO_EM_ANDAMENTO)
             return None
+        contas = _contas_do_payload(job.payload)
         agora = _agora()
         job.status = BackgroundJobStatus.RUNNING
         job.started_at = agora
@@ -964,6 +993,10 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
             await s.rollback()
             await _encerrar(job_id, BackgroundJobStatus.FAILED, erro=ERRO_DEPARTAMENTO)
             return None
+        if contas is not None:
+            # Montadas todas (a disputa de catálogo é por coluna inteira, como
+            # no envio); ficam só as das contas escolhidas.
+            celulas = [c for c in celulas if c.conta.id in contas]
         imediatas = await _gravar_vivas(
             s,
             [
@@ -982,11 +1015,23 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
         grupos=grupos,
         leitores=leitores,
         imediatas=Counter(ln["situacao"] for ln in imediatas),
+        contas=contas,
+        inicio=agora,
     )
 
 
+def _contas_do_payload(payload: dict[str, Any] | None) -> frozenset[UUID] | None:
+    """M-14: as contas escolhidas no payload do job; sem a chave, None (o
+    departamento inteiro)."""
+    contas = (payload or {}).get("contas")
+    if contas is None:
+        return None
+    return frozenset(UUID(str(c)) for c in contas)
+
+
 async def run_conferir_precos(*, job_id: UUID, department: str, user_id: UUID) -> None:
-    """O job (`worker.conferir_precos_run`): confere um departamento inteiro."""
+    """O job (`worker.conferir_precos_run`): confere um departamento inteiro,
+    ou só as contas do payload do job (M-14)."""
     log = logger.bind(job_id=str(job_id), department=department, user_id=str(user_id))
     prazo = asyncio.get_running_loop().time() + PRAZO_S
     try:
@@ -1071,7 +1116,9 @@ async def _conferir(job_id: UUID, department: str, *, prazo: float, log: Any) ->
         "situacoes": {s: situacoes.get(s, 0) for s in SITUACOES},
     }
     try:
-        saidas = await _limpar_celulas_que_sairam(job_id, department, comeco.celulas)
+        saidas = await _limpar_celulas_que_sairam(
+            job_id, department, comeco.celulas, contas=comeco.contas, desde=comeco.inicio
+        )
     except Exception:  # noqa: BLE001 — a conferência valeu; sobram células velhas
         saidas = 0
         log.exception("conferencia_limpeza_falhou")

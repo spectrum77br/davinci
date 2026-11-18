@@ -155,7 +155,9 @@ const iTroca = setup.indexOf('watch(department, async')
 assert.ok(iTroca > 0, 'watch da troca de departamento')
 const trocaDepto = setup.slice(iTroca)
 assert.match(trocaDepto, /plataformasDesmarcadas\.value = new Set\(\)\s*contasDesmarcadas\.value = new Set\(\)/)
-assert.match(funcao('pushAllVisible'), /for \(const a of gridAccounts\.value\)/)
+// M-14: o "Enviar todas" virou "Atualizar anúncio" do Atualizar ▾, pelas
+// colunas visíveis (gridAccounts) e só as escolhidas.
+assert.match(funcao('enviarPrecoDasContas'), /for \(const a of gridAccounts\.value\)/)
 console.log('pricing filtros: script ok')
 
 // ---------- 4) template
@@ -165,15 +167,19 @@ assert.ok(iTabela > 0, 'aba Tabela de Preços no template')
 const tabela = tpl.slice(iTabela, tpl.indexOf('</section>', iTabela))
 // Barra na ordem do pedido (sem os comentários, que citam os botões).
 const barra = tabela.slice(0, tabela.indexOf('<table')).replace(/<!--[\s\S]*?-->/g, '')
+// M-14 (18/11/2026): Recarregar e Conferir anúncios saíram (viraram opções do
+// Atualizar ▾, que era o Enviar ▾).
 const ordem = ['v-model="gridSearch"', 'data-filtro="plataforma"', 'data-filtro="contas"', 'data-acao="layout"',
-  'handleExportExcel', 'pushAllAndClose', 'Recarregar', 'data-prazo-reposicao', 'data-acao="margem"',
-  'data-acao="conferir-anuncios"']
+  'handleExportExcel', 'data-acao="atualizar"', 'data-prazo-reposicao', 'data-acao="margem"']
 let antes = -1
 for (const marca of ordem) {
   const i = barra.indexOf(marca)
   assert.ok(i > antes, `barra: ${marca} na ordem`)
   antes = i
 }
+assert.ok(!barra.includes('Recarregar'), 'o Recarregar saiu da barra')
+assert.ok(!barra.includes('conferir-anuncios') && !barra.includes('Conferir anúncios'), 'o Conferir anúncios saiu da barra')
+assert.ok(!barra.includes('pushAllAndClose') && !barra.includes('showPushMenu'), 'o menu do Enviar saiu')
 assert.doesNotMatch(barra, /<select/, 'Plataforma não é mais select')
 assert.match(barra, /data-menu-plataforma[\s\S]*?Marcar todas[\s\S]*?Limpar[\s\S]*?type="checkbox"/)
 assert.match(barra, /data-menu-contas[\s\S]*?v-model="buscaContas"[\s\S]*?Marcar todas[\s\S]*?Limpar[\s\S]*?type="checkbox"/)

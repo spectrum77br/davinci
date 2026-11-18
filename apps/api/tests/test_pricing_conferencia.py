@@ -619,6 +619,128 @@ async def test_fim_com_sucesso_tira_so_as_celulas_que_sairam_e_departamento_inva
 
 
 @pytest.mark.asyncio
+async def test_conferencia_so_das_contas_escolhidas_nao_mexe_nas_outras(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """M-14, 18/11/2026 (botão "Atualizar ▾"): com `contas` no payload, só as
+    células dessas contas são lidas, gravadas e limpas; as das outras contas
+    ficam com a conferência anterior."""
+    c = cenario
+    primeira = await _rodar(db, admin)
+    assert primeira.status == BackgroundJobStatus.SUCCEEDED
+    antes = await _gravadas(db)
+    assert (c.kit.id, c.x010.id) in antes and (c.conta_amz.id, c.a003.id) in antes
+    chamadas_ml = len(marketplaces.ml.chamadas)
+    chamadas_amz = len(marketplaces.amz.chamadas)
+    # As duas células deixam de mandar preço (NA): só a da conta escolhida sai.
+    db.add_all(
+        [
+            PricingOverride(
+                user_id=admin.id,
+                pricing_product_id=c.x010.id,
+                pricing_account_id=c.kit.id,
+                cell_status=CellStatus.NA,
+            ),
+            PricingOverride(
+                user_id=admin.id,
+                pricing_product_id=c.a003.id,
+                pricing_account_id=c.conta_amz.id,
+                cell_status=CellStatus.NA,
+            ),
+        ]
+    )
+    await db.commit()
+
+    job = BackgroundJob(
+        type=BackgroundJobType.CONFERIR_PRECOS,
+        status=BackgroundJobStatus.PENDING,
+        created_by=admin.id,
+        payload={"department": "celular", "contas": [str(c.kit.id)]},
+    )
+    db.add(job)
+    await db.commit()
+    await conferencia.run_conferir_precos(job_id=job.id, department="celular", user_id=admin.id)
+    await db.refresh(job)
+    assert job.status == BackgroundJobStatus.SUCCEEDED, job.error
+
+    # Só a conta escolhida foi lida (nem "ml quebrado", nem a Amazon).
+    assert [nome for nome, _ in marketplaces.ml.chamadas[chamadas_ml:]] == ["counhago"]
+    assert len(marketplaces.amz.chamadas) == chamadas_amz
+    depois = await _gravadas(db)
+    # A célula da conta escolhida que não manda mais preço saiu; a da Amazon,
+    # que também não manda mais, ficou (não era desta conferência).
+    assert (c.kit.id, c.x010.id) not in depois
+    assert depois[(c.conta_amz.id, c.a003.id)].job_id == primeira.id
+    # As da conta escolhida são deste job; as das outras contas, da primeira.
+    for (conta_id, _linha_id), cel in depois.items():
+        esperado = job.id if conta_id == c.kit.id else primeira.id
+        assert cel.job_id == esperado, (conta_id, cel.situacao)
+    assert set(depois) == set(antes) - {(c.kit.id, c.x010.id)}
+
+
+@pytest.mark.asyncio
+async def test_limpeza_do_fim_nao_apaga_celula_conferida_sozinha_no_meio(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """M-14 × M-15: a x010 estava NA quando a conferência (só da counhago)
+    começou, então não é desta conferência. No meio, alguém tira o NA e clica
+    no cartão: a célula é conferida sozinha. A limpeza do fim (que só mexe nas
+    contas escolhidas) não apaga essa leitura, mais nova que a montagem do job;
+    a leitura de célula conferida sozinha ANTES do job sai, como sempre."""
+    c = cenario
+    na = PricingOverride(
+        user_id=admin.id,
+        pricing_product_id=c.x010.id,
+        pricing_account_id=c.kit.id,
+        cell_status=CellStatus.NA,
+    )
+    db.add(na)
+    await db.commit()
+    clicou = asyncio.Event()
+    ml = marketplaces.ml
+
+    async def _ml(cliente, vinculos):
+        if cliente.nome == "counhago" and not clicou.is_set():
+            clicou.set()
+            await db.delete(na)
+            await db.commit()
+            assert await conferencia.conferir_celula("celular", c.kit.id, c.x010.id)
+        return await ml(cliente, vinculos)
+
+    marketplaces.leitores["ml"] = _ml
+    job = BackgroundJob(
+        type=BackgroundJobType.CONFERIR_PRECOS,
+        status=BackgroundJobStatus.PENDING,
+        created_by=admin.id,
+        payload={"department": "celular", "contas": [str(c.kit.id)]},
+    )
+    db.add(job)
+    await db.commit()
+    await conferencia.run_conferir_precos(job_id=job.id, department="celular", user_id=admin.id)
+    await db.refresh(job)
+    assert job.status == BackgroundJobStatus.SUCCEEDED, job.error
+    assert clicou.is_set()
+    gravadas = await _gravadas(db)
+    assert gravadas[(c.kit.id, c.x010.id)].job_id is None
+    assert gravadas[(c.kit.id, c.a003.id)].job_id == job.id
+
+    # Conferida sozinha antes, e a célula volta a NA: a próxima conferência
+    # do departamento tira a leitura dela.
+    db.add(
+        PricingOverride(
+            user_id=admin.id,
+            pricing_product_id=c.x010.id,
+            pricing_account_id=c.kit.id,
+            cell_status=CellStatus.NA,
+        )
+    )
+    await db.commit()
+    marketplaces.leitores["ml"] = ml
+    await _rodar(db, admin)
+    assert (c.kit.id, c.x010.id) not in await _gravadas(db)
+
+
+@pytest.mark.asyncio
 async def test_falha_ao_gravar_uma_conta_mantem_a_leitura_anterior_dela(
     db: AsyncSession, admin: User, cenario, marketplaces, monkeypatch
 ):
@@ -1188,6 +1310,49 @@ async def test_post_enfileira_e_recusa_outra_em_andamento(
     r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
     assert r.status_code == 201
     assert len(fila.jobs) == 3
+
+
+@pytest.mark.asyncio
+async def test_post_com_contas_escolhidas_vai_no_payload_e_recusa_conta_de_fora(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    cenario,
+    auth_as: Callable,
+    fila: _Fila,
+    monkeypatch,
+):
+    """M-14, 18/11/2026: o "Atualizar ▾" confere só as contas escolhidas — elas
+    vão no payload do job (sem repetir); conta que não é coluna do departamento
+    é recusada; lista vazia, também."""
+    monkeypatch.setattr(get_settings(), "env", "production")
+    auth_as(admin)
+    de_fora = str(uuid.uuid4())
+    r = await client.post(
+        "/api/pricing/conferencia",
+        json={"department": "celular", "contas": [str(cenario.kit.id), de_fora]},
+    )
+    assert (r.status_code, r.json()["detail"]) == (400, {"code": "contas_invalidas"})
+    r = await client.post("/api/pricing/conferencia", json={"department": "celular", "contas": []})
+    assert r.status_code == 422
+    assert fila.jobs == []
+
+    escolhidas = sorted([str(cenario.kit.id), str(cenario.conta_amz.id)])
+    r = await client.post(
+        "/api/pricing/conferencia",
+        json={"department": "celular", "contas": [*escolhidas, str(cenario.kit.id)]},
+    )
+    assert r.status_code == 201, r.text
+    job_id = r.json()["job_id"]
+    assert fila.jobs == [("conferir_precos_run", job_id, "celular", str(admin.id))]
+    job = await db.get(BackgroundJob, uuid.UUID(job_id))
+    assert job.payload == {"department": "celular", "contas": escolhidas}
+    # A conta é do departamento celular: na mala, é recusada.
+    r = await client.post(
+        "/api/pricing/conferencia",
+        json={"department": "mala", "contas": [str(cenario.kit.id)]},
+    )
+    assert (r.status_code, r.json()["detail"]) == (400, {"code": "contas_invalidas"})
 
 
 @pytest.mark.asyncio
