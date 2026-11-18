@@ -2834,6 +2834,163 @@ async function confirmarNaoEntregue() {
   }
 }
 
+// ---- Abrir chamado no Melhor Envio (Amazon Envio próprio, 18/11/2026) ----
+// Vinicius: "nos Amazon envio próprio … a gente clica, Abrir chamado, vem os
+// motivos do Melhor Envio e a gente abre o chamado". Os motivos e as travas
+// (48 h depois da entrega, prazo da acareação) vêm do próprio ME; o servidor
+// abre lá e já cria o chamado da aba Chamados, então a coluna fica "Aberto".
+type MeComo = 'acareacao' | 'atraso' | 'comprovante' | 'site' | 'descricao'
+type MeMotivo = { slug: string; nome: string; como: MeComo }
+type MeAbertura = {
+  envio: { id: string; rastreio: string; status: string | null; protocolo: string | null }
+  motivos: MeMotivo[]
+  url_site: string
+}
+type MeConsulta = {
+  situacao: string | null
+  liberado: boolean
+  titulo: string | null
+  texto: string | null
+  info: string | null
+  detalhes: Array<{ chave: string; titulo: string; valor: string }>
+  aceita_anexos: boolean
+}
+const ME_DESCRICAO_MIN = 10
+const ME_DESCRICAO_MAX = 2048
+const ME_RECEBEDOR_MIN = 6
+const ME_RECEBEDOR_MAX = 120
+const ME_ANEXOS_MAX = 10
+const ME_ANEXO_MAX = 3 * 1024 * 1024
+const ME_ANEXO_TIPOS = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf']
+const ME_TEXTO_ACAREACAO =
+  'Bom dia, o cliente entrou em contato e informa que não recebeu o produto. Pedimos a acareação da entrega junto aos Correios.'
+const abrirMe = reactive({
+  open: false,
+  linha: null as Logistica | null,
+  carregando: false,
+  consultando: false,
+  enviando: false,
+  erro: '',
+  dados: null as MeAbertura | null,
+  motivo: '',
+  consulta: null as MeConsulta | null,
+  recebedor: 'Não informado',
+  descricao: '',
+  anexos: [] as File[],
+})
+// O botão: Amazon Envio próprio com rastreio dos Correios e sem chamado nenhum
+// (com chamado a coluna já mostra Aberto/Concluído, como nas outras abas).
+function podeAbrirChamadoMe(c: Logistica): boolean {
+  return canEdit.value && ehEnvioProprio(c) && ehCorreios(c.rastreio) && !situacaoChamado(c)
+}
+const meMotivoAtual = computed(() => abrirMe.dados?.motivos.find((m) => m.slug === abrirMe.motivo) || null)
+const meComo = computed<MeComo | null>(() => meMotivoAtual.value?.como || null)
+async function abrirChamadoMe(c: Logistica) {
+  Object.assign(abrirMe, {
+    open: true,
+    linha: c,
+    carregando: true,
+    consultando: false,
+    enviando: false,
+    erro: '',
+    dados: null,
+    motivo: '',
+    consulta: null,
+    recebedor: 'Não informado',
+    descricao: '',
+    anexos: [],
+  })
+  try {
+    const d = await api<MeAbertura>(`/api/logistica/${c.id}/melhor-envio/abrir`)
+    if (abrirMe.linha?.id !== c.id) return
+    abrirMe.dados = d
+  } catch (e: any) {
+    abrirMe.erro = e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    abrirMe.carregando = false
+  }
+}
+function fecharAbrirMe() {
+  if (!abrirMe.enviando) abrirMe.open = false
+}
+watch(
+  () => abrirMe.motivo,
+  async (slug) => {
+    abrirMe.consulta = null
+    abrirMe.erro = ''
+    const c = abrirMe.linha
+    const como = meComo.value
+    if (como === 'acareacao' && !abrirMe.descricao.trim()) abrirMe.descricao = ME_TEXTO_ACAREACAO
+    if (!c || !slug || !como || !['acareacao', 'atraso', 'comprovante'].includes(como)) return
+    abrirMe.consultando = true
+    try {
+      const r = await api<MeConsulta>(
+        `/api/logistica/${c.id}/melhor-envio/abrir/consulta?tipo=${encodeURIComponent(slug)}`,
+      )
+      if (abrirMe.motivo === slug) abrirMe.consulta = r
+    } catch (e: any) {
+      if (abrirMe.motivo === slug) abrirMe.erro = e?.data?.detail?.mensagem || e?.message || 'erro'
+    } finally {
+      if (abrirMe.motivo === slug) abrirMe.consultando = false
+    }
+  },
+)
+function escolherAnexosMe(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const novos = [...(input.files || [])]
+  input.value = ''
+  abrirMe.anexos = [...abrirMe.anexos, ...novos].slice(0, ME_ANEXOS_MAX)
+}
+// O que falta para o botão "Abrir" (as mesmas regras do site do ME).
+const meFalta = computed(() => {
+  const como = meComo.value
+  if (!abrirMe.dados || !como) return 'Escolha o motivo.'
+  if (como === 'site') return 'Esse motivo tem formulário próprio: abra pelo site do Melhor Envio.'
+  if (['acareacao', 'atraso', 'comprovante'].includes(como)) {
+    if (abrirMe.consultando || !abrirMe.consulta) return 'Consultando o Melhor Envio…'
+    if (!abrirMe.consulta.liberado) return abrirMe.consulta.titulo || 'O Melhor Envio não libera esse motivo agora.'
+  }
+  const d = abrirMe.descricao.trim()
+  if (['acareacao', 'descricao'].includes(como) && (d.length < ME_DESCRICAO_MIN || d.length > ME_DESCRICAO_MAX))
+    return `A descrição precisa ter de ${ME_DESCRICAO_MIN} a ${ME_DESCRICAO_MAX} letras.`
+  if (como === 'acareacao') {
+    const r = abrirMe.recebedor.trim()
+    if (r && (r.length < ME_RECEBEDOR_MIN || r.length > ME_RECEBEDOR_MAX))
+      return `O nome de quem recebeu precisa ter de ${ME_RECEBEDOR_MIN} a ${ME_RECEBEDOR_MAX} letras.`
+    const ruim = abrirMe.anexos.find((f) => !ME_ANEXO_TIPOS.includes(f.type) || f.size > ME_ANEXO_MAX)
+    if (ruim) return `${ruim.name}: só jpg, png, gif ou pdf de até 3 MB.`
+  }
+  return ''
+})
+async function confirmarAbrirMe() {
+  const c = abrirMe.linha
+  const como = meComo.value
+  if (!c || !como || abrirMe.enviando || meFalta.value) return
+  abrirMe.enviando = true
+  abrirMe.erro = ''
+  try {
+    const fd = new FormData()
+    fd.append('tipo', abrirMe.motivo)
+    if (['acareacao', 'descricao', 'atraso'].includes(como) && abrirMe.descricao.trim()) fd.append('descricao', abrirMe.descricao.trim())
+    if (como === 'acareacao') {
+      if (abrirMe.recebedor.trim()) fd.append('recebedor', abrirMe.recebedor.trim())
+      for (const f of abrirMe.anexos) fd.append('files', f)
+    }
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/melhor-envio/abrir`, { method: 'POST', body: fd })
+    const i = rows.value.findIndex((x) => x.id === c.id)
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
+    abrirMe.open = false
+    toasts.success(
+      `Chamado ${updated.chamado_aba?.chamado || ''} aberto no Melhor Envio`.replace('  ', ' '),
+      'Já está na aba Chamados; a IA de Chamado acompanha as respostas.',
+    )
+  } catch (e: any) {
+    abrirMe.erro = e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    abrirMe.enviando = false
+  }
+}
+
 const MENSAGEM_BLING_ERROS: Record<string, string> = {
   logistica_sem_mensagem_bling:
     'Sem regra na aba Status com Mensagem Bling que case com o Status Plataforma deste pedido.',
@@ -3528,7 +3685,16 @@ async function aplicarStatusBling(c: Logistica) {
                       class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold"
                       :class="COR_SITUACAO_CHAMADO[situacaoChamado(c)!]"
                     >{{ situacaoChamado(c) }}</span>
-                    <span v-else-if="!problemaSemChamado(c) && !(ehFlexTab && podeNaoEntregue(c))" class="text-muted-foreground">—</span>
+                    <span v-else-if="!problemaSemChamado(c) && !(ehFlexTab && podeNaoEntregue(c)) && !podeAbrirChamadoMe(c)" class="text-muted-foreground">—</span>
+                    <!-- Amazon Envio próprio sem chamado (18/11/2026): abre o atendimento no Melhor Envio. -->
+                    <button
+                      v-if="podeAbrirChamadoMe(c)"
+                      type="button"
+                      class="inline-flex items-center gap-0.5 whitespace-nowrap rounded-md border border-primary/50 bg-background px-1.5 py-0.5 text-[11px] font-semibold text-primary hover:bg-primary/10"
+                      title="Abre o atendimento no Melhor Envio (os motivos são os do site deles) e o chamado entra na aba Chamados"
+                      data-abrir-chamado-me
+                      @click.stop="abrirChamadoMe(c)"
+                    ><Plus class="size-3" /> Abrir chamado</button>
                     <div v-if="problemaSemChamado(c)" class="text-[10.5px] font-bold text-red-600 dark:text-red-400" title="Status Bling Problemas e nenhum chamado aberto: ninguém está olhando este pedido">sem chamado aberto</div>
                     <!-- Aba Flex (16/11/2026): o botão do Raio-X também aqui. -->
                     <button
@@ -4757,6 +4923,93 @@ async function aplicarStatusBling(c: Logistica) {
             @click="confirmarJuntarRepetidas"
           >
             {{ juntarModal.saving ? 'Juntando…' : `Juntar ${juntarModal.grupos.length} grupo(s)` }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Abrir chamado no Melhor Envio (Amazon Envio próprio, 18/11/2026) -->
+    <div v-if="abrirMe.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" data-abrir-me-janela @click.self="fecharAbrirMe">
+      <div class="max-h-[90vh] w-full max-w-xl space-y-3 overflow-y-auto rounded-lg border bg-background p-5 text-sm">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Abrir chamado no Melhor Envio · {{ abrirMe.linha?.pedido_bling || abrirMe.linha?.pedido_marketplace }}</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" :disabled="abrirMe.enviando" @click="fecharAbrirMe">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div v-if="abrirMe.linha" class="rounded-md border bg-muted/40 px-3 py-2 text-xs leading-relaxed">
+          <div><span class="text-muted-foreground">{{ abrirMe.linha.conta || '—' }} · Amazon Envio próprio · pedido</span> <b class="font-mono">{{ abrirMe.linha.pedido_marketplace || '—' }}</b></div>
+          <div><span class="text-muted-foreground">Correios</span> <b class="font-mono">{{ abrirMe.linha.rastreio }}</b><span v-if="abrirMe.linha.localizacao" class="text-muted-foreground"> · {{ abrirMe.linha.localizacao }}</span></div>
+          <div v-if="abrirMe.linha.entregue_em || (abrirMe.linha.produtos || []).length">
+            <template v-if="abrirMe.linha.entregue_em"><span class="text-muted-foreground">entregue</span> {{ fmtDataHora(abrirMe.linha.entregue_em) }}</template>
+            <span v-if="(abrirMe.linha.produtos || []).length" class="text-muted-foreground"><template v-if="abrirMe.linha.entregue_em"> · </template>{{ (abrirMe.linha.produtos || []).map((p) => p.nome).filter(Boolean).join(' + ') }}</span>
+          </div>
+        </div>
+        <div v-if="abrirMe.carregando" class="py-6 text-center text-muted-foreground"><RefreshCw class="mr-1.5 inline size-4 animate-spin" /> buscando o envio no Melhor Envio…</div>
+        <template v-else-if="abrirMe.dados">
+          <label class="block space-y-1">
+            <span class="font-semibold">O que houve com o envio?</span>
+            <span class="block text-xs text-muted-foreground">Os motivos são os do Melhor Envio (a mesma lista do "Iniciar atendimento" no site deles).</span>
+            <select v-model="abrirMe.motivo" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" data-abrir-me-motivo>
+              <option value="" disabled>Escolha o motivo</option>
+              <option v-for="m in abrirMe.dados.motivos" :key="m.slug" :value="m.slug">{{ m.nome }}</option>
+            </select>
+          </label>
+          <div v-if="abrirMe.consultando" class="text-xs text-muted-foreground"><RefreshCw class="mr-1 inline size-3 animate-spin" /> consultando o Melhor Envio…</div>
+          <div
+            v-else-if="abrirMe.consulta && (abrirMe.consulta.titulo || abrirMe.consulta.detalhes.length)"
+            class="rounded-md border px-3 py-2 text-xs"
+            :class="abrirMe.consulta.liberado ? 'border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200' : 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200'"
+            data-abrir-me-consulta
+          >
+            <div v-if="abrirMe.consulta.titulo" class="font-semibold">{{ abrirMe.consulta.titulo }}</div>
+            <div v-if="abrirMe.consulta.texto" class="mt-0.5 whitespace-pre-line">{{ abrirMe.consulta.texto }}</div>
+            <div v-if="abrirMe.consulta.detalhes.length" class="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
+              <div v-for="d in abrirMe.consulta.detalhes" :key="d.chave + d.titulo"><span class="opacity-75">{{ d.titulo }}:</span> <b class="font-semibold">{{ d.valor }}</b></div>
+            </div>
+          </div>
+          <div v-if="meComo === 'site'" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            Esse motivo tem formulário próprio no Melhor Envio (campo a campo).
+            <a :href="abrirMe.dados.url_site" target="_blank" rel="noopener" class="font-semibold underline">Abrir pelo site do Melhor Envio</a> — depois ele entra sozinho na aba Chamados.
+          </div>
+          <template v-if="meComo === 'acareacao'">
+            <label class="block space-y-1">
+              <span class="font-semibold">Nome de quem recebeu o pedido</span>
+              <input v-model="abrirMe.recebedor" :maxlength="ME_RECEBEDOR_MAX" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+            </label>
+          </template>
+          <label v-if="meComo === 'acareacao' || meComo === 'descricao' || meComo === 'atraso'" class="block space-y-1">
+            <span class="font-semibold">{{ meComo === 'atraso' ? 'Descrição (opcional)' : 'Descrição da ocorrência' }}</span>
+            <textarea v-model="abrirMe.descricao" rows="5" :maxlength="ME_DESCRICAO_MAX" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" data-abrir-me-descricao />
+            <span class="block text-right text-[11px] tabular-nums text-muted-foreground">{{ abrirMe.descricao.trim().length }}/{{ ME_DESCRICAO_MAX }}</span>
+          </label>
+          <div v-if="meComo === 'acareacao'" class="space-y-1 text-xs">
+            <div class="flex items-center gap-2">
+              <label class="inline-flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 font-semibold hover:bg-muted">
+                <ImagePlus class="size-3.5" /> Anexar arquivo
+                <input type="file" multiple accept="image/jpeg,image/png,image/gif,application/pdf" class="hidden" @change="escolherAnexosMe" />
+              </label>
+              <span class="text-muted-foreground">opcional — print da conversa com o cliente, foto… (jpg, png, gif ou pdf, até 3 MB, no máximo {{ ME_ANEXOS_MAX }})</span>
+            </div>
+            <div v-for="(f, k) in abrirMe.anexos" :key="k" class="flex items-center gap-1">
+              <span class="truncate">{{ f.name }}</span>
+              <button type="button" class="text-muted-foreground hover:text-foreground" title="Tirar" @click="abrirMe.anexos.splice(k, 1)"><X class="size-3" /></button>
+            </div>
+          </div>
+          <div v-if="meComo === 'comprovante'" class="text-xs text-muted-foreground">Pede ao Melhor Envio o comprovante de entrega deste envio (sem texto).</div>
+          <div v-if="meComo && meComo !== 'site'" class="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            Depois de abrir: o chamado entra na aba <b class="text-foreground">Chamados</b> ligado ao pedido {{ abrirMe.linha?.pedido_bling }}, a coluna Chamado daqui mostra
+            <span class="rounded bg-blue-100 px-1.5 py-px text-[11px] font-semibold text-blue-800 dark:bg-blue-950/50 dark:text-blue-300">Aberto</span>
+            e a IA de Chamado acompanha as respostas do Melhor Envio.
+          </div>
+        </template>
+        <div v-if="abrirMe.erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300" data-abrir-me-erro>{{ abrirMe.erro }}</div>
+        <div class="flex items-center justify-end gap-2">
+          <span v-if="abrirMe.dados && meFalta && abrirMe.motivo && meComo !== 'site'" class="mr-auto text-xs text-muted-foreground">{{ meFalta }}</span>
+          <Button variant="ghost" :disabled="abrirMe.enviando" @click="fecharAbrirMe">Cancelar</Button>
+          <Button :disabled="abrirMe.enviando || abrirMe.carregando || !!meFalta" data-abrir-me-enviar @click="confirmarAbrirMe">
+            <Send class="mr-1 size-4" />
+            {{ abrirMe.enviando ? 'Abrindo…' : 'Abrir chamado no Melhor Envio' }}
           </Button>
         </div>
       </div>

@@ -472,3 +472,101 @@ async def enviar_no_atendimento(
     except ValueError:
         corpo = {"texto": r.text[:200]}
     return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}
+
+
+# ---------------------------------------------------------------------------
+# Abrir atendimento pelo DaVinci (18/11/2026)
+# ---------------------------------------------------------------------------
+# Lido no JS do painel do ME (dash.js, janela "Precisa de ajuda com este envio?"):
+# - motivos: `GET /api/v2/me/tickets/type?category=…` → [{id, name, slug}]; a
+#   categoria é `order_pre_posting` com o envio liberado/expirado e
+#   `order_post_posting` depois de postado (`getTicketCategory`);
+# - consulta do motivo: `GET /api/v2/me/tickets/{slug}/config/{id do envio}
+#   ?use_descriptive_values=true` → `ticket_details` (título/texto da tela),
+#   `order_details` [{key, title, value}] e `configs_type.current_status`
+#   (ex.: `confrontation_opening_allowed`, `confrontation_blocked_by_48`);
+# - abrir: `POST /api/v2/me/tickets` em multipart com `order_id`, `type_ticket`
+#   (o slug), `description` e, na acareação, `recipient` + `attachments[]`. A
+#   resposta traz `ticket` (com o `number`).
+CATEGORIA_PRE_POSTAGEM = "order_pre_posting"
+CATEGORIA_POS_POSTAGEM = "order_post_posting"
+_SLUG_OK = re.compile(r"^[a-z_]{1,48}$")
+_ENVIO_ID_OK = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+
+def categoria_do_envio(status: str | None) -> str:
+    """A mesma regra da tela do ME: liberado/expirado = antes da postagem."""
+    s = (status or "").strip().lower()
+    return CATEGORIA_PRE_POSTAGEM if s in ("released", "expired") else CATEGORIA_POS_POSTAGEM
+
+
+def _json_ou_texto(r: httpx.Response) -> object:
+    try:
+        return r.json() if r.content else {}
+    except ValueError:
+        return {"texto": r.text[:200]}
+
+
+async def ler_motivos_atendimento(token: str, categoria: str) -> tuple[int, list[dict]]:
+    """GET /api/v2/me/tickets/type — os motivos do "Iniciar atendimento" do ME."""
+    if categoria not in (CATEGORIA_PRE_POSTAGEM, CATEGORIA_POS_POSTAGEM):
+        return 400, []
+    async with httpx.AsyncClient(timeout=20) as cli:
+        r = await cli.get(
+            f"{ME_BASE_PROD}/api/v2/me/tickets/type",
+            headers=_headers_leitura(token),
+            params={"category": categoria},
+        )
+    corpo = _json_ou_texto(r)
+    if isinstance(corpo, dict):
+        corpo = corpo.get("data") if isinstance(corpo.get("data"), list) else []
+    motivos = [m for m in corpo if isinstance(m, dict)] if isinstance(corpo, list) else []
+    return r.status_code, motivos
+
+
+async def ler_config_atendimento(token: str, tipo: str, envio_id: str) -> tuple[int, dict]:
+    """GET /api/v2/me/tickets/{tipo}/config/{envio} — o que a tela do ME mostra antes
+    de deixar abrir (prazo, 48 h depois da entrega, comprovante). Só leitura."""
+    if not _SLUG_OK.match(tipo or "") or not _ENVIO_ID_OK.match(envio_id or ""):
+        return 400, {"message": "motivo ou envio inválido"}
+    async with httpx.AsyncClient(timeout=20) as cli:
+        r = await cli.get(
+            f"{ME_BASE_PROD}/api/v2/me/tickets/{tipo}/config/{envio_id}",
+            headers=_headers_leitura(token),
+            params={"use_descriptive_values": "true"},
+        )
+    corpo = _json_ou_texto(r)
+    if isinstance(corpo, dict) and isinstance(corpo.get("data"), dict):
+        corpo = corpo["data"]
+    return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}
+
+
+async def abrir_atendimento(
+    token: str,
+    *,
+    envio_id: str,
+    tipo: str,
+    descricao: str | None = None,
+    recebedor: str | None = None,
+    anexos: list[tuple[str, bytes, str]] | None = None,
+) -> tuple[int, dict]:
+    """POST /api/v2/me/tickets — abre o atendimento como o botão "Abrir atendimento"
+    da tela do ME. Campo vazio não vai (a tela só manda o que tem)."""
+    if not _SLUG_OK.match(tipo or "") or not _ENVIO_ID_OK.match(envio_id or ""):
+        return 400, {"message": "motivo ou envio inválido"}
+    partes: list[tuple[str, tuple]] = [
+        ("order_id", (None, envio_id)),
+        ("type_ticket", (None, tipo)),
+    ]
+    if recebedor:
+        partes.append(("recipient", (None, recebedor)))
+    if descricao:
+        partes.append(("description", (None, descricao)))
+    for nome, blob, ctype in anexos or []:
+        partes.append(("attachments[]", (nome, blob, ctype or "application/octet-stream")))
+    async with httpx.AsyncClient(timeout=60) as cli:
+        r = await cli.post(
+            f"{ME_BASE_PROD}/api/v2/me/tickets", headers=_headers_leitura(token), files=partes
+        )
+    corpo = _json_ou_texto(r)
+    return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}

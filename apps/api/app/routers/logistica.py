@@ -24,7 +24,17 @@ from uuid import UUID
 import httpx
 import structlog
 from arq.jobs import Job, JobStatus
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -100,6 +110,7 @@ from app.schemas.logistica import (
     ThreemaDestinatarioOut,
 )
 from app.services import (
+    chamados_melhor_envio_abrir,
     flex_nao_entregue,
     logistica_amazon,
     logistica_amazon_bling,
@@ -1345,6 +1356,102 @@ async def suspender_entrega(
         await logistica_robo.solicitar_suspensao(session, c, user_id=user.id)
     except logistica_robo.RoboError as e:
         raise HTTPException(422, detail={"code": e.code}) from e
+    await session.refresh(c)
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
+    )
+
+
+# ---- Abrir atendimento no Melhor Envio (Amazon Envio próprio, 18/11/2026) ----
+# Vinicius: "nos Amazon envio próprio … a gente clica, Abrir chamado, vem os
+# motivos do Melhor Envio e a gente abre o chamado". A regra mora em
+# services/chamados_melhor_envio_abrir; aqui só a porta (mesma permissão e cerca
+# de equipe do "Suspender entrega").
+
+
+def _recusa_me(e: chamados_melhor_envio_abrir.AberturaRecusadaError) -> HTTPException:
+    return HTTPException(e.http, detail={"code": e.code, "mensagem": e.mensagem})
+
+
+async def _linha_ou_404(session: AsyncSession, logistica_id: UUID) -> Logistica:
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    return c
+
+
+@router.get("/{logistica_id}/melhor-envio/abrir", dependencies=_DA_EQUIPE)
+async def melhor_envio_abrir_preparar(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> dict:
+    """Janela "Abrir chamado no Melhor Envio": o envio no ME e os motivos do site."""
+    c = await _linha_ou_404(session, logistica_id)
+    try:
+        return await chamados_melhor_envio_abrir.preparar(session, c)
+    except chamados_melhor_envio_abrir.AberturaRecusadaError as e:
+        raise _recusa_me(e) from e
+
+
+@router.get("/{logistica_id}/melhor-envio/abrir/consulta", dependencies=_DA_EQUIPE)
+async def melhor_envio_abrir_consulta(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    tipo: Annotated[str, Query(pattern=r"^[a-z_]{1,48}$")],
+) -> dict:
+    """O que o ME diz do envio nesse motivo (prazo, 48 h, se libera) — só leitura."""
+    c = await _linha_ou_404(session, logistica_id)
+    try:
+        return await chamados_melhor_envio_abrir.consultar(session, c, tipo)
+    except chamados_melhor_envio_abrir.AberturaRecusadaError as e:
+        raise _recusa_me(e) from e
+
+
+@router.post(
+    "/{logistica_id}/melhor-envio/abrir",
+    response_model=LogisticaOut,
+    dependencies=_DA_EQUIPE,
+)
+async def melhor_envio_abrir(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    tipo: Annotated[str, Form(pattern=r"^[a-z_]{1,48}$")],
+    descricao: Annotated[str, Form()] = "",
+    recebedor: Annotated[str, Form()] = "",
+    files: Annotated[list[UploadFile], File()] = [],  # noqa: B006 — FastAPI lê o default por request
+) -> LogisticaOut:
+    """Abre o atendimento no Melhor Envio e já cria o chamado da aba Chamados — a
+    linha volta com a coluna Chamado em "Aberto"."""
+    c = await _linha_ou_404(session, logistica_id)
+    anexos: list[tuple[str, bytes, str]] = []
+    for f in files or []:
+        raw = await f.read()
+        nome = (f.filename or "").strip() or "arquivo"
+        anexos.append((nome, raw, (f.content_type or "").lower()))
+    try:
+        await chamados_melhor_envio_abrir.abrir(
+            session,
+            c,
+            slug=tipo,
+            descricao=descricao,
+            recebedor=recebedor,
+            anexos=anexos,
+            por=(user.name or user.email or "alguém").strip(),
+        )
+    except chamados_melhor_envio_abrir.AberturaRecusadaError as e:
+        await session.rollback()
+        raise _recusa_me(e) from e
+    await session.commit()
     await session.refresh(c)
     return _to_out(
         c,
