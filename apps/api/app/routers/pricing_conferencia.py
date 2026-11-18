@@ -1,4 +1,4 @@
-"""Conferência de preços da Tabela de Preços (02/11/2026) — só administrador.
+"""Conferência de preços da Tabela de Preços (02/11/2026).
 
 Eduardo, tarefa "Melhorias na Tabela de Preços": botão com "% margem de erro"
 que compara o preço da Tabela com o preço do anúncio em cada conta e marca
@@ -28,6 +28,15 @@ Tabela. Por isso o GET deixou de ser só do administrador: vale para quem tem
 grade (a cerca de equipe do `/grid`, `_contas_da_grade`), mais a margem e se a
 pessoa pode conferir. Conferir e mudar a margem continuam só do administrador.
 
+M-7, 18/11/2026 (Eduardo): conferir passou para todos que veem a Tabela (o
+mesmo `tabela_precos` ver do GET); mudar a margem continua só do
+administrador. Quem não é administrador vê no botão a data e o andamento do
+último job do departamento (de quem quer que tenha iniciado), sem o resumo
+do departamento inteiro (`result`), e o job da conferência não aparece para
+ele no /api/jobs (lá o resumo iria inteiro). A tela consulta a cada 30 s com
+`celulas=false` (só o job, resposta leve) e relê as células quando uma
+conferência termina.
+
   PUT /api/pricing/conferencia/margem                {"department", "margem_pct"?,
                                                       "geral_ligada"?, "por_produto_ligada"?}
   PUT /api/pricing/conferencia/margem/produto/{id}   {"margem_pct": n | null}
@@ -35,6 +44,7 @@ pessoa pode conferir. Conferir e mudar a margem continuam só do administrador.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any
@@ -114,7 +124,7 @@ class MargemOut(BaseModel):
     por_produto_ligada: bool
     # {pricing_product_id: %} — só as linhas da Tabela deste departamento.
     produtos: dict[str, float]
-    # Só o administrador muda a margem (a mesma trava de conferir).
+    # Só o administrador muda a margem (conferir é de todos desde o M-7).
     pode_editar: bool
 
 
@@ -138,7 +148,8 @@ class ConferenciaOut(BaseModel):
     ultimo_concluido: UUID | None = None
     celulas: list[ConferenciaCelulaOut]
     margem: MargemOut
-    # Só o administrador aperta "Conferir anúncios" (POST continua require_admin).
+    # Desde o M-7 (18/11/2026) todos que veem a Tabela apertam "Conferir
+    # anúncios" (o POST pede o mesmo `tabela_precos` ver do GET).
     pode_conferir: bool
 
 
@@ -233,7 +244,7 @@ def _job_out(job: BackgroundJob | None) -> ConferenciaJobOut | None:
 async def iniciar_conferencia(
     body: ConferenciaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_admin)],
+    user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
 ) -> JobCreatedOut:
     department = body.department
     await _exigir_departamento(session, department)
@@ -281,6 +292,9 @@ async def ver_conferencia(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
     department: Annotated[str, Query()],
+    # M-7: false = só o job e a margem (a consulta de 30 s da tela), sem as
+    # células, que pesam MBs na mala.
+    celulas: Annotated[bool, Query()] = True,
 ) -> ConferenciaOut:
     root_id = await _exigir_departamento(session, department)
     admin = _e_admin(user)
@@ -290,25 +304,27 @@ async def ver_conferencia(
         # aviso de job falho passam a dizer o mesmo.
         await session.commit()
     concluido = await conferencia.ultimo_job(session, department, so_concluido=True)
-    stmt = select(PricingConferencia).where(PricingConferencia.department == department)
-    if not admin:
-        # M-3, 17/11/2026: quem não é administrador só recebe as células das
-        # contas que veria na grade (equipe; a coluna de catálogo vai com a
-        # base). O administrador continua recebendo tudo.
-        visiveis = [c.id for c in await _contas_da_grade(session, user, root_id)]
-        stmt = stmt.where(PricingConferencia.pricing_account_id.in_(visiveis))
-    linhas = (await session.execute(stmt)).scalars().all()
+    linhas: Sequence[PricingConferencia] = []
+    if celulas:
+        stmt = select(PricingConferencia).where(PricingConferencia.department == department)
+        if not admin:
+            # M-3, 17/11/2026: quem não é administrador só recebe as células das
+            # contas que veria na grade (equipe; a coluna de catálogo vai com a
+            # base). O administrador continua recebendo tudo.
+            visiveis = [c.id for c in await _contas_da_grade(session, user, root_id)]
+            stmt = stmt.where(PricingConferencia.pricing_account_id.in_(visiveis))
+        linhas = (await session.execute(stmt)).scalars().all()
     job_out = _job_out(job)
     if job_out is not None and not admin:
         # O resumo do job (`contas_com_erro` com o nome das integrações, os
-        # totais do departamento inteiro) só serve ao balão do botão
-        # "Conferir anúncios", que é do administrador: não sai da cerca.
+        # totais do departamento inteiro) é do departamento todo: não sai da
+        # cerca. Quem não é administrador vê no botão a data e o andamento.
         job_out.result = {}
     return ConferenciaOut(
         job=job_out,
         ultimo_concluido=concluido.id if concluido else None,
         margem=await _margem_out(session, department, root_id, user),
-        pode_conferir=admin,
+        pode_conferir=True,
         celulas=[
             ConferenciaCelulaOut(
                 pricing_account_id=c.pricing_account_id,
@@ -332,7 +348,7 @@ async def gravar_margem(
     user: Annotated[User, Depends(require_admin)],
 ) -> MargemOut:
     """A Geral do departamento e as duas caixas do menu "Margem ▾" (M-2,
-    17/11/2026). Só o administrador, a mesma trava de conferir."""
+    17/11/2026). Só o administrador (conferir é de todos desde o M-7)."""
     root_id = await _exigir_departamento(session, body.department)
     mudancas = {
         campo: valor

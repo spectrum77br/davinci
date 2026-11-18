@@ -395,10 +395,10 @@ async def test_so_o_administrador_muda_a_margem(
     assert (r.status_code, r.json()["detail"]) == (403, {"code": "admin_only"})
     assert (await db.execute(select(PricingConferenciaMargem))).scalars().all() == []
     assert (await db.execute(select(PricingConferenciaMargemProduto))).scalars().all() == []
-    # Ele vê a margem, mas não pode editar nem conferir.
+    # Ele vê a margem, mas não pode editar; conferir pode (M-7, 18/11/2026).
     corpo = (await _ver(client)).json()
     assert corpo["margem"] == {"department": "celular", **MARGEM_PADRAO, "pode_editar": False}
-    assert corpo["pode_conferir"] is False
+    assert corpo["pode_conferir"] is True
 
 
 # =========================================================== GET para quem vê a Tabela
@@ -428,13 +428,24 @@ async def test_get_para_quem_ve_a_tabela_so_traz_as_contas_da_equipe(
     # A mesma régua da grade: as colunas que ele vê são as das células.
     grade = (await client.get("/api/pricing/grid", params={"department": "celular"})).json()
     assert {a["id"] for a in grade["accounts"]} == esperadas
-    assert corpo["pode_conferir"] is False
+    assert corpo["pode_conferir"] is True
     assert corpo["margem"]["pode_editar"] is False
-    # O job vem (a tela compara com o job das células), sem o resumo do
-    # departamento inteiro (nome de integração de outra equipe).
+    # O job vem (a tela compara com o job das células e o balão mostra a data
+    # e o andamento — M-7), sem o resumo do departamento inteiro (nome de
+    # integração de outra equipe).
     assert corpo["job"]["id"] == str(cenario.job.id)
+    assert corpo["job"]["finished_at"] is not None
     assert corpo["job"]["result"] == {}
     assert corpo["ultimo_concluido"] == str(cenario.job.id)
+    # A consulta de 30 s da tela (M-7): só o job, sem as células, com a mesma cerca.
+    r = await client.get(
+        "/api/pricing/conferencia", params={"department": "celular", "celulas": "false"}
+    )
+    assert r.status_code == 200, r.text
+    leve = r.json()
+    assert leve["celulas"] == []
+    assert (leve["job"]["id"], leve["job"]["result"]) == (str(cenario.job.id), {})
+    assert leve["ultimo_concluido"] == str(cenario.job.id)
 
     # Quem tem "todas as contas" na Tabela vê todas, como na grade.
     israel_todas = await make_user(
@@ -457,9 +468,18 @@ async def test_get_para_quem_ve_a_tabela_so_traz_as_contas_da_equipe(
         {"conta": "israel ml", "motivo": "token vencido"}
     ]
     assert corpo["pode_conferir"] is True
+    # A consulta leve do administrador também traz o resumo, sem as células.
+    r = await client.get(
+        "/api/pricing/conferencia", params={"department": "celular", "celulas": "false"}
+    )
+    leve = r.json()
+    assert leve["celulas"] == []
+    assert leve["job"]["result"]["contas_com_erro"] == [
+        {"conta": "israel ml", "motivo": "token vencido"}
+    ]
 
 
-async def test_get_exige_ver_a_tabela_e_conferir_continua_do_administrador(
+async def test_get_e_conferir_exigem_ver_a_tabela(
     client: AsyncClient, make_user, cenario, auth_as: Callable
 ):
     sem_tabela = await make_user(
@@ -469,13 +489,19 @@ async def test_get_exige_ver_a_tabela_e_conferir_continua_do_administrador(
     auth_as(sem_tabela)
     r = await _ver(client)
     assert (r.status_code, r.json()["detail"]["code"]) == (403, "forbidden")
+    r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
+    assert (r.status_code, r.json()["detail"]["code"]) == (403, "forbidden")
 
-    vendedor = await make_user(role=UserRole.USER, permissions=PERM_TUDO)
+    # M-7 (18/11/2026): quem só VÊ a Tabela confere (aqui fora da produção a
+    # trava de sempre responde, depois de passar pela permissão).
+    vendedor = await make_user(role=UserRole.USER, permissions=PERM_VER)
     auth_as(vendedor)
     r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
-    assert (r.status_code, r.json()["detail"]) == (403, {"code": "admin_only"})
+    assert (r.status_code, r.json()["detail"]) == (409, {"code": "so_no_servidor"})
     # Departamento inválido continua 400 para quem vê.
     assert (await _ver(client, "xyz")).status_code == 400
+    r = await client.post("/api/pricing/conferencia", json={"department": "xyz"})
+    assert (r.status_code, r.json()["detail"]) == (400, {"code": "invalid_department"})
 
 
 # =========================================================== Histórico

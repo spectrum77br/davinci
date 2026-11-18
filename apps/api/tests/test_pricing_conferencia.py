@@ -57,7 +57,7 @@ from app.services.pricing.conferencia_leitores import LeituraAnuncio
 from app.services.pricing.push import bases_com_catalogo_ligado, resolver_para_envio
 from tests.conftest import TEST_SCHEMA
 
-PERM_PRECOS = {"tabela_precos": {"view": True, "edit": True, "delete": True}}
+PERM_VER = {"tabela_precos": {"view": True, "edit": False, "delete": False}}
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -1078,25 +1078,59 @@ def fila(monkeypatch) -> _Fila:
 
 
 @pytest.mark.asyncio
-async def test_conferir_so_de_administrador_e_ver_para_quem_ve_a_tabela(
-    client: AsyncClient, make_user, cenario, auth_as: Callable, fila: _Fila
+async def test_conferir_e_ver_para_quem_ve_a_tabela(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    make_user,
+    cenario,
+    auth_as: Callable,
+    fila: _Fila,
+    monkeypatch,
 ):
     """M-3, 17/11/2026: o cartão vermelho e o (!) são de todos que veem a
-    Tabela — o GET vale para `tabela_precos` (ver); conferir continua só do
-    administrador (o teste da cerca de equipe está em
-    test_pricing_conferencia_margem.py)."""
-    vendedor = await make_user(role=UserRole.USER, permissions=PERM_PRECOS)
+    Tabela — o GET vale para `tabela_precos` (ver). M-7, 18/11/2026: conferir
+    também; a margem continua só do administrador (o teste da cerca de equipe
+    está em test_pricing_conferencia_margem.py)."""
+    monkeypatch.setattr(get_settings(), "env", "production")
+    vendedor = await make_user(role=UserRole.USER, permissions=PERM_VER)
     auth_as(vendedor)
     r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
-    assert r.status_code == 403
+    assert r.status_code == 201, r.text
+    job_id = r.json()["job_id"]
+    assert fila.jobs == [("conferir_precos_run", job_id, "celular", str(vendedor.id))]
+    job = await db.get(BackgroundJob, uuid.UUID(job_id))
+    assert job.created_by == vendedor.id
+    # O balão dele mostra o andamento (o job vem, sem o resumo).
     r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
     assert r.status_code == 200, r.text
-    assert (r.json()["pode_conferir"], r.json()["margem"]["pode_editar"]) == (False, False)
+    corpo = r.json()
+    assert (corpo["pode_conferir"], corpo["margem"]["pode_editar"]) == (True, False)
+    assert (corpo["job"]["id"], corpo["job"]["status"], corpo["job"]["result"]) == (
+        job_id,
+        "pending",
+        {},
+    )
+    # O /api/jobs não mostra a conferência a quem não é administrador (o
+    # resumo do departamento inteiro iria junto); ao administrador, sim.
+    assert (await client.get(f"/api/jobs/{job_id}/status")).status_code == 404
+    assert (await client.get(f"/api/jobs/{job_id}")).status_code == 404
+    lista = (await client.get("/api/jobs")).json()
+    assert lista["total"] == 0 and lista["items"] == []
+    # Outra pessoa (o administrador) clica no mesmo departamento: o aviso de sempre.
+    auth_as(admin)
+    r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
+    assert r.json()["detail"] == {"code": "conferencia_em_andamento", "job_id": job_id}
+    assert (await client.get(f"/api/jobs/{job_id}/status")).status_code == 200
+    assert len(fila.jobs) == 1
+
     sem_tabela = await make_user(role=UserRole.USER, permissions={})
     auth_as(sem_tabela)
     r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
     assert r.status_code == 403
-    assert fila.jobs == []
+    r = await client.post("/api/pricing/conferencia", json={"department": "celular"})
+    assert r.status_code == 403
+    assert len(fila.jobs) == 1
 
 
 @pytest.mark.asyncio

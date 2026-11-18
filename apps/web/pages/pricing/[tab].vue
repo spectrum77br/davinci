@@ -82,10 +82,12 @@ const canEditContas = useCan('tabela_precos_contas', 'edit')
 const canDeleteContas = useCan('tabela_precos_contas', 'delete')
 const canEditProdutos = useCan('tabela_precos_produtos', 'edit')
 const canDeleteProdutos = useCan('tabela_precos_produtos', 'delete')
-// Conferência de preços dos anúncios (02/11/2026): os botões "Margem" e
-// "Conferir anúncios" são só do administrador. Desde o M-3 (17/11/2026) o
-// resultado — cartão vermelho e "(!) anúncio X" — aparece para todos que
-// veem a Tabela. O useCan libera tudo para admin, então aqui é o papel mesmo.
+// Conferência de preços dos anúncios (02/11/2026): o botão "Margem" é só do
+// administrador. Desde o M-3 (17/11/2026) o resultado — cartão vermelho e
+// "(!) anúncio X" — aparece para todos que veem a Tabela; desde o M-7
+// (18/11/2026) "Conferir anúncios" também é de todos e o campo "Reposição
+// [N] dias" da barra é só do administrador. O useCan libera tudo para admin,
+// então aqui é o papel mesmo.
 const isAdmin = useIsAdmin()
 
 // Departments + their subtypes are loaded from /api/segments at boot.
@@ -2668,9 +2670,11 @@ function tituloReposicao(prodId: string): string {
 // margem de erro em relação ao preço da Tabela. Mudar a margem não relê
 // nada: só recalcula na tela.
 // M-2/M-3 (17/11/2026): a leitura vale para todos que veem a Tabela (o
-// servidor só manda as células das contas que a pessoa vê na grade); os
-// botões "Margem" e "Conferir anúncios" continuam só do administrador. A
-// margem saiu do navegador e foi para o servidor (Geral + por produto).
+// servidor só manda as células das contas que a pessoa vê na grade); o
+// botão "Margem" continua só do administrador. A margem saiu do navegador e
+// foi para o servidor (Geral + por produto). M-7 (18/11/2026): "Conferir
+// anúncios" é de todos; quem não é administrador vê no balão a data e o
+// andamento, sem as contas que não leram (o servidor não manda o resumo).
 type AnuncioConferido = {
   anuncio: string
   variacao: string | null
@@ -2721,7 +2725,7 @@ type MargemConferencia = {
   pode_editar: boolean
 }
 // `ultimo_concluido`: o último job do departamento que terminou bem.
-// `margem` e `pode_conferir` (= administrador) vêm desde o M-2.
+// `margem` e `pode_conferir` vêm desde o M-2 (pode_conferir = todos desde o M-7).
 type ConferenciaResposta = {
   job: JobConferencia | null
   ultimo_concluido: string | null
@@ -2813,22 +2817,52 @@ async function carregarConferencia() {
   agendarConferencia()
 }
 
-// Enquanto o job roda: a cada 4 s só o andamento (leve, /api/jobs/{id}/status);
-// as células (resposta grande, MBs na mala) a cada 5 voltas e no fim — as
-// contas vão chegando aos poucos. Quem não é administrador não lê o job (o
-// /api/jobs só mostra os da própria pessoa): relê a conferência inteira, a
-// cada 30 s, até ela terminar.
+// Administrador, com o job rodando: a cada 4 s só o andamento (leve,
+// /api/jobs/{id}/status); as células (resposta grande, MBs na mala) a cada 5
+// voltas e no fim — as contas vão chegando aos poucos.
+// M-7 (18/11/2026): no resto do tempo, e para quem não é administrador (o
+// /api/jobs não mostra a conferência a ele), a consulta de 30 s. Só com a
+// aba Tabela aberta: fora dela (ou fora da página) o timer para.
 const VOLTAS_ATE_RELER_CELULAS = 5
+const INTERVALO_CONSULTA = 30000
 let voltasConferencia = 0
 function agendarConferencia() {
   if (timerConferencia) clearTimeout(timerConferencia)
   timerConferencia = null
-  if (desmontado) return
-  if (import.meta.client && conferenciaRodando.value && tab.value === 'tabela') {
-    timerConferencia = isAdmin.value
-      ? setTimeout(() => void acompanharConferencia(), 4000)
-      : setTimeout(() => void carregarConferencia(), 30000)
+  if (desmontado || !import.meta.client || tab.value !== 'tabela') return
+  timerConferencia = conferenciaRodando.value && isAdmin.value
+    ? setTimeout(() => void acompanharConferencia(), 4000)
+    : setTimeout(() => void consultarConferencia(), INTERVALO_CONSULTA)
+}
+
+// A consulta de 30 s (M-7): leve, só o último job (`celulas=false`). Vale
+// para a conferência de qualquer pessoa. Rodando: atualiza o andamento do
+// balão. Quando a que rodava termina, ou aparece outra já terminada, relê a
+// conferência inteira: os (!) e os cartões se atualizam sozinhos, sem
+// recarregar a página nem a grade.
+async function consultarConferencia() {
+  const antes = conferencia.value
+  // Sem dados ou com a releitura falhando: relê tudo.
+  if (!antes || releitura.value !== 'ok') return carregarConferencia()
+  const seq = seqConferencia
+  try {
+    const r = await api<ConferenciaResposta>(
+      `/api/pricing/conferencia?department=${encodeURIComponent(department.value)}&celulas=false`,
+    )
+    // Uma leitura inteira (troca de departamento, clique) passou na frente.
+    if (desmontado || seq !== seqConferencia || conferencia.value !== antes) return
+    const job = r.job
+    const rodando = job?.status === 'pending' || job?.status === 'running'
+    const terminou = !rodando && (job?.id !== antes.job?.id || job?.status !== antes.job?.status)
+    if (terminou || r.ultimo_concluido !== antes.ultimo_concluido) {
+      await carregarConferencia()
+      return
+    }
+    antes.job = job
+  } catch {
+    /* rede piscou: tenta de novo na próxima volta */
   }
+  agendarConferencia()
 }
 
 async function acompanharConferencia() {
@@ -2864,7 +2898,7 @@ onBeforeUnmount(() => {
 })
 
 async function conferirAnuncios() {
-  if (!isAdmin.value || conferenciaIniciando.value || conferenciaRodando.value) return
+  if (conferenciaIniciando.value || conferenciaRodando.value) return
   conferenciaIniciando.value = true
   try {
     await api('/api/pricing/conferencia', { method: 'POST', body: { department: department.value } })
@@ -4405,6 +4439,10 @@ watch(
     if (t === 'tabela') {
       carregarExtrasDaTabela()
       await loadGrid()
+    } else if (timerConferencia) {
+      // M-7: fora da aba Tabela a consulta de 30 s para (volta ao voltar).
+      clearTimeout(timerConferencia)
+      timerConferencia = null
     }
     if (t === 'produtos') {
       loadAudit()
@@ -6147,8 +6185,11 @@ watch(department, async () => {
         </button>
         <!-- Reposição única (M-2): o MESMO prazo da Importação, por
              departamento — mudar aqui muda lá. Reposição = Estoque − vendas
-             30d × Reposição ÷ 30. A explicação da conta está no balão. -->
+             30d × Reposição ÷ 30. A explicação da conta está no balão.
+             M-7 (18/11/2026): o campo é só do administrador; a coluna
+             Reposição da grade continua para todos (Layout → Estoque). -->
         <label
+          v-if="isAdmin"
           class="inline-flex items-center gap-1 text-sm"
           data-prazo-reposicao
           :title="tituloPrazos"
@@ -6285,10 +6326,11 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
-        <!-- Conferir anúncios: só administrador. O andamento, a última
-             conferência e os erros ficam no balão do botão. -->
+        <!-- Conferir anúncios: de todos que veem a Tabela desde o M-7
+             (18/11/2026). O andamento, a última conferência e os erros
+             ficam no balão do botão (as contas que não leram, só para o
+             administrador: o servidor não manda o resumo aos outros). -->
         <button
-          v-if="isAdmin"
           class="btn btn-sm"
           data-acao="conferir-anuncios"
           :disabled="conferenciaIniciando || conferenciaRodando"

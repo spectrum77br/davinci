@@ -41,7 +41,13 @@ def _scope_jobs(user: User):
 
     if user.role == UserRole.ADMIN:
         return true()
-    return BackgroundJob.created_by == user.id
+    # M-7 (18/11/2026): a conferência de preços é do departamento inteiro (o
+    # resumo traz contas de todas as equipes); quem não é ADM e a iniciou
+    # acompanha pelo GET /api/pricing/conferencia, que respeita a cerca.
+    return and_(
+        BackgroundJob.created_by == user.id,
+        BackgroundJob.type != BackgroundJobType.CONFERIR_PRECOS,
+    )
 
 
 @router.get("/jobs", response_model=JobPage)
