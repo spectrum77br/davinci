@@ -139,6 +139,8 @@ type Item = {
   atendimentoOnly?: boolean
   // /app-uranyx: só quem vem com `app_uranyx: true` no /me (nem todo admin).
   appUranyxOnly?: boolean
+  // DaVinci ERP: só quem vem com `erp: true` no /me (por enquanto thorfinn e heisenberg).
+  erpOnly?: boolean
   // Some do menu de quem não tem `view` no `resource` (admin sempre vê). Os
   // itens antigos com `resource` aparecem para todos e a página manda para o
   // 403; o de Garantias (07/10/2026) já nasce escondido de quem não consulta.
@@ -200,7 +202,7 @@ const sections = computed<Section[]>(() => [
       { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', tambemCom: ['margem'], soComPermissao: true },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
       // ERP próprio (18/11/2026): v1 em modo consulta (o Bling manda em tudo), só admin.
-      { to: '/erp', label: 'DaVinci ERP', icon: Boxes, adminOnly: true, external: true },
+      { to: '/erp', label: 'DaVinci ERP', icon: Boxes, adminOnly: true, erpOnly: true, external: true },
     ],
   },
   {
@@ -344,6 +346,7 @@ const visibleSections = computed(() => {
         if (it.mudancasOnly && auth.user?.mudancas !== true) return false
         if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
         if (it.appUranyxOnly && auth.user?.app_uranyx !== true) return false
+        if (it.erpOnly && auth.user?.erp !== true) return false
         if (
           it.soComPermissao && it.resource && !auth.isAdmin
           && ![it.resource, ...(it.tambemCom ?? [])].some((r) => auth.user?.permissions?.[r]?.view === true)

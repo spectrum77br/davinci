@@ -956,6 +956,10 @@ class Settings(BaseSettings):
     # DESLIGADO para todo mundo — ao contrário do ATENDIMENTO_USUARIOS, em que
     # vazio libera todo admin.
     app_uranyx_usuarios: str = ""
+    # DaVinci ERP (Marco, 18/11/2026): quem abre /erp, só entre os admins, e-mails
+    # separados por vírgula. Vazio = a mesma lista do App Uranyx (hoje thorfinn e
+    # heisenberg), para não depender de mexer no .env agora.
+    erp_usuarios: str = ""
 
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints

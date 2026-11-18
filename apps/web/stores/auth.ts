@@ -33,6 +33,9 @@ export type AuthUser = {
   // Módulo App Uranyx (06/10/2026): true só para admin que está em
   // APP_URANYX_USUARIOS no .env da api (hoje thorfinn e heisenberg).
   app_uranyx?: boolean
+  // DaVinci ERP (18/11/2026): true só para quem o portão do /erp deixa entrar
+  // (ERP_USUARIOS, ou a lista do App Uranyx enquanto vazia: thorfinn e heisenberg).
+  erp?: boolean
 }
 
 export const useAuthStore = defineStore('auth', {
