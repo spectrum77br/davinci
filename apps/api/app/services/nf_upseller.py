@@ -84,6 +84,9 @@ _LOJA_UPSELLER = {
     # "jlas" e "kia/fiore".
     "atlas": "jlas",
     "fiore": "kia/fiore",
+    # Eduardo 18/11: a loja da Shopee Lucas Mei no Upseller chama "sl lucas"
+    # (o avulso do 309584 saiu "lucas mei" e não bateu com a lista).
+    "lucas mei": "sl lucas",
 }
 
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").

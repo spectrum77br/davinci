@@ -208,6 +208,9 @@ def test_loja_upseller_renomeia_victor_mei():
     # importação do pedido é recusada pela lista suspensa.
     assert nf_upseller.loja_upseller("kia") == "kia/fiore"
     assert nf_upseller.loja_upseller(" Kia ") == "kia/fiore"
+    # Lucas Mei: no Upseller a loja chama "sl lucas" (Eduardo 18/11).
+    assert nf_upseller.loja_upseller("lucas mei") == "sl lucas"
+    assert nf_upseller.loja_upseller(" Lucas Mei ") == "sl lucas"
     assert nf_upseller.loja_upseller("poofy") == "poofy"
     assert nf_upseller.loja_upseller(None) == ""
 
