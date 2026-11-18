@@ -181,10 +181,12 @@ def _cliente_ml() -> ml_mod.MercadoLivreClient:
 
 @pytest_asyncio.fixture
 async def dono(db: AsyncSession) -> User:
+    # Administrador: desde o M-10 (18/11/2026) kit, comissão, margens e fretes
+    # da conta (inclusive os do catálogo) só o ADM vê e muda.
     u = User(
         open_id=f"email:cat-{uuid.uuid4().hex[:6]}@davinci-test.com",
         email=f"cat-{uuid.uuid4().hex[:6]}@davinci-test.com",
-        role=UserRole.USER,
+        role=UserRole.ADMIN,
         status=UserStatus.ACTIVE,
         permissions=PERM_FULL,
     )

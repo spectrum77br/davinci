@@ -112,6 +112,9 @@ class EquipeDaConta(BaseModel):
 
 class PricingAccountOut(PricingAccountBase):
     model_config = ConfigDict(from_attributes=True)
+    # M-10 (18/11/2026): kit, comissão, margens e fretes saem null para quem
+    # não é administrador (routers/pricing.py, _CAMPOS_SO_ADMIN).
+    kit_number: int | None = None
     id: UUID
     user_id: UUID
     has_password: bool = False

@@ -359,7 +359,9 @@ type Account = {
   platform: string
   listing_type: string | null
   department: string
-  kit_number: number
+  // Kit, comissão, margens e fretes: null para quem não é ADM (M-10,
+  // 18/11/2026) — o /accounts e o /grid não mandam; o preço vem pronto.
+  kit_number: number | null
   commission: string | number | null
   margin1: string | number | null
   shipping1: string | number | null
@@ -603,6 +605,13 @@ const accountsCurrent = computed(() => accountsByDept.value[department.value] ??
 // títulos do cabeçalho). Desenhar sempre 5 desalinhava a tabela quando um
 // tipo é desativado (Mala sem "Queima de estoque", 07/10/2026).
 const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).length)
+
+// Colunas da tabela da aba Contas (o colspan das linhas de grupo e de aviso):
+// Nome, Plataforma, Tipo ML, Catálogo ML, Equipe, [Kit, Comissão e os pares
+// marg/frete — só ADM, M-10], as anotações e a lixeira.
+const colunasContas = computed(() =>
+  5 + (isAdmin.value ? 2 + nTiposAba.value * 2 : 0) + STORE_NOTE_FIELDS.length + 1,
+)
 
 // SSH-style contas filters
 const contasSearch = ref('')
@@ -1478,9 +1487,12 @@ async function submitNewAcc() {
       name: newAcc.name.trim(),
       platform: newAcc.platform,
       department: department.value,
-      kit_number: newAcc.kit_number || 1,
     }
-    if (newAcc.commission) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
+    // Kit e comissão só o ADM manda (M-10): sem eles a conta nasce no Kit 1.
+    if (isAdmin.value) {
+      body.kit_number = newAcc.kit_number || 1
+      if (newAcc.commission) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
+    }
     const created = await api<Account>('/api/pricing/accounts', { method: 'POST', body })
     accounts.value.push(created)
     // Conta nova nasce sem loja (= sem equipe): se os filtros a esconderiam,
@@ -2036,7 +2048,10 @@ async function _patchProduct(id: string, field: string, raw: string) {
     // prices. A full loadGrid() here used to occasionally overwrite the
     // freshly-saved value with stale data, producing the "I typed 20 and
     // it snapped back to 4000" bug.
-    if (mudaPreco) recomputeCellsForProduct(id)
+    if (mudaPreco) {
+      if (isAdmin.value) recomputeCellsForProduct(id)
+      else if (grid.value) void loadGrid()
+    }
   } catch (e: any) {
     productsErr.value = erroDoProduto(e?.data?.detail?.code)
     // Revert the optimistic update on failure by re-fetching.
@@ -4019,10 +4034,15 @@ const accountGroups = computed<
   let currentKey = ''
   for (const acc of accs) {
     const catalogo = ehCatalogo(acc)
-    const key = catalogo ? `${acc.platform}-catalogo` : `${acc.platform}-kit${acc.kit_number}`
+    // Quem não é ADM não recebe o kit (M-10): um grupo por plataforma, com o
+    // nome do filtro Plataforma ▾ ("ML Kit", "Shopee"...).
+    const semKit = acc.kit_number == null
+    const key = catalogo
+      ? `${acc.platform}-catalogo`
+      : semKit ? chavePlataforma(acc) : `${acc.platform}-kit${acc.kit_number}`
     const label = catalogo
       ? `${platformLabel(acc.platform)} Catálogo`
-      : `${platformLabel(acc.platform)} kit ${acc.kit_number}`
+      : semKit ? rotuloPlataforma(acc) : `${platformLabel(acc.platform)} kit ${acc.kit_number}`
     if (key !== currentKey) {
       groups.push({ label, platform: acc.platform, catalogo, accounts: [acc] })
       currentKey = key
@@ -4066,7 +4086,7 @@ watch(
 )
 
 // Feature 9: negative margin helpers + counter
-function getKitCost(prod: PricingProduct, kitNumber: number): number {
+function getKitCost(prod: PricingProduct, kitNumber: number | null): number {
   const key = `cost_kit${Math.max(1, Math.min(8, kitNumber || 1))}` as keyof PricingProduct
   const v = prod[key] ?? prod.cost_kit1
   return Number(v ?? 0)
@@ -4123,7 +4143,9 @@ function computePrice(acc: Account, prod: PricingProduct): number | null {
 // cell_status='auto' and no price_override are just leftover rows from the
 // SSH import and should still recompute.
 function recomputeCellsForProduct(prodId: string) {
-  if (!grid.value) return
+  // Sem comissão, margens, fretes e kit (quem não é ADM, M-10) não dá para
+  // recalcular aqui: o preço novo vem do servidor (loadGrid depois de gravar).
+  if (!grid.value || !isAdmin.value) return
   const prod = grid.value.products.find((x) => x.id === prodId)
   if (!prod) return
   for (const acc of grid.value.accounts) {
@@ -4551,7 +4573,7 @@ watch(department, async () => {
             Contas de Venda — {{ DEPARTMENTS.find(d => d.value === department)?.label }}
           </h3>
           <p class="text-xs text-muted-foreground">
-            {{ accountsCurrent.length }} conta(s) com {{ nTiposAba }} pares margem/frete por tipo — clique para editar
+            {{ accountsCurrent.length }} conta(s)<template v-if="isAdmin"> com {{ nTiposAba }} pares margem/frete por tipo</template> — clique para editar
           </p>
         </div>
         <div class="flex gap-2">
@@ -4686,19 +4708,23 @@ watch(department, async () => {
                 class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[70px]"
                 title="Número da equipe que vê esta conta (1, 2 ou 3, a mesma da tela de Lojas), pela loja ligada a ela — a que separa o que cada vendedor enxerga."
               >Equipe</th>
-              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12">Kit</th>
-              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20">Comissão</th>
+              <!-- Kit, Comissão e os pares marg/frete: só ADM (M-10, 18/11/2026). -->
+              <template v-if="isAdmin">
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12" data-coluna-so-admin="kit">Kit</th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20" data-coluna-so-admin="comissao">Comissão</th>
               <th
                 v-for="(label, i) in TYPE_HEADERS[department] ?? []"
                 :key="i"
                 colSpan="2"
                 class="text-center px-1 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
+                data-coluna-so-admin="margem-frete"
               >
                 <div>{{ label }}</div>
                 <div class="text-muted-foreground flex justify-center gap-3">
                   <span>marg</span><span>frete</span>
                 </div>
               </th>
+              </template>
               <th
                 v-for="f in STORE_NOTE_FIELDS"
                 :key="`h-${f.key}`"
@@ -4709,12 +4735,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="accountsLoading && !accounts.length">
-              <td colSpan="30" class="text-center py-6 text-muted-foreground">
+              <td :colspan="colunasContas" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!accountsFiltered.length && !showAddAcc">
-              <td colSpan="30" class="text-center py-6 text-muted-foreground">
+              <td :colspan="colunasContas" class="text-center py-6 text-muted-foreground">
                 {{ accountsCurrent.length ? 'Nenhuma conta corresponde aos filtros.' : 'Nenhuma conta neste departamento.' }}
               </td>
             </tr>
@@ -4741,11 +4767,13 @@ watch(department, async () => {
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <template v-if="isAdmin">
               <td class="border border-border px-1 py-1">
                 <input
                   v-model.number="newAcc.kit_number"
                   type="text" inputmode="numeric"
                   class="w-full text-xs border rounded px-1 py-1 bg-background text-center"
+                  data-campo="novo-kit"
                 />
               </td>
               <td class="border border-border px-1 py-1">
@@ -4754,10 +4782,12 @@ watch(department, async () => {
                   type="text" inputmode="decimal"
                   placeholder="11"
                   class="w-full text-xs border rounded px-1 py-1 bg-background text-center"
+                  data-campo="nova-comissao"
                   @keydown.enter="submitNewAcc"
                 />
               </td>
               <td v-for="i in nTiposAba * 2" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              </template>
               <td v-for="i in STORE_NOTE_FIELDS.length" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
@@ -4775,7 +4805,7 @@ watch(department, async () => {
             <!-- data rows grouped by platform (SSH-style) -->
             <template v-for="group in accountsGrouped" :key="group.platform">
               <tr class="bg-muted/40">
-                <td colSpan="30" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase">
+                <td :colspan="colunasContas" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase" data-grupo-contas>
                   {{ group.label }} · {{ group.rows.length }} CONTA(S)
                 </td>
               </tr>
@@ -4940,7 +4970,7 @@ watch(department, async () => {
                     {{ catalogoAtivo(acc) ? 'Ligado' : 'Desligado' }}
                   </button>
                   <button
-                    v-if="catalogoAtivo(acc)"
+                    v-if="catalogoAtivo(acc) && isAdmin"
                     type="button"
                     data-margens-catalogo
                     class="mt-1 block mx-auto whitespace-nowrap text-[10px] hover:underline"
@@ -4964,6 +4994,8 @@ watch(department, async () => {
                 :class="{ 'text-muted-foreground': !equipesDaConta(acc).length }"
                 data-coluna-equipe
               >{{ rotuloEquipes(acc) }}</td>
+              <!-- kit, comissão e pares marg/frete: só ADM (M-10) -->
+              <template v-if="isAdmin">
               <!-- kit -->
               <td
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
@@ -5045,6 +5077,7 @@ watch(department, async () => {
                   />
                   <span v-else>{{ fmtShipping((acc as any)[`shipping${t}`]) }}</span>
                 </td>
+              </template>
               </template>
               <!-- desconto / afiliado / ads / cupom / obs -->
               <template v-for="f in STORE_NOTE_FIELDS" :key="`c-${f.key}`">
@@ -6345,7 +6378,8 @@ watch(department, async () => {
       </div>
 
       <div
-        v-if="negativeMarginCount > 0"
+        v-if="isAdmin && negativeMarginCount > 0"
+        data-aviso-margem-negativa
         class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 flex items-center gap-2"
       >
         <AlertCircle class="h-4 w-4" />

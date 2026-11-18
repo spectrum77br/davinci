@@ -45,6 +45,7 @@ from app.models import (
     Segment,
     StoreInfo,
     User,
+    UserRole,
 )
 from app.schemas.pricing import (
     AccountSetDepartmentIn,
@@ -276,6 +277,43 @@ _CAMPOS_ESPELHADOS_NA_FILHA = (
 # Por tipo; NULL = usa a margem da conta base.
 _MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
 
+# M-10 (18/11/2026): kit, comissão, margens e fretes da conta são só do
+# administrador. Para os demais, o /accounts, o /grid e as respostas de uma
+# conta saem com esses campos vazios (null) — inclusive os que a coluna de
+# catálogo herda da base e as margens próprias dela —, e o POST/PATCH recusa
+# mudá-los. O preço da grade continua calculado aqui com os números de verdade.
+_CAMPOS_SO_ADMIN = (
+    "kit_number",
+    "commission",
+    "margin1", "shipping1",
+    "margin2", "shipping2",
+    "margin3", "shipping3",
+    "margin4", "shipping4",
+    "margin5", "shipping5",
+)
+
+
+def _e_admin(user: User) -> bool:
+    return user.role == UserRole.ADMIN
+
+
+def _recusar_campos_so_admin(user: User, body: PricingAccountCreate | PricingAccountPatch) -> None:
+    """Quem não é ADM não muda kit, comissão, margens nem fretes (M-10): o
+    pedido que traz algum deles é recusado inteiro e nada muda. Pedido sem
+    eles (outro campo) não toca nesses valores."""
+    if _e_admin(user):
+        return
+    campos = sorted(body.model_fields_set & set(_CAMPOS_SO_ADMIN))
+    if campos:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "campos_so_admin",
+                "message": "Kit, comissão, margens e fretes só o administrador altera",
+                "campos": campos,
+            },
+        )
+
 
 def _rotulo_equipe(sales_team: int) -> str:
     """"Equipe 1/2/3" (03/11/2026: só o número, como em Lojas); código fora
@@ -292,11 +330,13 @@ def _account_out(
     base: PricingAccount | None = None,
     conta_catalogo_id: UUID | None = None,
     equipes: list[int] | None = None,
+    admin: bool,
 ) -> PricingAccountOut:
     """`base`: a conta de kit de uma coluna de catálogo — a filha sai com os
     números e anotações dela, e as margens próprias em `margens_catalogo`.
     `conta_catalogo_id`: a filha de uma conta de kit (catálogo ligado).
-    `equipes`: os números das equipes que veem a conta (`_equipes_das_contas`)."""
+    `equipes`: os números das equipes que veem a conta (`_equipes_das_contas`).
+    `admin`: False = sai sem kit, comissão, margens e fretes (M-10)."""
     out = PricingAccountOut.model_validate(row)
     out.equipes = [EquipeDaConta(numero=n, nome=_rotulo_equipe(n)) for n in equipes or ()]
     out.has_password = bool(row.password_enc)
@@ -315,6 +355,10 @@ def _account_out(
             setattr(out, campo, getattr(base, campo))
     if row.canal != CANAL_CATALOGO:
         out.conta_catalogo_id = conta_catalogo_id
+    if not admin:
+        for campo in _CAMPOS_SO_ADMIN:
+            setattr(out, campo, None)
+        out.margens_catalogo = None
     return out
 
 
@@ -372,6 +416,8 @@ def _accounts_out(
     roots_by_id: dict[UUID, str],
     names_by_id: dict[UUID, str] | None = None,
     equipes_por_conta: dict[UUID, list[int]] | None = None,
+    *,
+    admin: bool,
 ) -> list[PricingAccountOut]:
     por_id = {r.id: r for r in rows}
     filha_de = {r.conta_base_id: r.id for r in rows if r.canal == CANAL_CATALOGO}
@@ -384,6 +430,7 @@ def _accounts_out(
             base=por_id.get(r.conta_base_id) if r.canal == CANAL_CATALOGO else None,
             conta_catalogo_id=filha_de.get(r.id),
             equipes=equipes_por_conta.get(r.id),
+            admin=admin,
         )
         for r in rows
     ]
@@ -405,13 +452,17 @@ async def _uma_conta_out(
     row: PricingAccount,
     roots_by_id: dict[UUID, str],
     names_by_id: dict[UUID, str] | None = None,
+    *,
+    admin: bool,
 ) -> PricingAccountOut:
     """Saída de UMA conta (create/patch/department), com a base (se for
     filha) ou a filha (se for de kit) já resolvida."""
     equipes = (await _equipes_das_contas(session, [row])).get(row.id)
     if row.canal == CANAL_CATALOGO:
         base = await session.get(PricingAccount, row.conta_base_id)
-        return _account_out(row, roots_by_id, names_by_id, base=base, equipes=equipes)
+        return _account_out(
+            row, roots_by_id, names_by_id, base=base, equipes=equipes, admin=admin
+        )
     filha = await _filha_de(session, row.id)
     return _account_out(
         row,
@@ -419,6 +470,7 @@ async def _uma_conta_out(
         names_by_id,
         conta_catalogo_id=filha.id if filha else None,
         equipes=equipes,
+        admin=admin,
     )
 
 
@@ -481,7 +533,9 @@ async def _patch_margens_da_filha(
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
     equipes = (await _equipes_das_contas(session, [filha, base])).get(filha.id)
-    return _account_out(filha, roots_by_id, names_by_id, base=base, equipes=equipes)
+    return _account_out(
+        filha, roots_by_id, names_by_id, base=base, equipes=equipes, admin=_e_admin(user)
+    )
 
 
 def _product_out(
@@ -626,7 +680,7 @@ async def list_accounts(
     rows = _so_filhas_com_base((await session.execute(stmt)).scalars().all())
     names_by_id = await _segment_names_by_id(session)
     equipes = await _equipes_das_contas(session, rows)
-    return _accounts_out(rows, roots_by_id, names_by_id, equipes)
+    return _accounts_out(rows, roots_by_id, names_by_id, equipes, admin=_e_admin(user))
 
 
 @router.post(
@@ -641,6 +695,7 @@ async def create_account(
         User, Depends(require_permission("tabela_precos_contas", "edit"))
     ],
 ) -> PricingAccountOut:
+    _recusar_campos_so_admin(user, body)
     data = body.model_dump(exclude={"password", "department"})
     data["platform"] = _coerce_platform(body.platform)
     # Resolve segment_id: prefer explicit, fall back to department slug, then
@@ -664,7 +719,9 @@ async def create_account(
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
+    return await _uma_conta_out(
+        session, row, roots_by_id, names_by_id, admin=_e_admin(user)
+    )
 
 
 @router.patch("/accounts/{account_id}", response_model=PricingAccountOut)
@@ -676,6 +733,7 @@ async def patch_account(
         User, Depends(require_permission("tabela_precos_contas", "edit"))
     ],
 ) -> PricingAccountOut:
+    _recusar_campos_so_admin(user, body)
     row = (
         await session.execute(
             select(PricingAccount).where(
@@ -724,7 +782,9 @@ async def patch_account(
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
+    return await _uma_conta_out(
+        session, row, roots_by_id, names_by_id, admin=_e_admin(user)
+    )
 
 
 @router.delete(
@@ -1637,7 +1697,7 @@ async def get_grid(
     # Sem `equipes` aqui: só a aba Contas (/accounts) mostra a coluna, e a
     # grade é carregada a toda hora (03/11/2026).
     return PricingGridOut(
-        accounts=_accounts_out(accounts, roots_by_id, names_by_id),
+        accounts=_accounts_out(accounts, roots_by_id, names_by_id, admin=_e_admin(user)),
         products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )
@@ -2507,7 +2567,9 @@ async def set_account_department(
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
+    return await _uma_conta_out(
+        session, row, roots_by_id, names_by_id, admin=_e_admin(user)
+    )
 
 
 @router.post("/accounts/{account_id}/catalogo", response_model=ContaCatalogoOut)
@@ -2596,9 +2658,17 @@ async def definir_catalogo_da_conta(
             names_by_id,
             conta_catalogo_id=filha.id if filha else None,
             equipes=equipes.get(base.id),
+            admin=_e_admin(user),
         ),
         conta_catalogo=(
-            _account_out(filha, roots_by_id, names_by_id, base=base, equipes=equipes.get(filha.id))
+            _account_out(
+                filha,
+                roots_by_id,
+                names_by_id,
+                base=base,
+                equipes=equipes.get(filha.id),
+                admin=_e_admin(user),
+            )
             if filha
             else None
         ),
@@ -3023,7 +3093,9 @@ async def set_store_info_department(
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
+    return await _uma_conta_out(
+        session, row, roots_by_id, names_by_id, admin=_e_admin(user)
+    )
 
 
 async def _ensure_store_pricing_account(

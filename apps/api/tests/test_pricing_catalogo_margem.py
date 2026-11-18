@@ -346,21 +346,24 @@ async def test_margem_propria_permissao_e_equipe(
     auth_as(leitor)
     assert (await _margem(client, filhas[1], margin1="0.4")).status_code == 403
 
-    # Equipe 1: a coluna de catálogo da equipe 2 não existe para ela.
+    # M-10 (18/11/2026): margem só o administrador muda — quem não é ADM,
+    # mesmo com "editar Contas", ouve 403 na coluna da própria equipe também.
     auth_as(membro)
-    r = await _margem(client, filhas[2], margin1="0.4")
-    assert r.status_code == 404, r.text
-    assert r.json()["detail"]["code"] == "account_not_found"
-    r = await _margem(client, filhas[1], margin1="0.4")
-    assert r.status_code == 200, r.text
+    for fid in filhas.values():
+        r = await _margem(client, fid, margin1="0.4")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "campos_so_admin"
+
+    auth_as(dono)
+    assert (await _margem(client, filhas[2], margin1="0.4")).status_code == 200
 
     linhas = {
         eq: await db.get(PricingAccount, uuid.UUID(fid)) for eq, fid in filhas.items()
     }
     for linha in linhas.values():
         await db.refresh(linha)
-    assert linhas[1].margin1 == Decimal("0.4")
-    assert linhas[2].margin1 is None
+    assert linhas[1].margin1 is None
+    assert linhas[2].margin1 == Decimal("0.4")
 
 
 # =========================================================== histórico
