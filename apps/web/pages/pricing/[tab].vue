@@ -604,72 +604,80 @@ const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).le
 
 // SSH-style contas filters
 const contasSearch = ref('')
-const contasPlatformFilter = ref<string>('')
-// Filtro de equipe (03/11/2026): '' = todas, 'sem' = contas sem equipe, ou o
-// número da equipe ('101'...). Uma conta vista por duas equipes entra nas duas.
+// Filtros Plataforma ▾ e Equipe ▾ (M-9, 18/11/2026; antes eram select):
+// caixas de marcar, com "Marcar todas" e "Limpar". Guardam o que está
+// DESMARCADO: vazio = tudo marcado (o começo, e como voltam ao recarregar a
+// página); opção que aparece ao trocar de aba já vem marcada.
+const contasPlataformasDesmarcadas = ref<string[]>([])
+// Equipe: o número da equipe ('101'...) ou 'sem' = contas sem equipe. Uma
+// conta vista por duas equipes aparece se qualquer uma delas estiver marcada.
 const SEM_EQUIPE = 'sem'
-const contasEquipeFilter = ref<string>('')
+const contasEquipesDesmarcadas = ref<string[]>([])
+
+// Marca/desmarca uma opção do filtro (devolve a lista nova).
+function alternarNaLista(lista: string[], valor: string): string[] {
+  return lista.includes(valor) ? lista.filter((v) => v !== valor) : [...lista, valor]
+}
 
 function equipesDaConta(a: Account): EquipeDaConta[] {
   return a.equipes ?? []
 }
 
-function rotuloEquipes(a: Account): string {
-  const eq = equipesDaConta(a)
-  return eq.length ? eq.map((e) => e.nome).join(' / ') : 'Sem equipe'
+// Só o número (M-9): "Equipe 2" → "2". Nome fora desse formato fica como veio.
+function numeroDaEquipe(e: EquipeDaConta): string {
+  return e.nome.replace(/^Equipe\s+/i, '')
 }
 
-function passaFiltroEquipe(a: Account, f: string): boolean {
-  if (!f) return true
+function rotuloEquipes(a: Account): string {
   const eq = equipesDaConta(a)
-  if (f === SEM_EQUIPE) return eq.length === 0
-  return eq.some((e) => String(e.numero) === f)
+  return eq.length ? eq.map(numeroDaEquipe).join(' / ') : 'Sem equipe'
+}
+
+// As chaves da conta no filtro: o número de cada equipe, ou 'sem'.
+function chavesEquipe(a: Account): string[] {
+  const eq = equipesDaConta(a)
+  return eq.length ? eq.map((e) => String(e.numero)) : [SEM_EQUIPE]
+}
+
+function passaFiltroEquipe(a: Account, desmarcadas: string[]): boolean {
+  if (!desmarcadas.length) return true
+  return chavesEquipe(a).some((k) => !desmarcadas.includes(k))
 }
 
 // As opções do filtro: as equipes das contas desta aba (celular/mala/eletro),
-// em ordem de número, e "Sem equipe" se houver conta sem nenhuma. A equipe já
-// escolhida fica na lista mesmo sem conta nesta aba (o filtro sobrevive à
-// troca de aba): sem a opção, o select ficava em branco e a tabela vazia sem
-// dizer por quê. O nome vem das contas das outras abas (`todas`).
-function opcoesEquipe(contas: Account[], todas: Account[], filtro: string) {
+// em ordem de número, e "Sem equipe" no fim se houver conta sem nenhuma.
+function opcoesEquipe(contas: Account[]): { valor: string; rotulo: string }[] {
   const porNumero = new Map<number, string>()
-  let semEquipe = filtro === SEM_EQUIPE
+  let semEquipe = false
   for (const a of contas) {
     const eq = equipesDaConta(a)
     if (!eq.length) semEquipe = true
-    for (const e of eq) porNumero.set(e.numero, e.nome)
+    for (const e of eq) porNumero.set(e.numero, numeroDaEquipe(e))
   }
-  const escolhida = Number(filtro)
-  if (filtro && filtro !== SEM_EQUIPE && !porNumero.has(escolhida)) {
-    const nome = todas.flatMap(equipesDaConta).find((e) => e.numero === escolhida)?.nome
-    porNumero.set(escolhida, nome ?? `Equipe ${filtro}`)
-  }
-  return {
-    equipes: Array.from(porNumero.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([numero, nome]) => ({ numero, nome })),
-    semEquipe,
-  }
+  const out = Array.from(porNumero.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([numero, rotulo]) => ({ valor: String(numero), rotulo }))
+  if (semEquipe) out.push({ valor: SEM_EQUIPE, rotulo: 'Sem equipe' })
+  return out
 }
 
-const equipesPresentesNoDept = computed(() =>
-  opcoesEquipe(accountsCurrent.value, accounts.value, contasEquipeFilter.value))
+const equipesPresentesNoDept = computed(() => opcoesEquipe(accountsCurrent.value))
 
-// Só aparece quando há o que escolher (como no Faturamento): quem é de uma
-// equipe só vê as contas dela. Com um filtro já escolhido continua na tela,
-// para dar para voltar a "Todas as equipes" ao trocar de aba.
+// Só aparece quando há mais de uma opção (como no Faturamento): quem é de uma
+// equipe só vê as contas dela. Com uma opção desta aba desmarcada continua na
+// tela, para dar para marcar de novo (o filtro sobrevive à troca de aba).
 const mostrarFiltroEquipe = computed(() => {
-  const { equipes, semEquipe } = equipesPresentesNoDept.value
-  return equipes.length + (semEquipe ? 1 : 0) > 1 || contasEquipeFilter.value !== ''
+  const opcoes = equipesPresentesNoDept.value
+  return opcoes.length > 1 || opcoes.some((o) => contasEquipesDesmarcadas.value.includes(o.valor))
 })
 
 const accountsFiltered = computed(() => {
   const q = contasSearch.value.trim().toLowerCase()
-  const pf = contasPlatformFilter.value
-  const ef = contasEquipeFilter.value
+  const pd = contasPlataformasDesmarcadas.value
+  const ed = contasEquipesDesmarcadas.value
   return accountsCurrent.value.filter((a) => {
-    if (pf && a.platform !== pf) return false
-    if (!passaFiltroEquipe(a, ef)) return false
+    if (pd.includes(a.platform)) return false
+    if (!passaFiltroEquipe(a, ed)) return false
     if (!q) return true
     return (
       a.name.toLowerCase().includes(q) ||
@@ -1473,9 +1481,14 @@ async function submitNewAcc() {
     if (newAcc.commission) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
     const created = await api<Account>('/api/pricing/accounts', { method: 'POST', body })
     accounts.value.push(created)
-    // Conta nova nasce sem loja (= sem equipe): com um filtro de equipe que a
-    // esconderia, o filtro volta a "Todas as equipes" para ela aparecer.
-    if (!passaFiltroEquipe(created, contasEquipeFilter.value)) contasEquipeFilter.value = ''
+    // Conta nova nasce sem loja (= sem equipe): se os filtros a esconderiam,
+    // "Sem equipe" e a plataforma dela voltam a ficar marcados para ela aparecer.
+    if (!passaFiltroEquipe(created, contasEquipesDesmarcadas.value)) {
+      contasEquipesDesmarcadas.value = contasEquipesDesmarcadas.value.filter((v) => !chavesEquipe(created).includes(v))
+    }
+    if (contasPlataformasDesmarcadas.value.includes(created.platform)) {
+      contasPlataformasDesmarcadas.value = alternarNaLista(contasPlataformasDesmarcadas.value, created.platform)
+    }
     showAddAcc.value = false
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'create_failed'
@@ -1847,7 +1860,9 @@ function rotuloEmbalagens(p: PricingProduct): { texto: string; tom: 'vazio' | 'v
 }
 
 // Mesmo peso visual do badge da coluna Tabela, com borda pra parecer botão.
-const ETIQUETA_MIDIA_BASE = 'inline-flex flex-col items-center justify-center min-w-[5.5rem] px-2 py-0.5 rounded border text-[11px] font-medium leading-tight transition-colors'
+// Uma linha só (M-9): "3 fotos" e "2 vídeos" lado a lado, para a linha da
+// tabela não crescer.
+const ETIQUETA_MIDIA_BASE = 'inline-flex items-center justify-center gap-1 whitespace-nowrap min-w-[5.5rem] px-2 py-0.5 rounded border text-[11px] font-medium leading-tight transition-colors'
 function classeEtiquetaMidia(tom: 'vazio' | 'ver' | 'ambar' | 'ok' | 'enviando'): string {
   switch (tom) {
     case 'vazio': return `${ETIQUETA_MIDIA_BASE} border-dashed border-muted-foreground/40 text-muted-foreground hover:border-blue-400 hover:text-blue-700 dark:hover:text-blue-300`
@@ -4518,28 +4533,92 @@ watch(department, async () => {
           placeholder="Buscar conta..."
           class="border rounded px-2 py-1 text-sm bg-background w-56"
         />
-        <select
-          v-model="contasPlatformFilter"
-          class="border rounded px-2 py-1 text-sm bg-background h-8"
-        >
-          <option value="">Todas plataformas</option>
-          <option v-for="p in platformsPresentInDept" :key="p" :value="p">{{ platformLabel(p) }}</option>
-        </select>
-        <select
-          v-if="mostrarFiltroEquipe"
-          v-model="contasEquipeFilter"
-          data-filtro-equipe
-          aria-label="Filtrar contas pela equipe"
-          class="border rounded px-2 py-1 text-sm bg-background h-8"
-        >
-          <option value="">Todas as equipes</option>
-          <option
-            v-for="e in equipesPresentesNoDept.equipes"
-            :key="e.numero"
-            :value="String(e.numero)"
-          >{{ e.nome }}</option>
-          <option v-if="equipesPresentesNoDept.semEquipe" :value="SEM_EQUIPE">Sem equipe</option>
-        </select>
+        <!-- Plataforma ▾ e Equipe ▾ (M-9): caixas de marcar, no visual dos
+             menus da Tabela de Preços. Recarregar a página marca tudo de novo. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :class="{ 'border-blue-400 font-medium': contasPlataformasDesmarcadas.length }"
+              title="Filtrar contas pela plataforma"
+              data-filtro-plataforma
+            >
+              Plataforma
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-plataforma
+              class="z-[70] w-56 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <label
+                v-for="p in platformsPresentInDept"
+                :key="p"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  class="size-4"
+                  :checked="!contasPlataformasDesmarcadas.includes(p)"
+                  @change="contasPlataformasDesmarcadas = alternarNaLista(contasPlataformasDesmarcadas, p)"
+                />
+                {{ platformLabel(p) }}
+              </label>
+              <div class="mt-1 flex items-center justify-between border-t px-1 pt-1 text-xs">
+                <button type="button" class="text-blue-600 hover:underline dark:text-blue-400" @click="contasPlataformasDesmarcadas = []">Marcar todas</button>
+                <button type="button" class="text-muted-foreground hover:underline" @click="contasPlataformasDesmarcadas = [...platformsPresentInDept]">Limpar</button>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <PopoverRoot v-if="mostrarFiltroEquipe">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :class="{ 'border-blue-400 font-medium': equipesPresentesNoDept.some((o) => contasEquipesDesmarcadas.includes(o.valor)) }"
+              title="Filtrar contas pela equipe"
+              data-filtro-equipe
+            >
+              Equipe
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-equipe
+              class="z-[70] w-48 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <label
+                v-for="o in equipesPresentesNoDept"
+                :key="o.valor"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  class="size-4"
+                  :checked="!contasEquipesDesmarcadas.includes(o.valor)"
+                  @change="contasEquipesDesmarcadas = alternarNaLista(contasEquipesDesmarcadas, o.valor)"
+                />
+                {{ o.rotulo }}
+              </label>
+              <div class="mt-1 flex items-center justify-between border-t px-1 pt-1 text-xs">
+                <button type="button" class="text-blue-600 hover:underline dark:text-blue-400" @click="contasEquipesDesmarcadas = []">Marcar todas</button>
+                <button type="button" class="text-muted-foreground hover:underline" @click="contasEquipesDesmarcadas = equipesPresentesNoDept.map((o) => o.valor)">Limpar</button>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ accountsFiltered.length }} conta(s)
         </span>
@@ -4552,40 +4631,42 @@ watch(department, async () => {
       <div class="border rounded-lg overflow-auto max-h-[calc(100vh-320px)]">
         <table class="w-full text-sm border-collapse">
           <thead class="sticky top-0 bg-muted z-10">
+            <!-- Cabeçalho no formato da Tabela de Preços (M-9): 11px, peso 600,
+                 linha de 14px, centralizado; Nome e Obs à esquerda, como o conteúdo. -->
             <tr>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Nome</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Plataforma</th>
+              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Nome</th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Plataforma</th>
               <th
-                class="text-center px-2 py-2 font-medium border-b border-border w-24"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
                 title="Tipo do anúncio no Mercado Livre. Preenchido, a coluna só manda preço para anúncios desse tipo; vazio = manda para clássico e premium. O Catálogo ML exige o tipo."
               >Tipo ML</th>
               <th
-                class="text-center px-2 py-2 font-medium border-b border-border w-28"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-28"
                 title="Liga a tabela ML Catálogo desta conta: colunas próprias na Tabela de Preços, calculadas pela coluna Catálogo dos produtos (com a comissão e os fretes desta conta; a margem é a desta conta ou a própria do catálogo, no botão “% margens”), que mandam preço só para o anúncio de catálogo."
               >Catálogo ML</th>
               <th
-                class="text-center px-2 py-2 font-medium border-b border-border min-w-[90px]"
-                title="Equipe que vê esta conta (Equipe 1, 2 ou 3, a mesma da tela de Lojas), pela loja ligada a ela — a que separa o que cada vendedor enxerga."
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[70px]"
+                title="Número da equipe que vê esta conta (1, 2 ou 3, a mesma da tela de Lojas), pela loja ligada a ela — a que separa o que cada vendedor enxerga."
               >Equipe</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12">Kit</th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20">Comissão</th>
               <th
                 v-for="(label, i) in TYPE_HEADERS[department] ?? []"
                 :key="i"
                 colSpan="2"
-                class="text-center px-1 py-2 font-medium border-b border-border"
+                class="text-center px-1 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
               >
-                <div class="text-[11px]">{{ label }}</div>
-                <div class="text-[10px] text-muted-foreground flex justify-center gap-3">
+                <div>{{ label }}</div>
+                <div class="text-muted-foreground flex justify-center gap-3">
                   <span>marg</span><span>frete</span>
                 </div>
               </th>
               <th
                 v-for="f in STORE_NOTE_FIELDS"
                 :key="`h-${f.key}`"
-                class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px] capitalize"
+                class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px] capitalize"
               >{{ f.label }}</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-16"></th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-16"></th>
             </tr>
           </thead>
           <tbody>
@@ -5184,57 +5265,60 @@ watch(department, async () => {
       <div class="border rounded-lg overflow-auto max-h-[calc(100vh-320px)]">
         <table class="w-full text-sm border-collapse">
           <thead class="sticky top-0 bg-muted z-10">
+            <!-- Cabeçalho no formato da Tabela de Preços (M-9): 11px, peso 600,
+                 linha de 14px. SKU, Produto e EAN à esquerda; o resto centralizado. -->
             <tr>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">SKU</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Produto</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">EAN</th>
+              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">SKU</th>
+              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[200px]">Produto</th>
+              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">EAN</th>
               <template v-if="department === 'mala'">
-                <th class="text-left px-2 py-2 font-medium border-b border-border">Descrição</th>
-                <th class="text-left px-2 py-2 font-medium border-b border-border">Modelo</th>
+                <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border">Descrição</th>
+                <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border">Modelo</th>
               </template>
               <template v-if="mostraCertificado">
                 <th
-                  class="text-left px-2 py-2 font-medium border-b border-border min-w-[90px]"
+                  class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[90px]"
                   title="Modelo do certificado: escolha a linha da Certificações (Importação › Certificações) e o Nº e a Validade vêm junto. Sem escolha, vale o código no fim do nome (ex.: “… - USM003”)."
                   data-col-cert-modelo
                 >Modelo</th>
                 <th
-                  class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]"
+                  class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]"
                   title="Número do certificado (Anatel/Inmetro), copiado da Certificações."
                 >Nº certificado</th>
                 <th
-                  class="text-right px-2 py-2 font-medium border-b border-border w-24"
+                  class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
                   title="Quantos dias faltam para o certificado vencer (coluna Fim da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias. Clique para mudar a data: grava no Fim do certificado e vale para todos os produtos dele."
                   data-col-cert-validade
                 >Validade</th>
               </template>
-              <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24" :title="kitTitulo(k)">
+              <!-- Kit (M-9): coluna de ~98px; descrição em 11px, até 2 linhas. -->
+              <th v-for="k in kitCount" :key="`kith-${k}`" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-[98px] min-w-[98px]" :title="kitTitulo(k)">
                 Kit {{ k }}
-                <span v-if="kitNome(k)" class="block text-[9px] font-normal text-muted-foreground leading-tight whitespace-normal">{{ kitNome(k) }}</span>
+                <span v-if="kitNome(k)" class="block text-[11px] font-normal text-muted-foreground leading-[14px] whitespace-normal line-clamp-2">{{ kitNome(k) }}</span>
               </th>
               <th
-                class="text-right px-2 py-2 font-medium border-b border-border w-24"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
                 title="Preço base do anúncio de catálogo do Mercado Livre (R$), um por linha. As colunas do grupo ML Catálogo da Tabela de Preços somam margem, frete e comissão da conta de kit sobre este valor. Vazio = sem preço de catálogo (não envia)."
               >Catálogo</th>
               <th
-                class="text-right px-2 py-2 font-medium border-b border-border w-24"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
                 title="Prazo da garantia do produto, em meses (0 = sem garantia). Aumentar vale para todas as vendas; diminuir só para as vendas a partir da mudança; corrigir no mesmo dia desfaz o valor anterior. Produto cujo certificado tem garantia: o prazo vem do certificado, e mudar aqui muda para todos os produtos dele."
                 data-col-garantia-meses
               >Garantia (meses)</th>
               <th
-                class="text-center px-2 py-2 font-medium border-b border-border w-28"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-28"
                 title="Fotos e vídeos do produto no MEGA. Clique na etiqueta para ver as fotos, enviar mais, baixar ou trocar a pasta."
               >Fotos</th>
               <th
-                class="text-center px-2 py-2 font-medium border-b border-border w-28"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-28"
                 title="Fotos da caixa, PDF da arte e outros arquivos de embalagem. Ficam na subpasta Embalagens, dentro da pasta de fotos do produto no MEGA, e não aparecem para as agências."
               >Embalagens</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24">Tabela</th>
               <th
-                class="text-center px-2 py-2 font-medium border-b border-border w-20"
+                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20"
                 title="Tag de estoque prioritária: venda que sair em outra tag é trocada pra esta ANTES da nota fiscal (só se o SKU com a tag existir no Bling e tiver saldo). Vazio = nada muda."
               >Prioridade</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12"></th>
             </tr>
           </thead>
           <tbody>
@@ -5289,10 +5373,10 @@ watch(department, async () => {
                 <td v-for="i in 3" :key="`newcert-${i}`" class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               </template>
               <td v-for="k in kitCount" :key="`newkit-${k}`" class="border border-border px-1 py-1">
-                <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+                <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center" />
               </td>
               <td class="border border-border px-1 py-1">
-                <input v-model="newProd.preco_catalogo" type="text" inputmode="decimal" placeholder="—" title="Preço de catálogo (opcional)" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+                <input v-model="newProd.preco_catalogo" type="text" inputmode="decimal" placeholder="—" title="Preço de catálogo (opcional)" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center" />
               </td>
               <!-- Garantia (meses): define depois, na linha criada. -->
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
@@ -5326,7 +5410,9 @@ watch(department, async () => {
             </tr>
 
             <!-- data rows -->
-            <tr v-for="p in productsCurrent" :key="p.id" class="hover:bg-accent/30" :class="{ 'opacity-50': !p.is_active }">
+            <!-- Todas as linhas com 33px (M-9): nada quebra linha nas
+                 células; texto longo é cortado com reticências. -->
+            <tr v-for="p in productsCurrent" :key="p.id" class="h-[33px] whitespace-nowrap hover:bg-accent/30" :class="{ 'opacity-50': !p.is_active }">
               <td
                 class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer max-w-[220px]"
                 :class="{
@@ -5357,7 +5443,7 @@ watch(department, async () => {
                   class="w-full text-xs bg-transparent outline-none"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else>{{ p.name }}</span>
+                <span v-else class="block max-w-[320px] truncate" :title="p.name">{{ p.name }}</span>
               </td>
               <td
                 class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer max-w-[220px]"
@@ -5378,7 +5464,7 @@ watch(department, async () => {
               </td>
               <template v-if="department === 'mala'">
                 <td
-                  class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+                  class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
                   :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'description'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'description') }"
                   @click="!isEditing(p.id, 'description') && startEditProduct(p, 'description')"
                 >
@@ -5386,13 +5472,13 @@ watch(department, async () => {
                     v-if="isEditing(p.id, 'description')"
                     :ref="setEditInputRef"
                     v-model="editValue" type="text"
-                    class="w-full text-xs bg-transparent outline-none"
+                    class="w-full text-xs bg-transparent outline-none text-center"
                     @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                   />
-                  <span v-else>{{ p.description || '—' }}</span>
+                  <span v-else class="mx-auto block max-w-[260px] truncate" :title="p.description || undefined">{{ p.description || '—' }}</span>
                 </td>
                 <td
-                  class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+                  class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
                   :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'model'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'model') }"
                   @click="!isEditing(p.id, 'model') && startEditProduct(p, 'model')"
                 >
@@ -5400,15 +5486,15 @@ watch(department, async () => {
                     v-if="isEditing(p.id, 'model')"
                     :ref="setEditInputRef"
                     v-model="editValue" type="text"
-                    class="w-full text-xs bg-transparent outline-none"
+                    class="w-full text-xs bg-transparent outline-none text-center"
                     @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                   />
-                  <span v-else>{{ p.model || '—' }}</span>
+                  <span v-else class="mx-auto block max-w-[200px] truncate" :title="p.model || undefined">{{ p.model || '—' }}</span>
                 </td>
               </template>
               <template v-if="mostraCertificado">
                 <td
-                  class="border border-border text-xs"
+                  class="border border-border text-xs text-center"
                   :class="[
                     canEditProdutos ? 'px-1 py-1' : 'px-2 py-1.5',
                     { 'text-muted-foreground': !p.certificacao, 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'certificacao_id') },
@@ -5437,7 +5523,7 @@ watch(department, async () => {
                   <template v-else>{{ p.certificacao ? (p.certificacao.modelo || p.certificacao.produto || '—') : '—' }}</template>
                 </td>
                 <td
-                  class="border border-border px-2 py-1.5 text-xs font-mono whitespace-nowrap"
+                  class="border border-border px-2 py-1.5 text-xs font-mono whitespace-nowrap text-center"
                   :class="{ 'text-muted-foreground': !p.certificacao?.numero }"
                   :title="certTitulo(p.certificacao)"
                   data-cert-numero
@@ -5447,7 +5533,7 @@ watch(department, async () => {
                      clicar edita a data Fim DO CERTIFICADO (vale para todos
                      os produtos dele). Sem certificado: só leitura. -->
                 <td
-                  class="border border-border px-2 py-1.5 text-xs whitespace-nowrap text-right tabular-nums"
+                  class="border border-border px-2 py-1.5 text-xs whitespace-nowrap text-center tabular-nums"
                   :class="[
                     p.certificacao?.fim ? certValidadeClasse(p.certificacao) : 'text-muted-foreground',
                     {
@@ -5464,7 +5550,7 @@ watch(department, async () => {
                     v-if="isEditing(p.id, 'certificado_fim')"
                     :ref="setEditInputRef"
                     v-model="editValue" type="date"
-                    class="w-full min-w-[118px] text-xs bg-transparent outline-none text-right"
+                    class="w-full min-w-[118px] text-xs bg-transparent outline-none text-center"
                     data-cert-validade-data
                     @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                   />
@@ -5473,7 +5559,7 @@ watch(department, async () => {
               </template>
               <td
                 v-for="k in kitCount" :key="`kit-${k}`"
-                class="border border-border px-2 py-1.5 text-xs text-right cursor-pointer"
+                class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, `cost_kit${k}`),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, `cost_kit${k}`),
@@ -5484,7 +5570,7 @@ watch(department, async () => {
                   v-if="isEditing(p.id, `cost_kit${k}`)"
                   :ref="setEditInputRef"
                   v-model="editValue" type="text" inputmode="decimal"
-                  class="w-full text-xs bg-transparent outline-none text-right"
+                  class="w-full text-xs bg-transparent outline-none text-center"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
                 <span v-else>{{ fmtBRL((p as any)[`cost_kit${k}`]) }}</span>
@@ -5492,7 +5578,7 @@ watch(department, async () => {
               <!-- Catálogo: preço base do anúncio de catálogo do ML; edita igual
                    aos kits. Vazio = "—" (sem preço de catálogo). -->
               <td
-                class="border border-border px-2 py-1.5 text-xs text-right cursor-pointer"
+                class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'preco_catalogo'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'preco_catalogo'),
@@ -5503,7 +5589,7 @@ watch(department, async () => {
                   v-if="isEditing(p.id, 'preco_catalogo')"
                   :ref="setEditInputRef"
                   v-model="editValue" type="text" inputmode="decimal"
-                  class="w-full text-xs bg-transparent outline-none text-right"
+                  class="w-full text-xs bg-transparent outline-none text-center"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
                 <span v-else :class="{ 'text-muted-foreground': p.preco_catalogo == null || p.preco_catalogo === '' }">{{ fmtBRL(p.preco_catalogo) }}</span>
@@ -5515,7 +5601,7 @@ watch(department, async () => {
                    tem garantia: o servidor grava no certificado e o prazo
                    vale para todos os produtos dele (title avisa). -->
               <td
-                class="border border-border px-2 py-1.5 text-xs text-right"
+                class="border border-border px-2 py-1.5 text-xs text-center"
                 :class="{
                   'cursor-pointer': canEditProdutos,
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'garantia_meses'),
@@ -5530,7 +5616,7 @@ watch(department, async () => {
                   :ref="setEditInputRef"
                   v-model="editValue" type="text" inputmode="numeric"
                   placeholder="meses"
-                  class="w-full text-xs bg-transparent outline-none text-right"
+                  class="w-full text-xs bg-transparent outline-none text-center"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
                 <span v-else :class="{ 'text-muted-foreground': p.garantia_meses == null || p.garantia_meses === 0 }">{{ p.garantia_meses == null ? '—' : p.garantia_meses === 0 ? 'sem garantia' : p.garantia_meses }}</span>
