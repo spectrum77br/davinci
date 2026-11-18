@@ -1687,7 +1687,8 @@ async function copiarChave(c: Logistica) {
   }
 }
 
-// Copia o rastreio (coluna Tracken da aba Flex): no Tracken, a busca à mão é por ele.
+// Copia o rastreio: na aba Flex fica na coluna Tracken (no Tracken, a busca à
+// mão é por ele); nas outras abas, na coluna Localização (18/11/2026).
 async function copiarRastreio(c: Logistica) {
   if (!c.rastreio) return
   try {
@@ -3457,11 +3458,25 @@ async function aplicarStatusBling(c: Logistica) {
                       class="break-words text-[11px] leading-tight"
                       :title="proprioSemRastreio(c) ? DESTINO_TITLE : c.localizacao || ''"
                     >{{ proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao || '—' }}</div>
-                    <div
-                      v-if="ehCorreios(c.rastreio)"
-                      class="truncate text-[10px]"
-                      :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
-                    >{{ c.localizacao_at ? `Correios · lido ${fmtDesde(c.rastreio_lido_em || c.localizacao_at)}` : 'sem leitura dos Correios ainda' }}</div>
+                    <!-- 18/11/2026 (Vinicius: "sumiu o código de rastreio… coloca em todos, só não
+                         mexe no Flex"): o rastreio tinha saído da tabela no desenho de 11/11 e só
+                         aparecia no Raio-X. Volta aqui, na mesma linha da leitura dos Correios;
+                         um clique copia. A aba Flex mostra o dela na coluna Tracken. -->
+                    <div v-if="c.rastreio" class="mt-0.5 flex min-w-0 items-center gap-1 text-[10px]">
+                      <button
+                        type="button"
+                        class="flex shrink-0 items-center gap-0.5 font-mono text-[10.5px] text-muted-foreground hover:text-foreground"
+                        title="Rastreio — clique para copiar"
+                        data-logistica-rastreio
+                        @click.stop="copiarRastreio(c)"
+                      ><span class="truncate">{{ c.rastreio }}</span><Copy class="size-3 shrink-0" /></button>
+                      <span
+                        v-if="ehCorreios(c.rastreio)"
+                        class="min-w-0 truncate"
+                        :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
+                        :title="c.localizacao_at ? `Lido nos Correios em ${fmtDataHora(c.rastreio_lido_em || c.localizacao_at)} · último movimento do pacote em ${fmtDataHora(c.localizacao_at)}` : undefined"
+                      >· {{ c.localizacao_at ? `Correios · lido ${fmtDesde(c.rastreio_lido_em || c.localizacao_at)}` : 'sem leitura dos Correios ainda' }}</span>
+                    </div>
                   </td>
                   <template v-if="ehAmazonTab">
                     <td class="px-1.5 py-1.5 text-center text-[11px]">
