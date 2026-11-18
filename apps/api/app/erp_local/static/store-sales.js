@@ -12,7 +12,7 @@ const square=(color,letter,size=14,y=17.2)=>`<rect x="2" y="2" width="20" height
 const storeMarks={
   shopee:[`<path d="M8.2 7.6V6.6a3.8 3.8 0 0 1 7.6 0v1" fill="none" stroke="#EE4D2D" stroke-width="1.9" stroke-linecap="round"/><path d="M3.9 7.4h16.2l-1.05 12.5a2 2 0 0 1-2 1.85H6.95a2 2 0 0 1-2-1.85z" fill="#EE4D2D"/><text x="12" y="18.4" text-anchor="middle" font-size="10.5" font-weight="700" ${T} fill="#fff">S</text>`,'Shopee'],
   tiktok:[`<g fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><g stroke="#25F4EE" transform="translate(-0.9 -0.7)">${note}</g><g stroke="#FE2C55" transform="translate(0.9 0.7)">${note}</g><g stroke="#111">${note}</g></g>`,'TikTok Shop'],
-  ml:['<image href="/assets/logos/mercado-livre.png" x="0" y="3.5" width="24" height="17" preserveAspectRatio="xMidYMid meet"/>','Mercado Livre'],
+  ml:['<image href="'+erpAsset('logos/mercado-livre.png')+'" x="0" y="3.5" width="24" height="17" preserveAspectRatio="xMidYMid meet"/>','Mercado Livre'],
   amazon:[`<text x="12" y="13.6" text-anchor="middle" font-size="14" font-weight="700" ${T} fill="#111">a</text><path d="M4.2 16.3c4.7 3 10.6 3 14.9.2" fill="none" stroke="#FF9900" stroke-width="1.9" stroke-linecap="round"/><path d="M16.5 15.1l2.8.9-.6 2.7" fill="none" stroke="#FF9900" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`,'Amazon'],
   magalu:[square('#0086FF','M'),'Magalu'],
   carrefour:['<rect x="2" y="2" width="20" height="20" rx="5" fill="#fff" stroke="#E5E7EB" stroke-width="0.5"/><path d="M3.4 12 L10.6 4.6 H14.2 L8.6 12 L14.2 19.4 H10.6 Z" fill="#E30613"/><path d="M16 5.2 C12.7 7 11.1 9.3 11.1 12 C11.1 14.7 12.7 17 16 18.8 L21.2 12 Z" fill="#004E9F"/>','Carrefour'],

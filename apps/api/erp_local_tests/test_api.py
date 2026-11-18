@@ -12,6 +12,8 @@ def client(tmp_path):
 def test_serves_ui_and_local_health(tmp_path):
     with client(tmp_path) as c:
         assert "<title>DaVinci ERP</title>" in c.get("/").text
+        behind = c.get("/erp").text
+        assert 'href="/erp/assets/style.css"' in behind and 'class="brand" href="/erp"' in behind
         assert c.get("/api/health").json()["external_connections"] is False
         assert c.get("/assets/app.js").status_code == 200
         assert c.get("/assets/style.css").status_code == 200

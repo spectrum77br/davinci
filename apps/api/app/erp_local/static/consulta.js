@@ -1,6 +1,9 @@
 // Consulta: while Bling owns stock, orders and the register, the page only reads. The server refuses
 // every change; here a change is not even sent, and the answer says why (the page shows it like
 // any other refusal). Reads that post (price quote, papers, tracking) still go.
+// Behind DaVinci's gate the page lives at /erp and its files at /erp/assets; /assets there is
+// DaVinci's own site. Images and video made by the scripts use this.
+window.erpAsset=name=>(location.pathname.startsWith('/erp')?'/erp/assets/':'/assets/')+name;
 (function(){
   const send=window.fetch.bind(window);
   const safe=['GET','HEAD','OPTIONS'];

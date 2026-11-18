@@ -1500,7 +1500,12 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
     @app.get("/erp")
     def erp_page():
         # Same page behind the gate: its files come through the route the proxy lets in.
-        html = (ASSETS / "index.html").read_text("utf-8").replace('"/assets/', '"/erp/assets/')
+        html = (
+            (ASSETS / "index.html")
+            .read_text("utf-8")
+            .replace('"/assets/', '"/erp/assets/')
+            .replace('class="brand" href="/"', 'class="brand" href="/erp"')
+        )
         return Response(html, media_type="text/html; charset=utf-8")
 
     @app.get("/")

@@ -77,9 +77,9 @@ test('integration rule submission targets only the selected exact account and ne
   dom.window.close();
 });
 
-async function setup(overrides={}) {
+async function setup(overrides={},address='http://127.0.0.1:8765') {
   const dom = new JSDOM(fs.readFileSync(path.join(assets,'index.html'),'utf8'), {
-    url:'http://127.0.0.1:8765',runScripts:'outside-only',
+    url:address,runScripts:'outside-only',
   });
   const requests=[];
   activeDOMs.add(dom);
@@ -1509,4 +1509,25 @@ test('the DaVinci opening covers the page while it loads and leaves once the sta
  assert.ok(opening&&opening.querySelector('.ab-v')&&/DaVinci\s*ERP/.test(opening.textContent));
  await new Promise(r=>setTimeout(r,1400));
  assert.ok(opening.classList.contains('pronta'));
+});
+
+test('behind the gate (/erp) the video and the store logos come from /erp/assets',async()=>{
+ const {document:d,dom}=await setup({},'http://127.0.0.1:8765/erp');
+ assert.equal(d.querySelector('.guide-video video').getAttribute('src'),'/erp/assets/como-usar.mp4');
+ assert.equal(d.querySelector('.guide-video track').getAttribute('src'),'/erp/assets/como-usar.vtt');
+ assert.match(dom.window.storeMark('ml'),/href="\/erp\/assets\/logos\/mercado-livre\.png"/);
+ const {document:local}=await setup();
+ assert.equal(local.querySelector('.guide-video video').getAttribute('src'),'/assets/como-usar.mp4');
+});
+
+test('Atualizar on the store sales list fetches the list again, keeping the old one meanwhile',async()=>{
+ const {dom,document:d}=await setup();
+ const asked=[],before=dom.window.fetch;
+ dom.window.fetch=async(url,options)=>{if(String(url).startsWith('/api/erp-local/store-sales?')){asked.push(String(url));return {ok:true,status:200,json:async()=>({items:[],total:0,offset:0})};}return before(url,options);};
+ d.querySelector('nav [data-page=orders]').click();d.querySelector('[data-sales-view=store]').click();
+ for(let i=0;i<4;i++)await new Promise(r=>setImmediate(r));
+ assert.equal(asked.length,1);
+ d.getElementById('refresh').click();
+ for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
+ assert.equal(asked.length,2);
 });
