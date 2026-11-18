@@ -349,7 +349,7 @@ function aoResponder(novo: DevolucaoDetalhe) {
       <template v-if="r.aberta && prazo">
         <dt class="text-muted-foreground">Restante</dt>
         <dd class="text-right">
-          <span class="rounded px-1.5 py-px font-medium tabular-nums" :class="prazo.cls">{{ restante }}</span>
+          <span class="whitespace-nowrap rounded px-1.5 py-px font-medium tabular-nums" :class="prazo.cls">{{ restante }}</span>
           <span class="ml-1 whitespace-nowrap text-muted-foreground">até {{ fmtDataHora(prazoIso).replace(',', '') }}</span>
         </dd>
       </template>
@@ -440,13 +440,16 @@ function aoResponder(novo: DevolucaoDetalhe) {
       </AtendimentoAbrirPlataforma>
     </div>
 
-    <AtendimentoDevolucaoResponder
-      v-if="respondendo"
-      :acao="respondendo"
-      :url="url"
-      :numero="r.numero || ''"
-      @fechar="respondendo = null"
-      @respondido="aoResponder"
-    />
+    <!-- No <body>: com o painel em gaveta (tela estreita), a janela cobre tudo. -->
+    <Teleport to="body">
+      <AtendimentoDevolucaoResponder
+        v-if="respondendo"
+        :acao="respondendo"
+        :url="url"
+        :numero="r.numero || ''"
+        @fechar="respondendo = null"
+        @respondido="aoResponder"
+      />
+    </Teleport>
   </section>
 </template>
