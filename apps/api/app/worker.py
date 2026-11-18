@@ -2899,6 +2899,14 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         lembretes = await chamados_devolucao_sync.lembrar_recursos(s)
     logger.info("chamados_recurso_lembrete_done", **lembretes)
+    # 17/11/2026 (298756/304961): chamado de devolução da Amazon parado só com o
+    # aviso "abrir SAFE-T na mão" — a IA de Chamado ganha a instrução de abrir.
+    try:
+        async with session_scope() as s:
+            safet = await chamados_devolucao_sync.instruir_safet_amazon(s)
+        logger.info("chamados_amazon_safet_done", **safet)
+    except Exception as e:  # noqa: BLE001 — não pode parar a varredura das presas
+        logger.warning("chamados_amazon_safet_falhou", err=str(e)[:300])
     # 17/09: abertura que a API não consegue fazer (sem return, sem foto…) parava
     # aqui pra sempre. A varredura roteia pro robô ou pro humano e avisa no Threema.
     async with session_scope() as s:

@@ -1343,6 +1343,127 @@ async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = No
     return {"seguindo": len(chs), "lembrados": lembrados}
 
 
+# 17/11/2026 (Vinicius, 298756/304961): o chamado de devolução da Amazon nasce só
+# com o aviso "abrir a SAFE-T na mão" e fica parado — a IA de Chamado só acorda com
+# fala da plataforma ou instrução, e ninguém escrevia. "Sim, pode fazer": entra uma
+# instrução do sistema pra IA abrir a SAFE-T na tela (ela já sabe: 304026, 06/11).
+# Extraviado fica de fora: o pacote sumiu no caminho e a cobrança é da
+# transportadora (298756: atendimento do Melhor Envio), não da Amazon.
+INSTRUCAO_SAFET_PREFIXO = "Pedido automático (SAFE-T da Amazon)"
+# Dá tempo da equipe terminar o lançamento (fotos) antes de a IA ir pra tela.
+INSTRUCAO_SAFET_ESPERA = timedelta(hours=1)
+_CONDICOES_SEM_SAFET = frozenset({"extraviado"})
+
+
+def _sem_safet(dev: Devolution) -> bool:
+    return (dev.condicao_produto or "").strip().lower() in _CONDICOES_SEM_SAFET
+
+
+def _texto_instrucao_safet(ch: Chamado, linhas: list[Devolution]) -> str:
+    def _distintos(vals) -> str:
+        return ", ".join(dict.fromkeys(v for v in vals if v))
+
+    motivos = _distintos((d.motivo_devolucao or "").strip() for d in linhas)
+    condicoes = _distintos((d.condicao_produto or "").strip() for d in linhas)
+    itens = _distintos(
+        " ".join(x for x in ((d.sku or "").strip(), (d.produtos or "").strip()) if x)
+        for d in linhas
+    )
+    pedido = (ch.pedido_marketplace or "").strip() or f"Bling {ch.pedido_bling}"
+    loja = (ch.conta or "").strip() or "a loja do pedido"
+    return (
+        f"{INSTRUCAO_SAFET_PREFIXO}: a Amazon não tem API pra contestar devolução. Abra a "
+        f"reivindicação SAFE-T na tela da Amazon ({loja}), pedido {pedido}"
+        + (f" — {itens}" if itens else "")
+        + f"; motivo da devolução \"{motivos or '—'}\""
+        + (f", condição \"{condicoes}\"" if condicoes else "")
+        + ". Mande as fotos da linha. Antes, confira na página do pedido e nas Transações "
+        "se a Amazon já cobrou o reembolso da conta: a SAFE-T só é aceita depois disso, "
+        "até 45 dias. Ainda não cobrou: não abra, diga o que viu e aguarde. O reembolso saiu "
+        "pela nossa própria conta (Gerenciar pedidos): não abra, diga isso pra pessoa "
+        "decidir. Abriu: diga o número da SAFE-T. Não emita reembolso e não abra caso no "
+        "suporte."
+    )
+
+
+async def instruir_safet_amazon(session: AsyncSession, *, agora: datetime | None = None) -> dict:
+    """Cron (:25): chamado de devolução da Amazon aberto há mais de
+    `INSTRUCAO_SAFET_ESPERA`, só com a abertura sem API (`plataforma_sem_api`), sem
+    número, sem instrução e sem análise da IA → uma instrução do sistema pra IA de
+    Chamado abrir a SAFE-T na tela. Uma por chamado (qualquer instrução ou análise
+    já tira o caso daqui). Fica de fora: Concluído, Encerrado, marca Encerrar ou Fixo
+    com data futura, e pedido em que toda linha que pede chamado é Extraviado.
+    Commita."""
+    ref = agora or datetime.now(UTC)
+    hoje = ref.astimezone(chamados_svc.SAO_PAULO).date()
+    msg = ChamadoMensagem
+    sem_api = (
+        select(msg.id)
+        .where(
+            msg.chamado_id == Chamado.id,
+            msg.tipo == cd.TIPO_ABERTURA,
+            msg.erro == "plataforma_sem_api",
+        )
+        .exists()
+    )
+    ia_ja_olhou = (
+        select(msg.id)
+        .where(msg.chamado_id == Chamado.id, msg.tipo.in_(("instrucao", "analise")))
+        .exists()
+    )
+    chs = (
+        await session.execute(
+            select(Chamado).where(
+                Chamado.origem == "devolucao",
+                Chamado.resolvido.is_(False),
+                _nao_encerrado,
+                func.coalesce(func.trim(Chamado.chamado), "") == "",
+                Chamado.created_at <= ref - INSTRUCAO_SAFET_ESPERA,
+                _fora_do_fixo(hoje),
+                sem_api,
+                ~ia_ja_olhou,
+            )
+        )
+    ).scalars().all()
+    instruidos = extraviados = 0
+    for ch in chs:
+        if cd.plataforma_de(ch.plataforma) != cd.PLAT_AMAZON:
+            continue
+        dev = await cd._dev_de_chamado(session, ch)
+        if dev is None and (ch.pedido_bling or "").strip():
+            dev = (
+                await session.execute(
+                    select(Devolution)
+                    .where(Devolution.pedido_bling == ch.pedido_bling.strip())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if dev is None:
+            continue
+        linhas = [
+            d for d in await cd._linhas_do_pedido(session, dev)
+            if chamados_svc.motivo_pede_chamado(d)
+        ]
+        alvo = [d for d in linhas if not _sem_safet(d)]
+        if not alvo:
+            extraviados += 1  # sumiu no caminho: cobrança da transportadora
+            continue
+        session.add(
+            chamados_svc.nova_mensagem(
+                ch,
+                texto=_texto_instrucao_safet(ch, alvo),
+                tipo="instrucao",
+                direcao="sistema",
+                autor_nome=chamados_svc.AUTOR_SISTEMA,
+                status="registrada",
+            )
+        )
+        instruidos += 1
+        logger.info("chamado_amazon_safet_instrucao", chamado_id=str(ch.id), pedido=ch.pedido_bling)
+    await session.commit()
+    return {"vistos": len(chs), "instruidos": instruidos, "extraviados": extraviados}
+
+
 # 22/09: o número em `chamados.chamado` foi capturado pelo robô na TELA — nenhuma
 # API sabe responder por ele. Quem lê esses casos é o `chamados_leitura`.
 _aberto_na_tela = chamados_svc.CASO_DE_TELA_SQL
