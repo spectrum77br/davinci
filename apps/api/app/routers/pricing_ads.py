@@ -1,0 +1,345 @@
+"""Ads da aba Contas da Tabela de Preços (M-12, 18/11/2026, migration 0503).
+
+Pedido do dono: a coluna Ads (texto livre "2% - 50 ROAS") vira o botão
+"2%  ROAS 50 ▾" com um painel igual ao da Margem (M-2): [x] Geral com o % que
+a conta pode gastar em Ads, o ROAS mínimo (100 ÷ %, calculado na tela, não
+gravado) e o gasto por dia em R$; "% gasto real" e "ROAS real" da conta nos
+últimos 7 dias; e [x] Por produto (um % e um gasto por dia para cada produto
+do departamento; % vazio = usa a Geral). Nada disso entra no cálculo de preço.
+
+O real vem do módulo Marketing SÓ LENDO (`marketing_accounts` e
+`marketing_metrics`; nenhuma coleta nova): a conta da Tabela casa com a conta
+de Ads não arquivada da mesma plataforma, do mesmo nome (`chave_nome`: sem
+acento, espaço nem pontuação) e do mesmo departamento. Sem conta que case (ou
+com mais de uma), ou sem dado na janela: null, e a tela mostra "—" (nunca
+estima). % gasto = ACOS = Σgasto ÷ Σfaturamento × 100 (a regra do Marketing);
+ROAS = Σfaturamento ÷ Σgasto. Só as linhas diárias (intensity = 0): a Shopee
+grava também as de hora em hora, e somar as duas contaria o dia em dobro. O
+Marketing não tem dado por produto.
+
+Vê quem vê a aba Contas (`tabela_precos_contas` ver), só as contas que a aba
+mostra (a cerca de equipe da grade, `_contas_da_grade`; a coluna de catálogo
+não tem Ads próprio); grava quem edita Contas.
+
+  GET /api/pricing/ads?department=celular
+  PUT /api/pricing/ads/{account_id}                       {"ads_geral_ligada"?, "pode_gastar_pct"?,
+                                                            "gasto_dia"?, "ads_por_produto_ligada"?}
+  PUT /api/pricing/ads/{account_id}/produto/{product_id}  {"pode_gastar_pct"?, "gasto_dia"?}
+
+Campo ausente não muda; % e gasto null apagam (o produto sem % nem gasto volta
+para a Geral).
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Annotated
+from uuid import UUID
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import get_session
+from app.deps.auth import require_permission
+from app.models import (
+    PricingAccount,
+    PricingAdsConta,
+    PricingAdsProduto,
+    PricingPlatform,
+    PricingProduct,
+    Segment,
+    User,
+    UserRole,
+)
+from app.models.marketing import MarketingAccount, MarketingMetric
+from app.routers.pricing import _contas_da_grade, _resolve_root_segment_id
+from app.services.marketing.horarios_contas import chave_nome
+from app.services.pricing.anuncios import CANAL_CATALOGO
+
+logger = structlog.get_logger()
+router = APIRouter(prefix="/api/pricing", tags=["pricing"])
+
+# Plataforma da Tabela → a do Marketing (só estas têm Ads lá).
+PLATAFORMA_NO_MARKETING = {
+    PricingPlatform.ML: "ml",
+    PricingPlatform.SHOPEE: "shopee",
+    PricingPlatform.AMAZON: "amazon",
+}
+JANELA_REAL_DIAS = 7
+
+Pct = Annotated[Decimal | None, Field(ge=0, le=100)]
+Gasto = Annotated[Decimal | None, Field(ge=0, lt=Decimal("10000000000"))]
+
+
+class AdsValoresOut(BaseModel):
+    pode_gastar_pct: float | None = None
+    gasto_dia: float | None = None
+
+
+class AdsRealOut(BaseModel):
+    """Últimos 7 dias, do Marketing; null = sem dado (a tela mostra "—")."""
+
+    pct_gasto: float | None = None
+    roas: float | None = None
+
+
+class AdsContaOut(AdsValoresOut):
+    ads_geral_ligada: bool
+    ads_por_produto_ligada: bool
+    # {pricing_product_id: valores próprios}
+    produtos: dict[str, AdsValoresOut]
+    real: AdsRealOut
+
+
+class AdsProdutoOut(BaseModel):
+    id: UUID
+    sku: str
+    name: str
+
+
+class AdsOut(BaseModel):
+    department: str
+    pode_editar: bool
+    # Os produtos do departamento (as linhas da grade), por nome.
+    produtos: list[AdsProdutoOut]
+    # {pricing_account_id: Ads} — as contas que a aba Contas mostra.
+    contas: dict[str, AdsContaOut]
+
+
+class AdsContaIn(BaseModel):
+    ads_geral_ligada: bool | None = None
+    pode_gastar_pct: Pct = None
+    gasto_dia: Gasto = None
+    ads_por_produto_ligada: bool | None = None
+
+
+class AdsProdutoIn(BaseModel):
+    pode_gastar_pct: Pct = None
+    gasto_dia: Gasto = None
+
+
+def _pode_editar(user: User) -> bool:
+    if user.role == UserRole.ADMIN:
+        return True
+    return bool(((user.permissions or {}).get("tabela_precos_contas") or {}).get("edit"))
+
+
+async def _real_das_contas(
+    session: AsyncSession, contas: Sequence[PricingAccount], department: str
+) -> dict[UUID, AdsRealOut]:
+    """O real de cada conta, lido do Marketing (ver o topo do arquivo)."""
+    por_chave: dict[tuple[str, str], list[UUID]] = defaultdict(list)
+    for a in (
+        await session.execute(
+            select(MarketingAccount).where(
+                MarketingAccount.arquivada_em.is_(None),
+                MarketingAccount.department == department,
+            )
+        )
+    ).scalars():
+        por_chave[(a.platform, chave_nome(a.name))].append(a.id)
+    casadas: dict[UUID, UUID] = {}
+    for c in contas:
+        achadas = por_chave.get((PLATAFORMA_NO_MARKETING.get(c.platform, ""), chave_nome(c.name)))
+        if achadas and len(achadas) == 1:
+            casadas[c.id] = achadas[0]
+    somas: dict[UUID, tuple[float, float]] = {}
+    if casadas:
+        desde = datetime.now(UTC) - timedelta(days=JANELA_REAL_DIAS)
+        for conta_ads, gasto, receita in await session.execute(
+            select(
+                MarketingMetric.account_id,
+                func.sum(MarketingMetric.spend),
+                func.sum(MarketingMetric.revenue),
+            )
+            .where(
+                MarketingMetric.account_id.in_(set(casadas.values())),
+                MarketingMetric.intensity == 0,
+                MarketingMetric.timestamp >= desde,
+            )
+            .group_by(MarketingMetric.account_id)
+        ):
+            somas[conta_ads] = (float(gasto or 0), float(receita or 0))
+    saida: dict[UUID, AdsRealOut] = {}
+    for c in contas:
+        gasto, receita = somas.get(casadas.get(c.id), (0.0, 0.0))
+        saida[c.id] = AdsRealOut(
+            pct_gasto=round(gasto / receita * 100, 1) if receita > 0 else None,
+            roas=round(receita / gasto, 2) if gasto > 0 else None,
+        )
+    return saida
+
+
+async def _contas_out(
+    session: AsyncSession, contas: Sequence[PricingAccount], department: str
+) -> dict[str, AdsContaOut]:
+    ids = [c.id for c in contas]
+    gerais = {
+        g.pricing_account_id: g
+        for g in (
+            await session.execute(
+                select(PricingAdsConta)
+                .where(PricingAdsConta.pricing_account_id.in_(ids))
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    produtos: dict[UUID, dict[str, AdsValoresOut]] = defaultdict(dict)
+    for p in (
+        await session.execute(
+            select(PricingAdsProduto)
+            .where(PricingAdsProduto.pricing_account_id.in_(ids))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars():
+        produtos[p.pricing_account_id][str(p.pricing_product_id)] = AdsValoresOut(
+            pode_gastar_pct=p.pode_gastar_pct, gasto_dia=p.gasto_dia
+        )
+    real = await _real_das_contas(session, contas, department)
+    saida: dict[str, AdsContaOut] = {}
+    for c in contas:
+        g = gerais.get(c.id)
+        saida[str(c.id)] = AdsContaOut(
+            ads_geral_ligada=g.ads_geral_ligada if g else True,
+            pode_gastar_pct=g.pode_gastar_pct if g else None,
+            gasto_dia=g.gasto_dia if g else None,
+            ads_por_produto_ligada=g.ads_por_produto_ligada if g else True,
+            produtos=produtos[c.id],
+            real=real[c.id],
+        )
+    return saida
+
+
+async def _conta_da_aba(
+    session: AsyncSession, user: User, account_id: UUID
+) -> tuple[PricingAccount, str]:
+    """(conta, slug do departamento) se a aba Contas desta pessoa mostra a
+    conta; senão 404 (fora da cerca, coluna de catálogo ou não existe)."""
+    acc = await session.get(PricingAccount, account_id)
+    if acc is None or acc.canal == CANAL_CATALOGO:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    visiveis = {c.id for c in await _contas_da_grade(session, user, acc.segment_id)}
+    raiz = await session.get(Segment, acc.segment_id)
+    if acc.id not in visiveis or raiz is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    return acc, raiz.slug
+
+
+@router.get("/ads", response_model=AdsOut)
+async def ver_ads(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos_contas", "view"))],
+    department: Annotated[str, Query()],
+) -> AdsOut:
+    root_id = await _resolve_root_segment_id(session, department)
+    if root_id is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"code": "invalid_department"})
+    contas = [
+        c for c in await _contas_da_grade(session, user, root_id) if c.canal != CANAL_CATALOGO
+    ]
+    produtos = (
+        await session.execute(
+            select(PricingProduct.id, PricingProduct.sku, PricingProduct.name)
+            .join(Segment, Segment.id == PricingProduct.segment_id)
+            .where(Segment.parent_id == root_id)
+            .order_by(PricingProduct.name, PricingProduct.sku)
+        )
+    ).all()
+    return AdsOut(
+        department=department,
+        pode_editar=_pode_editar(user),
+        produtos=[AdsProdutoOut(id=i, sku=s, name=n) for i, s, n in produtos],
+        contas=await _contas_out(session, contas, department),
+    )
+
+
+@router.put("/ads/{account_id}", response_model=AdsContaOut)
+async def gravar_ads_da_conta(
+    account_id: UUID,
+    body: AdsContaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos_contas", "edit"))],
+) -> AdsContaOut:
+    """A Geral e as duas caixas. Campo ausente não muda; caixa null não muda;
+    % e gasto null apagam."""
+    acc, department = await _conta_da_aba(session, user, account_id)
+    mudancas = {
+        campo: valor
+        for campo, valor in body.model_dump(exclude_unset=True).items()
+        if valor is not None or campo in ("pode_gastar_pct", "gasto_dia")
+    }
+    if mudancas:
+        stmt = pg_insert(PricingAdsConta).values(
+            pricing_account_id=acc.id, atualizado_por=user.id, **mudancas
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[PricingAdsConta.pricing_account_id],
+            set_={**mudancas, "atualizado_por": user.id, "atualizado_em": func.now()},
+        )
+        await session.execute(stmt)
+        await session.commit()
+        logger.info(
+            "pricing_ads_conta",
+            account_id=str(acc.id),
+            campos=sorted(mudancas),
+            user_id=str(user.id),
+        )
+    return (await _contas_out(session, [acc], department))[str(acc.id)]
+
+
+@router.put("/ads/{account_id}/produto/{product_id}", response_model=AdsContaOut)
+async def gravar_ads_do_produto(
+    account_id: UUID,
+    product_id: UUID,
+    body: AdsProdutoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos_contas", "edit"))],
+) -> AdsContaOut:
+    """O % e o gasto por dia de um produto do departamento da conta. Sem % e
+    sem gasto, a linha sai e o produto volta para a Geral. Responde o Ads da
+    conta inteira."""
+    acc, department = await _conta_da_aba(session, user, account_id)
+    prod = await session.get(PricingProduct, product_id)
+    folha = await session.get(Segment, prod.segment_id) if prod is not None else None
+    if folha is None or folha.parent_id != acc.segment_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "product_not_found"})
+    mudancas = body.model_dump(exclude_unset=True)
+    linha = await session.get(PricingAdsProduto, (acc.id, product_id))
+    valores = {
+        "pode_gastar_pct": linha.pode_gastar_pct if linha else None,
+        "gasto_dia": linha.gasto_dia if linha else None,
+        **mudancas,
+    }
+    if valores["pode_gastar_pct"] is None and valores["gasto_dia"] is None:
+        if linha is not None:
+            await session.delete(linha)
+    elif linha is None:
+        session.add(
+            PricingAdsProduto(
+                pricing_account_id=acc.id,
+                pricing_product_id=product_id,
+                atualizado_por=user.id,
+                **valores,
+            )
+        )
+    else:
+        for campo, valor in mudancas.items():
+            setattr(linha, campo, valor)
+        linha.atualizado_por = user.id
+        linha.atualizado_em = func.now()
+    await session.commit()
+    logger.info(
+        "pricing_ads_produto",
+        account_id=str(acc.id),
+        product_id=str(product_id),
+        campos=sorted(mudancas),
+        user_id=str(user.id),
+    )
+    return (await _contas_out(session, [acc], department))[str(acc.id)]

@@ -92,6 +92,7 @@ from app.routers import ouvidoria as ouvidoria_router
 from app.routers import denuncia as denuncia_router
 from app.routers import juridico as juridico_router
 from app.routers import pricing as pricing_router
+from app.routers import pricing_ads as pricing_ads_router
 from app.routers import pricing_conferencia as pricing_conferencia_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
@@ -278,6 +279,7 @@ claude_conector_router.mascarar_token_no_access_log()  # token do conector fora 
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
 app.include_router(pricing_conferencia_router.router)  # Conferência de preços (só admin)
+app.include_router(pricing_ads_router.router)  # Ads da aba Contas (M-12)
 app.include_router(pricing_mega_router.router)
 app.include_router(segments_router.router)
 app.include_router(marcas_router.router)

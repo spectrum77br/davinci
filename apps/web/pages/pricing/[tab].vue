@@ -1165,8 +1165,8 @@ async function focusEditInput() {
 
 // =========================================================== account inline edit
 
-// Anotações da conta na aba Contas. `observation` é a "Obs"; Ads é texto
-// livre. Desconto até / Cupom até ("dd/mm") e Afiliado / Oferta limite (%)
+// Anotações da conta na aba Contas. `observation` é a "Obs"; Ads abre o
+// painel do M-12 (gravado à parte, não no texto `ads`). Desconto até / Cupom até ("dd/mm") e Afiliado / Oferta limite (%)
 // são campos próprios, sempre à mostra e fora do cálculo (M-11, 18/11/2026,
 // migration 0502); os textos antigos discount/affiliate/coupon/offer ficam no
 // banco, fora da tela.
@@ -1175,7 +1175,7 @@ type CampoAnotacao = { key: string; label: string; tipo?: TipoAnotacao; titulo?:
 const STORE_NOTE_FIELDS: CampoAnotacao[] = [
   { key: 'desconto_ate', label: 'Desconto até', tipo: 'data', titulo: 'Até que dia e mês vai o desconto da conta' },
   { key: 'afiliado_pct', label: 'Afiliado', tipo: 'pct', titulo: 'Quanto pode gastar com afiliado (%)' },
-  { key: 'ads', label: 'Ads' },
+  { key: 'ads', label: 'Ads', titulo: 'Quanto a conta pode gastar em Ads (%), o ROAS mínimo e o gasto por dia — clique na célula' },
   { key: 'cupom_ate', label: 'Cupom até', tipo: 'data', titulo: 'Até que dia e mês vai o cupom da conta' },
   { key: 'oferta_limite_pct', label: 'Oferta limite', tipo: 'pct', titulo: 'Limite de oferta que pode colocar (%)' },
   { key: 'observation', label: 'Obs' },
@@ -1227,6 +1227,177 @@ function desfazerAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
   const el = ev.target as HTMLInputElement
   el.value = textoAnotacao(acc, f)
   el.blur()
+}
+
+// ---------- Ads da aba Contas (M-12, 18/11/2026; migration 0503)
+// A célula Ads vira o botão "2%  ROAS 50 ▾" e abre um painel igual ao da
+// Margem: [x] Geral (% que pode gastar, ROAS mínimo = 100 ÷ % calculado e
+// gasto por dia em R$), "% gasto real" e "ROAS real" da conta nos últimos 7
+// dias (lidos do Marketing; sem dado = "—", nunca estimado) e [x] Por produto
+// (% e gasto por dia de cada produto do departamento; % vazio = usa a Geral).
+// Grava no servidor ao sair do campo, com Enter ou ao fechar; quem não edita
+// Contas só vê. Fora do cálculo de preço. O texto antigo (`ads`) fica no banco.
+type AdsValores = { pode_gastar_pct: number | null; gasto_dia: number | null }
+type AdsConta = AdsValores & {
+  ads_geral_ligada: boolean
+  ads_por_produto_ligada: boolean
+  produtos: Record<string, AdsValores>
+  real: { pct_gasto: number | null; roas: number | null }
+}
+type AdsResposta = {
+  department: string
+  pode_editar: boolean
+  produtos: { id: string; sku: string; name: string }[]
+  contas: Record<string, AdsConta>
+}
+// Conta sem nada gravado (ou criada depois da leitura): o padrão do servidor.
+const ADS_PADRAO: AdsConta = {
+  ads_geral_ligada: true,
+  pode_gastar_pct: null,
+  gasto_dia: null,
+  ads_por_produto_ligada: true,
+  produtos: {},
+  real: { pct_gasto: null, roas: null },
+}
+const ads = ref<AdsResposta | null>(null)
+const adsErro = ref(false)
+const buscaAdsProduto = ref('')
+const podeEditarAds = computed(() => !!ads.value?.pode_editar)
+let seqAds = 0
+// Por conta: só a resposta da última gravação vale (duas no ar ao mesmo tempo).
+const seqAdsConta: Record<string, number> = {}
+
+async function carregarAds() {
+  if (import.meta.server) return
+  const dep = department.value
+  const seq = ++seqAds
+  ads.value = null
+  adsErro.value = false
+  try {
+    const r = await api<AdsResposta>(`/api/pricing/ads?department=${encodeURIComponent(dep)}`)
+    if (seq === seqAds) ads.value = r
+  } catch {
+    if (seq === seqAds) adsErro.value = true
+  }
+}
+
+function adsDa(accId: string): AdsConta {
+  return ads.value?.contas[accId] ?? ADS_PADRAO
+}
+
+// A Geral que vale: com a caixa ligada e % gravado; senão nenhuma ("—").
+function pctGeralAds(c: AdsConta): number | null {
+  return c.ads_geral_ligada ? c.pode_gastar_pct : null
+}
+
+// O % do produto: o próprio (com Por produto ligada) ou a Geral.
+function pctDoProdutoAds(c: AdsConta, prodId: string): number | null {
+  const proprio = c.ads_por_produto_ligada ? c.produtos[prodId]?.pode_gastar_pct : null
+  return proprio ?? pctGeralAds(c)
+}
+
+// ROAS mínimo = 100 ÷ % (2% → 50); sem % ou com 0% não há ("—").
+function roasMinimo(pct: number | null): number | null {
+  return pct ? 100 / pct : null
+}
+
+function fmtRoas(v: number | null): string {
+  return v == null ? '—' : v.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
+}
+
+function fmtGasto(v: number | null | undefined): string {
+  return v == null ? '' : v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+// Gasto por dia: "50", "50,90", "1.234,56" → reais com centavos; vazio → null;
+// outra coisa ou negativo → undefined (não grava).
+function lerGasto(texto: string): number | null | undefined {
+  if (!texto.trim()) return null
+  const n = parseDec(texto)
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined
+}
+
+// Lista do Por produto: os produtos do departamento (busca por SKU ou nome),
+// primeiro os que têm valor próprio, como na Margem.
+function produtosDoAds(c: AdsConta) {
+  const q = buscaAdsProduto.value.trim().toLowerCase()
+  const achados = (ads.value?.produtos ?? []).filter(
+    (p) => !q || p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q),
+  )
+  return [...achados.filter((p) => c.produtos[p.id]), ...achados.filter((p) => !c.produtos[p.id])]
+}
+
+function textoErroAds(e: any): string {
+  const status = e?.status ?? e?.response?.status
+  if (status === 422) return 'Use % de 0 a 100 e gasto em reais (não negativo).'
+  if (status === 403) return 'Só quem edita Contas altera o Ads.'
+  if (status === 404) return 'Conta ou produto não encontrado — recarregue a página.'
+  return 'Tente de novo; voltou ao que está salvo.'
+}
+
+async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: string) {
+  const r = ads.value
+  if (!r?.pode_editar) return
+  const antes = adsDa(accId)
+  const dep = r.department
+  // Já na tela; volta ao salvo se o servidor recusar.
+  r.contas[accId] = prodId
+    ? {
+        ...antes,
+        produtos: {
+          ...antes.produtos,
+          [prodId]: { pode_gastar_pct: null, gasto_dia: null, ...antes.produtos[prodId], ...mudanca },
+        },
+      }
+    : { ...antes, ...mudanca }
+  const seq = (seqAdsConta[accId] ?? 0) + 1
+  seqAdsConta[accId] = seq
+  const url = prodId
+    ? `/api/pricing/ads/${encodeURIComponent(accId)}/produto/${encodeURIComponent(prodId)}`
+    : `/api/pricing/ads/${encodeURIComponent(accId)}`
+  try {
+    const salvo = await api<AdsConta>(url, { method: 'PUT', body: mudanca })
+    if (ads.value?.department === dep && seqAdsConta[accId] === seq) ads.value.contas[accId] = salvo
+    flash(accId, 'ads')
+  } catch (e: any) {
+    toast.error('Não salvou o Ads', textoErroAds(e))
+    if (ads.value?.department === dep && seqAdsConta[accId] === seq) ads.value.contas[accId] = antes
+  }
+}
+
+// Campo de % ou de gasto do painel (Geral ou produto): o input diz de qual
+// conta, campo e produto é (data-ads-*). Vazio apaga; inválido volta ao salvo.
+function gravarCampoAds(ev: Event) {
+  const el = ev.target as HTMLInputElement
+  const { adsConta: accId, adsCampo, adsProduto: prodId } = el.dataset
+  if (!accId || !podeEditarAds.value) return
+  const campo = adsCampo === 'gasto_dia' ? 'gasto_dia' : 'pode_gastar_pct'
+  const c = adsDa(accId)
+  const salvo = (prodId ? c.produtos[prodId]?.[campo] : c[campo]) ?? null
+  const valor = campo === 'gasto_dia' ? lerGasto(el.value) : lerPct(el.value)
+  if (valor === undefined) {
+    toast.error(
+      'Valor inválido',
+      campo === 'gasto_dia' ? 'Use o valor em reais, ex.: 50 ou 50,90; vazio apaga.' : 'Use um número de 0 a 100; vazio apaga.',
+    )
+    el.value = campo === 'gasto_dia' ? fmtGasto(salvo) : salvo == null ? '' : fmtPct(salvo)
+    return
+  }
+  if (valor === salvo) return
+  void gravarAds(accId, { [campo]: valor }, prodId)
+}
+
+// Esc ou clique fora fecham o painel com o campo ainda focado, sem change
+// (igual ao menu da Margem): ao fechar, grava o campo que está com o foco.
+// Ao abrir, a busca de produto começa vazia.
+function abrirOuFecharAds(aberto: boolean) {
+  if (aberto) {
+    buscaAdsProduto.value = ''
+    return
+  }
+  if (typeof document === 'undefined') return
+  const el = document.activeElement as HTMLInputElement | null
+  if (el?.closest?.('[data-menu-ads]') && el.dataset.adsConta) gravarCampoAds({ target: el } as unknown as Event)
 }
 
 function startEditAccount(acc: Account, field: string) {
@@ -4536,6 +4707,8 @@ watch(
       loadAudit()
       talvezCarregarMegaStatus()
     }
+    // Ads da aba Contas (M-12): uma leitura por visita à aba e por departamento.
+    if (t === 'contas') void carregarAds()
   },
   { immediate: true },
 )
@@ -4556,9 +4729,11 @@ watch(department, async () => {
   vendasEstado.value = 'carregando'
   prazos.value = null
   margem.value = null
+  buscaAdsProduto.value = ''
   // Resposta de mapa do departamento anterior ainda no ar é descartada.
   seqEstoque++
   seqVendas++
+  if (tab.value === 'contas') void carregarAds()
   if (tab.value === 'tabela') {
     carregarExtrasDaTabela()
     await loadGrid()
@@ -5176,6 +5351,189 @@ watch(department, async () => {
                     />
                     <span v-if="f.tipo === 'pct'" class="text-xs text-muted-foreground">%</span>
                   </div>
+                </td>
+                <!-- Ads (M-12): botão "2%  ROAS 50 ▾" que abre o painel no estilo do
+                     da Margem. Quem não edita Contas abre e só vê. -->
+                <td
+                  v-else-if="f.key === 'ads'"
+                  class="border border-border px-1 py-1 text-left"
+                  :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'ads') }"
+                >
+                  <PopoverRoot @update:open="abrirOuFecharAds">
+                    <PopoverTrigger as-child>
+                      <button
+                        type="button"
+                        class="inline-flex items-center gap-2 whitespace-nowrap rounded px-1.5 py-0.5 text-xs hover:bg-muted"
+                        data-acao="ads"
+                        :data-ads-botao="acc.id"
+                        :title="adsErro ? 'O Ads não carregou — recarregue a página.' : 'Ads da conta: % que pode gastar, ROAS mínimo e gasto por dia'"
+                      >
+                        <template v-if="ads && pctGeralAds(adsDa(acc.id)) != null">
+                          <span>{{ fmtPct(pctGeralAds(adsDa(acc.id))!) }}%</span>
+                          <span>ROAS {{ fmtRoas(roasMinimo(pctGeralAds(adsDa(acc.id)))) }}</span>
+                        </template>
+                        <span v-else class="text-muted-foreground">{{ ads || adsErro ? '—' : '…' }}</span>
+                        <ChevronDown class="h-3 w-3 text-muted-foreground" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverPortal>
+                      <PopoverContent
+                        side="bottom"
+                        align="start"
+                        :side-offset="4"
+                        :collision-padding="8"
+                        data-menu-ads
+                        :data-ads-painel="acc.id"
+                        class="z-[70] w-[30rem] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+                      >
+                        <div class="px-1 pb-2 text-sm font-semibold">Ads — {{ nomeComTipo(acc) }} · {{ platformLabel(acc.platform) }}</div>
+                        <div v-if="!ads" class="px-1 py-1 text-sm text-muted-foreground">
+                          {{ adsErro ? 'O Ads não carregou — recarregue a página.' : 'carregando o Ads…' }}
+                        </div>
+                        <!-- `c` = o Ads desta conta (alias para o template; nada até carregar). -->
+                        <template v-for="c in ads ? [adsDa(acc.id)] : []" :key="acc.id">
+                          <div class="flex flex-wrap items-center gap-2 rounded px-1 py-1 text-sm">
+                            <label class="flex cursor-pointer items-center gap-2">
+                              <input
+                                type="checkbox"
+                                class="size-4"
+                                data-campo="ads-geral-ligada"
+                                :checked="c.ads_geral_ligada"
+                                :disabled="!podeEditarAds"
+                                @change="gravarAds(acc.id, { ads_geral_ligada: !c.ads_geral_ligada })"
+                              />
+                              Geral
+                            </label>
+                            <input
+                              type="text"
+                              inputmode="decimal"
+                              class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:opacity-60"
+                              data-campo="ads-pct"
+                              :data-ads-conta="acc.id"
+                              data-ads-campo="pode_gastar_pct"
+                              :value="c.pode_gastar_pct == null ? '' : fmtPct(c.pode_gastar_pct)"
+                              :disabled="!podeEditarAds"
+                              @change="gravarCampoAds"
+                            />
+                            %
+                            <span class="text-xs text-muted-foreground" data-ads-roas-minimo>
+                              ROAS mínimo {{ fmtRoas(roasMinimo(c.pode_gastar_pct)) }}
+                            </span>
+                          </div>
+                          <div class="flex items-center gap-2 px-1 py-1 text-sm">
+                            <span class="text-muted-foreground">Gasto por dia R$</span>
+                            <input
+                              type="text"
+                              inputmode="decimal"
+                              class="h-7 w-24 border rounded px-2 text-right text-sm bg-background disabled:opacity-60"
+                              data-campo="ads-gasto-dia"
+                              :data-ads-conta="acc.id"
+                              data-ads-campo="gasto_dia"
+                              :value="fmtGasto(c.gasto_dia)"
+                              :disabled="!podeEditarAds"
+                              @change="gravarCampoAds"
+                            />
+                          </div>
+                          <p class="px-1 pb-1 text-[11px] text-muted-foreground">
+                            Vale para todos os produtos sem % próprio. ROAS mínimo = 100 ÷ %. Desmarcada: fica sem % (—).
+                          </p>
+                          <div class="grid grid-cols-2 gap-2 px-1 pb-1">
+                            <div class="rounded border px-2 py-1" data-ads-real="pct_gasto">
+                              <div class="text-[11px] text-muted-foreground">% gasto real</div>
+                              <div class="text-sm font-semibold">{{ c.real.pct_gasto == null ? '—' : `${fmtPct(c.real.pct_gasto)}%` }}</div>
+                            </div>
+                            <div class="rounded border px-2 py-1" data-ads-real="roas">
+                              <div class="text-[11px] text-muted-foreground">ROAS real</div>
+                              <div class="text-sm font-semibold">{{ fmtRoas(c.real.roas) }}</div>
+                            </div>
+                          </div>
+                          <p class="px-1 pb-1 text-[11px] text-muted-foreground">
+                            Últimos 7 dias, do Marketing (% gasto = ACOS; ROAS = receita ÷ gasto). Sem dado da conta: —.
+                          </p>
+                          <label class="flex cursor-pointer items-center gap-2 rounded border-t px-1 pb-1 pt-2 text-sm">
+                            <input
+                              type="checkbox"
+                              class="size-4"
+                              data-campo="ads-por-produto-ligada"
+                              :checked="c.ads_por_produto_ligada"
+                              :disabled="!podeEditarAds"
+                              @change="gravarAds(acc.id, { ads_por_produto_ligada: !c.ads_por_produto_ligada })"
+                            />
+                            Por produto
+                          </label>
+                          <p class="px-1 pb-1 text-[11px] text-muted-foreground">
+                            O produto com % próprio usa o dele; % vazio usa a Geral. Desmarcada: todos usam a Geral.
+                          </p>
+                          <div class="relative px-1 pb-1">
+                            <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                            <input
+                              v-model="buscaAdsProduto"
+                              placeholder="Buscar produto por SKU ou nome…"
+                              class="h-7 w-full border rounded pl-7 pr-2 text-sm bg-background"
+                              data-campo="ads-busca-produto"
+                            />
+                          </div>
+                          <div class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 px-1 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground">
+                            <span>Produto</span>
+                            <span class="text-right">Pode gastar (%)</span>
+                            <span class="text-right">ROAS mínimo</span>
+                            <span class="text-right">Gasto por dia (R$)</span>
+                          </div>
+                          <div
+                            class="max-h-64 overflow-y-auto px-1"
+                            :class="{ 'opacity-60': !c.ads_por_produto_ligada }"
+                            data-lista-ads-produto
+                          >
+                            <div
+                              v-for="p in produtosDoAds(c)"
+                              :key="p.id"
+                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5 text-xs"
+                              :data-ads-produto-linha="p.id"
+                            >
+                              <span class="truncate" :title="`${p.sku} — ${p.name}`">{{ p.name }}</span>
+                              <span class="inline-flex items-center justify-end gap-0.5">
+                                <input
+                                  type="text"
+                                  inputmode="decimal"
+                                  class="h-6 w-12 border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                                  :placeholder="pctGeralAds(c) == null ? '—' : fmtPct(pctGeralAds(c)!)"
+                                  :value="c.produtos[p.id]?.pode_gastar_pct == null ? '' : fmtPct(c.produtos[p.id].pode_gastar_pct!)"
+                                  :data-ads-conta="acc.id"
+                                  data-ads-campo="pode_gastar_pct"
+                                  :data-ads-produto="p.id"
+                                  :disabled="!podeEditarAds"
+                                  @change="gravarCampoAds"
+                                />
+                                %
+                              </span>
+                              <span class="text-right text-muted-foreground" data-ads-roas-produto>
+                                {{ fmtRoas(roasMinimo(pctDoProdutoAds(c, p.id))) }}
+                              </span>
+                              <input
+                                type="text"
+                                inputmode="decimal"
+                                class="h-6 w-full border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                                :value="fmtGasto(c.produtos[p.id]?.gasto_dia)"
+                                :data-ads-conta="acc.id"
+                                data-ads-campo="gasto_dia"
+                                :data-ads-produto="p.id"
+                                :disabled="!podeEditarAds"
+                                @change="gravarCampoAds"
+                              />
+                            </div>
+                            <p v-if="!produtosDoAds(c).length" class="py-1 text-[11px] text-muted-foreground">
+                              {{ buscaAdsProduto.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.' }}
+                            </p>
+                          </div>
+                          <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
+                            {{ podeEditarAds
+                              ? 'Grava ao sair do campo, com Enter ou ao fechar. Fora do cálculo de preço.'
+                              : 'Só quem edita Contas altera o Ads.' }}
+                          </div>
+                        </template>
+                      </PopoverContent>
+                    </PopoverPortal>
+                  </PopoverRoot>
                 </td>
                 <td
                   v-else

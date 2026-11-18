@@ -307,6 +307,7 @@ from app.models.pricing import (
     PricingPushIdempotency,
     StoreInfo,
 )
+from app.models.pricing_ads import PricingAdsConta, PricingAdsProduto
 from app.models.pricing_conferencia import (
     PricingConferencia,
     PricingConferenciaMargem,
@@ -573,6 +574,8 @@ __all__ = [
     "PricingConferencia",
     "PricingConferenciaMargem",
     "PricingConferenciaMargemProduto",
+    "PricingAdsConta",
+    "PricingAdsProduto",
     "PricingGarantiaPrazo",
     "PricingOverride",
     "PricingPlatform",

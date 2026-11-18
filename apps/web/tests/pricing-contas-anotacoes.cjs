@@ -142,7 +142,8 @@ for (const trecho of [
 ]) assert.ok(input.includes(trecho), `input tem ${trecho}`)
 assert.doesNotMatch(input, /v-if/, 'campo sempre à mostra, mesmo vazio')
 assert.match(proprio, /<span v-if="f\.tipo === 'pct'" class="text-xs text-muted-foreground">%<\/span>/)
-// Ads e Obs continuam como antes (clique para editar).
+// Obs continua como antes (clique para editar); Ads virou o painel do M-12
+// (tests/pricing-contas-ads.cjs).
 assert.match(celulas, /<td\s+v-else\s+class="border border-border px-2 py-1\.5 text-xs cursor-pointer text-left max-w-\[260px\]"/)
 console.log('pricing contas anotações: template ok')
 console.log('pricing-contas-anotacoes: ok')

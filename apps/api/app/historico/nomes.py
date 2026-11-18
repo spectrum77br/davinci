@@ -424,6 +424,9 @@ TABELAS: dict[str, str] = {
     # M-2 (17/11/2026, migration 0499): a margem de erro da conferência.
     "pricing_conferencia_margem": "Margem de erro geral (Tabela de preços)",
     "pricing_conferencia_margem_produto": "Margem de erro do produto (Tabela de preços)",
+    # M-12 (18/11/2026, migration 0503): o Ads da aba Contas.
+    "pricing_ads_conta": "Ads da conta (Tabela de preços)",
+    "pricing_ads_produto": "Ads do produto (Tabela de preços)",
     "store_info": "Loja",
     "stores": "Conta de marketplace",
     "companies": "Empresa",
@@ -527,6 +530,11 @@ CAMPOS: dict[str, str] = {
     "cupom_ate": "Cupom até",
     "afiliado_pct": "Afiliado (%)",
     "oferta_limite_pct": "Oferta limite (%)",
+    # Ads da aba Contas (M-12, 18/11/2026, migration 0503).
+    "ads_geral_ligada": "Ads geral ligado",
+    "ads_por_produto_ligada": "Ads por produto ligado",
+    "pode_gastar_pct": "Ads: pode gastar (%)",
+    "gasto_dia": "Ads: gasto por dia",
     "platform": "Plataforma",
     "server": "Servidor",
     "password_enc": "Senha",

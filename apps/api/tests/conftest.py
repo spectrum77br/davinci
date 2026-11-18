@@ -567,6 +567,9 @@ _CLEANUP_TABLES = (
     # departamento (sem FK que a apague: a margem de um teste não vaza).
     "pricing_conferencia_margem_produto",
     "pricing_conferencia_margem",
+    # 0503 (M-12): o Ads da conta e do produto (CASCADE na conta e no produto).
+    "pricing_ads_produto",
+    "pricing_ads_conta",
     "verificar_margem",
     "valuation",
     "valuation_estoque_bling_diario",

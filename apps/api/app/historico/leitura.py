@@ -45,13 +45,16 @@ ITEM_FKS: dict[str, tuple[str, ...]] = {
     "stores": ("company_id",),
     # M-2 (17/11/2026): a margem própria não tem id/sku; o nome vem do produto.
     "pricing_conferencia_margem_produto": ("pricing_product_id",),
+    # M-12 (18/11/2026): o Ads é da conta (e do produto nela).
+    "pricing_ads_conta": ("pricing_account_id",),
+    "pricing_ads_produto": ("pricing_product_id", "pricing_account_id"),
 }
 
 # Guardados como fração (0,125) e digitados como porcentagem (12,5%).
 PERCENTUAIS = {"commission", "min_margin", *(f"margin{i}" for i in range(1, 6))}
 DINHEIRO = {
     "price_override", "bling_cost_price", "valorbase", "taxacomissao", "custofrete",
-    "reembolso", "prejuizo", "preco_catalogo", "custo_bling",
+    "reembolso", "prejuizo", "preco_catalogo", "custo_bling", "gasto_dia",
     *(f"cost_kit{i}" for i in range(1, 9)), *(f"shipping{i}" for i in range(1, 6)),
 }
 # "valor" só é dinheiro onde se sabe que é.
