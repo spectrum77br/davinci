@@ -1,4 +1,4 @@
-"""ORGANIZAR da tela Produtos: o que está escondido da TELA (migration 0499).
+"""ORGANIZAR da tela Produtos: o que está escondido da TELA (migration 0500).
 
 Eduardo, 17/11/2026 (decisões 3 e 4): o "Remover os N mortos" sai da tela e
 fica só o ORGANIZAR — só ADM, só ESCONDE da tela Produtos/Anúncios, dá para

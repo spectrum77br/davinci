@@ -130,7 +130,7 @@ EXCLUIDAS = re.compile(
     # (quem pediu/aprovou/recusou e quando); o diff inteiro seria copiado a
     # cada passo. `sistema_mudanca_aprovador` (quem aprova) fica COM.
     r"|sistema_mudanca$"
-    # Produtos › Organizar (0499): a marca já é a trilha (quem ocultou e quem
+    # Produtos › Organizar (0500): a marca já é a trilha (quem ocultou e quem
     # mostrou de novo, e quando); com o gatilho, um "Ocultar 7.208 itens"
     # viraria 7.208 linhas aqui. A prévia guarda só ids por 30 min. A ação
     # continua no Histórico pelo rótulo (historico/nomes.ACOES).

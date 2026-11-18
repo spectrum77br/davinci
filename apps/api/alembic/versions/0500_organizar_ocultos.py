@@ -17,8 +17,8 @@ estas tabelas.
 Sem ALTER em products, product_links ou listings (tabelas quentes) e sem
 ALTER TYPE.
 
-Revision ID: 0499_organizar_ocultos
-Revises: 0498_carrefour_offer_write
+Revision ID: 0500_organizar_ocultos
+Revises: 0499_pricing_conferencia_margem
 """
 
 from collections.abc import Sequence
@@ -28,8 +28,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0499_organizar_ocultos"
-down_revision: str | None = "0498_carrefour_offer_write"
+revision: str = "0500_organizar_ocultos"
+down_revision: str | None = "0499_pricing_conferencia_margem"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -96,9 +96,7 @@ def upgrade() -> None:
         postgresql_where=sa.text("reexibido_em IS NULL"),
         schema=SCHEMA,
     )
-    op.create_index(
-        "ix_organizar_ocultos_lote", "organizar_ocultos", ["lote_id"], schema=SCHEMA
-    )
+    op.create_index("ix_organizar_ocultos_lote", "organizar_ocultos", ["lote_id"], schema=SCHEMA)
     op.create_table(
         "organizar_previas",
         sa.Column(

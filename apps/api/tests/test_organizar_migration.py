@@ -1,4 +1,4 @@
-"""A 0499 cria as tabelas do Organizar igual ao model (17/11/2026).
+"""A 0500 cria as tabelas do Organizar igual ao model (17/11/2026).
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a migration roda de verdade num schema rascunho (com um
@@ -22,13 +22,13 @@ from sqlalchemy.exc import IntegrityError
 from app.models import Base
 
 _MIGRATION = (
-    Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0499_organizar_ocultos.py"
+    Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0500_organizar_ocultos.py"
 )
 TABELAS = ("organizar_ocultos", "organizar_previas")
 
 
 def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0499", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0500", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -77,17 +77,17 @@ async def _catalogo(db, schema: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_0499_cria_igual_ao_model_e_desce(db):
+async def test_0500_cria_igual_ao_model_e_desce(db):
     mod = _carregar()
-    assert mod.revision == "0499_organizar_ocultos"
-    assert mod.down_revision == "0498_carrefour_offer_write"
+    assert mod.revision == "0500_organizar_ocultos"
+    assert mod.down_revision == "0499_pricing_conferencia_margem"
     from app.models.organizar import CHAVES_ORGANIZAR, TABELAS_ORGANIZAR
 
     assert mod.CHAVES == CHAVES_ORGANIZAR
     assert mod.TABELAS == TABELAS_ORGANIZAR
 
     modelo = Base.metadata.schema
-    rascunho = f"{modelo}_m0499"
+    rascunho = f"{modelo}_m0500"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
     await db.execute(text(f'CREATE TABLE "{rascunho}".users (id uuid PRIMARY KEY)'))
@@ -130,17 +130,17 @@ async def test_0499_cria_igual_ao_model_e_desce(db):
         with pytest.raises(IntegrityError, match="ck_organizar_ocultos_motivo"):
             await db.execute(inserir, {"r": item, "m": "excluido_bling", "u": usuario})
         await db.rollback()
-        await db.execute(
-            text(f'UPDATE "{rascunho}".organizar_ocultos SET reexibido_em = now()')
-        )
+        await db.execute(text(f'UPDATE "{rascunho}".organizar_ocultos SET reexibido_em = now()'))
         await db.execute(inserir, {"r": item, "m": "produto_inativo", "u": usuario})
         await db.commit()
         # FK SET NULL: o usuário apagado não leva a trilha junto
         await db.execute(text(f'DELETE FROM "{rascunho}".users'))
         await db.commit()
         quem = (
-            await db.execute(text(f'SELECT oculto_por FROM "{rascunho}".organizar_ocultos'))
-        ).scalars().all()
+            (await db.execute(text(f'SELECT oculto_por FROM "{rascunho}".organizar_ocultos')))
+            .scalars()
+            .all()
+        )
         assert quem == [None, None]
 
         conn = await db.connection()
