@@ -2102,7 +2102,8 @@ def test_declaracao_com_erro_na_subida_loga_warning():
     item = [formatar_item("b027.24", "Mala Chanfrada M3 tamanho 24 - Branca", 1)]
     with structlog.testing.capture_logs() as logs:
         assert nf_router._declaracao_do_bling(b"nao sou pdf", "870199", item, "upload") == (
-            b"nao sou pdf"
+            b"nao sou pdf",
+            "erro",
         )
         nf_router._declaracao_do_bling(_etiqueta_com_declaracao(), "870199", [], "upload")
     niveis = {

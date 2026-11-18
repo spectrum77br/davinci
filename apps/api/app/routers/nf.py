@@ -80,6 +80,7 @@ from app.services import (
     melhor_envio,
     nf_emissao_gerar,
     nf_etiqueta_lote,
+    nf_etiqueta_temu,
     nf_frete_auto,
     nf_relatorio,
     nf_upseller,
@@ -2420,13 +2421,15 @@ async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | N
 
 def _declaracao_do_bling(
     pdf: bytes, numero: str, itens: list[ItemDeclaracao], origem: str
-) -> bytes:
+) -> tuple[bytes, str]:
     """Reescreve a DECLARAÇÃO DE CONTEÚDO com os itens atuais do pedido no
     Bling (Eduardo, 06/11/2026: o papel na caixa mostra o item do pedido, não
     o do anúncio). Nunca trava a subida: qualquer status que não seja 'ok'
     guarda a etiqueta como veio do transform. 'erro' (exceção, grade que não
     deu pra ler — ex. o Upseller mudou o layout) é warning, como na impressão:
-    o blob fica com a declaração do anúncio e precisa aparecer no filtro."""
+    o blob fica com a declaração do anúncio e precisa aparecer no filtro.
+    Devolve (bytes, status) — `sem_declaracao` é a deixa da Temu
+    (`_declaracao_temu`)."""
     try:
         novo, status, detalhe = reescrever_declaracao(pdf, itens)
     except Exception as exc:  # noqa: BLE001 — reescrever_declaracao já não levanta
@@ -2434,6 +2437,33 @@ def _declaracao_do_bling(
     log = logger.warning if status == "erro" else logger.info
     log(
         "nf_etiqueta_declaracao",
+        pedido=numero, status=status, detalhe=detalhe, origem=origem,
+    )
+    return novo, status
+
+
+def _declaracao_temu(
+    pdf: bytes,
+    numero: str,
+    itens: list[ItemDeclaracao],
+    temu: nf_etiqueta_temu.PedidoTemu | None,
+    nome: str | None,
+    origem: str,
+) -> bytes:
+    """Etiqueta de pedido TEMU que chegou SEM declaração de conteúdo (a da
+    Anjun nunca traz — 18/11/2026): acrescenta a 2ª página com os itens do
+    Bling, no modelo do `~/nf-executor/temu_declaracao.py`. Só chamada quando
+    `_declaracao_do_bling` devolveu `sem_declaracao`; pedido que não é Temu
+    (`temu` None — Amazon, SEDEX…) passa direto, como antes. Nunca trava a
+    subida: falha guarda a etiqueta como estava (warning no log)."""
+    if temu is None:
+        return pdf
+    novo, status, detalhe = nf_etiqueta_temu.acrescentar_declaracao(
+        pdf, temu, itens, nome_destinatario=nome
+    )
+    log = logger.warning if status == "erro" else logger.info
+    log(
+        "nf_etiqueta_declaracao_temu",
         pedido=numero, status=status, detalhe=detalhe, origem=origem,
     )
     return novo
@@ -2508,7 +2538,18 @@ async def nf_agent_etiqueta(
         raise HTTPException(422, detail={"code": "nf_etiqueta_invalida", "erro": str(exc)}) from exc
     itens = await itens_para_declaracao(session, [pedido_bling], origem="upload")
     itens_pedido = itens.get(pedido_bling, [])
-    transformado = _declaracao_do_bling(transformado, pedido_bling, itens_pedido, "upload")
+    transformado, st_decl = _declaracao_do_bling(
+        transformado, pedido_bling, itens_pedido, "upload"
+    )
+    if st_decl == "sem_declaracao":
+        # Temu (Anjun) vem sem declaração: a página entra aqui (18/11/2026).
+        temu = (
+            await nf_etiqueta_temu.pedidos_temu(session, [pedido_bling], origem="upload")
+        ).get(pedido_bling)
+        transformado = _declaracao_temu(
+            transformado, pedido_bling, itens_pedido, temu,
+            (destinatario_nome or "").strip() or None, "upload",
+        )
     transformado = _picking_do_bling(transformado, pedido_bling, itens_pedido, rodape, "upload")
 
     filename = f"etiqueta_{pedido_bling}.pdf"
@@ -2552,8 +2593,13 @@ async def nf_agent_etiqueta_lote(
     ("Pedido: X" → bling_orders.numeroloja, Shopee); 2º pelo CPF/CNPJ da
     declaração de conteúdo → bling_orders.documento_destinatario (chave mais
     específica, cobre os layouts sem o nº da plataforma); 3º pelo NOME do
-    destinatário + SKU da declaração (TikTok). Todos só quando inequívoco — o
-    que não casar volta em `nao_casadas` pra tratamento humano, nunca chuta.
+    destinatário + SKU da declaração (TikTok); 4º, só pra quem sobrou e só
+    entre pedidos de loja TEMU fora de Cancelado/Aguardando Cancelamento
+    (etiqueta da Anjun, 18/11/2026): pela chave da NF impressa →
+    `nf_nota.chave`, depois pelo CEP + nome do destinatário. Todos só quando
+    inequívoco — o que não casar volta em `nao_casadas` pra tratamento humano,
+    nunca chuta. Etiqueta de pedido Temu sem declaração ganha a 2ª página
+    (`_declaracao_temu`).
     """
     raw = await file.read()
     if not raw:
@@ -2626,7 +2672,8 @@ async def nf_agent_etiqueta_lote(
     nao_casadas: list[dict] = []
     falhas: list[dict] = []
     casadas: list[tuple[nf_etiqueta_lote.EtiquetaFatia, str, str | None]] = []
-    for i, fatia in enumerate(fatias):
+    achados: list[tuple[str, str | None] | None] = []
+    for fatia in fatias:
         numero: str | None = None
         nome: str | None = None
         for candidato_loja in fatia.numerolojas:
@@ -2641,7 +2688,39 @@ async def nf_agent_etiqueta_lote(
             numero = nf_etiqueta_lote.casa_por_texto(fatia.texto, cand_nome)
         if numero is not None and nome is None:
             nome = cand_map.get(numero, (None, None, set()))[0]
-        if numero is None:
+        achados.append((numero, nome) if numero is not None else None)
+
+    # 3) Etiqueta da TEMU (Anjun, 18/11/2026: sem CPF, sem o nº do pedido na
+    #    Temu e sem declaração — nada acima casa). Só pras fatias que sobraram
+    #    e só entre pedidos de loja Temu fora de 12/83955: 1º pela chave da NF
+    #    impressa (nf_nota, quando o XML já foi coletado), 2º pelo CEP + nome
+    #    do destinatário. As consultas só rodam quando sobrou fatia.
+    sobras = [i for i, a in enumerate(achados) if a is None]
+    if sobras:
+        temu_etq = {i: nf_etiqueta_lote.ler_etiqueta_temu(fatias[i].texto) for i in sobras}
+        por_chave = await nf_etiqueta_temu.pedidos_por_chave(
+            session, [c for e in temu_etq.values() for c in e.chaves], origem="upload_lote"
+        )
+        cand_temu = await nf_etiqueta_temu.candidatos_cep_nome(
+            session, cutoff, origem="upload_lote"
+        )
+        nome_temu = {n: nm for n, nm, _cep in cand_temu}
+        for i in sobras:
+            via = "chave"
+            numero = nf_etiqueta_lote.casa_por_chave(temu_etq[i].chaves, por_chave)
+            if numero is None:
+                via = "cep_nome"
+                numero = nf_etiqueta_lote.casa_por_cep_nome(fatias[i].texto, cand_temu)
+            if numero is not None:
+                nome = nome_temu.get(numero) or cand_map.get(numero, (None, None, set()))[0]
+                achados[i] = (numero, nome)
+                logger.info(
+                    "nf_etiqueta_lote_temu_casou",
+                    fatia=i, pedido=numero, via=via, rastreio=temu_etq[i].rastreio,
+                )
+
+    for i, (fatia, achado) in enumerate(zip(fatias, achados, strict=True)):
+        if achado is None:
             nao_casadas.append(
                 {
                     "fatia": i,
@@ -2650,13 +2729,15 @@ async def nf_agent_etiqueta_lote(
                 }
             )
             continue
-        casadas.append((fatia, numero, nome))
+        casadas.append((fatia, achado[0], achado[1]))
 
     # Itens do Bling de todos os casados numa consulta só (declaração). Falha
     # na consulta = sobe com a declaração como veio (nunca derruba o lote).
     itens_por_pedido = await itens_para_declaracao(
         session, [n for _f, n, _nm in casadas], origem="upload_lote"
     )
+    # Pedidos Temu do lote — só consultado se alguma fatia vier sem declaração.
+    temu_por_pedido: dict[str, nf_etiqueta_temu.PedidoTemu] | None = None
     for fatia, numero, nome in casadas:
         rodape = ler_picking(fatia.pdf)  # na fatia CRUA, antes do transform
         try:
@@ -2669,7 +2750,18 @@ async def nf_agent_etiqueta_lote(
             falhas.append({"numero": numero, "erro": str(exc)})
             continue
         itens_pedido = itens_por_pedido.get(numero, [])
-        transformado = _declaracao_do_bling(transformado, numero, itens_pedido, "upload_lote")
+        transformado, st_decl = _declaracao_do_bling(
+            transformado, numero, itens_pedido, "upload_lote"
+        )
+        if st_decl == "sem_declaracao":
+            if temu_por_pedido is None:
+                temu_por_pedido = await nf_etiqueta_temu.pedidos_temu(
+                    session, [n for _f, n, _nm in casadas], origem="upload_lote"
+                )
+            transformado = _declaracao_temu(
+                transformado, numero, itens_pedido, temu_por_pedido.get(numero), nome,
+                "upload_lote",
+            )
         transformado = _picking_do_bling(
             transformado, numero, itens_pedido, rodape, "upload_lote"
         )

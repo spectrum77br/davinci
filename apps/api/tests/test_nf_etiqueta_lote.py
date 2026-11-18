@@ -275,3 +275,128 @@ def test_numerolojas_pack_id_ml_flex_partido_por_espaco():
         "DECLARAÇÃO DE CONTEÚDO\nCódigo de Rastreamento: 47964868117\n"
     )
     assert nf_etiqueta_lote._numerolojas_do_texto(texto) == ["2000014931988905"]
+
+
+# --- Etiqueta da Temu (Anjun Express), 18/11/2026 ---------------------------
+
+_CHAVE_TEMU = "35261159882322000154550020000020281154723552"
+
+
+def _anjun(
+    nome: str = "veralucia Soares Goncalves Soares",
+    cep: str = "35661-072",
+    chave: str = _CHAVE_TEMU,
+    rastreio: str = "AJ261111162691701",
+) -> list[str]:
+    """Linhas da etiqueta da Anjun na ordem em que o PyMuPDF extrai do PDF real
+    (`~/nf-executor/saidas/etiquetas/1111z/`): DANFE, chave, nome ANTES do
+    "DESTINATÁRIO", CEP, rastreio, "Pedido: AJ…", remetente sem rótulo de CEP."""
+    return [
+        "DANFE SIMPLIFICADO-ETIQUETA",
+        "Saída NF: 1",
+        "Série: 1",
+        "Emissão: 11-11-2026",
+        chave,
+        nome,
+        "DESTINATÁRIO",
+        f"CEP:{cep}",
+        "Endereço:  Avenida Padre José Viegas/Recanto da Lagoa/Pará",
+        rastreio,
+        "MG-W-FQ002",
+        f"Pedido: {rastreio[:15]}",
+        "REMETENTE",
+        "Madalena",
+        "13400-820",
+        "Nome:",
+        "DOC:",
+        "Anjun Express Log. e Transp. LTDA.",
+    ]
+
+
+def test_ler_etiqueta_temu_anjun():
+    etq = nf_etiqueta_lote.ler_etiqueta_temu("\n".join(_anjun()))
+    assert etq.cep == "35661072"
+    assert etq.nome == "veralucia Soares Goncalves Soares"
+    assert etq.chaves == [_CHAVE_TEMU]
+    assert etq.rastreio == "AJ261111162691701"
+
+
+def test_ler_etiqueta_temu_nome_nao_e_a_chave():
+    """Sem a linha do nome, a linha antes do "DESTINATÁRIO" é a chave — não
+    vira nome (e sem nome não casa por CEP)."""
+    linhas = [ln for ln in _anjun() if ln != "veralucia Soares Goncalves Soares"]
+    etq = nf_etiqueta_lote.ler_etiqueta_temu("\n".join(linhas))
+    assert etq.nome is None
+    assert nf_etiqueta_lote.casa_por_cep_nome(
+        "\n".join(linhas), [("309001", "VERALUCIA SOARES", "35661072")]
+    ) is None
+
+
+def test_fatia_anjun_sozinha_nao_casa_pelos_casamentos_antigos():
+    """A etiqueta da Anjun vira 1 fatia; o "Pedido:" é o código da Anjun (não
+    o PO-… da Temu) e não há CPF — os 3 casamentos de antes não pegam."""
+    fatias = nf_etiqueta_lote.fatiar_lote(_lote_pdf([_anjun(), _anjun(nome="Outra Pessoa")]))
+    assert len(fatias) == 2
+    assert fatias[0].numerolojas == ["AJ2611111626917"]
+    assert fatias[0].documentos == []
+    assert nf_etiqueta_lote.ler_etiqueta_temu(fatias[0].texto).cep == "35661072"
+
+
+def test_casa_por_cep_nome_casa_no_temu_certo():
+    candidatos = [
+        ("309001", "VERALUCIA SOARES GONCALVES SOARES", "35661072"),
+        ("309002", "Maria Aparecida Silva", "01001000"),
+    ]
+    assert nf_etiqueta_lote.casa_por_cep_nome("\n".join(_anjun()), candidatos) == "309001"
+
+
+def test_casa_por_cep_nome_dois_no_mesmo_cep_desempata_pelo_nome():
+    """Vizinhos de prédio (mesmo CEP): o nome normalizado decide — sem acento
+    e sem caixa; nome abreviado de um lado casa (palavras contidas)."""
+    candidatos = [
+        ("309001", "Vera Lúcia Pereira", "35661072"),
+        ("309002", "VERALUCIA SOARES GONÇALVES SOARES", "35661-072"),
+    ]
+    texto = "\n".join(_anjun(nome="Veralúcia Soares Gonçalves"))
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, candidatos) == "309002"
+
+
+def test_casa_por_cep_nome_ambiguo_nao_casa():
+    """Mesmo cliente com 2 pedidos Temu no mesmo CEP → ambíguo → None."""
+    candidatos = [
+        ("309001", "Veralucia Soares Goncalves Soares", "35661072"),
+        ("309005", "Veralucia Soares Goncalves Soares", "35661072"),
+    ]
+    assert nf_etiqueta_lote.casa_por_cep_nome("\n".join(_anjun()), candidatos) is None
+
+
+def test_casa_por_cep_nome_exige_nome_mesmo_com_um_pedido_no_cep():
+    """Um pedido só no CEP, mas de OUTRA pessoa → não casa (o pedido certo
+    pode ainda não ter chegado ao espelho). Candidato sem nome não casa."""
+    texto = "\n".join(_anjun())
+    assert nf_etiqueta_lote.casa_por_cep_nome(
+        texto, [("309001", "Joao Batista", "35661072")]
+    ) is None
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, [("309001", None, "35661072")]) is None
+    # CEP diferente, mesmo nome → não casa
+    assert nf_etiqueta_lote.casa_por_cep_nome(
+        texto, [("309001", "Veralucia Soares Goncalves Soares", "35661073")]
+    ) is None
+
+
+def test_casa_por_cep_nome_fatia_com_declaracao_nao_entra():
+    """Fatia com declaração de conteúdo é etiqueta do Upseller (Shopee/TikTok),
+    não a da Anjun — o casamento por CEP + nome não olha."""
+    texto = "\n".join([*_anjun(), "DECLARAÇÃO DE CONTEÚDO", "b101.14"])
+    candidatos = [("309001", "Veralucia Soares Goncalves Soares", "35661072")]
+    assert nf_etiqueta_lote.casa_por_cep_nome(texto, candidatos) is None
+    assert nf_etiqueta_lote.casa_por_cep_nome("\n".join(_anjun()), candidatos) == "309001"
+
+
+def test_casa_por_chave():
+    por_chave = {_CHAVE_TEMU: "309001", "1" * 44: "309002"}
+    assert nf_etiqueta_lote.casa_por_chave([_CHAVE_TEMU], por_chave) == "309001"
+    assert nf_etiqueta_lote.casa_por_chave(["9" * 44], por_chave) is None
+    assert nf_etiqueta_lote.casa_por_chave([], por_chave) is None
+    # duas chaves no papel apontando pra pedidos diferentes → ambíguo
+    assert nf_etiqueta_lote.casa_por_chave([_CHAVE_TEMU, "1" * 44], por_chave) is None

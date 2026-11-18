@@ -29,6 +29,16 @@ módulo é a camada PURA (sem rede, sem banco) que:
    casamento é INEQUÍVOCO (exatamente um candidato) — ambíguo é melhor não
    casar do que subir a etiqueta no pedido errado.
 
+4. Etiqueta da TEMU (Anjun Express, "DANFE SIMPLIFICADO-ETIQUETA", 18/11/2026):
+   não traz CPF, nem o nº do pedido na Temu (o "Pedido: AJ…" é o código da
+   Anjun), nem declaração de conteúdo — nenhum dos 3 casamentos acima pega.
+   `ler_etiqueta_temu(texto)` lê a chave da NF (44 dígitos), o CEP e o nome
+   do destinatário (a linha ANTES do rótulo "DESTINATÁRIO", como no
+   `~/nf-executor/temu_declaracao.py`); `casa_por_chave` casa pela chave
+   (`nf_nota.chave`, quando o XML já foi coletado) e `casa_por_cep_nome`
+   pelo CEP + nome entre os pedidos Temu que o router passa. Os dois só
+   casam quando o resultado é INEQUÍVOCO.
+
 Quem consome é o endpoint `/agent/etiqueta-lote` (routers/nf.py), que casa
 contra `bling_orders`, transforma cada fatia e grava por pedido.
 """
@@ -36,6 +46,7 @@ contra `bling_orders`, transforma cada fatia e grava por pedido.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 import fitz  # PyMuPDF
@@ -244,5 +255,122 @@ def casa_por_texto(
         if not any(_sku_no_texto(sku, texto) for sku in skus if sku):
             continue
         hits.append(numero)
+    unicos = list(dict.fromkeys(hits))
+    return unicos[0] if len(unicos) == 1 else None
+
+
+# ---------------------------------------------------------------------------
+# Etiqueta da Temu (Anjun Express) — 18/11/2026
+# ---------------------------------------------------------------------------
+
+# "CEP:35661-072" logo abaixo do "DESTINATÁRIO" (o CEP do remetente vem sem
+# rótulo na Anjun).
+_RE_CEP = re.compile(r"CEP:\s*(\d{5})-?(\d{3})", re.IGNORECASE)
+# Chave de acesso da NF-e: 44 dígitos como token isolado.
+_RE_CHAVE = re.compile(r"(?<!\d)\d{44}(?!\d)")
+# Código de rastreio da Anjun ("AJ261111162691701").
+_RE_RASTREIO_ANJUN = re.compile(r"(?<![A-Za-z0-9])AJ\d{12,}(?![A-Za-z0-9])")
+
+
+@dataclass(frozen=True)
+class EtiquetaTemu:
+    """O que a etiqueta da Temu (Anjun) traz pra casar e pra declaração."""
+
+    # CEP do destinatário, só dígitos (8).
+    cep: str | None
+    # Nome do destinatário como está no papel.
+    nome: str | None
+    # Chave(s) de acesso da NF impressas (44 dígitos), na ordem.
+    chaves: list[str]
+    # Código de rastreio da Anjun (vai na declaração).
+    rastreio: str | None
+
+
+def _sem_acento(s: str) -> str:
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+
+
+def ler_etiqueta_temu(texto: str) -> EtiquetaTemu:
+    """Lê a etiqueta da Anjun (layout "DANFE SIMPLIFICADO-ETIQUETA").
+
+    O nome do destinatário é a linha ANTES do rótulo "DESTINATÁRIO" (o bloco
+    da Anjun é nome → DESTINATÁRIO → CEP → Endereço); a chave da NF, quando
+    vem logo antes do nome, não conta como nome. O CEP é o 1º "CEP:" depois
+    do rótulo (ou o 1º do texto, se o rótulo não aparecer)."""
+    linhas = [ln.strip() for ln in (texto or "").splitlines() if ln.strip()]
+    nome: str | None = None
+    pos_dest = -1
+    for i, ln in enumerate(linhas):
+        if _sem_acento(ln).upper() == "DESTINATARIO":
+            pos_dest = i
+            if i > 0:
+                antes = linhas[i - 1]
+                # nome tem letra; a chave (44 dígitos) e códigos soltos não
+                if re.search(r"[^\W\d_]", antes) and not _RE_CHAVE.search(antes):
+                    nome = antes
+            break
+    cep_m = None
+    if pos_dest >= 0:
+        cep_m = _RE_CEP.search("\n".join(linhas[pos_dest:]))
+    if cep_m is None:
+        cep_m = _RE_CEP.search(texto or "")
+    rastreio = _RE_RASTREIO_ANJUN.search(texto or "")
+    return EtiquetaTemu(
+        cep=(cep_m.group(1) + cep_m.group(2)) if cep_m else None,
+        nome=nome,
+        chaves=list(dict.fromkeys(_RE_CHAVE.findall(texto or ""))),
+        rastreio=rastreio.group(0) if rastreio else None,
+    )
+
+
+def _tokens_nome(nome: str | None) -> set[str]:
+    """Nome → palavras sem acento, minúsculas, só letras (como o
+    `temu_declaracao._norm`)."""
+    s = _sem_acento(nome or "").lower()
+    return set(re.sub(r"[^a-z ]", " ", s).split())
+
+
+def _so_digitos(s: str | None) -> str:
+    return "".join(c for c in (s or "") if c.isdigit())
+
+
+def casa_por_chave(chaves: list[str], por_chave: dict[str, str]) -> str | None:
+    """Casamento pela chave da NF impressa na etiqueta.
+
+    `por_chave` = {chave → numero do pedido} que o router montou de
+    `nf_nota` (só notas já casadas com pedido Temu válido). Devolve o pedido
+    quando as chaves do papel apontam pra UM pedido só; senão None."""
+    numeros = list(dict.fromkeys(por_chave[c] for c in chaves if c in por_chave))
+    return numeros[0] if len(numeros) == 1 else None
+
+
+def casa_por_cep_nome(
+    texto: str, candidatos: list[tuple[str, str | None, str | None]]
+) -> str | None:
+    """Casamento reserva da etiqueta da Temu: CEP + nome do destinatário.
+
+    `candidatos` = [(numero, nome_destinatario, cep_destino)] — o router já
+    restringe a pedidos de loja Temu, fora de Cancelado (12) e Aguardando
+    Cancelamento (83955), na janela do lote. Casa quando EXATAMENTE UM pedido
+    tem o MESMO CEP e o nome compatível: as palavras de um contidas nas do
+    outro, sem acento/caixa (o mesmo critério do `temu_declaracao.py`). O nome
+    confere SEMPRE, mesmo com um pedido só no CEP — CEP sozinho casaria o
+    vizinho de prédio cujo pedido ainda não chegou ao espelho. Mesmo cliente
+    com 2 pedidos no CEP = ambíguo → None (fica pra mão). Fatia COM
+    declaração de conteúdo não é a etiqueta da Anjun (Shopee/TikTok do
+    Upseller) e não entra."""
+    if _e_declaracao(texto):
+        return None
+    etq = ler_etiqueta_temu(texto)
+    alvo = _tokens_nome(etq.nome)
+    if not etq.cep or not alvo:
+        return None
+    hits: list[str] = []
+    for numero, nome, cep in candidatos:
+        if _so_digitos(cep) != etq.cep:
+            continue
+        toks = _tokens_nome(nome)
+        if toks and (alvo <= toks or toks <= alvo):
+            hits.append(numero)
     unicos = list(dict.fromkeys(hits))
     return unicos[0] if len(unicos) == 1 else None
