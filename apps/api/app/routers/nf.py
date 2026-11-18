@@ -2077,7 +2077,12 @@ async def _require_nf_agent_token(
 # consumidor PADRÃO: o código dele não muda, então ele continua chamando o lease
 # sem dizer plataforma nenhuma e recebe só o que é dele. O Mac local pede
 # explicitamente `["ml", "amazon"]`.
-_PLATAFORMAS_PADRAO: tuple[str, ...] = ("shopee", "tiktok")
+# Temu (18/11): mesmo faturador Upseller e mesmo perfil AdsPower (58) da Shopee,
+# então a cadeia é da nuvem (import → emitir_nf_upseller → imprimir_etiqueta).
+# Tem que andar JUNTO com o `_PLATAFORMAS` do sweep (nf_auto_enfileirar): sem
+# isto o comando Temu fica 'pending' pra sempre — ninguém o pede e o
+# recuperador não olha pending.
+_PLATAFORMAS_PADRAO: tuple[str, ...] = ("shopee", "tiktok", "temu")
 
 # Impressão de etiqueta do ML sai do MESMO perfil AdsPower (58) que a nuvem usa
 # pra Shopee/TikTok. Às 12h o Mac imprime o lote do ML; se a nuvem imprimir junto,

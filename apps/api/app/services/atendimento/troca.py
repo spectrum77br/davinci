@@ -1229,7 +1229,7 @@ async def oferta_em(session: AsyncSession, p: _Pedido) -> datetime | None:
 
 def _aviso_nf(p: _Pedido) -> str | None:
     """Quando o sweep de NF NÃO vai pegar o pedido depois da troca: "enfileire na aba NF"."""
-    from app.services.nf_auto_enfileirar import _CANDIDATE_WINDOW, _plataformas_ativas
+    from app.services.nf_auto_enfileirar import _CANDIDATE_WINDOW, plataformas_do_sweep
 
     s = get_settings()
     fim = "— depois da troca, enfileire na aba NF."
@@ -1237,9 +1237,7 @@ def _aviso_nf(p: _Pedido) -> str | None:
         return f"O envio automático da NF está desligado {fim}"
     if p.data is not None and p.data < _agora() - _CANDIDATE_WINDOW:
         return f"Pedido com mais de 7 dias: o envio automático da NF não pega {fim}"
-    plataformas = _plataformas_ativas(
-        ml_amazon=bool(s.nf_auto_ml_amazon), so_ml=bool(getattr(s, "nf_auto_ml", False))
-    )
+    plataformas = plataformas_do_sweep(s)
     info = p.loja_info
     if (
         info is None

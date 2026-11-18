@@ -220,6 +220,14 @@ def _s(v: object) -> str:
     return "" if v is None else str(v).strip()
 
 
+def endereco_sem_pontuacao_final(v: object) -> str:
+    """Endereço 1 sem a vírgula/ponto-e-vírgula que sobra no FIM ("Rua Tucuna,"
+    → "Rua Tucuna"). A Temu manda assim (6 de 60 pedidos em 60 dias; Shopee 0
+    de 1437) e no avulso manual do 309594 (18/11) foi tirada à mão. Só o fim:
+    vírgula no meio ("Rua A, Bloco 2") fica como está."""
+    return _s(v).rstrip(",; \t")
+
+
 def _preco_num(v: Decimal) -> float:
     """Preço como NÚMERO (célula numérica). Texto BR '35,06' é rejeitado pelo
     Upseller ("O preço unitário deve ser um número entre 0,01 e 999999999")."""
@@ -319,7 +327,7 @@ def _linha(
         row[13] = _s(pedido.cidade_destino)                          # Cidade
         row[14] = _s(pedido.bairro_destino)                          # Bairro
         row[15] = _s(pedido.numero_destino)                          # Número
-        row[16] = _s(pedido.endereco_destino)                        # Endereço 1
+        row[16] = endereco_sem_pontuacao_final(pedido.endereco_destino)  # Endereço 1
         row[17] = _s(pedido.complemento_destino)                     # Endereço 2
     return row
 

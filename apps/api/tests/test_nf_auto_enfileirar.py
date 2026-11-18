@@ -12,6 +12,7 @@ dá pra chamar direto e conferir o resultado pela fixture `db` (mesmo schema).
 
 from __future__ import annotations
 
+import io
 import uuid
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -231,9 +232,11 @@ async def _seed_loja(
     impressao: str | None = None, etiqueta_horarios: str | None = None,
     etiqueta_sabado_horario: str | None = None,
     etiqueta_sabado_tags: str | None = None,
+    account_name: str | None = None, faturador_id: uuid.UUID | None = None,
 ) -> None:
-    faturador_id = None
-    if com_faturador:
+    """`faturador_id` = usa um faturador já criado (várias lojas no MESMO
+    faturador, como as 21 Shopee + 4 Temu no "upseller 2%" de prod)."""
+    if faturador_id is None and com_faturador:
         f = NfFaturador(
             nome=f"faturador {bling_store_id}", modo="bling", nf_cheia=True,
             sku_fonte="principal", nome_fonte="produto", ncm="4202.12.10",
@@ -251,7 +254,7 @@ async def _seed_loja(
     db.add(
         StoreInfo(
             user_id=admin.id, platform=plataforma,
-            account_name=f"loja {bling_store_id}",
+            account_name=account_name or f"loja {bling_store_id}",
             bling_store_id=bling_store_id, nf_faturador_id=faturador_id,
             nf_impressao_id=impressao_id,
             etiqueta_horarios=etiqueta_horarios,
@@ -269,7 +272,8 @@ async def _seed_pedido(
     situacao: str = "6", bling_id: int = 700001,
     data: datetime | None = None, item_produto_id: int | None = None,
     item_descricao: str | None = None, uf_destino: str = "MG",
-    valorbase: float | None = None,
+    valorbase: float | None = None, itemvalor: float = 100,
+    endereco_destino: str = "Rua Emídio Beruto",
 ) -> None:
     db.add(
         BlingOrder(
@@ -284,10 +288,10 @@ async def _seed_pedido(
             item_produto_id=item_produto_id,
             item_descricao=item_descricao or f"Produto {sku}",
             item_quantidade=1,
-            itemvalor=100,
+            itemvalor=itemvalor,
             nome_destinatario="Cleso Menezes",
             cep_destino="30570050",
-            endereco_destino="Rua Emídio Beruto",
+            endereco_destino=endereco_destino,
             numero_destino="30",
             bairro_destino="Cinquentenário",
             cidade_destino="Belo Horizonte",
@@ -308,9 +312,9 @@ def test_horas_e_tags_leem_o_cadastro_da_loja():
 
 
 def test_loja_emite_agora_continuos():
-    """Shopee, TikTok e Amazon não têm regra de horário — emitem sempre,
-    inclusive no domingo."""
-    for plataforma in ("shopee", "tiktok", "amazon"):
+    """Shopee, TikTok, Temu e Amazon não têm regra de horário — emitem sempre,
+    inclusive no domingo (Temu igual à Shopee, Eduardo 18/11)."""
+    for plataforma in ("shopee", "tiktok", "temu", "amazon"):
         assert loja_emite_agora(
             plataforma=plataforma, impressao="agencia",
             etiqueta_horarios="10:00", sabado_horario=None,
@@ -498,13 +502,143 @@ async def test_sweep_ml_amazon_entram_na_janela(
 
 
 def test_plataformas_ativas_por_flag():
-    """Sem flag: só Shopee/TikTok. `nf_auto_ml`: soma o ML (Eduardo 15/09:
-    "ligar o automático igual da Shopee", Amazon fora). Mestre: os quatro."""
+    """Sem flag de janela: Shopee/TikTok/Temu. `nf_auto_ml`: soma o ML (Eduardo
+    15/09: "ligar o automático igual da Shopee", Amazon fora). Mestre: todas.
+    `nf_auto_temu` desligada (chave de emergência) tira só a Temu."""
     f = nf_auto_enfileirar._plataformas_ativas
-    assert f(ml_amazon=False, so_ml=False) == ("shopee", "tiktok")
-    assert f(ml_amazon=False, so_ml=True) == ("shopee", "tiktok", "ml")
-    assert f(ml_amazon=True, so_ml=False) == ("shopee", "tiktok", "ml", "amazon")
-    assert f(ml_amazon=True, so_ml=True) == ("shopee", "tiktok", "ml", "amazon")
+    assert f(ml_amazon=False, so_ml=False, temu=True) == ("shopee", "tiktok", "temu")
+    assert f(ml_amazon=False, so_ml=True, temu=True) == ("shopee", "tiktok", "temu", "ml")
+    assert f(ml_amazon=True, so_ml=False, temu=True) == (
+        "shopee", "tiktok", "temu", "ml", "amazon"
+    )
+    assert f(ml_amazon=True, so_ml=True, temu=True) == (
+        "shopee", "tiktok", "temu", "ml", "amazon"
+    )
+    assert f(ml_amazon=False, so_ml=False, temu=False) == ("shopee", "tiktok")
+    assert f(ml_amazon=True, so_ml=False, temu=False) == ("shopee", "tiktok", "ml", "amazon")
+
+
+def test_temu_ligada_por_padrao_e_fora_da_janela(monkeypatch: pytest.MonkeyPatch):
+    """Decisão do Eduardo (18/11): a Temu entra no automático igual à Shopee —
+    a chave nasce LIGADA (NF_AUTO_TEMU=false é só pra emergência) e a Temu
+    não depende de horário/flag de janela."""
+    from app.config import Settings
+
+    assert Settings.model_fields["nf_auto_temu"].default is True
+    assert "temu" in nf_auto_enfileirar._PLATAFORMAS
+    assert "temu" not in nf_auto_enfileirar._PLATAFORMAS_JANELA
+    s = get_settings()
+    monkeypatch.setattr(s, "nf_auto_ml_amazon", False, raising=False)
+    monkeypatch.setattr(s, "nf_auto_ml", False, raising=False)
+    monkeypatch.setattr(s, "nf_auto_temu", True, raising=False)
+    assert "temu" in nf_auto_enfileirar.plataformas_do_sweep()
+    monkeypatch.setattr(s, "nf_auto_temu", False, raising=False)
+    assert "temu" not in nf_auto_enfileirar.plataformas_do_sweep()
+
+
+async def _seed_temu_e_shopee_no_mesmo_upseller(db: AsyncSession, admin: User) -> None:
+    """Como em prod: a loja Temu "barbosa" e uma Shopee no MESMO faturador
+    "upseller 2%" (modo upseller, sku_fonte e3), um pedido 'Em aberto' em cada.
+    O Temu com o endereço terminando em vírgula (6 de 60 Temu; 309594)."""
+    fat = NfFaturador(
+        nome="upseller 2%", modo="upseller", nf_cheia=False, percentual="2",
+        sku_fonte="e3", nome_fonte="produto", ads_power="58",
+        usuario="user-ups", senha_enc=encrypt("segredoUps"),
+    )
+    db.add(fat)
+    await db.flush()
+    await _seed_loja(db, admin, plataforma="temu", bling_store_id="930071",
+                     account_name="barbosa", faturador_id=fat.id)
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930072",
+                     account_name="mega", faturador_id=fat.id)
+    await _seed_pedido(db, numero="830071", loja="930071", sku="a076",
+                       bling_id=700071, itemvalor=36.60, endereco_destino="Rua Tucuna,")
+    await _seed_pedido(db, numero="830072", loja="930072", sku="a077",
+                       bling_id=700072, itemvalor=100)
+    db.add(Product(user_id=admin.id, sku="a076", name="Mala A076", stock=3))
+    db.add(Product(user_id=admin.id, sku="a077", name="Mala A077", stock=3))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_sweep_temu_sai_em_planilha_propria_no_mesmo_faturador(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Temu + Shopee no mesmo faturador Upseller: 2 import_avulsa source='auto'
+    (o gerador agrupa por faturador+plataforma e o lease divide por plataforma
+    — um comando nunca mistura as duas). A planilha da Temu sai igual ao avulso
+    manual: Loja = account_name, SKU e3, preço = itemvalor × 2%, endereço sem a
+    vírgula sobrando."""
+    from openpyxl import load_workbook
+
+    from app.services import nf_upseller
+
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
+    await _seed_temu_e_shopee_no_mesmo_upseller(db, admin)
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 2
+    assert summary["enfileirados"] == 2
+    assert summary["comandos"] == 2
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert {c.action for c in cmds} == {"import_avulsa"}
+    assert {c.source for c in cmds} == {"auto"}
+    assert {c.status for c in cmds} == {"pending"}
+    por_pedido = {tuple(c.numeros): c for c in cmds}
+    assert set(por_pedido) == {("830071",), ("830072",)}
+    assert len({c.faturador_id for c in cmds}) == 1  # o MESMO faturador
+
+    temu = por_pedido[("830071",)]
+    assert temu.nome_arquivo.endswith(".xlsx")
+    ws = load_workbook(io.BytesIO(temu.planilha)).active
+
+    def c(header: str):
+        return ws.cell(row=4, column=nf_upseller._HEADERS.index(header) + 1).value
+
+    assert c("Nome da Loja*") == "barbosa"
+    assert c("Nº do Pedido da Loja*") == "830071"
+    assert c("SKU*") == "e3"
+    assert c("Quantidade*") == 1
+    assert c("Preço Unitário* ") == 0.73  # 36,60 × 2%
+    assert c("Necessita Emitir NF-e*") == "Sim"
+    assert c("Endereço 1") == "Rua Tucuna"
+    assert ws.cell(row=5, column=2).value is None  # só o pedido Temu no arquivo
+
+    shopee = load_workbook(io.BytesIO(por_pedido[("830072",)].planilha)).active
+    assert shopee.cell(row=4, column=nf_upseller._HEADERS.index("Nome da Loja*") + 1).value == "mega"
+
+    fats = {f.pedido_bling: f for f in (await db.execute(select(NfFaturamento))).scalars().all()}
+    assert fats["830071"].status_faturamento == "processando"
+    assert fats["830072"].status_faturamento == "processando"
+
+
+@pytest.mark.asyncio
+async def test_sweep_nf_auto_temu_desligada_so_sai_shopee(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """NF_AUTO_TEMU=false (chave de emergência): a Temu fica fora do sweep —
+    nem comando, nem marca no nf_faturamento (religando, ela entra sozinha)."""
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", False, raising=False)
+    await _seed_temu_e_shopee_no_mesmo_upseller(db, admin)
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["enfileirados"] == 1
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert [c.numeros for c in cmds] == [["830072"]]
+    fats = (await db.execute(select(NfFaturamento.pedido_bling))).scalars().all()
+    assert "830071" not in fats
+
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830071", "830072"]
 
 
 @pytest.mark.asyncio

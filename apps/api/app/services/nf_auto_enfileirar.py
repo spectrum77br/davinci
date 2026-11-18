@@ -1,8 +1,8 @@
-"""Auto-enfileirador de NF (sweep) — pedidos Shopee/TikTok/ML/Amazon "Em aberto".
+"""Auto-enfileirador de NF (sweep) — pedidos Shopee/TikTok/Temu/ML/Amazon "Em aberto".
 
 Faz sozinho o que o botão "Enfileirar" do Painel Faturamento faz: a cada tick
 varre os pedidos com situacao=6 ("Em aberto") de lojas com faturador
-atribuído — Shopee/TikTok/Amazon contínuos; ML segue o HORÁRIO da tela Lojas
+atribuído — Shopee/TikTok/Temu/Amazon contínuos; ML segue o HORÁRIO da tela Lojas
 (correios contínuo, agência nos horários da loja, sábado uma vez só e domingo
 nunca — ver `loja_emite_agora`) —, confere o ESTOQUE antes de tudo (saldo
 virtual negativo = falta peça; kit com composição no cache conta SEMPRE pelos
@@ -72,7 +72,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from sqlalchemy import func, or_, select, text
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import session_scope
 from app.models import BlingOrder, NfCommand, NfFaturamento, NfImpressao, Product, StoreInfo
 from app.redis_client import redis
@@ -92,7 +92,11 @@ _SWEEP_LOCK_KEY = 0x6E666165  # ascii "nfae"
 _SITUACAO_EM_ABERTO = "6"
 
 # Plataformas que o fluxo automatizado cobre hoje (codes de store_info.platform).
-_PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml", "amazon")
+# Temu (Eduardo, 18/11): mesmas regras da Shopee — contínua, FIFO do sem estoque
+# → 83955 com aviso, prioridade de estoque; a NF sai pelo MESMO faturador
+# Upseller e a cadeia da nuvem sobe o XML no pedido original (PO-0xx-…). Fica
+# FORA da janela; `nf_auto_temu` (ligada por padrão) é a chave de emergência.
+_PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "temu", "ml", "amazon")
 
 # ML e Amazon só entram no automático com a flag `nf_auto_ml_amazon` LIGADA
 # (usuário: "nao e para ativar mercado livre ainda... vamos testar de noite").
@@ -106,14 +110,28 @@ _DIA_SABADO = 5
 _DIA_DOMINGO = 6
 
 
-def _plataformas_ativas(*, ml_amazon: bool, so_ml: bool) -> tuple[str, ...]:
+def _plataformas_ativas(*, ml_amazon: bool, so_ml: bool, temu: bool) -> tuple[str, ...]:
     """Plataformas que o sweep varre com as flags dadas (ordem de _PLATAFORMAS)."""
     liberadas = set(_PLATAFORMAS) - set(_PLATAFORMAS_JANELA)
     if ml_amazon:
         liberadas |= set(_PLATAFORMAS_JANELA)
     if so_ml:
         liberadas.add("ml")
+    if not temu:
+        liberadas.discard("temu")
     return tuple(p for p in _PLATAFORMAS if p in liberadas)
+
+
+def plataformas_do_sweep(cfg: Settings | None = None) -> tuple[str, ...]:
+    """As plataformas que o sweep varre AGORA, pelas chaves do .env. Fonte única
+    pro `_candidatos` e pra quem precisa saber se o pedido entra sozinho (ex.:
+    o aviso da troca no Atendimento)."""
+    cfg = cfg or get_settings()
+    return _plataformas_ativas(
+        ml_amazon=bool(cfg.nf_auto_ml_amazon),
+        so_ml=bool(getattr(cfg, "nf_auto_ml", False)),
+        temu=bool(getattr(cfg, "nf_auto_temu", True)),
+    )
 
 
 def _agora_brt() -> datetime:
@@ -145,7 +163,8 @@ def loja_emite_agora(
 ) -> bool:
     """A loja emite NESTE instante? (regra da tela Lojas, decidida em 21/08)
 
-    - Shopee, TikTok e Amazon: contínuos ("amazon é continuo").
+    - Shopee, TikTok, Temu e Amazon: contínuos ("amazon é continuo"; Temu
+      igual à Shopee, Eduardo 18/11).
     - ML + Impressão **correios**: contínuo todo dia, inclusive sábado e
       domingo, e sem regra de estoque.
     - ML + Impressão **agência**: dia útil nos `etiqueta_horarios` da loja;
@@ -1383,12 +1402,10 @@ async def _candidatos(
     número menor tomam as vagas do tick e o pedido novo nunca entra.
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
-    # Flags: sem nenhuma, o sweep segue só com Shopee/TikTok; `nf_auto_ml`
-    # soma o ML; `nf_auto_ml_amazon` (mestre) soma ML e Amazon.
-    cfg = get_settings()
-    plataformas = _plataformas_ativas(
-        ml_amazon=bool(cfg.nf_auto_ml_amazon), so_ml=bool(getattr(cfg, "nf_auto_ml", False))
-    )
+    # Flags: sem nenhuma, o sweep segue com Shopee/TikTok/Temu; `nf_auto_ml`
+    # soma o ML; `nf_auto_ml_amazon` (mestre) soma ML e Amazon;
+    # `nf_auto_temu=false` tira a Temu (chave de emergência).
+    plataformas = plataformas_do_sweep()
     rows = (
         await session.execute(
             select(

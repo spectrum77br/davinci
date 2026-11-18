@@ -123,6 +123,40 @@ def test_xlsx_itens_seguintes_com_destinatario():
     assert _c(ws, 5, "Método de Pagamento") == _c(ws, 4, "Método de Pagamento")
 
 
+def test_endereco_sem_pontuacao_final():
+    """A Temu manda o endereço com vírgula sobrando no fim ("Rua Tucuna,") —
+    no avulso manual do 309594 (18/11) ela foi tirada à mão. Só o FIM sai."""
+    f = nf_upseller.endereco_sem_pontuacao_final
+    assert f("Rua Tucuna,") == "Rua Tucuna"
+    assert f("Rua Tucuna;") == "Rua Tucuna"
+    assert f("  Rua Tucuna , ; ") == "Rua Tucuna"
+    assert f("Rua A, Bloco 2") == "Rua A, Bloco 2"  # vírgula do meio fica
+    assert f("Av. Brasil") == "Av. Brasil"
+    assert f("Rua Sto.") == "Rua Sto."  # ponto de abreviatura não é sobra
+    assert f(None) == ""
+    assert f(",") == ""
+
+
+def test_xlsx_endereco_temu_sem_virgula_final_e_resto_intacto():
+    """No arquivo, só a coluna Endereço 1 perde a vírgula do fim: complemento,
+    bairro, cidade e nome seguem exatamente como vieram (mesmo com vírgula)."""
+    info, linhas = _pedido()
+    info = replace(
+        info,
+        endereco_destino="Rua Tucuna,",
+        complemento_destino="Casa 2,",
+        bairro_destino="Perdizes,",
+        nome_destinatario="Silva, Maria",
+    )
+    ws = load_workbook(io.BytesIO(nf_upseller.montar_xlsx("Loja", [(info, linhas)]))).active
+    for row in (4, 5):  # o destinatário repete em todas as linhas do pedido
+        assert _c(ws, row, "Endereço 1") == "Rua Tucuna"
+        assert _c(ws, row, "Endereço 2") == "Casa 2,"
+        assert _c(ws, row, "Bairro (Obrigatório para NF-e)") == "Perdizes,"
+        assert _c(ws, row, "Nome do Destinatário (Obrigatório para NF-e)") == "Silva, Maria"
+        assert _c(ws, row, "Número") == "30"
+
+
 def test_xlsx_nfe_nao_para_import_ml():
     # Fluxo ML: a NF já saiu do Bling; o Upseller entra só pra puxar a etiqueta,
     # então "Necessita Emitir NF-e = NÃO" (senão o Upseller emitiria 2ª NF). O

@@ -974,7 +974,7 @@ class Settings(BaseSettings):
     # arquivo de token do serviço no Mac.
     adspower_agent_token: str = ""
 
-    # Auto-enfileirador de NF (sweep): a cada tick varre pedidos Shopee/TikTok
+    # Auto-enfileirador de NF (sweep): a cada tick varre pedidos Shopee/TikTok/Temu
     # "Em aberto" (situacao=6) de loja com faturador atribuído, confere o
     # estoque (saldo negativo → Aguardando Cancelamento) e enfileira a
     # importação avulsa sozinho — mesma cadeia do botão "Enfileirar" do
@@ -994,6 +994,13 @@ class Settings(BaseSettings):
     # via NF_AUTO_ML=true no .env. Cada loja ML ainda precisa de faturador e
     # do horário da tela Lojas (agência); correios é contínuo.
     nf_auto_ml: bool = False
+
+    # Temu no sweep, com as MESMAS regras da Shopee (Eduardo, 18/11: contínuo
+    # 24/7, sem estoque → Aguardando Cancelamento com aviso, prioridade de
+    # estoque). LIGADA por padrão — é chave de emergência, não de teste:
+    # NF_AUTO_TEMU=false no .env tira a Temu do automático sem deploy. O
+    # avulso Temu manual parou de ser pedido no mesmo dia (NF em dobro).
+    nf_auto_temu: bool = True
 
     # Conferência de estoque nos marketplaces (ML e Shopee): compara o que o
     # anúncio mostra com o que o DaVinci acha que devia mostrar. Ficou QUEBRADA

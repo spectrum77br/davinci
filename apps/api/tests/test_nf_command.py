@@ -41,8 +41,8 @@ from app.services import nf_emissao_gerar, nf_relatorio
 
 _TOKEN = "nf-agent-test-token"
 # Testes que não são sobre a divisão de trabalho pedem TODAS as plataformas —
-# sem isso o lease trata a chamada como o consumidor padrão (só Shopee/TikTok).
-_TODAS = ["shopee", "tiktok", "ml", "amazon"]
+# sem isso o lease trata a chamada como o consumidor padrão (só Shopee/TikTok/Temu).
+_TODAS = ["shopee", "tiktok", "temu", "ml", "amazon"]
 
 
 async def _async_return(value: object) -> object:
@@ -532,6 +532,44 @@ async def test_lease_divide_trabalho_por_plataforma(
                           json={"limit": 5, "plataformas": ["ml", "amazon"]},
                           headers={"X-Agent-Token": _TOKEN})
     assert [c["numeros"] for c in r.json()["commands"]] == [["940002"]]
+
+
+@pytest.mark.asyncio
+async def test_lease_temu_vai_pro_robo_da_nuvem(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Temu (18/11) usa o MESMO faturador Upseller/perfil 58 da Shopee: a cadeia
+    inteira (import → emitir_nf_upseller → imprimir_etiqueta) é do robô da
+    nuvem, que chama o lease SEM plataforma. O Mac (ml/amazon) nunca a pega —
+    e sem isto o comando Temu ficaria 'pending' pra sempre."""
+    from app.routers import nf as nf_router
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    # fora do meio-dia (às 12h o padrão não pega etiqueta — teste próprio)
+    monkeypatch.setattr(
+        nf_router, "_agora_brt",
+        lambda: datetime(2026, 11, 18, 15, 0, tzinfo=nf_router._TZ_BRT),
+    )
+    await _seed_loja_e_comando(db, admin, plataforma="temu", numero="940061", loja="940961")
+    db.add_all([
+        NfCommand(action=action, numeros=["940061"], planilha=b"", nome_arquivo="",
+                  status="pending", source="auto")
+        for action in ("emitir_nf_upseller", "imprimir_etiqueta")
+    ])
+    await db.commit()
+
+    r = await client.post("/api/nf-cadastro/agent/lease",
+                          json={"limit": 5, "plataformas": ["ml", "amazon"]},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert r.json()["commands"] == []
+
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    cmds = r.json()["commands"]
+    assert sorted(c["action"] for c in cmds) == [
+        "emitir_nf_upseller", "import_avulsa", "imprimir_etiqueta",
+    ]
+    assert {tuple(c["numeros"]) for c in cmds} == {("940061",)}
 
 
 @pytest.mark.asyncio
@@ -1298,6 +1336,73 @@ async def test_lease_entrega_comando_etiqueta(
     # A fila do Upseller lista pelo nº da PLATAFORMA — sem ele a marionete
     # procurava pelo nº do Bling e não achava a linha.
     assert etq["numeros_plataforma"] == ["PLAT-850001"]
+
+
+@pytest.mark.asyncio
+async def test_cadeia_temu_inteira_so_com_o_robo_da_nuvem(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Temu é "o mesmo processo da Shopee" (Eduardo, 18/11): com o faturador
+    Upseller, o robô da nuvem — lease SEM plataforma, o código dele não muda —
+    leva o pedido Temu do import até a etiqueta. Nenhum elo (lease, /result,
+    emissão, etiqueta) filtra a plataforma, e o nº de busca na fila do Upseller
+    é o do pedido Temu (PO-0xx-…), onde a emissão sobe o XML."""
+    from app.routers import nf as nf_router
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    monkeypatch.setattr(
+        nf_router, "_agora_brt",
+        lambda: datetime(2026, 11, 18, 15, 0, tzinfo=nf_router._TZ_BRT),
+    )
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    auth_as(admin)
+    f = NfFaturador(
+        nome="upseller 2%", modo="upseller", nf_cheia=False, percentual="2",
+        sku_fonte="e3", nome_fonte="produto", ads_power="58",
+        usuario="user-u", senha_enc=encrypt("segredoU"),
+    )
+    db.add(f)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="temu", account_name="barbosa",
+                     bling_store_id="950061", nf_faturador_id=f.id))
+    await db.flush()
+    await _seed_pedido(db, numero="850061", loja="950061", sku="a076", nome="Mala",
+                       unit=36.60, bling_id=700061, numeroloja="PO-029-16788700723833706")
+    await db.commit()
+    r = await client.post("/api/nf-cadastro/faturamento/enfileirar",
+                          json={"numeros": ["850061"]})
+    assert r.status_code == 200, r.text
+
+    for action in ("import_avulsa", "emitir_nf_upseller", "imprimir_etiqueta"):
+        # o Mac (ml/amazon) nunca pega elo nenhum da Temu
+        mac = await client.post("/api/nf-cadastro/agent/lease",
+                                json={"limit": 5, "plataformas": ["ml", "amazon"]},
+                                headers={"X-Agent-Token": _TOKEN})
+        assert mac.json()["commands"] == []
+        lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                                  headers={"X-Agent-Token": _TOKEN})
+        cmds = lease.json()["commands"]
+        assert [c["action"] for c in cmds] == [action]
+        assert cmds[0]["numeros"] == ["850061"]
+        assert cmds[0]["numeros_plataforma"] == ["PO-029-16788700723833706"]
+        assert cmds[0]["ads_power"] == "58"
+        r = await client.post(f"/api/nf-cadastro/agent/commands/{cmds[0]['id']}/result",
+                              json={"status": "done"}, headers={"X-Agent-Token": _TOKEN})
+        assert r.status_code == 200, r.text
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "850061")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_faturamento == "ok"
+    assert fat.status_etiqueta == "ok"
+    assert fake.chamadas == [(700061, 21)]  # foi pra "Em digitação" como a Shopee
 
 
 @pytest.mark.asyncio
