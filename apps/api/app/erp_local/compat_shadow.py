@@ -98,8 +98,9 @@ def pick(erp, now=None):
 
 def number(erp):
     """The compatible numeric ids the API gives on its first read, given here beforehand so the
-    read-only answers do not need to write. Depots and categories made in the ERP get ids of their
-    own (900.000.000.001 on), never Bling's: the comparison shows it."""
+    read-only answers do not need to write: depots, categories, products and each product's
+    suppliers (the contact and the link). Ids made in the ERP are its own (900.000.000.001 on),
+    never Bling's: the comparison shows it."""
     from app.erp_local import categories
 
     snap = erp.snapshot()
@@ -112,6 +113,10 @@ def number(erp):
                 bling_compat.numeric_id(db, "category", category["id"])
             for product in snap["products"]:
                 bling_compat.numeric_id(db, "product", product["sku"])
+                for supplier in product["suppliers"]["rows"]:
+                    contact = supplier["contact_id"]
+                    bling_compat.numeric_id(db, "contact", contact)
+                    bling_compat.numeric_id(db, "supplier_link", product["sku"] + ":" + contact)
             db.commit()
         except Exception:
             db.rollback()

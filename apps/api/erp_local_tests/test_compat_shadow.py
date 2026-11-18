@@ -219,3 +219,45 @@ def test_product_answers_ncm_and_cost_as_bling_shows_them(erp):
         == cost
         == answer["body"]["data"]["precoCusto"]
     )
+
+
+def test_a_product_with_a_supplier_in_the_erp_answers_in_the_read_only_shadow(erp):
+    from app.erp_local import product_suppliers
+
+    with_origin(erp)
+    compat_shadow.number(erp)
+    contact = erp.command(
+        "teste:fornecedor",
+        "contact.save",
+        {"data": {"name": "Fornecedor ACME", "roles": ["supplier"]}},
+    )["id"]
+    with erp.connection() as db:
+        version = product_suppliers.details(db, "demo.fone")["version"]
+    row = {
+        "contact_id": contact,
+        "description": "",
+        "code": "F-1",
+        "purchase_price": "10",
+        "cost_price": "12.5",
+        "warranty_months": 0,
+        "is_default": True,
+    }
+    erp.command(
+        "teste:vinculo",
+        "product.suppliers.save",
+        {"sku": "demo.fone", "version": version, "rows": [row], "reason": "Teste"},
+    )
+    with erp.connection() as db:
+        identifier = bling_compat.numeric_id(db, "product", "demo.fone")
+    asked = [(None, f"/produtos/{identifier}", [])]
+    (before,) = compat_shadow.ask_erp(compat_shadow.ReadOnlyERP(erp.database), asked)
+    assert before["status"] == 500  # the link had no compatible id yet and the base is read only
+    compat_shadow.number(erp)
+    (answer,) = compat_shadow.ask_erp(compat_shadow.ReadOnlyERP(erp.database), asked)
+    assert answer["status"] == 200
+    supplier = answer["body"]["data"]["fornecedor"]
+    assert (
+        supplier["id"] > bling_compat.FIRST_OWN_ID
+        and supplier["contato"]["nome"] == "Fornecedor ACME"
+    )
+    assert supplier["precoCusto"] == 12.5
