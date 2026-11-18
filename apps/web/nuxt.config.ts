@@ -50,6 +50,7 @@ export default defineNuxtConfig({
     },
   },
   routeRules: {
+    '/celulares': { redirect: '/configuracoes' },
     '/api/**': { proxy: (process.env.API_URL_INTERNAL || 'http://127.0.0.1:8000') + '/api/**' },
     // 16/11/2026: o painel novo de Devoluções ficou algumas horas em
     // /devolucoes-novo antes de virar o /devolucoes — quem guardou o endereço
