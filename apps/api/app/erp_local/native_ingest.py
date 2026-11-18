@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
 """
 COMMANDS = {"ingest.account.set"}
 OVERLAP = timedelta(minutes=15)
-SAFETY_LAG = timedelta(minutes=2)
+# A new order shows about a minute after the store has it (18/11/2026: was 2). Late reports are
+# still caught: each window goes back OVERLAP, and the 7-day lookback runs daily.
+SAFETY_LAG = timedelta(minutes=1)
 FIRST_WINDOW = timedelta(days=1)
 MAX_WINDOW = timedelta(hours=24)
 LOOKBACK_EVERY = timedelta(hours=24)
