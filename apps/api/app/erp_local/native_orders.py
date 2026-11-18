@@ -366,7 +366,7 @@ def snapshot(db):
                     "limit_per_account": report["limit_per_account"],
                     "read_captured_at": row["captured_at"],
                     "outside_window_count": sum(
-                        o["within_window"] is False for o in account["orders"]
+                        o.get("within_window") is False for o in account["orders"]
                     ),
                 },
             )

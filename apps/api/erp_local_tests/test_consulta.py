@@ -111,3 +111,35 @@ def test_the_homologation_copy_keeps_accepting_changes(erp, tmp_path, monkeypatc
     with TestClient(create_app(target), base_url="http://127.0.0.1:8765") as c:
         assert c.get("/api/erp-local/state").json()["consulta"]["active"] is False
         assert change(c).status_code == 200
+
+
+def test_the_screen_opens_with_the_real_base_shapes(tmp_path):
+    """Stores registered only by name (adopted from DaVinci, Temu copied from Bling) and reads
+    whose orders do not say if they are in the window: the page state still answers."""
+    import json
+
+    from app.erp_local import integration_registry
+
+    with app_client(tmp_path) as c:
+        erp = c.app.state.erp
+        assert seed(c).status_code == 200
+        c.get("/api/erp-local/state")  # every table exists
+        with erp.connection() as db:
+            db.execute(
+                "INSERT INTO store_policies VALUES ('temu','barbosa','active',?,?)",
+                (json.dumps({"name": "Temu Barbosa", "copied_from_bling": True}), "2026-11-18"),
+            )
+            columns = [r[1] for r in db.execute("PRAGMA table_info(native_order_reads)")]
+            report = {
+                "limit_per_account": 50,
+                "accounts": [{"integration_id": "x", "platform": "temu", "orders": [{"id": "1"}]}],
+            }
+            values = {"data": json.dumps(report), "captured_at": "2026-11-18T10:00:00+00:00"}
+            db.execute(
+                f"INSERT INTO native_order_reads({','.join(columns)}) "  # noqa: S608
+                f"VALUES ({','.join('?' * len(columns))})",
+                [values.get(col, "leitura-" + col) for col in columns],
+            )
+        assert integration_registry.authorization_snapshot(db, {"name": "só nome"}) is None
+        state = c.get("/api/erp-local/state")
+        assert state.status_code == 200

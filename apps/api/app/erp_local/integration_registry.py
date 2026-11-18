@@ -396,6 +396,9 @@ def record_authorizations(erp, read):
 
 
 def authorization_snapshot(db, policy_data):
+    # Stores adopted from DaVinci or copied from Bling (Temu) carry only a name: nothing to show.
+    if not policy_data.get("integration_id") or not policy_data.get("platform"):
+        return None
     row = db.execute(
         "SELECT data FROM integration_authorization_reads WHERE integration_id=? AND platform=?",
         (policy_data["integration_id"], policy_data["platform"]),
