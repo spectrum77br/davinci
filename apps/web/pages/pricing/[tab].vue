@@ -2266,11 +2266,14 @@ function pushCellKey(productId: string, accountId: string): string {
 // ---------- Feature 7: grid search
 const gridSearch = ref('')
 
-// ---------- Feature 7b: grid platform filter
-// Empty string = show all marketplaces. Selecting one hides the other
-// platforms' columns (and their grouped headers). Reset to '' whenever
-// the user switches department — see the watch(department) below.
-const gridPlatformFilter = ref<string>('')
+// ---------- Feature 7b: filtros Plataforma ▾ e Contas ▾ (M-8, 18/11/2026)
+// Caixas de marcar (antes era um select só de plataforma). Guardamos as
+// DESMARCADAS: vazio = tudo marcado, e plataforma/conta nova já aparece.
+// Não ficam lembrados: recarregar a página ou trocar de departamento volta
+// com tudo marcado — veja o watch(department) lá embaixo.
+const plataformasDesmarcadas = ref<Set<string>>(new Set())
+const contasDesmarcadas = ref<Set<string>>(new Set())
+const buscaContas = ref('')
 
 // ---------- Feature 8: push dropdown
 const showPushMenu = ref(false)
@@ -3822,8 +3825,8 @@ const PLATFORM_ORDER: Record<string, number> = {
 // Same SSH order is reused by the body iteration so each data column lines
 // up with its grouped header — see `gridAccounts` below.
 //
-// Platform filter: when gridPlatformFilter is set, drop accounts whose
-// platform doesn't match. The downstream consumers (accountGroups,
+// Filtros Plataforma ▾ e Contas ▾ (M-8): drop the unchecked accounts.
+// The downstream consumers (accountGroups,
 // pushItemsBatch's "send all visible" iteration, the cellOf lookups
 // in keyboard nav) all read from this computed so they inherit the
 // filter automatically.
@@ -3858,45 +3861,106 @@ const gridAccountsOrdenadas = computed<Account[]>(() => {
   })
 })
 
-// Filtro "Plataforma" (até o M-2, 17/11/2026, "Todos marketplaces"):
-// plataforma, ou as duas tabelas do ML separadas ('ml_kit' / 'ml_catalogo').
-function passaFiltroPlataforma(a: Account, f: string): boolean {
-  if (!f) return true
-  if (f === 'ml_kit') return a.platform === 'mercadolivre' && !ehCatalogo(a)
-  if (f === 'ml_catalogo') return ehCatalogo(a)
-  return a.platform === f
+// Filtro "Plataforma ▾" (M-8, 18/11/2026; antes um select): uma caixa por
+// coluna de plataforma — o ML vem separado em "ML Kit" e "ML Catálogo".
+function chavePlataforma(a: Account): string {
+  if (ehCatalogo(a)) return a.platform === 'mercadolivre' ? 'ml_catalogo' : `${a.platform}_catalogo`
+  if (a.platform === 'mercadolivre') return 'ml_kit'
+  return a.platform
 }
 
+function rotuloPlataforma(a: Account): string {
+  if (a.platform === 'mercadolivre') return ehCatalogo(a) ? 'ML Catálogo' : 'ML Kit'
+  return ehCatalogo(a) ? `${platformLabel(a.platform)} Catálogo` : platformLabel(a.platform)
+}
+
+// Filtro "Contas ▾" (M-8): por nome de loja ("atlas" marca todas as colunas
+// da atlas, em qualquer plataforma). Maiúscula/minúscula não separa.
+function chaveConta(a: Account): string {
+  return (nomeColuna(a) || '').trim().toLocaleLowerCase('pt-BR')
+}
+
+// A coluna só aparece com a plataforma E a conta marcadas.
 const gridAccounts = computed<Account[]>(() => {
-  const f = gridPlatformFilter.value
-  return f ? gridAccountsOrdenadas.value.filter((a) => passaFiltroPlataforma(a, f)) : gridAccountsOrdenadas.value
+  const plats = plataformasDesmarcadas.value
+  const contas = contasDesmarcadas.value
+  if (!plats.size && !contas.size) return gridAccountsOrdenadas.value
+  return gridAccountsOrdenadas.value.filter(
+    (a) => !plats.has(chavePlataforma(a)) && !contas.has(chaveConta(a)),
+  )
 })
 
-// Dropdown options derived from the unfiltered grid response — only
-// platforms actually present in the current department show up so the
-// operator doesn't see dead-end options like "TikTok" when there are
-// zero TikTok accounts in the loaded department. Com ML na categoria,
-// entram também "ML Kit" e "ML Catálogo" (este desabilitado, com o caminho
-// para ligar, enquanto nenhuma conta tiver o catálogo ligado).
+// Opções do Plataforma ▾: só as colunas que existem no departamento, na
+// ordem da tabela (Amazon, Magalu, ML Kit, ML Catálogo, Shopee...). Com ML e
+// sem nenhum catálogo ligado, "ML Catálogo" aparece apagado, com o caminho.
 const gridPlatformOptions = computed<{ value: string; label: string; disabled?: boolean }[]>(() => {
-  const set = new Set<string>()
-  for (const a of (grid.value?.accounts ?? [])) set.add(a.platform)
-  const temCatalogo = (grid.value?.accounts ?? []).some(ehCatalogo)
   const out: { value: string; label: string; disabled?: boolean }[] = []
-  const plataformas = Array.from(set).sort(comparePlatformLabels)
-  for (const p of plataformas) {
-    out.push({ value: p, label: platformLabel(p) })
-    if (p === 'mercadolivre') {
-      out.push({ value: 'ml_kit', label: 'ML Kit' })
-      out.push(
-        temCatalogo
-          ? { value: 'ml_catalogo', label: 'ML Catálogo' }
-          : { value: 'ml_catalogo', label: 'ML Catálogo (ligue na aba Contas)', disabled: true },
-      )
+  const vistas = new Set<string>()
+  const contas = gridAccountsOrdenadas.value
+  const temCatalogoMl = contas.some((a) => chavePlataforma(a) === 'ml_catalogo')
+  for (const a of contas) {
+    const chave = chavePlataforma(a)
+    if (vistas.has(chave)) continue
+    vistas.add(chave)
+    out.push({ value: chave, label: rotuloPlataforma(a) })
+    if (chave === 'ml_kit' && !temCatalogoMl) {
+      out.push({ value: 'ml_catalogo', label: 'ML Catálogo (ligue na aba Contas)', disabled: true })
     }
   }
   return out
 })
+
+// Opções do Contas ▾: nomes de loja sem repetir, em ordem alfabética.
+const gridContaOptions = computed<{ value: string; label: string }[]>(() => {
+  const porChave = new Map<string, string>()
+  for (const a of gridAccountsOrdenadas.value) {
+    const chave = chaveConta(a)
+    if (!porChave.has(chave)) porChave.set(chave, (nomeColuna(a) || '').trim())
+  }
+  return Array.from(porChave, ([value, label]) => ({ value, label })).sort((x, y) =>
+    x.label.localeCompare(y.label, 'pt-BR', { sensitivity: 'base' }),
+  )
+})
+
+// Lista do Contas ▾ depois da busca do próprio menu.
+const gridContaOptionsBuscadas = computed(() => {
+  const q = buscaContas.value.trim().toLocaleLowerCase('pt-BR')
+  return q ? gridContaOptions.value.filter((o) => o.value.includes(q)) : gridContaOptions.value
+})
+
+// "Contas (2)": com filtro parcial, o botão mostra quantas estão marcadas.
+const rotuloContas = computed(() => {
+  const total = gridContaOptions.value.length
+  const marcadas = gridContaOptions.value.filter((o) => !contasDesmarcadas.value.has(o.value)).length
+  return marcadas < total ? `Contas (${marcadas})` : 'Contas'
+})
+
+// Uma caixa marcada/desmarcada (no template a ref chega desembrulhada, por
+// isso o filtro vai pelo nome).
+function alternarFiltro(qual: 'plataforma' | 'conta', chave: string, marcar: boolean) {
+  const alvo = qual === 'plataforma' ? plataformasDesmarcadas : contasDesmarcadas
+  const s = new Set(alvo.value)
+  if (marcar) s.delete(chave)
+  else s.add(chave)
+  alvo.value = s
+}
+
+// "Marcar todas" / "Limpar" do Contas ▾ valem para a lista que está à vista
+// (com busca, só as encontradas).
+function marcarContas(marcar: boolean) {
+  const s = new Set(contasDesmarcadas.value)
+  for (const o of gridContaOptionsBuscadas.value) {
+    if (marcar) s.delete(o.value)
+    else s.add(o.value)
+  }
+  contasDesmarcadas.value = s
+}
+
+function marcarPlataformas(marcar: boolean) {
+  plataformasDesmarcadas.value = marcar
+    ? new Set()
+    : new Set(gridPlatformOptions.value.filter((o) => !o.disabled).map((o) => o.value))
+}
 
 const accountGroups = computed<
   { label: string; platform: string; catalogo: boolean; accounts: Account[] }[]
@@ -3943,9 +4007,10 @@ const filteredGridProducts = computed(() =>
 )
 
 // A seleção (anel azul, setas) é por posição: se a lista visível muda (busca,
-// recarga), a posição apontaria para outro produto — então a seleção sai.
+// recarga, filtros Plataforma/Contas), a posição apontaria para outro
+// produto ou outra coluna — então a seleção sai.
 watch(
-  () => filteredGridProducts.value.map((p) => p.id).join(','),
+  () => `${filteredGridProducts.value.map((p) => p.id).join(',')}|${gridAccounts.value.map((a) => a.id).join(',')}`,
   () => {
     selectedCell.value = null
   },
@@ -4335,10 +4400,12 @@ watch(
 )
 
 watch(department, async () => {
-  // Switching department invalidates the platform filter — the new
-  // dept may not have the same platforms, and stale filters silently
-  // hide all columns until the operator notices.
-  gridPlatformFilter.value = ''
+  // Switching department invalidates the Plataforma/Contas filters — the
+  // new dept may not have the same columns, and stale filters silently
+  // hide columns until the operator notices. Volta tudo marcado.
+  plataformasDesmarcadas.value = new Set()
+  contasDesmarcadas.value = new Set()
+  buscaContas.value = ''
   buscaMargemProduto.value = ''
   // Até os mapas, o prazo, a conferência e a margem do departamento novo
   // chegarem, nada do anterior é usado (a Reposição mostra "…", não números
@@ -5782,7 +5849,8 @@ watch(department, async () => {
 
     <!-- ============================================ TABELA DE PREÇOS (grid) -->
     <section v-else-if="tab === 'tabela'" class="space-y-3">
-      <!-- Barra (M-2, 17/11/2026): Buscar | Plataforma | Layout ▾ | Excel |
+      <!-- Barra (M-2, 17/11/2026; M-8, 18/11/2026: Plataforma ▾ e Contas ▾
+           com caixas): Buscar | Plataforma ▾ | Contas ▾ | Layout ▾ | Excel |
            Enviar ▾ | Recarregar | Reposição [N] dias | Margem N% ▾ |
            Conferir anúncios. Saíram Desfazer, Refazer, Custo Bling, Enviar
            relatório e a paleta Cor; a caixa amarela da Reposição e a faixa
@@ -5796,19 +5864,109 @@ watch(department, async () => {
             class="border rounded pl-7 pr-2 py-1 text-sm bg-background w-full"
           />
         </div>
-        <!-- Plataforma: esconde as colunas das outras plataformas. Vazio =
-             todas. As opções são só as plataformas do departamento. -->
-        <select
-          v-model="gridPlatformFilter"
-          class="border rounded px-2 py-1 text-sm bg-background min-w-[140px]"
-          title="Filtrar colunas por plataforma"
-          data-filtro="plataforma"
-        >
-          <option value="">Plataforma</option>
-          <option v-for="o in gridPlatformOptions" :key="o.value" :value="o.value" :disabled="o.disabled">
-            {{ o.label }}
-          </option>
-        </select>
+        <!-- Plataforma ▾ (M-8, 18/11/2026; antes um select): uma caixa por
+             coluna de plataforma do departamento. Desmarcada = as colunas
+             dela somem. Recarregar a página volta tudo marcado. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm" data-filtro="plataforma" title="Escolher as plataformas que a grade mostra">
+              Plataforma
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-plataforma
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div class="flex items-center gap-2 px-1 pb-1 text-xs">
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" data-acao="plataforma-marcar-todas" @click="marcarPlataformas(true)">Marcar todas</button>
+                <span class="text-muted-foreground">·</span>
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" data-acao="plataforma-limpar" @click="marcarPlataformas(false)">Limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto border-t pt-1">
+                <label
+                  v-for="o in gridPlatformOptions"
+                  :key="o.value"
+                  class="flex items-center gap-2 rounded px-1 py-1 text-sm"
+                  :class="o.disabled ? 'cursor-not-allowed text-muted-foreground' : 'cursor-pointer hover:bg-muted/50'"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="!o.disabled && !plataformasDesmarcadas.has(o.value)"
+                    :disabled="o.disabled"
+                    :data-plataforma="o.value"
+                    @change="alternarFiltro('plataforma', o.value, ($event.target as HTMLInputElement).checked)"
+                  />
+                  {{ o.label }}
+                </label>
+                <p v-if="!gridPlatformOptions.length" class="px-1 py-1 text-[11px] text-muted-foreground">
+                  Nenhuma conta neste departamento.
+                </p>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <!-- Contas ▾ (M-8): por nome de loja, sem repetir ("atlas" mostra
+             todas as colunas da atlas). Combina com a Plataforma: a coluna só
+             aparece com as duas marcadas. Filtro parcial: "Contas (2)". -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm" data-filtro="contas" title="Escolher as contas que a grade mostra">
+              {{ rotuloContas }}
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-contas
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div class="relative px-1 pb-1">
+                <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <input
+                  v-model="buscaContas"
+                  placeholder="Buscar conta…"
+                  class="h-7 w-full border rounded pl-7 pr-2 text-sm bg-background"
+                  data-campo="contas-busca"
+                />
+              </div>
+              <div class="flex items-center gap-2 px-1 pb-1 text-xs">
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" data-acao="contas-marcar-todas" @click="marcarContas(true)">Marcar todas</button>
+                <span class="text-muted-foreground">·</span>
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" data-acao="contas-limpar" @click="marcarContas(false)">Limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto border-t pt-1">
+                <label
+                  v-for="o in gridContaOptionsBuscadas"
+                  :key="o.value"
+                  class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="!contasDesmarcadas.has(o.value)"
+                    :data-conta="o.value"
+                    @change="alternarFiltro('conta', o.value, ($event.target as HTMLInputElement).checked)"
+                  />
+                  <span class="truncate">{{ o.label }}</span>
+                </label>
+                <p v-if="!gridContaOptionsBuscadas.length" class="px-1 py-1 text-[11px] text-muted-foreground">
+                  {{ buscaContas.trim() ? 'Nenhuma conta encontrada.' : 'Nenhuma conta neste departamento.' }}
+                </p>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
         <!-- Layout ▾ (era "Mostrar kits"): para todos que veem a Tabela. Kit só
              no Celular (Mala e Eletro não têm kits). Lembrado neste navegador. -->
         <PopoverRoot>
@@ -5867,7 +6025,11 @@ watch(department, async () => {
             v-if="showPushMenu"
             class="absolute right-0 mt-1 w-64 bg-background border rounded-md shadow-lg z-50 max-h-80 overflow-y-auto"
           >
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-muted font-medium" @click="pushAllAndClose">
+            <button
+              class="w-full text-left px-3 py-2 text-sm hover:bg-muted font-medium"
+              title="Envia só para as colunas que estão na tela (filtros Plataforma e Contas)"
+              @click="pushAllAndClose"
+            >
               Enviar todas as contas
             </button>
             <div class="border-t" />
@@ -6095,61 +6257,63 @@ watch(department, async () => {
       >
         <table class="text-xs border-collapse">
           <thead class="bg-background sticky top-0 z-20">
+            <!-- Cabeçalho (M-8, 18/11/2026): todos os textos com 11px, peso 600,
+                 altura de linha 14px, centralizados, e 24px (h-6) por linha.
+                 Só "Produto" fica à esquerda. O colspan de cada grupo é o número
+                 de colunas visíveis dele (filtros Plataforma e Contas). -->
             <!-- Row 1: Platform groups -->
             <tr>
               <th
-                class="sticky left-0 bg-background px-2 py-1 text-left z-30"
+                class="sticky left-0 bg-background h-6 px-2 py-0 z-30"
                 :colspan="colunasFixas.length"
               />
               <th
                 v-for="group in accountGroups"
                 :key="`g-${group.label}`"
                 :colspan="group.accounts.length"
-                class="px-2 py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-500"
+                class="h-6 px-2 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] whitespace-nowrap border-l-[3px] border-gray-500"
                 :class="grupoHeaderBg(group)"
                 :title="group.catalogo ? 'Preço = coluna Catálogo do produto + frete e comissão da conta de kit; margem da conta de kit, ou a própria do catálogo quando preenchida (aba Contas, botão “% margens” do Catálogo ML). Envia só para o anúncio de catálogo; célula bloqueada não envia (aviãozinho apagado, motivo no balão da célula).' : undefined"
               >
                 {{ group.label }}
               </th>
             </tr>
-            <!-- Row 2: nome da conta + aviãozinho (M-3, 17/11/2026: saíram as 6
-                 anotações, o selo "catálogo" e o "margem própria" — os dados
-                 continuam na aba Contas). O espaço da esquerda fica vazio:
-                 "Produto" está no cabeçalho da linha 3. -->
+            <!-- Row 2: só o nome da conta, centralizado (M-3, 17/11/2026: saíram
+                 as 6 anotações, o selo "catálogo" e o "margem própria" — os
+                 dados continuam na aba Contas; M-8: saiu o aviãozinho — o envio
+                 por conta fica na lista do botão Enviar). O espaço da esquerda
+                 fica vazio: "Produto" está no cabeçalho da linha 3. -->
             <tr>
               <th
-                class="sticky left-0 bg-background px-2 py-1 text-left z-30 align-bottom"
+                class="sticky left-0 bg-background h-6 px-2 py-0 z-30"
                 :colspan="colunasFixas.length"
               />
               <th
                 v-for="acc in gridAccounts"
                 :key="`n-${acc.id}`"
-                class="px-1 py-1 text-left min-w-[110px] align-top border-l"
+                class="h-6 min-w-[110px] px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] border-l"
                 :class="colunaHeaderBg(acc)"
+                :title="nomeColuna(acc)"
+                data-cab-conta
               >
-                <div class="flex items-center gap-1">
-                  <span class="text-xs font-semibold truncate" :title="nomeColuna(acc)">{{ nomeColuna(acc) }}</span>
-                  <button class="p-0.5 hover:bg-muted rounded shrink-0" title="Push para esta conta" @click="pushAccountColumn(acc.id)">
-                    <Send class="h-3 w-3" />
-                  </button>
-                </div>
+                <div class="truncate">{{ nomeColuna(acc) }}</div>
               </th>
             </tr>
             <!-- Row 3: Listing type + cost column headers -->
             <tr>
-              <th class="sticky left-0 bg-background px-2 py-1 text-left z-30" :style="estiloFixa('produto')">Produto</th>
+              <th class="sticky left-0 bg-background h-6 px-2 py-0 align-middle text-left text-[11px] font-semibold leading-[14px] z-30" :style="estiloFixa('produto')">Produto</th>
               <!-- Estoque, 7d, 30d e Reposição: somem com "Estoque" desmarcado no
                    Layout (o left das colunas presas vem de colunasFixas). -->
               <template v-if="!ocultarEstoque">
                 <th
-                  class="sticky bg-background px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 dark:text-green-400"
+                  class="sticky bg-background h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] text-green-700 z-30 dark:text-green-400"
                   :style="estiloFixa('estoque')"
                   title="Estoque no Bling. Celular: soma de todos os lotes do produto (ci, pi, ra, sa, sp e cd), sem kits e sem usados. Mala/eletro: o SKU de cada cor. Passe o mouse no número para ver as parcelas."
                 >Estoque</th>
-                <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v7')" :title="tituloVendas('ok', 7)">7d</th>
-                <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v30')" :title="tituloVendas('ok', 30)">30d</th>
+                <th class="sticky bg-blue-50 h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] text-blue-700 z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v7')" :title="tituloVendas('ok', 7)">7d</th>
+                <th class="sticky bg-blue-50 h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] text-blue-700 z-30 dark:bg-blue-950 dark:text-blue-300" :style="estiloFixa('v30')" :title="tituloVendas('ok', 30)">30d</th>
                 <th
-                  class="sticky bg-amber-50 px-1 py-1 text-center text-[10px] text-amber-800 font-bold z-30 dark:bg-amber-950 dark:text-amber-200"
+                  class="sticky bg-amber-50 h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] text-amber-800 z-30 dark:bg-amber-950 dark:text-amber-200"
                   :style="estiloFixa('reposicao')"
                   :title="`${formulaReposicao}. Negativo (vermelho) = falta: é quanto comprar. Positivo = sobra. Linha com várias cores ou voltagens: conta item a item e soma só as faltas. Linha de conjunto/kit: — (a compra é pelos avulsos). Não desconta o que já está em lote aberto na Importação.`"
                   data-coluna="reposicao"
@@ -6160,7 +6324,7 @@ watch(department, async () => {
               <template v-if="department === 'celular'">
                 <th
                   v-for="k in kitsNaGrade" :key="`gridkith-${k}`"
-                  class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30"
+                  class="sticky bg-background h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] whitespace-nowrap text-muted-foreground z-30"
                   :style="estiloFixa(`kit${k}`)"
                   :title="kitTitulo(k)"
                 >
@@ -6168,12 +6332,12 @@ watch(department, async () => {
                 </th>
               </template>
               <template v-else>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30" :style="estiloFixa('custo')">custo</th>
+                <th class="sticky bg-background h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] text-blue-700 z-30" :style="estiloFixa('custo')">custo</th>
               </template>
               <th
                 v-for="acc in gridAccounts"
                 :key="`lt-${acc.id}`"
-                class="px-1 py-1 text-center text-[10px] text-muted-foreground border-l"
+                class="h-6 px-1 py-0 align-middle text-center text-[11px] font-semibold leading-[14px] whitespace-nowrap text-muted-foreground border-l"
                 :class="colunaHeaderBg(acc)"
               >
                 {{ tipoDe(acc) || platformLabel(acc.platform) }}
@@ -6193,10 +6357,13 @@ watch(department, async () => {
                   : 'Nenhum produto corresponde à busca.' }}
               </td>
             </tr>
+            <!-- Linhas (M-8, 18/11/2026): todas com 34px; o "(!) anúncio X"
+                 fica no pé da célula, sem aumentar a linha. -->
             <tr
               v-for="(prod, rowIdx) in filteredGridProducts"
               :key="prod.id"
-              class="border-t hover:bg-muted/20 group"
+              class="h-[34px] border-t hover:bg-muted/20 group"
+              data-linha-grade
             >
               <!-- Sticky: SKU + nome + compare toggle -->
               <td class="sticky left-0 bg-background px-2 py-1 text-xs whitespace-nowrap z-10" :style="estiloFixa('produto')">
@@ -6372,10 +6539,12 @@ watch(department, async () => {
                     real: {{ actualPriceMap[prod.id][acc.id] }}
                   </div>
                   <!-- Conferência (para todos desde o M-3): anúncio fora da margem
-                       da linha (a do produto ou a Geral) → (!) e o preço dele -->
+                       da linha (a do produto ou a Geral) → (!) e o preço dele.
+                       M-8: preso no pé da célula (absolute), abaixo do preço sem
+                       encostar nele e sem aumentar a linha de 34px. -->
                   <div
                     v-if="divergenciaDe(prod.id, acc.id)"
-                    class="cursor-help text-[9px] font-bold leading-tight text-red-600 dark:text-red-400"
+                    class="absolute inset-x-1 bottom-px truncate cursor-help text-[9px] font-bold leading-[9px] text-red-600 dark:text-red-400"
                     :title="tituloDivergencia(divergenciaDe(prod.id, acc.id)!)"
                     data-divergencia="1"
                   >
