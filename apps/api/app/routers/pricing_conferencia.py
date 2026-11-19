@@ -149,10 +149,10 @@ class ConferirCelulaOut(BaseModel):
 
     celula: ConferenciaCelulaOut | None = None
     erro: str | None = None
-    # A conferência achou anúncio vinculado e tirou o "sem anúncio vinculado"
-    # (no_link) que um envio antigo tinha gravado: a tela tira a marca da
-    # célula na grade aberta (19/11/2026).
-    sem_vinculo_tirado: bool = False
+    # 19/11/2026: a marca "sem anúncio vinculado" (no_link) não vale nesta
+    # célula — o envio de hoje não a gravaria e a conferência a tirou do banco.
+    # É o estado (vem também com `erro`): a tela tira a marca da grade aberta.
+    tem_vinculo: bool = False
 
 
 class MargemOut(BaseModel):
@@ -185,6 +185,11 @@ class MargemProdutoIn(BaseModel):
     margem_pct: Decimal | None = Field(..., ge=0, le=100)
 
 
+class CelulaChaveOut(BaseModel):
+    pricing_account_id: UUID
+    pricing_product_id: UUID
+
+
 class ConferenciaOut(BaseModel):
     job: ConferenciaJobOut | None = None
     ultimo_concluido: UUID | None = None
@@ -193,6 +198,11 @@ class ConferenciaOut(BaseModel):
     # Desde o M-7 (18/11/2026) todos que veem a Tabela apertam "Conferir
     # anúncios" (o POST pede o mesmo `tabela_precos` ver do GET).
     pode_conferir: bool
+    # 19/11/2026: as células (das colunas que a pessoa vê) com "sem anúncio
+    # vinculado" (no_link) gravado AGORA. A tela tira da grade aberta a marca
+    # que não está mais aqui (a conferência ou o clique de outra pessoa tirou),
+    # sem reler a grade inteira. None = não pedido (`celulas=false`).
+    sem_vinculo: list[CelulaChaveOut] | None = None
 
 
 def _e_admin(user: User) -> bool:
@@ -387,15 +397,20 @@ async def ver_conferencia(
         await session.commit()
     concluido = await conferencia.ultimo_job(session, department, so_concluido=True)
     linhas: Sequence[PricingConferencia] = []
+    sem_vinculo: list[CelulaChaveOut] | None = None
     if celulas:
         stmt = select(PricingConferencia).where(PricingConferencia.department == department)
+        colunas = [c.id for c in await _contas_da_grade(session, user, root_id)]
         if not admin:
             # M-3, 17/11/2026: quem não é administrador só recebe as células das
             # contas que veria na grade (equipe; a coluna de catálogo vai com a
             # base). O administrador continua recebendo tudo.
-            visiveis = [c.id for c in await _contas_da_grade(session, user, root_id)]
-            stmt = stmt.where(PricingConferencia.pricing_account_id.in_(visiveis))
+            stmt = stmt.where(PricingConferencia.pricing_account_id.in_(colunas))
         linhas = (await session.execute(stmt)).scalars().all()
+        sem_vinculo = [
+            CelulaChaveOut(pricing_account_id=conta, pricing_product_id=linha)
+            for conta, linha in await conferencia.sem_vinculo_do_departamento(session, colunas)
+        ]
     job_out = _job_out(job)
     if job_out is not None and not admin:
         # O resumo do job (`contas_com_erro` com o nome das integrações, os
@@ -407,6 +422,7 @@ async def ver_conferencia(
         ultimo_concluido=concluido.id if concluido else None,
         margem=await _margem_out(session, department, root_id, user),
         pode_conferir=True,
+        sem_vinculo=sem_vinculo,
         celulas=[
             ConferenciaCelulaOut(
                 pricing_account_id=c.pricing_account_id,
@@ -456,7 +472,7 @@ async def conferir_celula(
             status.HTTP_409_CONFLICT, detail={"code": "celula_em_conferencia"}
         ) from e
     except conferencia.LeituraDaCelulaFalhouError as e:
-        return ConferirCelulaOut(erro=str(e))
+        return ConferirCelulaOut(erro=str(e), tem_vinculo=e.tem_vinculo)
     logger.info(
         "conferencia_celula_pedida",
         department=department,
@@ -477,7 +493,7 @@ async def conferir_celula(
             anuncios=linha["anuncios"],
             job_id=linha["job_id"],
         ),
-        sem_vinculo_tirado=bool(linha.get("sem_vinculo_tirado")),
+        tem_vinculo=bool(linha.get("tem_vinculo")),
     )
 
 

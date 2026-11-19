@@ -2971,9 +2971,9 @@ type CelulaConferida = {
 type ConferirCelulaResposta = {
   celula: CelulaConferida | null
   erro: string | null
-  // 19/11/2026: a conferência achou anúncio vinculado e tirou o "sem anúncio
-  // vinculado" que um envio antigo tinha gravado.
-  sem_vinculo_tirado?: boolean
+  // 19/11/2026: a marca "sem anúncio vinculado" não vale nesta célula (o
+  // servidor já tirou). Vem também com `erro` (a leitura falhou, a marca saiu).
+  tem_vinculo?: boolean
 }
 type JobConferencia = {
   id: string
@@ -3015,6 +3015,9 @@ type ConferenciaResposta = {
   celulas: CelulaConferida[]
   margem?: Partial<MargemConferencia> | null
   pode_conferir?: boolean
+  // 19/11/2026: células com "sem anúncio vinculado" gravado agora (só com as
+  // células); a grade aberta tira a marca das que não estão mais aqui.
+  sem_vinculo?: { pricing_account_id: string; pricing_product_id: string }[] | null
 }
 
 // Sem linha no banco o servidor manda 5% com as duas caixas ligadas.
@@ -3088,6 +3091,7 @@ async function carregarConferencia() {
     if (seq !== seqConferencia || desmontado) return
     r.celulas = comCelulasRecentes(r.celulas ?? [], celulasAntes)
     conferencia.value = r
+    aplicarSemVinculo(r.sem_vinculo, dep)
     conferenciaEstado.value = 'ok'
     releitura.value = 'ok'
     tentativasReleitura = 0
@@ -3149,9 +3153,6 @@ async function consultarConferencia() {
     const rodando = job?.status === 'pending' || job?.status === 'running'
     const terminou = !rodando && (job?.id !== antes.job?.id || job?.status !== antes.job?.status)
     if (terminou || r.ultimo_concluido !== antes.ultimo_concluido) {
-      // A conferência tira o "sem anúncio vinculado" vencido no servidor
-      // (19/11/2026): a grade relê para o cartão sair sem recarregar a página.
-      void loadGrid()
       await carregarConferencia()
       return
     }
@@ -3180,9 +3181,6 @@ async function acompanharConferencia() {
     }
     voltasConferencia++
     const terminou = atual.status !== 'pending' && atual.status !== 'running'
-    // Ver consultarConferencia: no fim, a grade relê (marca "sem anúncio
-    // vinculado" vencida que o servidor tirou).
-    if (terminou) void loadGrid()
     if (terminou || voltasConferencia % VOLTAS_ATE_RELER_CELULAS === 0) {
       await carregarConferencia()
       return
@@ -3287,6 +3285,38 @@ function tituloDoCartao(motivos: string, clicavel: boolean, erro: string | null)
   return linhas.join('\n')
 }
 
+// ---------- "Sem anúncio vinculado" vencido (19/11/2026)
+// O envio que não acha vínculo grava `no_link` na célula, e só um envio com
+// sucesso tirava: vínculo criado depois deixava o cartão vermelho preso. Hoje
+// o servidor tira na conferência (inteira ou do clique); aqui a grade aberta
+// acompanha, sem relê-la inteira (o loadGrid de fora de hora desfaria um custo
+// recém-digitado pelo administrador). Tira também o cinza do envio que ficou.
+function tirarSemVinculoDaGrade(prodId: string, accId: string) {
+  const c = cellOf(prodId, accId)
+  if (c?.cell_status === 'no_link') c.cell_status = 'auto'
+  const ck = pushCellKey(prodId, accId)
+  if (pushStates.value.get(ck) === 'no_link') {
+    const m = new Map(pushStates.value)
+    m.delete(ck)
+    pushStates.value = m
+  }
+}
+
+// `lista`: as células com no_link gravado agora (GET da conferência). A grade
+// do mesmo departamento tira a marca das que não estão mais nela.
+function aplicarSemVinculo(
+  lista: ConferenciaResposta['sem_vinculo'],
+  dep: string,
+) {
+  if (!lista || !grid.value || gridDepartamento.value !== dep) return
+  const ainda = new Set(lista.map((c) => `${c.pricing_product_id}::${c.pricing_account_id}`))
+  for (const c of grid.value.cells) {
+    if (c.cell_status === 'no_link' && !ainda.has(`${c.pricing_product_id}::${c.pricing_account_id}`)) {
+      tirarSemVinculoDaGrade(c.pricing_product_id, c.pricing_account_id)
+    }
+  }
+}
+
 function conferindoCelula(prodId: string, accId: string): boolean {
   return celulasConferindo.value.has(`${prodId}::${accId}`)
 }
@@ -3324,18 +3354,17 @@ async function conferirCelula(prodId: string, acc: Account) {
       body: { pricing_account_id: acc.id, pricing_product_id: prodId },
     })
     if (desmontado || dep !== department.value) return
+    // A marca "sem anúncio vinculado" não vale (o servidor tirou antes de ler):
+    // sai da grade aberta mesmo se a leitura falhou.
+    if (r.tem_vinculo) tirarSemVinculoDaGrade(prodId, acc.id)
     if (r.erro) {
-      // Nada foi gravado: o cartão continua e o balão mostra o erro.
+      // A leitura não foi gravada: o cartão continua e o balão mostra o erro.
       trocarErroDaCelula(chave, r.erro)
       return
     }
     const celula = r.celula ?? null
     celulasRecentes.set(chave, { seq: ++seqCelula, celula })
     if (conferencia.value) conferencia.value.celulas = trocarCelula(conferencia.value.celulas, chave, celula)
-    // O servidor tirou a marca "sem anúncio vinculado" (envio antigo, vínculo
-    // criado depois): sai também da grade aberta, sem reler a grade inteira.
-    const naGrade = r.sem_vinculo_tirado ? cellOf(prodId, acc.id) : undefined
-    if (naGrade?.cell_status === 'no_link') naGrade.cell_status = 'auto'
   } catch (e: any) {
     if (desmontado || dep !== department.value) return
     trocarErroDaCelula(chave, textoErroCelula(e?.data?.detail?.code))

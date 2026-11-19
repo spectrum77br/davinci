@@ -24,7 +24,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from arq.constants import in_progress_key_prefix, result_key_prefix
 from httpx import AsyncClient
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,7 +54,7 @@ from app.security.cipher import encrypt_json
 from app.services.pricing import conferencia
 from app.services.pricing.anuncios import CANAL_CATALOGO, CANAL_KIT, kit_pula_catalogo
 from app.services.pricing.conferencia_leitores import LeituraAnuncio
-from app.services.pricing.push import bases_com_catalogo_ligado, resolver_para_envio
+from app.services.pricing.push import bases_com_catalogo_ligado, push_one, resolver_para_envio
 from tests.conftest import TEST_SCHEMA
 
 PERM_VER = {"tabela_precos": {"view": True, "edit": False, "delete": False}}
@@ -1464,6 +1464,8 @@ async def test_get_devolve_o_ultimo_job_e_as_celulas(
             "pode_editar": True,
         },
         "pode_conferir": True,
+        # 19/11/2026: células com "sem anúncio vinculado" gravado agora.
+        "sem_vinculo": [],
     }
 
     job = await _rodar(db, admin)
@@ -1795,13 +1797,13 @@ async def test_rota_da_celula_para_quem_ve_a_tabela(
     assert r.json() == {
         "celula": None,
         "erro": "o Mercado Livre recusou o acesso da conta (403)",
-        "sem_vinculo_tirado": False,
+        "tem_vinculo": True,
     }
     # Célula que não manda preço (NA): celula null.
     r = await client.post(
         url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(c.b200.id)}
     )
-    assert r.json() == {"celula": None, "erro": None, "sem_vinculo_tirado": False}
+    assert r.json() == {"celula": None, "erro": None, "tem_vinculo": False}
     # Linha que não existe.
     r = await client.post(
         url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(uuid.uuid4())}
@@ -1917,45 +1919,138 @@ async def test_conferencia_parcial_tira_so_nas_contas_escolhidas(
 async def test_clique_no_cartao_tira_o_sem_vinculo_vencido(
     db: AsyncSession, admin: User, cenario, marketplaces
 ):
-    """O clique tira a marca e avisa a tela; a leitura que falhou não mexe em
-    nada; o segundo clique não tem o que tirar; sem vínculo a marca fica."""
+    """O clique tira a marca ANTES de ler (o vínculo é do banco): a conta cuja
+    leitura falha (403) não fica com o cartão falso. A resposta diz o ESTADO
+    (tem_vinculo), não "eu tirei agora": o segundo clique, ou a grade velha de
+    outra pessoa, também tira da tela. Sem vínculo a marca fica."""
     c = cenario
     await _marcas(db, c, a003__kit=CellStatus.NO_LINK, z999__kit=CellStatus.NO_LINK)
 
     marketplaces.ml.falha_em = {"counhago"}
-    with pytest.raises(conferencia.LeituraDaCelulaFalhouError):
+    with pytest.raises(conferencia.LeituraDaCelulaFalhouError) as falha:
         await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
-    assert await _estado(db, c, "a003__kit") == CellStatus.NO_LINK
+    assert falha.value.tem_vinculo is True
+    assert await _estado(db, c, "a003__kit") == CellStatus.AUTO
 
     marketplaces.ml.falha_em = set()
     linha = await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
-    assert (linha["situacao"], linha["sem_vinculo_tirado"]) == ("conferida", True)
+    assert (linha["situacao"], linha["tem_vinculo"]) == ("conferida", True)
     assert await _estado(db, c, "a003__kit") == CellStatus.AUTO
-    linha = await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
-    assert linha["sem_vinculo_tirado"] is False
 
     linha = await conferencia.conferir_celula("celular", c.kit.id, c.z999.id)
-    assert (linha["situacao"], linha["sem_vinculo_tirado"]) == ("sem_anuncio", False)
+    assert (linha["situacao"], linha["tem_vinculo"]) == ("sem_anuncio", False)
     assert await _estado(db, c, "z999__kit") == CellStatus.NO_LINK
 
 
+async def _linha_so_catalogo(db: AsyncSession, admin: User, c: SimpleNamespace) -> PricingProduct:
+    """k555: na counhago (catálogo ligado) só casa o anúncio de catálogo MLB555."""
+    p = Product(user_id=admin.id, sku="k555.sa", name="Só catálogo")
+    db.add(p)
+    await db.flush()
+    db.add(
+        _link(
+            admin,
+            c.ml,
+            p,
+            "MLB555",
+            listing_type="gold_special",
+            catalog_listing=True,
+            anuncio_status="active",
+        )
+    )
+    acess = c.seg["celular_filhos"][0]
+    k555 = _linha(admin, acess, "k555", cost_kit1=Decimal("10"), preco_catalogo=Decimal("20"))
+    db.add(k555)
+    await db.commit()
+    c.k555 = k555
+    return k555
+
+
 @pytest.mark.asyncio
-async def test_rota_da_celula_avisa_que_tirou_o_sem_vinculo(
+async def test_kit_so_de_catalogo_e_coluna_catalogo_perdem_a_marca(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """Revisão de 19/11: o envio de hoje nunca grava no_link no kit que só tem
+    anúncio de catálogo (responde 'bloqueado') nem na coluna Catálogo — a marca
+    de antes nunca sairia. A conferência inteira e o clique tiram."""
+    c = cenario
+    k555 = await _linha_so_catalogo(db, admin, c)
+    await _marcas(db, c, k555__kit=CellStatus.NO_LINK, a003__filha=CellStatus.NO_LINK)
+    out = await push_one(db, user=admin, account_id=c.kit.id, product_id=k555.id)
+    await db.commit()
+    assert out.code == "bloqueado"
+    assert await _estado(db, c, "k555__kit") == CellStatus.NO_LINK
+
+    job = await _rodar(db, admin)
+    assert job.status == BackgroundJobStatus.SUCCEEDED, job.error
+    assert await _estado(db, c, "k555__kit") == CellStatus.AUTO
+    assert await _estado(db, c, "a003__filha") == CellStatus.AUTO
+
+    # O clique também (marca regravada à mão para o teste).
+    await db.execute(
+        update(PricingOverride)
+        .where(PricingOverride.pricing_product_id == k555.id)
+        .values(cell_status=CellStatus.NO_LINK)
+    )
+    await db.commit()
+    linha = await conferencia.conferir_celula("celular", c.kit.id, k555.id)
+    assert (linha["situacao"], linha["tem_vinculo"]) == ("sem_anuncio", True)
+    assert await _estado(db, c, "k555__kit") == CellStatus.AUTO
+
+
+@pytest.mark.asyncio
+async def test_linha_ocupada_por_um_envio_fica_com_ele(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """SKIP LOCKED: a marca que um envio está gravando (linha travada, sem
+    commit) não é esperada nem tocada — a conferência segue e as outras saem."""
+    c = cenario
+    await _marcas(db, c, a003__kit=CellStatus.NO_LINK, a003__conta_sh=CellStatus.NO_LINK)
+    async with conferencia._db.SessionLocal() as envio:
+        await envio.execute(
+            select(PricingOverride)
+            .where(
+                PricingOverride.pricing_product_id == c.a003.id,
+                PricingOverride.pricing_account_id == c.kit.id,
+            )
+            .with_for_update()
+        )
+        celulas = await conferencia.montar_celulas(envio, "celular", {"ml", "amazon"})
+        tirados = await asyncio.wait_for(conferencia.tirar_sem_vinculo_vencido(celulas), 10)
+        await envio.rollback()
+    assert tirados == {(c.conta_sh.id, c.a003.id)}
+    assert await _estado(db, c, "a003__kit") == CellStatus.NO_LINK
+    assert await _estado(db, c, "a003__conta_sh") == CellStatus.AUTO
+
+
+@pytest.mark.asyncio
+async def test_rota_da_celula_e_get_dizem_onde_a_marca_vale(
     db: AsyncSession, client: AsyncClient, make_user, cenario, auth_as: Callable, marketplaces
 ):
     c = cenario
-    await _marcas(db, c, a003__conta_sh=CellStatus.NO_LINK)
+    await _marcas(db, c, a003__conta_sh=CellStatus.NO_LINK, z999__kit=CellStatus.NO_LINK)
     auth_as(await make_user(role=UserRole.USER, permissions=PERM_VER))
+
+    r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
+    chaves = {(x["pricing_account_id"], x["pricing_product_id"]) for x in r.json()["sem_vinculo"]}
+    assert chaves == {(str(c.conta_sh.id), str(c.a003.id)), (str(c.kit.id), str(c.z999.id))}
+    r = await client.get(
+        "/api/pricing/conferencia", params={"department": "celular", "celulas": "false"}
+    )
+    assert r.json()["sem_vinculo"] is None
+
     corpo = {"pricing_account_id": str(c.conta_sh.id), "pricing_product_id": str(c.a003.id)}
     r = await client.post("/api/pricing/conferencia/celula", json=corpo)
     assert r.status_code == 200, r.text
-    assert (r.json()["celula"]["situacao"], r.json()["sem_vinculo_tirado"]) == (
-        "nao_suportada",
-        True,
-    )
+    assert (r.json()["celula"]["situacao"], r.json()["tem_vinculo"]) == ("nao_suportada", True)
     assert await _estado(db, c, "a003__conta_sh") == CellStatus.AUTO
+    # De novo (ex.: a grade de outra pessoa ainda mostra a marca): o estado.
     r = await client.post("/api/pricing/conferencia/celula", json=corpo)
-    assert r.json()["sem_vinculo_tirado"] is False
+    assert r.json()["tem_vinculo"] is True
+
+    r = await client.get("/api/pricing/conferencia", params={"department": "celular"})
+    chaves = {(x["pricing_account_id"], x["pricing_product_id"]) for x in r.json()["sem_vinculo"]}
+    assert chaves == {(str(c.kit.id), str(c.z999.id))}
 
 
 # =========================================================== job e migration

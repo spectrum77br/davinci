@@ -193,7 +193,13 @@ class CelulaEmConferenciaError(RuntimeError):
 
 
 class LeituraDaCelulaFalhouError(RuntimeError):
-    """A leitura da célula falhou (token, acesso, leitor): nada foi gravado."""
+    """A leitura da célula falhou (token, acesso, leitor): nada foi gravado.
+    `tem_vinculo`: a marca "sem anúncio vinculado" não vale nesta célula (já
+    tirada antes da leitura) — a tela tira também no ramo de erro."""
+
+    def __init__(self, motivo: str, *, tem_vinculo: bool = False) -> None:
+        super().__init__(motivo)
+        self.tem_vinculo = tem_vinculo
 
 
 # M-15: as células sendo conferidas sozinhas neste processo (conta, linha).
@@ -212,9 +218,11 @@ class Celula:
     # Já decidida na montagem (sem_anuncio / nao_suportada); None = ler.
     situacao: str | None = None
     motivo: str | None = None
-    # O resolvedor do envio achou anúncio para a célula (com ou sem leitor de
-    # preço): o "sem anúncio vinculado" (no_link) gravado por um envio antigo
-    # já não vale (`tirar_sem_vinculo_vencido`).
+    # O envio de hoje NÃO gravaria "sem anúncio vinculado" (no_link) nesta
+    # célula: o resolvedor achou anúncio (com ou sem leitor de preço), ou só
+    # anúncio de catálogo (kit com a D3), ou é a coluna Catálogo (que tem
+    # bloqueio próprio e nunca grava no_link) — ver `push.push_one`. Uma marca
+    # no_link gravada antes já não vale (`tirar_sem_vinculo_vencido`).
     tem_vinculo: bool = False
 
 
@@ -653,7 +661,9 @@ async def montar_celulas(
         if celula.situacao is not None:
             continue
         resolucao = resolucoes[(celula.produto.id, celula.conta.id)]
-        celula.tem_vinculo = bool(resolucao.links)
+        celula.tem_vinculo = bool(
+            resolucao.links or resolucao.so_catalogo or celula.conta.canal == CANAL_CATALOGO
+        )
         if resolucao.links and celula.integracao.id not in lidas:
             # Tem anúncio, mas a plataforma não tem leitor de preço (Magalu).
             celula.situacao = SITUACAO_NAO_SUPORTADA
@@ -749,12 +759,10 @@ def _linha(
 _LOTE_SEM_VINCULO = 1000
 
 
-async def tirar_sem_vinculo_vencido(
-    session: AsyncSession, celulas: Iterable[Celula]
-) -> set[tuple[UUID, UUID]]:
+async def tirar_sem_vinculo_vencido(celulas: Iterable[Celula]) -> set[tuple[UUID, UUID]]:
     """Tira o "sem anúncio vinculado" (cell_status `no_link`) das células em
-    que a conferência achou anúncio vinculado. Devolve os pares (conta, linha)
-    que mudaram.
+    que o envio de hoje não gravaria essa marca (`Celula.tem_vinculo`).
+    Devolve os pares (conta, linha) que mudaram.
 
     O `no_link` é gravado pelo envio de preço que não achou vínculo e, até
     19/11/2026, só um envio com sucesso o tirava (`push._persist_cell_status`).
@@ -762,30 +770,64 @@ async def tirar_sem_vinculo_vencido(
     nem o clique no cartão nem a conferência inteira o apagavam. Ex.: wp60 4g
     36.512 na fiore, envio às 10:00 de 18/11 e vínculo às 10:05.
 
-    `tem_vinculo` vem do mesmo resolvedor do envio (`montar_celulas`), então
-    o próximo envio também acharia o anúncio e tiraria a marca. Só o
-    `no_link` muda, para `auto`, como o envio faria; NA, SV, manual,
-    travada, desligada e erro ficam como estão. Quem chama faz o commit."""
+    Só o `no_link` muda, para `auto`, como o envio faria; NA, SV, manual,
+    travada, desligada e erro ficam como estão.
+
+    Sessão PRÓPRIA e curta (commit por lote), fora da transação que grava a
+    conferência — a revisão de 19/11 achou deadlock quando o UPDATE travava os
+    overrides antes do FOR KEY SHARE de `_gravar_vivas`. E só as linhas
+    livres (SKIP LOCKED): a que um envio está gravando agora fica com ele, que
+    grava `auto` ou `error` de qualquer jeito — nunca espera nem trava o envio
+    em lote (`run_push_prices_batch`, commit a cada 10)."""
     pares = sorted({(c.conta.id, c.produto.id) for c in celulas if c.tem_vinculo})
     tirados: set[tuple[UUID, UUID]] = set()
-    for i in range(0, len(pares), _LOTE_SEM_VINCULO):
-        lote = pares[i : i + _LOTE_SEM_VINCULO]
-        res = await session.execute(
-            update(PricingOverride)
-            .where(
-                PricingOverride.cell_status == CellStatus.NO_LINK,
-                tuple_(PricingOverride.pricing_account_id, PricingOverride.pricing_product_id).in_(
-                    lote
-                ),
+    if not pares:
+        return tirados
+    async with _db.SessionLocal() as s:
+        for i in range(0, len(pares), _LOTE_SEM_VINCULO):
+            lote = pares[i : i + _LOTE_SEM_VINCULO]
+            livres = (
+                select(PricingOverride.id)
+                .where(
+                    PricingOverride.cell_status == CellStatus.NO_LINK,
+                    tuple_(
+                        PricingOverride.pricing_account_id, PricingOverride.pricing_product_id
+                    ).in_(lote),
+                )
+                .with_for_update(skip_locked=True)
             )
-            .values(cell_status=CellStatus.AUTO)
-            .returning(PricingOverride.pricing_account_id, PricingOverride.pricing_product_id)
-            .execution_options(synchronize_session=False)
-        )
-        tirados.update((conta, linha) for conta, linha in res.all())
+            res = await s.execute(
+                update(PricingOverride)
+                .where(
+                    PricingOverride.id.in_(livres),
+                    PricingOverride.cell_status == CellStatus.NO_LINK,
+                )
+                .values(cell_status=CellStatus.AUTO)
+                .returning(PricingOverride.pricing_account_id, PricingOverride.pricing_product_id)
+                .execution_options(synchronize_session=False)
+            )
+            tirados.update((conta, linha) for conta, linha in res.all())
+            await s.commit()
     if tirados:
         logger.info("conferencia_sem_vinculo_tirado", celulas=len(tirados))
     return tirados
+
+
+async def sem_vinculo_do_departamento(
+    session: AsyncSession, contas: Collection[UUID]
+) -> list[tuple[UUID, UUID]]:
+    """Os pares (conta, linha) com `no_link` gravado hoje, das contas dadas: a
+    tela tira da grade aberta a marca que não está mais aqui (a conferência
+    ou o clique de outra pessoa tirou), sem reler a grade inteira."""
+    if not contas:
+        return []
+    linhas = await session.execute(
+        select(PricingOverride.pricing_account_id, PricingOverride.pricing_product_id).where(
+            PricingOverride.cell_status == CellStatus.NO_LINK,
+            PricingOverride.pricing_account_id.in_(list(contas)),
+        )
+    )
+    return [(conta, linha) for conta, linha in linhas.all()]
 
 
 async def _gravar(
@@ -1056,9 +1098,6 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
             # Montadas todas (a disputa de catálogo é por coluna inteira, como
             # no envio); ficam só as das contas escolhidas.
             celulas = [c for c in celulas if c.conta.id in contas]
-        # O vínculo é do banco (não depende da leitura do marketplace): a
-        # marca vencida sai já, no mesmo commit das células imediatas.
-        await tirar_sem_vinculo_vencido(s, celulas)
         imediatas = await _gravar_vivas(
             s,
             [
@@ -1072,6 +1111,13 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
         job.total = len(grupos)
         job.last_heartbeat_at = _agora()
         await s.commit()
+    # O vínculo é do banco (não depende da leitura do marketplace): a marca
+    # "sem anúncio vinculado" vencida sai já, em transação própria, depois do
+    # commit acima. Se falhar, a conferência segue (a marca fica para a próxima).
+    try:
+        await tirar_sem_vinculo_vencido(celulas)
+    except Exception as e:  # noqa: BLE001 — não derruba a conferência
+        logger.warning("conferencia_sem_vinculo_falhou", job_id=str(job_id), erro=_motivo_curto(e))
     return _Comeco(
         celulas=celulas,
         grupos=grupos,
@@ -1267,6 +1313,13 @@ async def _conferir_celula(
         log.info("conferencia_celula_nao_manda_preco")
         return None
     celula = celulas[0]
+    # A marca "sem anúncio vinculado" vencida sai antes da leitura, como na
+    # conferência inteira: o vínculo é do banco, e a conta cuja leitura falha
+    # (403) não pode ficar com o cartão falso para sempre (revisão de 19/11).
+    try:
+        await tirar_sem_vinculo_vencido([celula])
+    except Exception as e:  # noqa: BLE001 — não impede a leitura da célula
+        log.warning("conferencia_celula_sem_vinculo_falhou", erro=_motivo_curto(e))
     leituras: dict[UUID, LeituraAnuncio] | None = None
     if celula.situacao is None:
         # Tem anúncio e a plataforma tem leitor: lê só os vínculos desta célula.
@@ -1280,19 +1333,18 @@ async def _conferir_celula(
         except Exception as e:  # noqa: BLE001 — a célula fica com a leitura anterior
             motivo = _motivo_curto(e)
             log.warning("conferencia_celula_falhou", plataforma=plataforma, erro=motivo)
-            raise LeituraDaCelulaFalhouError(motivo) from e
+            raise LeituraDaCelulaFalhouError(motivo, tem_vinculo=celula.tem_vinculo) from e
     linha = _linha(celula, department=department, job_id=None, agora=_agora(), leituras=leituras)
     async with _db.SessionLocal() as s:
         gravadas = await _gravar_vivas(s, [linha])
-        # Só depois da leitura que deu certo: a que falhou não grava nada.
-        tirados = await tirar_sem_vinculo_vencido(s, [celula]) if gravadas else set()
         await s.commit()
     log.info(
         "conferencia_celula",
         situacao=linha["situacao"],
         anuncios=len(linha["anuncios"]),
-        sem_vinculo_tirado=bool(tirados),
+        tem_vinculo=celula.tem_vinculo,
     )
-    # `sem_vinculo_tirado` não é coluna: avisa a tela para tirar a marca da
-    # grade aberta sem reler a grade inteira.
-    return {**gravadas[0], "sem_vinculo_tirado": bool(tirados)} if gravadas else None
+    # `tem_vinculo` não é coluna: diz à tela que a marca "sem anúncio
+    # vinculado" não vale nesta célula (o ESTADO, não "eu tirei agora": a grade
+    # aberta pode estar velha, outra pessoa pode ter tirado antes).
+    return {**gravadas[0], "tem_vinculo": celula.tem_vinculo} if gravadas else None
