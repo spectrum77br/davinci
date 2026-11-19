@@ -124,13 +124,26 @@ async def test_lista_mostra_a_configuracao_antiga_com_nomes_e_sem_id(
     prazo = e[K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA]
     assert prazo["situacao"] == "ninguem"
     assert any(f["tipo"] == "vermelho" and "Ninguém recebe" in f["texto"] for f in prazo["faixas"])
-    # Robô desligado na Ouvidoria e robô em silencioso.
+    # Robô desligado na Ouvidoria e robô em silencioso: a coluna Ativo diz o
+    # estado EFETIVO (o modo do robô), não "ligado".
     cred = e[K.OUVIDORIA_VIGIA_CREDENCIAIS]
     assert cred["situacao"] == "desligado"
     assert cred["depende_de"][0]["estado"] == "desligado"
+    assert cred["ativo_texto"].startswith("desligado: o robô 'Vigia de API x Contas'"), cred
+    assert any(
+        f["texto"].startswith("Robô desligado em Ouvidoria › Robôs: Vigia de API x Contas.")
+        for f in cred["faixas"]
+    )
+    # desligado de propósito: "ninguém recebe" não acende em vermelho
+    assert not any(f["tipo"] == "vermelho" for f in cred["faixas"]), cred["faixas"]
     frete = e[K.OUVIDORIA_CHAMADO_FRETE_ML]
     assert "bloqueado" in frete["situacoes"]
     assert any("silencioso" in f["texto"] for f in frete["faixas"])
+    assert frete["ativo_texto"].startswith("silencioso: o robô")
+    # robô ligado: diz onde fica o interruptor
+    assert correios["ativo_texto"] == (
+        "ligado (robô 'Vigia Ocorrências Correio' ligado em Ouvidoria › Robôs)"
+    )
     # Relatório da Denúncia: o modo do robô é o interruptor (desligado no cenário).
     rel = e[K.DENUNCIA_RELATORIO_DIARIO]
     assert rel["ativo"] is False and rel["situacao"] == "desligado"
@@ -139,10 +152,19 @@ async def test_lista_mostra_a_configuracao_antiga_com_nomes_e_sem_id(
     conf_ml = e[K.MARKETING_CONFERENCIA_ML]
     assert conf_ml["ativo"] is False
     assert "CONFERENCIA_ML_THREEMA" in conf_ml["faixas"][0]["texto"]
-    # Item 1: sem interruptor.
+    # Item 1: sem interruptor; a coluna conta as regras com lista própria.
     regra = e[K.LOGISTICA_MENSAGEM_REGRA]
     assert regra["desligavel"] is False
     assert regra["ativo_texto"].startswith("sempre")
+    assert regra["por_que_nao_desliga"].startswith("Sem interruptor")
+    por_regra = regra["quem_recebe"]["por_regra"]
+    assert por_regra["regras"] >= 1, por_regra
+    assert all(
+        n not in [x["nome"] for x in regra["quem_recebe"]["nomes"]] for n in por_regra["extras"]
+    )
+    # remetente × conversa de verdade (servidor sim; Mac e informativo não)
+    assert isinstance(info["canal"], str) and info["canal"]
+    assert e[K.DEVOLUCOES_CODIGOS_ML_TUTA]["canal"] is None
     # Tuta do servidor: o usuário pelo nome.
     tuta = e[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR]
     assert [n["nome"] for n in tuta["quem_recebe"]["nomes"]] == ["thatcher"]
@@ -155,6 +177,9 @@ async def test_lista_mostra_a_configuracao_antiga_com_nomes_e_sem_id(
     assert mac["situacao"] == "mac_env"
     assert mac["editavel"] is True, "o envio do Mac pode ser editado (C7)"
     assert "DEVOL_CODIGOS_THREEMA_TO" in mac["faixas"][0]["texto"]
+    # ... mas o liga/desliga ainda é do Mac (até ele ler o Cadastro)
+    assert mac["desligavel"] is False and "próprio Mac" in mac["por_que_nao_desliga"]
+    assert mac["ativo_texto"].startswith("ligado no Mac")
 
     # Contagem do catálogo inteiro.
     assert corpo["contagem"]["informativo"] == 3
@@ -378,11 +403,18 @@ async def test_pessoas_e_envios_da_pessoa(db, monkeypatch, client, make_user, au
     assert r.status_code == 200
     uso = r.json()
     por = {x["chave"]: x for x in uso["envios"]}
-    assert por[K.MARKETING_CONFERENCIA_SHOPEE]["unico"] is True
-    assert por[K.MARKETING_CONFERENCIA_SHOPEE]["via"] == "legado"
+    # Configuração antiga: a lista guarda o ID — suspender ou apagar o
+    # Threema dela não faz o aviso parar de chegar. Nunca "única" aqui; o
+    # aviso diz onde tirar.
+    conf = por[K.MARKETING_CONFERENCIA_SHOPEE]
+    assert conf["via"] == "legado" and conf["unico"] is False
+    assert conf["onde"] == "Marketing › Conferência › quem recebe"
     assert por[K.LOGISTICA_INFORMAR]["unico"] is False
-    assert uso["total"] == len(uso["envios"]) and uso["unicos"] >= 1
+    assert uso["total"] == len(uso["envios"]) and uso["unicos"] == 0
     assert uso["pela_configuracao_antiga"] == uso["total"]
+    # os envios do Mac usam a lista de lá: o DaVinci não sabe quem está nela
+    n_mac = sum(1 for d in ENVIOS if d.onde_roda == "mac" and d.gerenciado)
+    assert uso["envios_do_mac_no_env"] == n_mac == 9
     # Envio do Mac com a pessoa no Cadastro: conta pelo Cadastro.
     await threema_envios.sincronizar(db)
     db.add(
@@ -393,7 +425,23 @@ async def test_pessoas_e_envios_da_pessoa(db, monkeypatch, client, make_user, au
     await db.commit()
     uso = (await client.get(f"/api/threema/pessoas/{harry.id}/envios")).json()
     mac = {x["chave"]: x for x in uso["envios"]}[K.DEVOLUCOES_CODIGOS_ML_TUTA]
+    assert mac["via"] == "mac_env" and mac["unico"] is False, "o Mac ainda não lê daqui"
+    # Com o Mac mandando pela lista daqui, conta pelo Cadastro (e é a única).
+    db.add(
+        ThreemaEnvioRegistro(
+            lote_id=uuid.uuid4(),
+            envio_chave=K.DEVOLUCOES_CODIGOS_ML_TUTA,
+            onde_roda="mac",
+            origem="automatico",
+            via="cadastro",
+            ok=True,
+        )
+    )
+    await db.commit()
+    uso = (await client.get(f"/api/threema/pessoas/{harry.id}/envios")).json()
+    mac = {x["chave"]: x for x in uso["envios"]}[K.DEVOLUCOES_CODIGOS_ML_TUTA]
     assert mac["via"] == "cadastro" and mac["unico"] is True
+    assert uso["unicos"] == 1 and uso["envios_do_mac_no_env"] == 8
     assert (await client.get(f"/api/threema/pessoas/{uuid.uuid4()}/envios")).status_code == 404
 
 
@@ -413,7 +461,9 @@ async def test_envios_da_pessoa_conta_o_item_1_pelo_da_regra(
     assert regra["unico"] is False  # harry também está na regra
     uso = (await client.get(f"/api/threema/pessoas/{heis.id}/envios")).json()
     regra = {x["chave"]: x for x in uso["envios"]}[K.LOGISTICA_MENSAGEM_REGRA]
-    assert regra["regras"] == ["Regra com pessoa e sem mensagem"] and regra["unico"] is True
+    assert regra["regras"] == ["Regra com pessoa e sem mensagem"]
+    assert regra["unico"] is False, "configuração antiga: o ID continua na lista"
+    assert regra["onde"].startswith("Logística › Status")
     # o filtro ?pessoa= da tela usa a mesma conta
     e = _por_chave((await client.get(f"/api/threema/envios?pessoa={joana.id}")).json())
     assert K.LOGISTICA_MENSAGEM_REGRA in e

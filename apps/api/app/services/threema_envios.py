@@ -397,6 +397,15 @@ async def dependencias(chave: str, session: AsyncSession) -> list[tuple[str, boo
     return out
 
 
+def canal(contexto: str) -> str:
+    """A conversa por onde um remetente sai DE VERDADE: o contexto passa pelos
+    apelidos e pelo THREEMA_CONTEXT_CHANNELS do servidor — a regra do próprio
+    `ThreemaClient` (só monta o cliente, não envia nada). `desativado` = o
+    canal está desligado no servidor."""
+    c = threema.ThreemaClient(contexto=contexto)
+    return "desativado" if c.disabled else (c.canal or "geral")
+
+
 async def _nomear(session: AsyncSession, ids: Sequence[str]) -> tuple[Destino, ...]:
     """Nomes para a lista do legado: usuário do cadastro (o ativo vence),
     depois contato externo, depois o apelido do .env."""

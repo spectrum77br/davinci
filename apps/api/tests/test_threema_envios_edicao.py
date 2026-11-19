@@ -190,17 +190,40 @@ async def test_envio_do_mac_se_edita(db, monkeypatch, client, make_user, auth_as
     assert d["observacao"] == "o Thatcher confere o ID"
     linhas = await _linhas(db, _MAC)
     assert [x.criado_por for x in linhas] == [admin.email] * 2
-    # desligar: grava no Cadastro (o Mac ainda não lê)
+    # O Mac ainda não lê o Cadastro: quem liga e desliga é o .env de lá. Um
+    # "desligado" aqui não pararia nada (e valeria sozinho depois da C13).
+    assert d["desligavel"] is False
+    assert "próprio Mac" in d["por_que_nao_desliga"]
+    assert d["ativo"] is True and d["ativo_texto"].startswith("ligado no Mac")
     r = await client.patch(f"/api/threema/envios/{_MAC}", json={"ativo": False, "observacao": None})
-    assert r.status_code == 200
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "mac_ainda_nao_le"
     linha = await db.get(ThreemaEnvio, _MAC, populate_existing=True)
-    assert linha.ativo is False and linha.observacao is None
-    assert linha.ativo_alterado_por == admin.email
+    assert linha.ativo is None and linha.observacao == "o Thatcher confere o ID", "nada salvo"
     # lista vazia no Mac pode (volta à reserva do .env)
     r = await client.patch(f"/api/threema/envios/{_MAC}", json={"destinatarios": [], "ativo": True})
     assert r.status_code == 200
     assert await _linhas(db, _MAC) == []
     assert r.json()["quem_recebe"]["via"] == "mac_env"
+    # Com o Mac já mandando pela lista daqui (via=cadastro), o Ligado vale.
+    db.add(
+        ThreemaEnvioRegistro(
+            lote_id=uuid.uuid4(),
+            envio_chave=_MAC,
+            onde_roda="mac",
+            origem="automatico",
+            via="cadastro",
+            ok=True,
+        )
+    )
+    await db.commit()
+    r = await client.patch(f"/api/threema/envios/{_MAC}", json={"ativo": False, "observacao": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["avisos_da_edicao"] == [], "o Mac já lê o Cadastro"
+    assert r.json()["desligavel"] is True and r.json()["ativo_texto"] == "desligado"
+    linha = await db.get(ThreemaEnvio, _MAC, populate_existing=True)
+    assert linha.ativo is False and linha.observacao is None
+    assert linha.ativo_alterado_por == admin.email
     # re-aviso só na Ouvidoria
     r = await client.patch(f"/api/threema/envios/{_MAC}", json={"reaviso_horas": 4})
     assert r.json()["detail"]["code"] == "sem_reaviso"
@@ -625,9 +648,12 @@ async def test_editar_tudo_nao_muda_quem_recebe_nenhum_envio_do_servidor(
         if d.onde_roda == "mac" and d.gerenciado:
             r = await client.patch(
                 f"/api/threema/envios/{d.chave}",
-                json={"destinatarios": [{"tipo": "grupo", "id": g["id"]}], "ativo": False},
+                json={"destinatarios": [{"tipo": "grupo", "id": g["id"]}]},
             )
             assert r.status_code == 200, r.text
+            # o Mac ainda não lê o Cadastro: desligar daqui é recusado
+            r = await client.patch(f"/api/threema/envios/{d.chave}", json={"ativo": False})
+            assert r.json()["detail"]["code"] == "mac_ainda_nao_le"
     await client.post("/api/threema/emergencia", json={"usar_legado": True})
     await client.post("/api/threema/emergencia", json={"usar_legado": False})
     threema_envios.limpar_cache()

@@ -60,6 +60,7 @@ from app.services.threema_envios_tela import (
     _quem,
     _usos,
     emergencia_out,
+    mac_le_cadastro,
     onde_configurar,
     usos_antigos,
 )
@@ -211,6 +212,17 @@ async def editar_envio(
         )
     if reaviso_horas is not None and not d.chave.startswith("ouvidoria."):
         raise TelaError(422, "sem_reaviso", "Só os robôs da Ouvidoria têm re-aviso.")
+    mac_le = d.onde_roda == "mac" and await mac_le_cadastro(session, d.chave)
+    if ativo is False and d.onde_roda == "mac" and not mac_le:
+        # Até a C13 o Mac liga e desliga pelo .env de lá: um "desligado" aqui
+        # não pararia nada hoje — e passaria a valer sozinho, sem aviso, no
+        # dia em que o Mac começasse a ler o Cadastro.
+        raise TelaError(
+            422,
+            "mac_ainda_nao_le",
+            "Quem liga e desliga este aviso hoje é o próprio Mac: desligar aqui não pararia "
+            "nada. O Ligado daqui passa a valer quando o Mac ler o Cadastro.",
+        )
     linha = await _garantir_linha(session, d.chave)
     refs = await _validar_refs(session, destinatarios) if destinatarios is not None else None
     avisos: list[str] = []
@@ -252,7 +264,7 @@ async def editar_envio(
         await _trocar_linhas(session, d.chave, None, refs, autor)
     linha.updated_at = datetime.now(UTC)
     await session.flush()
-    if d.onde_roda == "mac":
+    if d.onde_roda == "mac" and not mac_le:
         avisos.append(
             "O Mac ainda usa o .env: esta lista passa a valer quando o Mac ler o Cadastro."
         )

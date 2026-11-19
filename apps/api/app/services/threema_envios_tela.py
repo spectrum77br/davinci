@@ -174,7 +174,11 @@ def onde_configurar(d: EnvioDef) -> str | None:
     """Onde a lista de quem recebe é editada HOJE (configuração antiga)."""
     L = d.legado  # noqa: N806
     if d.onde_roda == "mac":
-        return f".env do Mac ({L.env_mac})" if L.env_mac else ".env do Mac"
+        return (
+            f"a lista do próprio Mac (.env de lá: {L.env_mac})"
+            if L.env_mac
+            else "a lista do próprio Mac (.env de lá)"
+        )
     if not d.gerenciado:
         return None
     if L.regra_status:
@@ -189,7 +193,11 @@ def onde_configurar(d: EnvioDef) -> str | None:
     elif L.usuario_nome:
         texto = f"Configurações › Usuários: o Threema do usuário '{L.usuario_nome}'"
     elif L.envs:
-        texto = ".env do servidor (" + " / ".join(n.upper() for n in L.envs) + ")"
+        texto = (
+            "lista fixa no servidor, só o técnico muda (.env do servidor: "
+            + " / ".join(n.upper() for n in L.envs)
+            + ")"
+        )
     else:
         texto = "sem lista"
     if d.interruptor == "robo_modo" and d.interruptor_alvo:
@@ -201,8 +209,28 @@ def onde_configurar(d: EnvioDef) -> str | None:
     elif d.interruptor == "robo_config":
         texto += "; liga e desliga: a caixinha 'avisar margem alta' do Robô da Margem"
     elif L.interruptor_env:
-        texto += f"; liga e desliga: {L.interruptor_env.upper()} no .env do servidor"
+        texto += f"; liga e desliga: {L.interruptor_env.upper()} no .env do servidor (só o técnico)"
     return texto
+
+
+def onde_lista(d: EnvioDef) -> str | None:
+    """Só o lugar da LISTA (sem o liga/desliga): o aviso de Usuários diz onde
+    tirar o ID de alguém."""
+    texto = onde_configurar(d)
+    return texto.split("; liga e desliga", 1)[0] if texto else None
+
+
+def _nome_robo(chave: str | None) -> str:
+    robo = ouvidoria.ROBOS.get(chave or "")
+    return robo.nome if robo else (chave or "?")
+
+
+def canal_efetivo(d: EnvioDef) -> str | None:
+    """Por qual conversa do Threema o envio sai DE VERDADE (None = dinâmico,
+    Mac ou informativo). A regra mora no núcleo (`threema_envios.canal`)."""
+    if d.onde_roda != "servidor" or not d.gerenciado or not d.remetente:
+        return None
+    return threema_envios.canal(d.remetente)
 
 
 # ─────────────────────────────────────────────────────────── leitura em lote
@@ -378,9 +406,12 @@ async def _quem(session: AsyncSession, b: _Base, d: EnvioDef) -> _Quem:
     if d.onde_roda == "mac":
         linha = b.linhas.get(d.chave)
         exp = await _expandir(session, await _linhas_destinatario(session, d.chave, None))
+        le = d.chave in b.mac_evidencia
         return _Quem(
-            via="cadastro" if d.chave in b.mac_evidencia else "mac_env",
-            ativo=not (linha is not None and linha.ativo is False),
+            via="cadastro" if le else "mac_env",
+            # Enquanto o Mac não lê o Cadastro, quem liga e desliga é o .env de
+            # lá: um "desligado" guardado aqui ainda não para nada.
+            ativo=not (le and linha is not None and linha.ativo is False),
             ids=tuple(x.id for x in exp.destinos),
             nomes=_nomes_dos_destinos(exp.destinos),
             avisos=list(exp.avisos),
@@ -496,7 +527,18 @@ def _faixas(
                 if quem.nomes
                 else ""
             )
-            faixa("azul", "mac_env", f"O Mac ainda usa o .env ({d.legado.env_mac or '—'}).{extra}")
+            faixa(
+                "azul",
+                "mac_env",
+                "O Mac ainda usa a lista e o liga/desliga dele mesmo "
+                f"(.env do Mac: {d.legado.env_mac or '—'}).{extra}",
+            )
+            if linha is not None and linha.ativo is False:
+                faixa(
+                    "ambar",
+                    "mac_env",
+                    "Desligado aqui, mas o Mac ainda não lê o Cadastro: o aviso continua saindo.",
+                )
         elif not quem.ids:
             faixa(
                 "ambar",
@@ -519,8 +561,20 @@ def _faixas(
         if not quem.ativo:
             faixa("cinza", "desligado", _texto_desligado(d, linha))
         for x in robo_desligado:
-            faixa("cinza", "desligado", f"Robô desligado em Ouvidoria › Robôs ({x['texto']}).")
-        if quem.ativo and not quem.ids:
+            faixa(
+                "cinza",
+                "desligado",
+                f"Robô desligado em Ouvidoria › Robôs: {_nome_robo(x['alvo'])}. "
+                "Enquanto isso, este aviso não sai.",
+            )
+        if quem.ativo and not quem.ids and robo_desligado:
+            # Desligado de propósito: não é alarme. Só lembra para quando religar.
+            faixa(
+                "cinza",
+                "ninguem",
+                f"Ao religar o robô, ninguém recebe: escolha quem em {onde_lista(d)}.",
+            )
+        elif quem.ativo and not quem.ids:
             texto = "Ninguém recebe: este aviso não está saindo."
             if quem.avisos:
                 texto += " " + "; ".join(quem.avisos[:5]) + "."
@@ -579,14 +633,119 @@ def _reaviso(b: _Base, d: EnvioDef) -> int | None:
     return int(robo.reaviso_horas) if robo is not None and robo.reaviso_horas else None
 
 
-def _ativo_texto(d: EnvioDef, linha: ThreemaEnvio | None, ativo: bool) -> str:
+def _onde_interruptor(d: EnvioDef) -> str | None:
+    """Onde fica HOJE o liga/desliga do envio (fora do Cadastro)."""
+    if d.interruptor == "robo_modo" and d.interruptor_alvo:
+        return f"modo do robô '{_nome_robo(d.interruptor_alvo)}' em Ouvidoria › Robôs"
+    if d.interruptor == "robo_config":
+        return "caixinha 'avisar margem alta' do Robô da Margem"
+    if d.legado.interruptor_env:
+        return f"{d.legado.interruptor_env.upper()} no .env do servidor, só o técnico muda"
+    return None
+
+
+def _dep_que_trava(deps: list[dict]) -> str | None:
+    """A frase do primeiro "depende de" que hoje impede o aviso de sair."""
+    for x in deps:
+        if x["ok"]:
+            continue
+        if x["tipo"] == "robo_modo":
+            nome = _nome_robo(x["alvo"])
+            if x["estado"] == "silencioso":
+                return f"silencioso: o robô '{nome}' registra e não avisa (Ouvidoria › Robôs)"
+            if x["estado"] == "sem linha":
+                return f"não sai: o robô '{nome}' ainda não tem linha em Ouvidoria › Robôs"
+            return f"desligado: o robô '{nome}' está {x['estado']} em Ouvidoria › Robôs"
+        return f"não sai: precisa de {x['texto']} (hoje: {x['estado']})"
+    return None
+
+
+def _ativo_texto(d: EnvioDef, linha: ThreemaEnvio | None, quem: _Quem, deps: list[dict]) -> str:
+    """O liga/desliga EFETIVO, dizendo onde ele fica. Se algo de que o envio
+    depende (o modo do robô, uma chave do servidor) trava o aviso, é isso que
+    a coluna diz — não "ligado"."""
     if not d.gerenciado:
         return "—"
     if d.interruptor == "fixo":
         return "sempre (o interruptor é a Mensagem de cada regra)"
+    if d.onde_roda == "mac" and quem.via == "mac_env":
+        return "ligado no Mac (quem liga e desliga é o próprio Mac)"
+    if quem.ativo:
+        trava = _dep_que_trava(deps)
+        if trava:
+            return trava
     if linha is not None and linha.ativo is not None and d.interruptor == "proprio":
         return "ligado" if linha.ativo else "desligado"
-    return ("ligado" if ativo else "desligado") + " (segue o interruptor de hoje)"
+    base = "ligado" if quem.ativo else "desligado"
+    onde = _onde_interruptor(d)
+    if onde:
+        return f"{base} ({onde})"
+    robo = next((x for x in deps if x["tipo"] == "robo_modo"), None)
+    if robo is not None:
+        return f"{base} (robô '{_nome_robo(robo['alvo'])}' ligado em Ouvidoria › Robôs)"
+    return f"{base} (sem interruptor hoje: sai sempre que acontece)"
+
+
+async def mac_le_cadastro(session: AsyncSession, chave: str) -> bool:
+    """O Mac já manda este envio pela lista daqui (via=cadastro nos últimos
+    DIAS_EVIDENCIA_MAC dias)? Antes disso, quem decide é o .env do Mac."""
+    R = ThreemaEnvioRegistro  # noqa: N806
+    corte = datetime.now(UTC) - timedelta(days=DIAS_EVIDENCIA_MAC)
+    achou = (
+        await session.execute(
+            select(R.id)
+            .where(
+                R.envio_chave == chave,
+                R.onde_roda == "mac",
+                R.via == "cadastro",
+                R.criado_em >= corte,
+            )
+            .limit(1)
+        )
+    ).first()
+    return achou is not None
+
+
+async def _por_regra(session: AsyncSession, b: _Base, d: EnvioDef, quem: _Quem) -> dict | None:
+    """Item 1: além do padrão, quantas regras (com Mensagem) têm lista própria
+    e quem recebe só por elas — para a coluna e a busca não esconderem quem
+    recebe pelo 👤 de uma regra."""
+    if d.escopo_tipo != "regra_status" or not d.gerenciado:
+        return None
+    padrao = {n["nome"] for n in quem.nomes}
+    com_mensagem = {
+        r.id: r
+        for r in (await session.execute(select(LogisticaStatus))).scalars()
+        if (r.mensagem_threema or "").strip()
+    }
+    listas: list[list[dict]] = []
+    if quem.via == "legado":
+        for r in await threema_envios._regras_com_pessoa(session):
+            if r.id not in com_mensagem:
+                continue
+            leg = await threema_envios.legado(d.chave, escopo=r.id, session=session)
+            listas.append(_nomes_dos_ids(b, leg.ids)[0])
+    else:
+        regras = {
+            r.logistica_status_id
+            for r in (
+                await session.execute(
+                    select(ThreemaEnvioDestinatario).where(
+                        ThreemaEnvioDestinatario.envio_chave == d.chave,
+                        ThreemaEnvioDestinatario.logistica_status_id.is_not(None),
+                    )
+                )
+            ).scalars()
+        }
+        for rid in regras:
+            if rid not in com_mensagem:
+                continue
+            exp = await _expandir(session, await _linhas_destinatario(session, d.chave, rid))
+            listas.append(_nomes_dos_destinos(exp.destinos))
+    extras = list(
+        dict.fromkeys(n["nome"] for lista in listas for n in lista if n["nome"] not in padrao)
+    )
+    return {"regras": len(listas), "extras": extras}
 
 
 async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
@@ -596,6 +755,18 @@ async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
     ultimo = b.ultimos.get(d.chave)
     situacoes, faixas = _faixas(d, quem, deps, ultimo, linha)
     pode = editavel(d)
+    mac_no_env = d.onde_roda == "mac" and quem.via == "mac_env"
+    if not d.gerenciado:
+        por_que_nao_desliga = None
+    elif d.interruptor == "fixo":
+        por_que_nao_desliga = "Sem interruptor: quem liga e desliga é a Mensagem de cada regra."
+    elif mac_no_env:
+        por_que_nao_desliga = (
+            "Quem liga e desliga este aviso hoje é o próprio Mac: o Ligado daqui passa a "
+            "valer quando o Mac ler o Cadastro."
+        )
+    else:
+        por_que_nao_desliga = None
     return {
         "chave": d.chave,
         "painel": d.painel,
@@ -606,6 +777,7 @@ async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
         "frequencia_texto": d.frequencia_texto,
         "onde_roda": d.onde_roda,
         "remetente": d.remetente,
+        "canal": canal_efetivo(d),
         "gerenciado": d.gerenciado,
         "migrado": d.migrado,
         "fatia": d.fatia,
@@ -614,7 +786,8 @@ async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
         "ao_desligar_texto": AO_DESLIGAR.get(d.ao_desligar, ""),
         "escopo_tipo": d.escopo_tipo,
         "editavel": pode,
-        "desligavel": d.gerenciado and d.interruptor != "fixo",
+        "desligavel": d.gerenciado and d.interruptor != "fixo" and not mac_no_env,
+        "por_que_nao_desliga": por_que_nao_desliga,
         "por_que_nao_edita": None
         if pode
         else (
@@ -626,7 +799,7 @@ async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
         "tem_reaviso": d.chave.startswith("ouvidoria."),
         "reaviso_horas": _reaviso(b, d),
         "ativo": quem.ativo,
-        "ativo_texto": _ativo_texto(d, linha, quem.ativo),
+        "ativo_texto": _ativo_texto(d, linha, quem, deps),
         "ativo_cadastro": linha.ativo if linha is not None else None,
         "ativo_alterado_por": linha.ativo_alterado_por if linha is not None else None,
         "ativo_alterado_em": _iso(linha.ativo_alterado_em) if linha is not None else None,
@@ -639,6 +812,7 @@ async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
             "nomes": quem.nomes,
             "avisos": quem.avisos,
             "total": len(quem.nomes),
+            "por_regra": await _por_regra(session, b, d, quem),
         },
         "depende_de": deps,
         "ultimo": ultimo,
@@ -660,9 +834,11 @@ def _bate_busca(e: dict, busca: str) -> bool:
         e["aba"] or "",
         e["frequencia_texto"],
         e["remetente"] or "",
+        e["canal"] or "",
         e["observacao"] or "",
         e["quem_recebe"]["fonte"] or "",
         *(n["nome"] for n in e["quem_recebe"]["nomes"]),
+        *((e["quem_recebe"]["por_regra"] or {}).get("extras") or []),
     ]
     return any(termo in (c or "").lower() for c in campos)
 
@@ -1056,8 +1232,15 @@ async def envios_da_pessoa(session: AsyncSession, user_id: uuid.UUID) -> dict:
     o aviso de Usuários antes de suspender, excluir ou apagar o Threema.
 
     * envio do servidor ainda não migrado: pela configuração antiga (o ID dela
-      está na lista de hoje — e continua lá mesmo suspendendo);
-    * migrado e do Mac: pelo Cadastro (direto ou por grupo)."""
+      está na lista de hoje — e continua lá mesmo suspendendo). `unico` é
+      sempre falso aqui: a lista antiga guarda o ID, então suspender ou
+      apagar o Threema dela não faz o aviso parar de chegar (ele continua
+      indo para o ID). `onde` diz onde tirar;
+    * migrado: pelo Cadastro (direto ou por grupo), com `unico`;
+    * do Mac: pelo Cadastro só quando o Mac já lê daqui (`via=cadastro`);
+      antes disso `via=mac_env` (a lista do Cadastro ainda não vale) e
+      `envios_do_mac_no_env` conta os envios do Mac cuja lista de hoje o
+      DaVinci não vê."""
     u = await session.get(User, user_id)
     if u is None:
         raise TelaError(404, "usuario_inexistente", "Usuário não encontrado.")
@@ -1088,7 +1271,8 @@ async def envios_da_pessoa(session: AsyncSession, user_id: uuid.UUID) -> dict:
         if d.onde_roda == "servidor" and not d.migrado:
             minhas_antigas = antigas.get(d.chave, [])
             if minhas_antigas:
-                uso = _uso_pessoa(d, "legado", any(x.ids == (rid,) for x in minhas_antigas), None)
+                uso = _uso_pessoa(d, "legado", False, None)
+                uso["onde"] = onde_lista(d)
                 uso["regras"] = [
                     x.regra.status_plataforma or str(x.regra.id)
                     for x in minhas_antigas
@@ -1103,6 +1287,14 @@ async def envios_da_pessoa(session: AsyncSession, user_id: uuid.UUID) -> dict:
         ]
         if not minhas:
             continue
+        grupo = next(
+            (b.grupos[r.grupo_id].nome for r in minhas if r.grupo_id and r.grupo_id in b.grupos),
+            None,
+        )
+        if d.onde_roda == "mac" and d.chave not in b.mac_evidencia:
+            # O Mac ainda usa a lista dele: a daqui não muda nada hoje.
+            out.append(_uso_pessoa(d, "mac_env", False, grupo))
+            continue
         # Única = em alguma lista (a padrão ou a de uma regra) em que ela
         # está, ninguém MAIS válido sobra.
         unico = False
@@ -1111,10 +1303,6 @@ async def envios_da_pessoa(session: AsyncSession, user_id: uuid.UUID) -> dict:
             exp = await _expandir(session, da_lista)
             if not [x for x in exp.destinos if x.ref_id != u.id]:
                 unico = True
-        grupo = next(
-            (b.grupos[r.grupo_id].nome for r in minhas if r.grupo_id and r.grupo_id in b.grupos),
-            None,
-        )
         out.append(_uso_pessoa(d, "cadastro", unico, grupo))
     return {
         "usuario": {"id": str(u.id), "nome": _nome_user(u), "tem_threema": bool(rid)},
@@ -1122,6 +1310,11 @@ async def envios_da_pessoa(session: AsyncSession, user_id: uuid.UUID) -> dict:
         "total": len(out),
         "unicos": sum(1 for x in out if x["unico"]),
         "pela_configuracao_antiga": sum(1 for x in out if x["via"] == "legado"),
+        "envios_do_mac_no_env": sum(
+            1
+            for d in _defs()
+            if d.onde_roda == "mac" and d.gerenciado and d.chave not in b.mac_evidencia
+        ),
     }
 
 
@@ -1136,6 +1329,8 @@ def _uso_pessoa(d: EnvioDef, via: str, unico: bool, grupo: str | None) -> dict:
         "grupo": grupo,
         # item 1 na configuração antiga: as regras em que a pessoa está no 👤
         "regras": [],
+        # configuração antiga: onde a lista é editada hoje (onde tirar o ID)
+        "onde": None,
     }
 
 

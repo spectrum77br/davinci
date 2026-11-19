@@ -219,6 +219,8 @@ _USOS_DO_NUCLEO = {
         "dependencias",
         "_dedupe",
         "_regras_com_pessoa",
+        # Só LÊ a conversa de verdade de um remetente (monta o cliente, não envia).
+        "canal",
     },
     "services/threema_envios_edicao.py": {
         "sincronizar",
