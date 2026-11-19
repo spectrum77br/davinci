@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import get_settings
 from app.historico import nomes
@@ -34,7 +34,7 @@ from app.models import (
     ThreemaEnvioRegistro,
     UserRole,
 )
-from app.services import threema_envios
+from app.services import ouvidoria, threema_envios
 from app.services.threema_catalogo import CATALOGO, ENVIOS, K
 from tests.test_threema_resolver import migrar, semeado
 from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
@@ -614,3 +614,29 @@ def test_nomes_do_historico():
     assert nomes.tela_da_pagina("/envios-threema") == "Cadastros › Envios Threema"
     assert nomes.tela_da_api("/api/threema/envios") == "Cadastros › Envios Threema"
     assert all(d.chave in CATALOGO for d in ENVIOS)
+
+
+@pytest.mark.asyncio
+async def test_robo_da_ouvidoria_sem_linha_nao_aparece_ligado(
+    db, monkeypatch, client, make_user, auth_as
+):
+    """`avisar_pendentes` não manda nada sem a linha do robô
+    (`robo_nao_cadastrado`); a tela não pode mostrá-lo como ligado. Já a
+    Margem (25 a 27) trata a falta da linha como `ligado`, como o ponto."""
+    await montar(db, monkeypatch)
+    await _admin(db, make_user, auth_as)
+    await db.execute(
+        text("DELETE FROM ouvidoria_robos WHERE chave IN ('vigia_flex', 'vigia_margem')")
+    )
+    await db.commit()
+    e = _por_chave((await client.get("/api/threema/envios")).json())
+    dep = e[K.OUVIDORIA_VIGIA_FLEX]["depende_de"][0]
+    assert (dep["ok"], dep["estado"]) == (False, "sem linha")
+    assert "bloqueado" in e[K.OUVIDORIA_VIGIA_FLEX]["situacoes"]
+    assert any("não tem linha" in f["texto"] for f in e[K.OUVIDORIA_VIGIA_FLEX]["faixas"])
+    assert (await ouvidoria.avisar_pendentes(db, "vigia_flex"))["motivo"] == "robo_nao_cadastrado"
+    # o próprio aviso do Robô da Margem também não sai sem a linha…
+    assert e[K.OUVIDORIA_VIGIA_MARGEM]["depende_de"][0]["ok"] is False
+    # …mas o pedido segurado (25) sai: sem linha, o ponto trata como ligado
+    seg = e[K.MARGEM_PEDIDO_SEGURADO]["depende_de"][0]
+    assert (seg["ok"], seg["estado"]) == (True, "ligado")

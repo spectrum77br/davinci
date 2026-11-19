@@ -414,8 +414,14 @@ async def _deps(session: AsyncSession, b: _Base, d: EnvioDef) -> list[dict]:
     for dep, (_texto, ok) in zip(d.depende_de, oks, strict=True):
         if dep.tipo == "robo_modo":
             robo = b.robos.get(dep.alvo)
-            # Sem linha = `ligado` (ouvidoria.modo, a mesma regra do ponto).
-            estado = robo.modo if robo is not None and robo.modo in ouvidoria.MODOS else "ligado"
+            if robo is not None and robo.modo in ouvidoria.MODOS:
+                estado = robo.modo
+            elif robo is None and not ok:
+                # O aviso do próprio robô da Ouvidoria não sai sem a linha.
+                estado = "sem linha"
+            else:
+                # Margem: sem linha = `ligado` (ouvidoria.modo, a regra do ponto).
+                estado = "ligado"
         elif dep.tipo == "env":
             estado = "ligado" if ok else "desligado"
         else:  # canal do Threema
@@ -506,6 +512,9 @@ def _faixas(
         robo_silencioso = [
             x for x in deps if x["tipo"] == "robo_modo" and x["estado"] == "silencioso"
         ]
+        robo_sem_linha = [
+            x for x in deps if x["tipo"] == "robo_modo" and x["estado"] == "sem linha"
+        ]
         outros = [x for x in deps if x["tipo"] != "robo_modo" and not x["ok"]]
         if not quem.ativo:
             faixa("cinza", "desligado", _texto_desligado(d, linha))
@@ -521,6 +530,12 @@ def _faixas(
                 "ambar",
                 "bloqueado",
                 "Robô em silencioso na Ouvidoria: registra as ocorrências e não avisa.",
+            )
+        for _ in robo_sem_linha:
+            faixa(
+                "ambar",
+                "bloqueado",
+                "O robô ainda não tem linha em Ouvidoria › Robôs: o aviso não sai enquanto isso.",
             )
         for x in outros:
             faixa("ambar", "bloqueado", f"Depende de: {x['texto']} — está {x['estado']}.")

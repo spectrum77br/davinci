@@ -72,7 +72,7 @@ from app.models import (
     UserStatus,
 )
 from app.services import threema, threema_registro
-from app.services.threema_catalogo import CATALOGO, ENVIOS, FATIAS, EnvioDef
+from app.services.threema_catalogo import CATALOGO, ENVIOS, FATIAS, EnvioDef, chave_ouvidoria
 
 logger = structlog.get_logger()
 
@@ -377,7 +377,16 @@ async def dependencias(chave: str, session: AsyncSession) -> list[tuple[str, boo
     s = get_settings()
     out = []
     for dep in d.depende_de:
-        if dep.tipo == "robo_modo":
+        if dep.tipo == "robo_modo" and chave_ouvidoria(dep.alvo) == d.chave:
+            # O aviso do próprio robô (ouvidoria.avisar_pendentes): sem linha
+            # no banco não sai nada (`robo_nao_cadastrado`), e só `ligado` avisa.
+            modo = (
+                await session.execute(
+                    select(OuvidoriaRobo.modo).where(OuvidoriaRobo.chave == dep.alvo)
+                )
+            ).scalar_one_or_none()
+            ok = modo == "ligado"
+        elif dep.tipo == "robo_modo":
             # margem_auto_hold._recipients_margem_auto: sem linha = `ligado`.
             ok = await ouvidoria.modo(session, dep.alvo) == "ligado"
         elif dep.tipo == "env":
