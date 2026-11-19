@@ -309,7 +309,13 @@ async def remover_contato_threema(
     `.env` não sai por aqui — some quando o cadastro dele mudar lá. Contato
     que um envio do Cadastro usa fica inativo em vez de sumir
     (services/threema.remover_contato)."""
-    await threema.remover_contato(session, threema_id)
+    try:
+        await threema.remover_contato(session, threema_id)
+    except threema.ContatoInvalidoError as e:  # publicação antes do alembic
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "contato_invalido", "message": str(e)},
+        ) from e
     await session.commit()
     logger.info(
         "ouvidoria_threema_contato_removido",

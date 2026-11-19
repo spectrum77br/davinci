@@ -124,6 +124,29 @@ class ContatoInvalidoError(ValueError):
     """Frase pronta pra tela (o router devolve 422 com ela)."""
 
 
+# Janela da publicação: o código novo pode subir ANTES do `alembic upgrade
+# head` (0505/0506; outra pessoa publicando o main também leva este código).
+# Enquanto `threema_contato` não existe, a LEITURA dos contatos cai na linha
+# antiga (`diretorio`, que a 0506 mantém como espelho) — as telas de sempre
+# (Informar, Ouvidoria › Robôs, aviso da IA de Chamado, teste da Denúncia)
+# não dão 500. Gravar contato nesse intervalo responde 422 com a frase
+# abaixo. A 1ª leitura boa liga a chave e o processo não confere mais.
+_TABELA_CONTATO_OK = False
+_TABELA_CONTATO_AUSENTE = (
+    "Os contatos externos estão sendo atualizados (publicação em andamento): "
+    "tente de novo em alguns minutos."
+)
+
+
+def _tabela_ausente(exc: BaseException) -> bool:
+    """O erro do banco é 'relation does not exist' (SQLSTATE 42P01)? Com
+    asyncpg o erro de verdade fica em `exc.orig.__cause__` (como em
+    `db.is_unique_violation`)."""
+    orig = getattr(exc, "orig", None)
+    cause = getattr(orig, "__cause__", None) or orig
+    return getattr(cause, "sqlstate", None) == "42P01"
+
+
 def threema_id_valido(rid: str | None) -> bool:
     """O ID tem o formato do Threema (8 letras/números, ou `*` + 7)."""
     return bool(_THREEMA_ID.match((rid or "").strip().upper()))
@@ -145,30 +168,53 @@ async def _linha_contatos(session):
 
 
 async def _contatos_ativos(session):
+    """Os contatos externos ativos (`ThreemaContato`), em ordem alfabética.
+    None = a tabela ainda não existe (janela entre subir o código e rodar o
+    alembic): quem chama cai na linha antiga. A conferência roda num
+    SAVEPOINT, para o erro não envenenar a transação de quem chama."""
+    global _TABELA_CONTATO_OK
     from sqlalchemy import func, select
+    from sqlalchemy.exc import DBAPIError
 
     from app.models import ThreemaContato
 
-    return (
-        (
-            await session.execute(
-                select(ThreemaContato)
-                .where(ThreemaContato.ativo.is_(True))
-                .order_by(
-                    func.lower(ThreemaContato.nome),
-                    ThreemaContato.created_at,
-                    ThreemaContato.threema_id,
-                )
-            )
+    consulta = (
+        select(ThreemaContato)
+        .where(ThreemaContato.ativo.is_(True))
+        .order_by(
+            func.lower(ThreemaContato.nome),
+            ThreemaContato.created_at,
+            ThreemaContato.threema_id,
         )
-        .scalars()
-        .all()
     )
+    if _TABELA_CONTATO_OK:
+        return (await session.execute(consulta)).scalars().all()
+    try:
+        async with session.begin_nested():
+            linhas = (await session.execute(consulta)).scalars().all()
+    except DBAPIError as exc:
+        if not _tabela_ausente(exc):
+            raise
+        logger.warning("threema_contato_tabela_ausente")
+        return None
+    _TABELA_CONTATO_OK = True
+    return linhas
+
+
+async def _exige_tabela_contato(session) -> None:
+    """Gravar contato antes do alembic: 422 com frase, não 500."""
+    if not _TABELA_CONTATO_OK and await _contatos_ativos(session) is None:
+        raise ContatoInvalidoError(_TABELA_CONTATO_AUSENTE)
 
 
 async def contatos(session) -> list[dict[str, str]]:
-    """Contatos externos ativos, `[{id, nome}]` (ordem alfabética)."""
-    return [{"id": c.threema_id, "nome": c.nome} for c in await _contatos_ativos(session)]
+    """Contatos externos ativos, `[{id, nome}]` (ordem alfabética). Antes do
+    alembic (tabela ausente), os da linha antiga, como era antes da 0506."""
+    linhas = await _contatos_ativos(session)
+    if linhas is None:
+        row = await _linha_contatos(session)
+        return parse_recipient_directory(row.recipients if row else "", None)
+    return [{"id": c.threema_id, "nome": c.nome} for c in linhas]
 
 
 async def espelhar_contatos(session) -> None:
@@ -205,6 +251,7 @@ async def salvar_contato(session, *, threema_id: str, nome: str) -> list[dict[st
         raise ContatoInvalidoError("O nome não pode ter ':' , ',' nem ';'.")
     if len(nome) > _TAM_NOME_CONTATO:
         raise ContatoInvalidoError(f"O nome pode ter até {_TAM_NOME_CONTATO} letras.")
+    await _exige_tabela_contato(session)
     row = (
         await session.execute(select(ThreemaContato).where(ThreemaContato.threema_id == rid))
     ).scalar_one_or_none()
@@ -229,6 +276,7 @@ async def remover_contato(session, threema_id: str) -> None:
     from app.models import ThreemaContato, ThreemaEnvioDestinatario, ThreemaGrupoMembro
 
     rid = (threema_id or "").strip().upper()
+    await _exige_tabela_contato(session)
     row = (
         await session.execute(select(ThreemaContato).where(ThreemaContato.threema_id == rid))
     ).scalar_one_or_none()

@@ -318,3 +318,34 @@ async def test_validacoes_de_sempre_mais_o_tamanho_do_nome(db):
     assert threema.threema_id_valido(" tstr0001 ")
     assert threema.threema_id_valido("*TSTGW01")
     assert not threema.threema_id_valido("TSTR001")
+
+
+@pytest.mark.asyncio
+async def test_antes_do_alembic_o_seletor_le_a_linha_antiga_sem_500(db, monkeypatch):
+    """Publicação: o código novo pode subir antes do `alembic upgrade head`
+    (0505/0506). Sem `threema_contato`, quem lê os contatos (o seletor da
+    Ouvidoria e do Informar, o aviso da IA de Chamado, o teste da Denúncia)
+    cai na linha antiga em vez de dar 500, sem envenenar a transação de quem
+    chamou; gravar contato responde a frase (422 na rota)."""
+    monkeypatch.setattr(threema, "get_settings", lambda: ENV)
+    await _cenario(db)
+    antes = await _diretorio_antigo(db)
+    monkeypatch.setattr(threema, "_TABELA_CONTATO_OK", False)
+    # A tabela "some" só dentro desta transação (DDL do Postgres é
+    # transacional): o rollback do fim a devolve.
+    await db.execute(text("ALTER TABLE threema_contato RENAME TO threema_contato_sumiu"))
+    try:
+        assert await threema.diretorio(db) == antes
+        assert await threema.contatos(db) == threema.parse_recipient_directory(LINHA_ANTIGA, None)
+        assert threema._TABELA_CONTATO_OK is False  # continua conferindo
+        assert (await db.execute(text("SELECT 1"))).scalar_one() == 1
+        with pytest.raises(threema.ContatoInvalidoError, match="publicação em andamento"):
+            await threema.salvar_contato(db, threema_id="TSTN0011", nome="Novo")
+        with pytest.raises(threema.ContatoInvalidoError, match="publicação em andamento"):
+            await threema.remover_contato(db, "TSTR0001")
+        assert (await db.execute(text("SELECT 1"))).scalar_one() == 1
+    finally:
+        await db.rollback()
+    # Com a tabela de volta, a 1ª leitura boa liga a chave.
+    assert await threema.contatos(db) == []
+    assert threema._TABELA_CONTATO_OK is True
