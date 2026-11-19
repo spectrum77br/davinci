@@ -44,10 +44,17 @@ const rotulos = (tabs) => tabs.map((t) => t.label)
   assert.deepEqual(nav.TABS_INTEGRACOES.map((t) => t.resource ?? t.soComChave),
     ['integracoes', 'sincronizacoes', 'alertas', 'historico'], 'mesmas permissões de antes')
   // M-29 (24/11/2026): a aba Produtos entrou DEPOIS de Integrações.
-  const [integracoes, produtos] = nav.TABS_CADASTROS.slice(-2)
+  const [envios, integracoes, produtos] = nav.TABS_CADASTROS.slice(-3)
   assert.equal(integracoes.label, 'Integrações', 'Integrações é a penúltima aba de Cadastros')
   assert.equal(integracoes.abas, nav.TABS_INTEGRACOES)
   assert.deepEqual([produtos.label, produtos.to, produtos.resource], ['Produtos', '/cadastro-produtos', 'cadastro_produtos'])
+  // Envios Threema (tarefa 16): logo antes de Integrações, só para admin.
+  assert.deepEqual(envios, { to: '/envios-threema', label: 'Envios Threema', adminOnly: true })
+  assert.ok(tos(nav.allowedTabs(nav.TABS_CADASTROS, ADMIN)).includes('/envios-threema'))
+  for (const u of [ADMIN_SEM_HISTORICO]) assert.ok(tos(nav.allowedTabs(nav.TABS_CADASTROS, u)).includes('/envios-threema'))
+  for (const u of [GESTOR, SO_ALERTAS, COMUM, OPERADOR]) {
+    assert.ok(!tos(nav.allowedTabs(nav.TABS_CADASTROS, u)).includes('/envios-threema'), 'só admin vê Envios Threema')
+  }
   assert.deepEqual(rotulos(nav.TABS_CONFIGURACOES), ['Configurações', 'Usuários', 'Faturas'])
   const [cfg, usu, fat] = nav.TABS_CONFIGURACOES
   assert.equal(cfg.resource, 'configuracoes')
@@ -124,6 +131,7 @@ const rotas = (m) => m.visibleSections.value.flatMap((s) => s.items.map((i) => i
     return m.visibleSections.value.flatMap((s) => s.items).filter((i) => m.isActive(i)).map((i) => i.label)
   }
   assert.deepEqual(ativo(ADMIN, '/historico'), ['Cadastros'])
+  assert.deepEqual(ativo(ADMIN, '/envios-threema'), ['Cadastros'], 'Envios Threema marca o item Cadastros do menu')
   assert.deepEqual(ativo(ADMIN, '/sincronizacoes'), ['Cadastros'])
   assert.deepEqual(ativo(ADMIN, '/faturas'), ['Configurações'])
   assert.deepEqual(ativo(ADMIN, '/users/7f3c'), ['Configurações'])
@@ -167,6 +175,9 @@ const rotas = (m) => m.visibleSections.value.flatMap((s) => s.items.map((i) => i
     return new Function(...nomes, transpile(src, ts.ModuleKind.ESNext) + '\nreturn { visible, isActive, temPonto }')(
       ...nomes.map((n) => params[n]))
   }
+  // Em /envios-threema só a aba dela acende (não a aba Cadastros, que acende em /cadastros/*).
+  const et = montar(nav.TABS_CADASTROS, ADMIN, '/envios-threema')
+  assert.deepEqual(et.visible.value.filter((t) => et.isActive(t)).map((t) => t.label), ['Envios Threema'])
   const c = montar(nav.TABS_CADASTROS, ADMIN, '/historico')
   const integ = c.visible.value.find((t) => t.label === 'Integrações')
   assert.ok(c.isActive(integ), 'em /historico a aba Integrações de Cadastros fica marcada')
@@ -201,6 +212,8 @@ const rotas = (m) => m.visibleSections.value.flatMap((s) => s.items.map((i) => i
   assert.match(pagina('users/index.vue'), /definePageMeta\(\{ middleware: \['admin'\] \}\)/)
   assert.match(pagina('users/[id].vue'), /definePageMeta\(\{ middleware: \['admin'\] \}\)/)
   assert.match(pagina('permissoes.vue'), /definePageMeta\(\{ middleware: \['admin'\] \}\)/)
+  assert.match(pagina('envios-threema.vue'), /definePageMeta\(\{ middleware: \['admin'\] \}\)/)
+  assert.match(pagina('envios-threema.vue'), /<RouteTabs :tabs="TABS_CADASTROS" \/>/)
   assert.match(pagina('configuracoes.vue'), /permission: \{ resource: 'configuracoes', action: 'view' \}/)
   assert.match(pagina('integrations.vue'), /permission: \{ resource: 'integracoes', action: 'view' \}/)
   assert.match(pagina('sincronizacoes.vue'), /permission: \{ resource: 'sincronizacoes', action: 'view' \}/)
@@ -226,6 +239,7 @@ const rotas = (m) => m.visibleSections.value.flatMap((s) => s.items.map((i) => i
     ['/historico', 'Integrações › Histórico'], ['/users', 'Configurações › Usuários'], ['/permissoes', 'Configurações › Permissões'],
     ['/faturas', 'Configurações › Faturas'], ['/configuracoes', 'Configurações'], ['/api/historico', 'Integrações › Histórico'],
     ['/api/users', 'Configurações › Usuários'], ['/api/faturas', 'Configurações › Faturas'], ['/api/settings', 'Configurações'],
+    ['/envios-threema', 'Cadastros › Envios Threema'], ['/api/threema', 'Cadastros › Envios Threema'],
   ]) assert.ok(nomes.includes(`    "${rota}": "${nome}",`), `nomes.py: ${rota} → ${nome}`)
   assert.doesNotMatch(nomes, /"Sistema › Histórico"|"Admin › (Usuários|Permissões|Faturas|Configurações)"/)
 }

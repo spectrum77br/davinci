@@ -64,6 +64,8 @@ PAGINAS: dict[str, str] = {
     "/redes-sociais": "Cadastros › Redes Sociais",
     "/email-padroes": "Cadastros › E-mails",
     "/legendas": "Cadastros › Legendas",
+    # Cadastros › Envios Threema (tarefa 16): quem recebe cada aviso do Threema.
+    "/envios-threema": "Cadastros › Envios Threema",
     "/nf-cadastros": "NF Faturador",
     "/nf-faturamento": "NF Faturador › Faturamento NF",
     "/ouvidoria": "Ouvidoria › Robôs",
@@ -124,6 +126,7 @@ API: dict[str, str] = {
     "/api/marca-emails": "Cadastros › E-mails",
     "/api/email-padroes": "Cadastros › E-mails",
     "/api/marketing/legendas": "Cadastros › Legendas",
+    "/api/threema": "Cadastros › Envios Threema",
     "/api/marketing": "Marketing",
     "/api/portal": "Marketing",
     "/api/nf-cadastro/faturamento": "NF Faturador › Faturamento NF",

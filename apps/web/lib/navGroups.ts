@@ -116,6 +116,10 @@ export const TABS_CADASTROS: RouteTab[] = [
   // Sem `resource` de propósito: quem não tem a permissão vê só os itens de
   // que é responsável (a tela e a API filtram). Admin/Gestor veem todos.
   { to: '/imobilizado', label: 'Imobilizado' },
+  // Envios Threema (tarefa 16, 19/11/2026): cada aviso do Threema — quem
+  // recebe, se está ligado, como foi o último envio. Só admin. Rota fora de
+  // /cadastros/ de propósito: a aba Cadastros acende em /cadastros/*.
+  { to: '/envios-threema', label: 'Envios Threema', adminOnly: true },
   // Integrações (17/11/2026): Integrações · Sincronizações · Alertas · Histórico.
   { to: '/integrations', label: 'Integrações', abas: TABS_INTEGRACOES },
   // Produtos (M-29, 24/11/2026): a lista oficial de categorias e tags de envio

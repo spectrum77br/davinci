@@ -111,6 +111,7 @@ from app.routers import sites_validar_nf as sites_validar_nf_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
 from app.routers import tarefas as tarefas_router
+from app.routers import threema_envios as threema_envios_router
 from app.routers import imobilizado as imobilizado_router
 from app.routers import garantias as garantias_router
 from app.routers import users as users_router
@@ -318,6 +319,8 @@ app.include_router(logistica_router.router)
 app.include_router(flex_router.router)
 app.include_router(logistica_track_router.router)
 app.include_router(informar_router.router)
+# Cadastros › Envios Threema (tarefa 16): /api/threema (tela, atalho e robôs do Mac).
+app.include_router(threema_envios_router.router)
 app.include_router(refunds_router.router)
 # Rotas do robô (/api/chamados/agent/*) ANTES das rotas /{chamado_id} da aba.
 app.include_router(chamados_router.agent_router)

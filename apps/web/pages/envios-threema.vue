@@ -1,0 +1,309 @@
+<script setup lang="ts">
+// Cadastros › Envios Threema (tarefa 16). Cada aviso que o DaVinci (e o Mac
+// do escritório) manda pelo Threema, num lugar só: o que é, quando sai, quem
+// recebe, do que depende, se está ligado e como foi o último envio.
+//
+// O código descreve cada envio (o catálogo); o banco vai decidir quem recebe.
+// Enquanto um envio não foi migrado (todos, nesta fase), quem recebe é a
+// configuração antiga de sempre — a faixa âmbar diz qual e onde ela é editada
+// hoje. Nada desta tela muda quem recebe um aviso do servidor ainda não
+// migrado. Os IDs do Threema nunca aparecem inteiros.
+//
+// Endereço: ?envio=<chave> abre a gaveta do envio (&regra=<id> marca a regra
+// de status do item 1); ?pessoa=<id> mostra só os envios daquela pessoa.
+import { computed, onMounted, ref, watch } from 'vue'
+import { MessageSquare, RefreshCw, Search, ShieldAlert, X } from 'lucide-vue-next'
+import { TABS_CADASTROS } from '~/lib/navGroups'
+import {
+  FREQUENCIA, ONDE_RODA, SITUACAO, classeFaixa, quemRecebeTexto, ultimoEnvioTexto,
+  type Envio, type Lista,
+} from '~/lib/enviosThreema'
+
+definePageMeta({ middleware: ['admin'] })
+
+const { api } = useApi()
+const route = useRoute()
+const router = useRouter()
+
+const lista = ref<Lista | null>(null)
+const carregando = ref(false)
+const erro = ref<string | null>(null)
+
+const busca = ref('')
+const painel = ref('')
+const ondeRoda = ref('')
+const situacao = ref('')
+const pessoa = computed(() => (typeof route.query.pessoa === 'string' ? route.query.pessoa : ''))
+
+let seq = 0
+async function carregar() {
+  const meu = ++seq
+  carregando.value = true
+  erro.value = null
+  try {
+    const query: Record<string, string> = {}
+    if (painel.value) query.painel = painel.value
+    if (ondeRoda.value) query.onde_roda = ondeRoda.value
+    if (situacao.value) query.situacao = situacao.value
+    if (busca.value.trim()) query.busca = busca.value.trim()
+    if (pessoa.value) query.pessoa = pessoa.value
+    const r = await api<Lista>('/api/threema/envios', { query })
+    if (meu !== seq) return
+    lista.value = r
+  } catch {
+    if (meu !== seq) return
+    erro.value = 'Não deu para carregar os envios do Threema. Tente atualizar.'
+  } finally {
+    if (meu === seq) carregando.value = false
+  }
+}
+
+let espera: ReturnType<typeof setTimeout> | null = null
+watch(busca, () => {
+  if (espera) clearTimeout(espera)
+  espera = setTimeout(carregar, 300)
+})
+watch([painel, ondeRoda, situacao, pessoa], () => carregar())
+onMounted(carregar)
+
+const temFiltro = computed(
+  () => !!(busca.value.trim() || painel.value || ondeRoda.value || situacao.value || pessoa.value),
+)
+function limparFiltros() {
+  busca.value = ''
+  painel.value = ''
+  ondeRoda.value = ''
+  situacao.value = ''
+  if (pessoa.value) tirarDoEndereco('pessoa')
+}
+
+function tirarDoEndereco(...chaves: string[]) {
+  const query = { ...route.query }
+  for (const k of chaves) delete query[k]
+  router.replace({ query })
+}
+
+// Os envios por painel, na ordem do catálogo.
+const porPainel = computed(() => {
+  const grupos: { painel: string; envios: Envio[] }[] = []
+  for (const e of lista.value?.envios ?? []) {
+    let g = grupos.find((x) => x.painel === e.painel)
+    if (!g) {
+      g = { painel: e.painel, envios: [] }
+      grupos.push(g)
+    }
+    g.envios.push(e)
+  }
+  return grupos
+})
+
+const migrados = computed(() => (lista.value?.envios ?? []).filter((e) => e.migrado).length)
+const contagem = computed(() => lista.value?.contagem ?? ({} as Record<string, number>))
+
+// Descrição longa: "ver mais" por linha.
+const abertas = ref<Set<string>>(new Set())
+function alternarDescricao(chave: string) {
+  const s = new Set(abertas.value)
+  if (s.has(chave)) s.delete(chave)
+  else s.add(chave)
+  abertas.value = s
+}
+
+// Gaveta do envio: pelo endereço (?envio=), para o link direto abrir nela.
+const envioAberto = computed(() => (typeof route.query.envio === 'string' ? route.query.envio : null))
+const regraMarcada = computed(() => (typeof route.query.regra === 'string' ? route.query.regra : null))
+function abrir(e: Envio) {
+  router.replace({ query: { ...route.query, envio: e.chave } })
+}
+function fechar() {
+  tirarDoEndereco('envio', 'regra')
+}
+</script>
+
+<template>
+  <div class="space-y-4">
+    <RouteTabs :tabs="TABS_CADASTROS" />
+
+    <div class="flex flex-wrap items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <h1 class="text-xl sm:text-2xl font-semibold">Envios Threema</h1>
+        <p class="text-sm text-muted-foreground">
+          Cada aviso que sai pelo Threema: o que é, quando sai, quem recebe e se chegou.
+          <template v-if="lista">
+            {{ lista.total }} envios · {{ migrados }} lendo daqui ·
+            os demais usam a configuração antiga (faixa âmbar).
+          </template>
+        </p>
+      </div>
+      <div
+        v-if="lista"
+        class="rounded-md border px-3 py-2 text-sm max-w-md"
+        :class="lista.emergencia.usar_legado || lista.emergencia.env_desligado
+          ? 'border-red-300 bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-300'
+          : 'bg-muted/30'"
+      >
+        <div class="flex items-center gap-2 font-medium">
+          <ShieldAlert class="size-4" />
+          Emergência: voltar todos para a configuração antiga
+        </div>
+        <p class="mt-0.5 text-xs">
+          <template v-if="lista.emergencia.usar_legado">
+            LIGADA<span v-if="lista.emergencia.alterado_por"> por {{ lista.emergencia.alterado_por }}</span>:
+            todos os envios usam a configuração antiga.
+          </template>
+          <template v-else-if="lista.emergencia.env_desligado">
+            Ligada pelo servidor (THREEMA_CADASTRO_ATIVO=false): todos usam a configuração antiga.
+          </template>
+          <template v-else>Desligada. Os envios migrados leem a lista daqui.</template>
+        </p>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="relative">
+        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <input
+          v-model="busca"
+          class="h-9 w-72 max-w-full rounded-md border bg-background pl-8 pr-3 text-sm"
+          placeholder="envio, pessoa, remetente…"
+        />
+      </div>
+      <select v-model="painel" class="h-9 rounded-md border bg-background px-2 text-sm" title="Painel">
+        <option value="">Painel: todos</option>
+        <option v-for="p in lista?.paineis ?? []" :key="p" :value="p">{{ p }}</option>
+      </select>
+      <select v-model="ondeRoda" class="h-9 rounded-md border bg-background px-2 text-sm" title="Onde roda">
+        <option value="">Onde roda: todos</option>
+        <option v-for="(rotulo, k) in ONDE_RODA" :key="k" :value="k">{{ rotulo }}</option>
+      </select>
+      <select v-model="situacao" class="h-9 rounded-md border bg-background px-2 text-sm" title="Situação">
+        <option value="">Situação: todas</option>
+        <option v-for="(s, k) in SITUACAO" :key="k" :value="k">
+          {{ s.rotulo }} ({{ contagem[k] ?? 0 }})
+        </option>
+      </select>
+      <span v-if="pessoa" class="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs">
+        Só os envios de {{ lista?.pessoa?.nome || 'uma pessoa' }}
+        <button type="button" aria-label="tirar o filtro da pessoa" @click="tirarDoEndereco('pessoa')">
+          <X class="size-3" />
+        </button>
+      </span>
+      <button v-if="temFiltro" type="button" class="text-sm text-muted-foreground underline" @click="limparFiltros">
+        limpar filtros
+      </button>
+      <button
+        type="button"
+        class="inline-flex items-center gap-1.5 h-9 rounded-md border bg-background px-3 text-sm hover:bg-muted"
+        :disabled="carregando"
+        @click="carregar"
+      >
+        <RefreshCw class="size-4" :class="{ 'animate-spin': carregando }" /> atualizar
+      </button>
+    </div>
+
+    <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
+
+    <div v-if="lista && !lista.envios.length" class="rounded-md border py-10 text-center text-sm text-muted-foreground">
+      <MessageSquare class="mx-auto mb-2 size-6 opacity-50" />
+      Nenhum envio com esses filtros.
+    </div>
+
+    <section v-for="g in porPainel" :key="g.painel" class="space-y-2">
+      <h2 class="text-sm font-semibold text-muted-foreground">{{ g.painel }}</h2>
+      <div class="table-card overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr>
+              <th class="text-left min-w-[18rem]">Envio</th>
+              <th class="text-left">Frequência</th>
+              <th class="text-left min-w-[12rem]">Quem recebe</th>
+              <th class="text-left">Depende de</th>
+              <th class="text-left">Ativo</th>
+              <th class="text-left whitespace-nowrap">Último envio</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="e in g.envios"
+              :key="e.chave"
+              :data-envio="e.chave"
+              class="align-top"
+              :class="{ 'text-muted-foreground bg-muted/20': !e.gerenciado }"
+            >
+              <td>
+                <div class="font-medium">
+                  {{ e.nome }}<span v-if="e.aba" class="font-normal text-muted-foreground"> · {{ e.aba }}</span>
+                </div>
+                <div class="text-xs text-muted-foreground">
+                  <span :class="abertas.has(e.chave) ? '' : 'line-clamp-2'">{{ e.descricao }}</span>
+                  <button
+                    v-if="e.descricao.length > 140"
+                    type="button"
+                    class="underline"
+                    @click="alternarDescricao(e.chave)"
+                  >{{ abertas.has(e.chave) ? 'ver menos' : 'ver mais' }}</button>
+                </div>
+                <div v-if="e.ultimo?.titulo" class="mt-0.5 text-xs text-muted-foreground">
+                  última mensagem: {{ e.ultimo.titulo }}
+                </div>
+                <ul v-if="e.faixas.length" class="mt-1 space-y-1">
+                  <li
+                    v-for="(f, i) in e.faixas"
+                    :key="i"
+                    class="rounded border px-2 py-1 text-xs"
+                    :class="classeFaixa(f.tipo)"
+                    :data-faixa="f.situacao"
+                  >{{ f.texto }}</li>
+                </ul>
+              </td>
+              <td class="whitespace-nowrap">
+                <span class="pill-muted">{{ FREQUENCIA[e.frequencia_tipo] }}</span>
+                <div class="mt-0.5 text-xs text-muted-foreground whitespace-normal max-w-[12rem]">{{ e.frequencia_texto }}</div>
+                <div class="text-xs text-muted-foreground">{{ ONDE_RODA[e.onde_roda] }}</div>
+              </td>
+              <td>
+                <span
+                  v-if="e.gerenciado && !e.quem_recebe.nomes.length"
+                  class="text-xs"
+                  :class="e.onde_roda === 'mac' ? 'text-muted-foreground' : 'text-red-700 font-medium'"
+                >{{ e.onde_roda === 'mac' ? 'o .env do Mac' : 'ninguém' }}</span>
+                <span v-else>{{ quemRecebeTexto(e) }}</span>
+              </td>
+              <td class="text-xs">
+                <ul v-if="e.depende_de.length" class="space-y-0.5">
+                  <li v-for="d in e.depende_de" :key="d.alvo" :class="d.ok ? 'text-muted-foreground' : 'text-amber-700'">
+                    {{ d.ok ? '✓' : '!' }} {{ d.texto }}<span v-if="!d.ok"> ({{ d.estado }})</span>
+                  </li>
+                </ul>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="text-xs">
+                <span :class="e.ativo ? '' : 'text-muted-foreground'">{{ e.ativo_texto }}</span>
+              </td>
+              <td class="text-xs whitespace-nowrap">
+                <span
+                  :class="e.ultimo && (e.ultimo.falhas || !e.ultimo.total) ? 'text-red-700' : 'text-muted-foreground'"
+                >{{ ultimoEnvioTexto(e.ultimo) }}</span>
+              </td>
+              <td class="whitespace-nowrap text-right">
+                <button
+                  type="button"
+                  class="h-8 rounded-md border px-2 text-xs hover:bg-muted"
+                  @click="abrir(e)"
+                >{{ e.editavel ? 'Editar' : 'Detalhes' }}</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <EnviosThreemaGaveta
+      :chave="envioAberto"
+      :regra="regraMarcada"
+      @fechar="fechar"
+      @mudou="carregar"
+    />
+  </div>
+</template>

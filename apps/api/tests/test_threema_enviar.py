@@ -205,20 +205,32 @@ async def test_sino_quebrado_nao_derruba_o_envio(db, monkeypatch):
     assert await _alertas(db) == []
 
 
+# Quem usa o núcleo nesta fase, e com quais funções. Nenhum é ponto de envio:
+# o startup do worker sincroniza o catálogo e a tela de Cadastros › Envios
+# Threema (C6) só LÊ (quem recebe, o legado, do que depende).
+_USOS_DO_NUCLEO = {
+    "worker.py": {"sincronizar"},
+    "services/threema_envios_tela.py": {"resolver", "legado", "dependencias", "_dedupe"},
+}
+
+
 def test_nenhum_ponto_de_envio_chama_o_nucleo_nesta_fase():
     """C5: o núcleo existe, mas nenhum ponto de envio o usa ainda (cada fatia
-    troca o seu portão no commit em que vira `migrado=True`)."""
+    troca o seu portão no commit em que vira `migrado=True`). Só o startup
+    do worker e a tela do Cadastro o chamam, com as funções listadas."""
     import re
 
     app = Path(__file__).resolve().parent.parent / "app"
     uso = re.compile(
-        r"threema_envios\.\w+\(|from app\.services\.threema_envios import|import threema_envios"
+        r"threema_envios\.\w+\(|from app\.services\.threema_envios import"
+        r"|from app\.services import [^\n]*\bthreema_envios\b(?!_)"
     )
     usam = sorted(
-        str(p.relative_to(app))
+        p.relative_to(app).as_posix()
         for p in app.rglob("*.py")
         if p.name != "threema_envios.py" and uso.search(p.read_text(encoding="utf-8"))
     )
-    assert usam == ["worker.py"]  # só a sincronização do catálogo no startup
-    chamadas = set(re.findall(r"threema_envios\.(\w+)\(", (app / "worker.py").read_text()))
-    assert chamadas == {"sincronizar"}
+    assert usam == sorted(_USOS_DO_NUCLEO)
+    for rel, permitidas in _USOS_DO_NUCLEO.items():
+        chamadas = set(re.findall(r"threema_envios\.(\w+)\(", (app / rel).read_text()))
+        assert chamadas <= permitidas, rel
