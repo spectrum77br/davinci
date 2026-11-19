@@ -177,6 +177,26 @@ const SEM_LOTES = { items: [], mais: false }
     assert.match(t, /2 usam a configuração antiga: o ID dela continua nessas listas \(suspender não tira\)/)
     assert.match(t, /Quer mesmo suspender esta pessoa\?$/)
     assert.equal(lib.textoAvisoPessoa({ ...r, envios: [], total: 0, unicos: 0, pela_configuracao_antiga: 0 }, 'x'), null)
+    // item 1: a pessoa só no 👤 de uma regra — o aviso diz qual
+    const soRegra = {
+      ...r,
+      envios: [{ chave: 'logistica.mensagem_regra', nome: 'Mensagem da regra', painel: 'Logística', onde_roda: 'servidor', via: 'legado', unico: true, grupo: null, regras: ['Extraviado'] }],
+      total: 1, unicos: 1, pela_configuracao_antiga: 1,
+    }
+    assert.match(lib.textoAvisoPessoa(soRegra, 'x'), /chegar a alguém: Mensagem da regra \(regra Extraviado\)\./)
+    // contato externo: o Cadastro e a configuração antiga dizem coisas diferentes
+    const roma = {
+      nome: 'Roma',
+      usado_em: [
+        { chave: 'x', nome: 'Grupo A' },
+        { chave: 'ouvidoria.vigia_correios', nome: 'Correios · configuração antiga', legado: true },
+      ],
+    }
+    const td = lib.textoDesativarContato(roma)
+    assert.match(td, /^Roma está em 1 lista\(s\): desativado, para de receber por elas\./)
+    assert.match(td, /Roma recebe hoje pela configuração antiga \(Correios · configuração antiga\): desativado, continua recebendo por lá, mas some do seletor/)
+    assert.match(td, /Desativar\?$/)
+    assert.ok(!/lista\(s\)/.test(lib.textoDesativarContato({ ...roma, usado_em: [roma.usado_em[1]] })), 'só antiga: sem o "para de receber"')
   }
 
   // ---------------------------------------------------------------- gaveta: envio do Mac
@@ -386,6 +406,13 @@ const SEM_LOTES = { items: [], mais: false }
     assert.equal(m.chamadas.at(-1).method, 'POST')
     html = await m.html()
     assert.match(html, /data-erro[^>]*>Esse ID já é de harry potter/)
+    // em uso só pela configuração antiga: desativar pede confirmação, com o texto dela
+    const romaAntigo = { ...PESSOAS.contatos[0], usado_em: [{ chave: 'ouvidoria.vigia_correios', nome: 'Correios · configuração antiga', legado: true }] }
+    responderConfirm = false
+    m.estado.alternar(romaAntigo)
+    assert.equal(confirmacoes.at(-1), lib.textoDesativarContato(romaAntigo))
+    assert.ok(!m.chamadas.some((c) => c.method === 'PATCH'), 'recusou: nada vai')
+    responderConfirm = true
   }
 
   // ---------------------------------------------------------------- Usuários

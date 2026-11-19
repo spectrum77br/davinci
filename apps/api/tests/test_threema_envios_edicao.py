@@ -553,6 +553,27 @@ async def test_contatos(db, monkeypatch, client, make_user, auth_as):
     assert ID["roma"] not in str(lista)
 
 
+@pytest.mark.asyncio
+async def test_contato_usado_pela_configuracao_antiga(db, monkeypatch, client, make_user, auth_as):
+    """O Roma recebe HOJE pelo Correios da Ouvidoria e pelo relatório da
+    Denúncia (listas antigas, com o ID). Fase 1, Cadastro vazio: a tela não
+    pode dizer "não usado" — mostra o uso antigo e não deixa apagar."""
+    c = await montar(db, monkeypatch)
+    await _admin(make_user, auth_as)
+    r = await client.get("/api/threema/pessoas")
+    assert ID["roma"] not in r.text
+    roma = {x["nome"]: x for x in r.json()["contatos"]}["Roma"]
+    antigos = {u["chave"]: u for u in roma["usado_em"] if u.get("legado")}
+    assert set(antigos) == {K.OUVIDORIA_VIGIA_CORREIOS, K.DENUNCIA_RELATORIO_DIARIO}
+    assert antigos[K.OUVIDORIA_VIGIA_CORREIOS]["nome"].endswith("· configuração antiga")
+    r = await client.delete(f"/api/threema/contatos/{c.roma.id}")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "contato_em_uso_antigo"
+    assert "configuração antiga" in r.json()["detail"]["message"]
+    assert ID["roma"] not in r.text
+    assert await db.get(ThreemaContato, c.roma.id) is not None
+
+
 # ─────────────────────────────────────────────────────────── emergência
 
 

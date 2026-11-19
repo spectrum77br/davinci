@@ -234,7 +234,8 @@ export type ContatoOut = {
   ativo: boolean
   origem: string
   observacao: string | null
-  usado_em: { chave?: string; grupo?: string; nome: string }[]
+  // `legado: true` = lista da configuração antiga, onde o ID recebe hoje
+  usado_em: { chave?: string; grupo?: string; nome: string; regra?: string | null; legado?: boolean }[]
   e_de_usuario: string | null
 }
 export type Pessoas = { usuarios: PessoaUsuario[]; grupos: GrupoOut[]; contatos: ContatoOut[] }
@@ -265,7 +266,11 @@ export function threemaIdValido(v: string | null | undefined): boolean {
 
 export type EnviosDaPessoa = {
   usuario: { id: string; nome: string; tem_threema: boolean }
-  envios: { chave: string; nome: string; painel: string; onde_roda: string; via: string; unico: boolean; grupo: string | null }[]
+  envios: {
+    chave: string; nome: string; painel: string; onde_roda: string; via: string; unico: boolean; grupo: string | null
+    // item 1 na configuração antiga: as regras em que a pessoa está no 👤
+    regras?: string[]
+  }[]
   total: number
   unicos: number
   pela_configuracao_antiga: number
@@ -279,7 +284,7 @@ export function textoAvisoPessoa(r: EnviosDaPessoa, acao: string): string | null
   const linhas = [`${r.usuario.nome} recebe ${r.total} ${plural} do Threema.`]
   const unicos = r.envios.filter((e) => e.unico)
   if (unicos.length) {
-    const nomes = unicos.slice(0, 6).map((e) => e.nome).join(', ')
+    const nomes = unicos.slice(0, 6).map(nomeDoUso).join(', ')
     const mais = unicos.length > 6 ? ` e mais ${unicos.length - 6}` : ''
     linhas.push(`Em ${unicos.length} é a única pessoa — eles param de chegar a alguém: ${nomes}${mais}.`)
   }
@@ -290,5 +295,28 @@ export function textoAvisoPessoa(r: EnviosDaPessoa, acao: string): string | null
     )
   }
   linhas.push(`Quer mesmo ${acao}?`)
+  return linhas.join('\n')
+}
+
+function nomeDoUso(e: EnviosDaPessoa['envios'][number]): string {
+  return e.regras?.length ? `${e.nome} (regra ${e.regras.join(', ')})` : e.nome
+}
+
+/** A confirmação ao desativar um contato externo em uso. Na configuração
+ *  antiga ele continua recebendo (a lista guarda o ID), mas some do seletor
+ *  da Ouvidoria e do Informar — e sai calado da lista quando alguém a salvar. */
+export function textoDesativarContato(c: Pick<ContatoOut, 'nome' | 'usado_em'>): string {
+  const daqui = c.usado_em.filter((u) => !u.legado)
+  const antigas = c.usado_em.filter((u) => u.legado)
+  const linhas: string[] = []
+  if (daqui.length) linhas.push(`${c.nome} está em ${daqui.length} lista(s): desativado, para de receber por elas.`)
+  if (antigas.length) {
+    linhas.push(
+      `${c.nome} recebe hoje pela configuração antiga (${antigas.map((u) => u.nome).join(', ')}): `
+      + 'desativado, continua recebendo por lá, mas some do seletor da Ouvidoria e do Informar '
+      + 'e sai da lista na próxima vez que alguém salvá-la.',
+    )
+  }
+  linhas.push('Desativar?')
   return linhas.join('\n')
 }

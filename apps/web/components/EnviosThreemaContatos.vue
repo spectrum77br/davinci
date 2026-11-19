@@ -3,10 +3,11 @@
 // aviso sem login no DaVinci (ex.: "Roma"). É a mesma lista do seletor da
 // Ouvidoria › Robôs e do Informar. O ID aparece só com as 2 primeiras letras;
 // ID que já é de alguém de Usuários é recusado ("já é de Fulano": escolha a
-// pessoa). Contato em uso (num envio ou grupo) não se apaga: desative. Só admin.
+// pessoa). Contato em uso (num envio ou grupo, ou numa lista da configuração
+// antiga, onde recebe de verdade hoje) não se apaga. Só admin.
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, Trash2 } from 'lucide-vue-next'
-import { threemaIdValido, type ContatoOut, type Pessoas } from '~/lib/enviosThreema'
+import { textoDesativarContato, threemaIdValido, type ContatoOut, type Pessoas } from '~/lib/enviosThreema'
 
 const emit = defineEmits<{ (e: 'mudou'): void }>()
 const { api } = useApi()
@@ -70,8 +71,7 @@ function renomear(c: ContatoOut) {
   if (nome && nome.trim() && nome.trim() !== c.nome) mudar(c, { nome }, 'Nome trocado.')
 }
 function alternar(c: ContatoOut) {
-  if (c.ativo && c.usado_em.length
-    && !confirm(`${c.nome} está em ${c.usado_em.length} lista(s): desativado, para de receber por elas. Desativar?`)) return
+  if (c.ativo && c.usado_em.length && !confirm(textoDesativarContato(c))) return
   mudar(c, { ativo: !c.ativo }, c.ativo ? 'Contato desativado.' : 'Contato reativado.')
 }
 async function apagar(c: ContatoOut) {

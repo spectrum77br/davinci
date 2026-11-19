@@ -916,6 +916,60 @@ async def registros(
 # ─────────────────────────────────────────────────────────── pessoas
 
 
+@dataclass(frozen=True)
+class _ListaAntiga:
+    """Uma lista de quem recebe na configuração antiga (envio do servidor
+    ainda não migrado). Item 1: a padrão (`regra=None`) e uma por regra com 👤."""
+
+    d: EnvioDef
+    regra: LogisticaStatus | None
+    ids: tuple[str, ...]
+
+    def uso(self) -> dict:
+        nome = self.d.nome
+        if self.regra is not None:
+            nome += f" (regra '{self.regra.status_plataforma or self.regra.id}')"
+        return {
+            "chave": self.d.chave,
+            "nome": f"{nome} · configuração antiga",
+            "regra": str(self.regra.id) if self.regra is not None else None,
+            "legado": True,
+        }
+
+
+async def _listas_antigas(session: AsyncSession) -> list[_ListaAntiga]:
+    """As listas de hoje (`legado`) de todo envio do servidor ainda não
+    migrado — onde um ID recebe DE VERDADE enquanto o Cadastro não vale."""
+    out: list[_ListaAntiga] = []
+    regras = None
+    for d in _defs():
+        if d.onde_roda != "servidor" or not d.gerenciado or d.migrado:
+            continue
+        leg = await threema_envios.legado(d.chave, session=session)
+        out.append(_ListaAntiga(d, None, threema_envios._dedupe(leg.ids)))
+        if d.escopo_tipo == "regra_status":
+            if regras is None:
+                regras = await threema_envios._regras_com_pessoa(session)
+            for r in regras:
+                leg = await threema_envios.legado(d.chave, escopo=r.id, session=session)
+                out.append(_ListaAntiga(d, r, threema_envios._dedupe(leg.ids)))
+    return out
+
+
+async def usos_antigos(session: AsyncSession, alvo: set[str]) -> dict[str, list[dict]]:
+    """ID do Threema → as listas da configuração antiga em que ele está.
+    Tirar um contato externo do Cadastro não o tira delas (continua
+    recebendo), mas ele some do seletor da Ouvidoria e do Informar — e quem
+    salvar aquela lista depois o perde calado. Por isso a tela avisa."""
+    if not alvo:
+        return {}
+    out: dict[str, list[dict]] = {}
+    for lista in await _listas_antigas(session):
+        for rid in alvo & set(lista.ids):
+            out.setdefault(rid, []).append(lista.uso())
+    return out
+
+
 async def _usos(session: AsyncSession) -> tuple[dict, dict]:
     """(grupo_id → [envios], contato_id → [envios ou grupos]) de quem usa."""
     por_grupo: dict[uuid.UUID, list[dict]] = {}
@@ -975,6 +1029,7 @@ async def pessoas(session: AsyncSession) -> dict:
         for g in sorted(b.grupos.values(), key=lambda g: g.nome.lower())
     ]
     contatos = []
+    antigos = await usos_antigos(session, {c.threema_id for c in b.contatos.values()})
     for c in sorted(b.contatos.values(), key=lambda c: (not c.ativo, c.nome.lower())):
         dono = b.users_por_threema.get(c.threema_id)
         contatos.append(
@@ -985,7 +1040,9 @@ async def pessoas(session: AsyncSession) -> dict:
                 "ativo": c.ativo,
                 "origem": c.origem,
                 "observacao": c.observacao,
-                "usado_em": por_contato.get(c.id, []),
+                # o Cadastro (listas e grupos) e as listas antigas, onde o ID
+                # recebe hoje (`legado: true`)
+                "usado_em": [*por_contato.get(c.id, []), *antigos.get(c.threema_id, [])],
                 "e_de_usuario": _nome_user(dono)
                 if dono is not None and _usuario_valido(dono)
                 else None,
@@ -1017,17 +1074,27 @@ async def envios_da_pessoa(session: AsyncSession, user_id: uuid.UUID) -> dict:
     linhas: dict[str, list[ThreemaEnvioDestinatario]] = {}
     for r in (await session.execute(select(ThreemaEnvioDestinatario))).scalars():
         linhas.setdefault(r.envio_chave, []).append(r)
+    # Configuração antiga: a lista de cada envio não migrado e, no item 1,
+    # também o 👤 de cada regra (a pessoa pode estar só numa regra).
+    antigas: dict[str, list[_ListaAntiga]] = {}
+    if rid:
+        for lista in await _listas_antigas(session):
+            if rid in lista.ids:
+                antigas.setdefault(lista.d.chave, []).append(lista)
     out = []
     for d in _defs():
         if not d.gerenciado:
             continue
         if d.onde_roda == "servidor" and not d.migrado:
-            if not rid:
-                continue
-            leg = await threema_envios.legado(d.chave, session=session)
-            ids = threema_envios._dedupe(leg.ids)
-            if rid in ids:
-                out.append(_uso_pessoa(d, "legado", ids == (rid,), None))
+            minhas_antigas = antigas.get(d.chave, [])
+            if minhas_antigas:
+                uso = _uso_pessoa(d, "legado", any(x.ids == (rid,) for x in minhas_antigas), None)
+                uso["regras"] = [
+                    x.regra.status_plataforma or str(x.regra.id)
+                    for x in minhas_antigas
+                    if x.regra is not None
+                ]
+                out.append(uso)
             continue
         minhas = [
             r
@@ -1067,6 +1134,8 @@ def _uso_pessoa(d: EnvioDef, via: str, unico: bool, grupo: str | None) -> dict:
         "via": via,
         "unico": unico,
         "grupo": grupo,
+        # item 1 na configuração antiga: as regras em que a pessoa está no 👤
+        "regras": [],
     }
 
 

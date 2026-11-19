@@ -61,6 +61,7 @@ from app.services.threema_envios_tela import (
     _usos,
     emergencia_out,
     onde_configurar,
+    usos_antigos,
 )
 
 # Mesmo teto da lista "Avisar" dos robôs (services/ouvidoria.MAX_DESTINATARIOS).
@@ -594,6 +595,19 @@ async def apagar_contato(session: AsyncSession, contato_id: uuid.UUID) -> None:
             "contato_em_uso",
             f"O contato {c.nome} está em uso: {nomes}. Desative-o ou tire-o de lá antes.",
             usado_em=usos,
+        )
+    # Na configuração antiga ele recebe de verdade: apagado, sumiria do seletor
+    # da Ouvidoria e do Informar e sairia calado da lista na próxima vez que
+    # alguém a salvasse.
+    antigos = (await usos_antigos(session, {c.threema_id})).get(c.threema_id, [])
+    if antigos:
+        nomes = ", ".join(dict.fromkeys(u["nome"] for u in antigos))
+        raise TelaError(
+            409,
+            "contato_em_uso_antigo",
+            f"O contato {c.nome} recebe hoje pela configuração antiga: {nomes}. Tire o ID "
+            "de lá antes de apagar.",
+            usado_em=antigos,
         )
     await session.delete(c)
     await session.flush()

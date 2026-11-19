@@ -397,6 +397,28 @@ async def test_pessoas_e_envios_da_pessoa(db, monkeypatch, client, make_user, au
     assert (await client.get(f"/api/threema/pessoas/{uuid.uuid4()}/envios")).status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_envios_da_pessoa_conta_o_item_1_pelo_da_regra(
+    db, monkeypatch, client, make_user, auth_as
+):
+    """Item 1 na configuração antiga: quem está só no 👤 de uma regra também
+    recebe (o aviso de Usuários antes de suspender e o filtro ?pessoa=)."""
+    c = await montar(db, monkeypatch)
+    await _admin(db, make_user, auth_as)
+    joana, heis = c.usuarios["joana"], c.usuarios["heisenberg"]
+    assert ID["joana"] not in get_settings().threema_recipients  # fora do padrão
+    uso = (await client.get(f"/api/threema/pessoas/{joana.id}/envios")).json()
+    regra = {x["chave"]: x for x in uso["envios"]}[K.LOGISTICA_MENSAGEM_REGRA]
+    assert regra["via"] == "legado" and regra["regras"] == ["Regra com pessoa"]
+    assert regra["unico"] is False  # harry também está na regra
+    uso = (await client.get(f"/api/threema/pessoas/{heis.id}/envios")).json()
+    regra = {x["chave"]: x for x in uso["envios"]}[K.LOGISTICA_MENSAGEM_REGRA]
+    assert regra["regras"] == ["Regra com pessoa e sem mensagem"] and regra["unico"] is True
+    # o filtro ?pessoa= da tela usa a mesma conta
+    e = _por_chave((await client.get(f"/api/threema/envios?pessoa={joana.id}")).json())
+    assert K.LOGISTICA_MENSAGEM_REGRA in e
+
+
 # ─────────────────────────────────────────────────────────── quem recebe (leve)
 
 
