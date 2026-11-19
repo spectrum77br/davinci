@@ -188,6 +188,11 @@ const LISTA = {
   assert.equal(lib.porRegraTexto({ quem_recebe: { por_regra: { regras: 1, extras: [] } } }), 'lista própria em 1 regra')
   assert.equal(lib.porRegraTexto(VIGIA), '')
   assert.equal(lib.textoSeDesligar(VIGIA), 'Se desligar: os avisos deste período se perdem.')
+  // robô desligado de propósito: "ninguém" sem alarme
+  const ROBO_OFF = { depende_de: [{ tipo: 'robo_modo', alvo: 'vigia_credenciais', texto: 'x', ok: false, estado: 'desligado' }] }
+  assert.equal(lib.roboDesligado(ROBO_OFF), true)
+  assert.equal(lib.roboDesligado({ depende_de: [{ ...ROBO_OFF.depende_de[0], estado: 'silencioso' }] }), false)
+  assert.equal(lib.roboDesligado(VIGIA), false)
   assert.equal(lib.textoSeDesligar(MAC), '', 'o Mac ainda não desliga daqui')
   assert.match(lib.classeFaixa('vermelho'), /bg-red-50/)
   assert.match(lib.classeFaixa('ambar'), /bg-amber-50/)

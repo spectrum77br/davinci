@@ -170,6 +170,13 @@ export function quemRecebeTexto(e: Pick<Envio, 'quem_recebe' | 'gerenciado'>, ma
   return `${nomes.slice(0, max).join(', ')} e mais ${nomes.length - max}`
 }
 
+/** Robô da Ouvidoria desligado de propósito: "ninguém recebe" não é alarme
+ *  (o aviso não sai de qualquer jeito; a faixa cinza já lembra de escolher
+ *  quem antes de religar). */
+export function roboDesligado(e: Pick<Envio, 'depende_de'>): boolean {
+  return e.depende_de.some((d) => d.tipo === 'robo_modo' && d.estado === 'desligado')
+}
+
 /** Item 1: "lista própria em 9 regras (+ harry potter)" — quem recebe pelo
  *  👤 de uma regra não pode sumir da coluna. '' quando não há. */
 export function porRegraTexto(e: Pick<Envio, 'quem_recebe'>): string {

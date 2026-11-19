@@ -20,7 +20,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { MessageSquare, RefreshCw, Search, ShieldAlert, X } from 'lucide-vue-next'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
-  FREQUENCIA, ONDE_RODA, SITUACAO, classeFaixa, porRegraTexto, quemRecebeTexto, ultimoEnvioTexto,
+  FREQUENCIA, ONDE_RODA, SITUACAO, classeFaixa, porRegraTexto, quemRecebeTexto, roboDesligado, ultimoEnvioTexto,
   type Envio, type Lista,
 } from '~/lib/enviosThreema'
 
@@ -339,8 +339,8 @@ function fechar() {
                     <span
                       v-if="e.gerenciado && !e.quem_recebe.nomes.length"
                       class="text-xs"
-                      :class="e.onde_roda === 'mac' ? 'text-muted-foreground' : 'text-red-700 font-medium dark:text-red-400'"
-                    >{{ e.onde_roda === 'mac' ? 'a lista do próprio Mac' : 'ninguém' }}</span>
+                      :class="e.onde_roda === 'mac' || roboDesligado(e) ? 'text-muted-foreground' : 'text-red-700 font-medium dark:text-red-400'"
+                    >{{ e.onde_roda === 'mac' ? 'a lista do próprio Mac' : roboDesligado(e) ? 'ninguém (robô desligado)' : 'ninguém' }}</span>
                     <span v-else>{{ e.quem_recebe.por_regra?.regras ? `padrão: ${quemRecebeTexto(e)}` : quemRecebeTexto(e) }}</span>
                     <div v-if="porRegraTexto(e)" class="text-xs text-muted-foreground" data-por-regra>{{ porRegraTexto(e) }}</div>
                   </td>

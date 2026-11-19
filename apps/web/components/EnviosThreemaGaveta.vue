@@ -14,7 +14,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { CheckCircle2, Send, X, XCircle } from 'lucide-vue-next'
 import {
-  FREQUENCIA, ONDE_RODA, ORIGEM, classeFaixa, fraseErro, haQuanto, remetenteTexto, textoConfirmarDesligar,
+  FREQUENCIA, ONDE_RODA, ORIGEM, classeFaixa, fraseErro, haQuanto, remetenteTexto, roboDesligado, textoConfirmarDesligar,
   textoConfirmarTeste, textoSeDesligar, type Detalhe, type Lote, type Pessoas, type Regra, type RefSel,
 } from '~/lib/enviosThreema'
 
@@ -297,8 +297,14 @@ watch(
             <div v-if="detalhe.quem_recebe.nomes.length" class="flex flex-wrap gap-1">
               <span v-for="(n, i) in detalhe.quem_recebe.nomes" :key="i" class="pill-muted">{{ n.nome }}</span>
             </div>
-            <p v-else-if="detalhe.gerenciado" :class="detalhe.onde_roda === 'mac' ? 'text-muted-foreground' : 'font-medium text-red-700 dark:text-red-400'">
-              {{ detalhe.onde_roda === 'mac' ? 'Ninguém na lista daqui: o Mac usa a lista dele.' : 'Ninguém: este aviso não está saindo.' }}
+            <p v-else-if="detalhe.gerenciado && detalhe.onde_roda === 'mac'" class="text-muted-foreground">
+              Ninguém na lista daqui: o Mac usa a lista dele.
+            </p>
+            <p v-else-if="detalhe.gerenciado && roboDesligado(detalhe)" class="text-muted-foreground" data-ninguem-robo-desligado>
+              Ninguém: o robô está desligado (ao religar, escolha quem recebe).
+            </p>
+            <p v-else-if="detalhe.gerenciado" class="font-medium text-red-700 dark:text-red-400">
+              Ninguém: este aviso não está saindo.
             </p>
             <p v-else class="text-muted-foreground">—</p>
             <p v-if="detalhe.quem_recebe.fonte" class="mt-1 text-xs text-muted-foreground">
