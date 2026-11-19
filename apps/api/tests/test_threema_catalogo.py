@@ -189,7 +189,8 @@ def test_todo_robo_da_ouvidoria_tem_o_seu_envio():
         assert envio.remetente == robo.contexto
         assert envio.legado.robo == chave
         assert envio.nome == robo.nome
-        assert envio.frequencia_texto == robo.cadencia_texto
+        # "Evento" = sai quando há pendência; a cadência é quando o robô confere
+        assert envio.frequencia_texto == f"quando há pendência; confere {robo.cadencia_texto}"
         assert [x.alvo for x in envio.depende_de] == [chave]
 
 

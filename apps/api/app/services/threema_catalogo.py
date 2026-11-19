@@ -286,7 +286,9 @@ def _servidor() -> list[EnvioDef]:
             K.LOGISTICA_CORREIOS_GRAVE, "Logística", None, "Ocorrência grave dos Correios",
             "Primeira leitura de ocorrência grave no rastreio (apreensão, extravio, roubo, "
             "avaria). Chega pelo rastreio das :05/:20/:35/:50, pelo webhook do 17track e pelo "
-            "botão ⟳ da Localização.",
+            "botão ⟳ da Localização. Repete o aviso do robô 'Vigia Ocorrências Correio' da "
+            "Ouvidoria (mesma ocorrência; quem está nos dois recebe em dobro): decida qual "
+            "manter.",
             "evento", "na leitura do rastreio (:05/:20/:35/:50, webhook, botão ⟳)", "servidor",
             "logistica", L(envs=("threema_recipients",), grupo=G_AVISOS_GERAIS), fatia="F1",
         ),
@@ -407,13 +409,15 @@ def _servidor() -> list[EnvioDef]:
             "O FIFO aponta como negativo um pedido que não está na passada (ex.: ML e "
             "Amazon). Um aviso por pedido, SKU e dia.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
-            L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF), fatia="F1",
+            L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
+            depende_de=(_DEP_NF_AUTO,), fatia="F1",
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO, "Controle de Estoque", None,
             "Kit sem composição",
             "Kit sem a composição cadastrada no Bling: a NF não sai. Um aviso por kit por "
-            "dia, pela passada ou pelo botão Enfileirar.",
+            "dia, pela passada ou pelo botão Enfileirar. Pela passada, só com a NF automática "
+            "ligada no servidor; pelo botão Enfileirar, sempre.",
             "misto", "passada da NF automática e botão Enfileirar", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF), fatia="F1",
         ),
@@ -423,7 +427,8 @@ def _servidor() -> list[EnvioDef]:
             "O Bling não respondeu a leitura de estoque da NF automática. No máximo um "
             "aviso por hora.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
-            L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF), fatia="F1",
+            L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
+            depende_de=(_DEP_NF_AUTO,), fatia="F1",
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO, "Controle de Estoque", None,
@@ -431,7 +436,8 @@ def _servidor() -> list[EnvioDef]:
             "O Bling recusou mover o pedido para Aguardando Cancelamento (83955). Um aviso "
             "por pedido por dia.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
-            L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF), fatia="F1",
+            L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
+            depende_de=(_DEP_NF_AUTO,), fatia="F1",
         ),
         E(
             K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA, "Controle de Estoque", None,
@@ -485,6 +491,16 @@ def _servidor() -> list[EnvioDef]:
     ]
 
 
+# Repetições que o dono decide na tela (§12.3 do desenho): a frase vai na
+# descrição dos dois lados.
+_REPETICOES = {
+    "vigia_correios": (
+        " Repete o aviso 'Ocorrência grave dos Correios' da Logística (mesma ocorrência; "
+        "quem está nos dois recebe em dobro): decida qual manter."
+    ),
+}
+
+
 def _ouvidoria() -> list[EnvioDef]:
     """Itens 29 a 42: um envio por robô da Ouvidoria (o aviso das ocorrências
     pendentes, `ouvidoria.avisar_pendentes`). O remetente é o `contexto` do
@@ -501,10 +517,10 @@ def _ouvidoria() -> list[EnvioDef]:
                 nome=robo.nome,
                 descricao=(
                     f"Ocorrências pendentes do robô '{robo.nome}', numa mensagem só. "
-                    f"{robo.descricao}"
+                    f"{robo.descricao}{_REPETICOES.get(chave, '')}"
                 ),
                 frequencia_tipo="evento",
-                frequencia_texto=robo.cadencia_texto,
+                frequencia_texto=f"quando há pendência; confere {robo.cadencia_texto}",
                 onde_roda="servidor",
                 remetente=robo.contexto,
                 legado=Legado(
@@ -602,7 +618,9 @@ def _mac() -> list[EnvioDef]:
         E(
             K.DEVOLUCOES_CODIGOS_ML_TUTA, "Devoluções", None, "Códigos de devolução do ML",
             "Códigos de autorização de devolução e retirada Full do ML lidos no Tuta. É o "
-            "único caminho que entrega os códigos. Guarda o que cada pessoa já recebeu.",
+            "único caminho que entrega os códigos. Guarda o que cada pessoa já recebeu. "
+            "Repete o 'Códigos de devolução do Tuta (servidor)', que está parado: decida "
+            "qual manter.",
             "horario", "08:00, 11:00 e 14:30", "mac", None,
             L(env_mac="DEVOL_CODIGOS_THREEMA_TO"), ao_desligar="acumula", fatia="mac",
         ),
