@@ -77,7 +77,9 @@ async def agent_destinatarios(
 async def agent_registros(body: RegistrosRoboIn, session: Sessao) -> dict:
     """Grava no registro o que o Mac mandou (até 200 itens, um por
     destinatário). Chave desconhecida fica com `envio_chave` vazio e volta em
-    `chaves_desconhecidas`."""
+    `chaves_desconhecidas`. Contrato para o Mac (C13): `erro` de preferência é
+    um código curto (`http_404`); se vier texto livre, todo ID do Threema nele e
+    no `titulo` é gravado mascarado."""
     resposta = await tela.gravar_registros_robo(session, body.itens)
     await session.commit()
     return resposta

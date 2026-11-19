@@ -548,17 +548,30 @@ async def test_robo_grava_o_registro(db, monkeypatch, client, make_user, auth_as
             "lote": "r-0330",
         },
         {"chave": "mac.chave_nova", "destinatario": ID["londres"], "ok": True, "via": "env"},
+        {
+            # o threema_send.py do Mac imprime o ID inteiro no erro mais comum
+            "chave": K.CHAMADOS_FRETE_ML_RELATORIO_NOITE,
+            "destinatario": ID["roma"],
+            "ok": False,
+            "http_status": 404,
+            "erro": f"ERRO ao buscar public key de {ID['roma'].lower()}: HTTP 404 (TSTX0099)",
+            "titulo": f"CORREIOS: aviso para {ID['roma']} e *TSTGW01",
+        },
     ]
     r = await client.post("/api/threema/agent/registros", json={"itens": itens}, headers=h)
     assert r.status_code == 200, r.text
-    assert r.json() == {"gravados": 3, "chaves_desconhecidas": ["mac.chave_nova"]}
+    assert r.json() == {"gravados": 4, "chaves_desconhecidas": ["mac.chave_nova"]}
     linhas = (
         (await db.execute(select(ThreemaEnvioRegistro).order_by(ThreemaEnvioRegistro.id)))
         .scalars()
         .all()
     )
-    assert [x.onde_roda for x in linhas] == ["mac"] * 3
-    a, b, sem = linhas
+    assert [x.onde_roda for x in linhas] == ["mac"] * 4
+    a, b, sem, roma = linhas
+    # ID inteiro nunca fica no erro nem no título (aparecem no Histórico)
+    assert roma.erro == "ERRO ao buscar public key de TS…: HTTP 404 (TS…)"
+    assert roma.titulo == "CORREIOS: aviso para TS… e *T…"
+    assert (roma.destinatario_nome, roma.contato_id) == ("Roma", c.roma.id)
     assert a.lote_id == b.lote_id != sem.lote_id
     assert a.envio_chave == K.CHAMADOS_FRETE_ML_RELATORIO_NOITE and sem.envio_chave is None
     assert a.destinatario_id == ID["heisenberg"] and a.destinatario_nome == "heisenberg"

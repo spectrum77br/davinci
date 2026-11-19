@@ -24,8 +24,9 @@ letras). A rota dos robôs (`destinatarios_robo`, com o token de agente) é a
 
 from __future__ import annotations
 
+import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -1112,10 +1113,35 @@ async def destinatarios_robo(session: AsyncSession, onde_roda: str = "mac") -> d
     }
 
 
+# Um ID do Threema solto num texto livre (o erro e o título que o Mac manda).
+_ID_SOLTO = re.compile(r"(?<![A-Za-z0-9*])(?:\*[A-Z0-9]{7}|[A-Z0-9]{8})(?![A-Za-z0-9])")
+
+
+def _sem_ids(texto: str | None, conhecidos: Iterable[str], *, qualquer: bool) -> str | None:
+    """Troca por `mascara()` todo ID do Threema no texto: os conhecidos (os
+    destinatários do lote, em qualquer caixa) e os que têm a forma de um ID —
+    no erro, qualquer palavra de 8 letras/números maiúsculas (o
+    `threema_send.py` do Mac imprime "ERRO ao buscar public key de <ID>"); no
+    título, só as que misturam letra e número (para não mascarar CORREIOS)."""
+    if not texto:
+        return texto
+    for rid in sorted({r for r in conhecidos if r}, key=len, reverse=True):
+        texto = re.sub(re.escape(rid), mascara(rid), texto, flags=re.IGNORECASE)
+
+    def _troca(m: re.Match) -> str:
+        tok = m.group(0)
+        misto = any(ch.isdigit() for ch in tok) and any(ch.isalpha() for ch in tok)
+        return mascara(tok) if qualquer or misto else tok
+
+    return _ID_SOLTO.sub(_troca, texto)
+
+
 async def gravar_registros_robo(session: AsyncSession, itens: Sequence) -> dict:
     """Grava no registro os envios que o Mac fez (um item por destinatário).
     Chave desconhecida vai com `envio_chave=NULL` (e volta na resposta).
-    Itens com o mesmo `lote` (no mesmo robô) ficam no mesmo lote."""
+    Itens com o mesmo `lote` (no mesmo robô) ficam no mesmo lote. O erro e o
+    título chegam como texto livre: todo ID do Threema neles sai mascarado
+    (o registro aparece no Histórico, e o ID inteiro nunca aparece)."""
     ids = {
         (i.destinatario or "").strip().upper()[:8] for i in itens if (i.destinatario or "").strip()
     }
@@ -1159,8 +1185,8 @@ async def gravar_registros_robo(session: AsyncSession, itens: Sequence) -> dict:
                 "contato_id": contato_id,
                 "ok": bool(i.ok),
                 "http_status": i.http_status,
-                "erro": (i.erro or "")[:200] or None,
-                "titulo": threema_registro._titulo(i.titulo or ""),
+                "erro": (_sem_ids(i.erro, ids, qualquer=True) or "")[:200] or None,
+                "titulo": threema_registro._titulo(_sem_ids(i.titulo, ids, qualquer=False) or ""),
                 "bytes": None,
                 "host": (i.host or "")[:60] or None,
             }
