@@ -283,7 +283,10 @@ async def criar_contato_threema(
     Vinicius, 22/09/2026: o "roma" (VBS64V3S) precisa receber aviso e não tem
     login no DaVinci — sem isto a única porta era a lista do `.env`, que exige
     mexer no servidor e subir de novo. Quem TEM login continua vindo de
-    Admin › Usuários: lá o nome é o do cadastro e manda neste."""
+    Admin › Usuários: lá o nome é o do cadastro e manda neste.
+
+    Grava em `threema_contato` (Contatos externos do Cadastro de envios
+    Threema, tarefa 16) — services/threema.salvar_contato."""
     try:
         await threema.salvar_contato(session, threema_id=body.id, nome=body.nome)
     except threema.ContatoInvalidoError as e:
@@ -303,7 +306,9 @@ async def remover_contato_threema(
     user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
 ) -> list[DestinatarioOut]:
     """Tira da lista um contato avulso. Quem veio de Admin › Usuários ou do
-    `.env` não sai por aqui — some quando o cadastro dele mudar lá."""
+    `.env` não sai por aqui — some quando o cadastro dele mudar lá. Contato
+    que um envio do Cadastro usa fica inativo em vez de sumir
+    (services/threema.remover_contato)."""
     await threema.remover_contato(session, threema_id)
     await session.commit()
     logger.info(

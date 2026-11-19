@@ -104,46 +104,94 @@ def parse_recipient_directory(names_raw: str | None, ids_raw: str | None) -> lis
     return [{"id": rid, "nome": names[rid]} for rid in order]
 
 
-# Contato avulso: quem recebe aviso mas não tem login no DaVinci (ou tem e
-# está desativado). Vinicius, 22/09/2026: precisava mandar pro "roma" e não
-# havia onde — a única porta era a lista do `.env`, que exige mexer no
-# servidor. Mora na MESMA tabela do Informar, numa linha de contexto próprio,
-# e no MESMO formato do `.env` (`ID:Nome`, separados por vírgula), então quem
-# lê continua sendo o `parse_recipient_directory`.
+# Contato avulso (CONTATO EXTERNO): quem recebe aviso mas não tem login no
+# DaVinci (ou tem e está desativado). Vinicius, 22/09/2026: precisava mandar
+# pro "roma" e não havia onde — a única porta era a lista do `.env`, que exige
+# mexer no servidor.
+#
+# Desde a migration 0506 (tarefa 16, C4) os contatos moram em
+# `threema_contato` (Cadastros › Envios Threema). A linha antiga
+# (`threema_informar_config`, contexto `diretorio`, formato `ID:Nome` do
+# `.env`) continua lá como ESPELHO: toda gravação daqui a reescreve com os
+# contatos ativos, para que reverter o código (que lê a linha) não perca
+# ninguém. Sai na limpeza da tarefa (C12).
 CONTEXTO_CONTATOS = "diretorio"
 _THREEMA_ID = re.compile(r"^(?:[A-Z0-9]{8}|\*[A-Z0-9]{7})$")
+_TAM_NOME_CONTATO = 80
 
 
 class ContatoInvalidoError(ValueError):
     """Frase pronta pra tela (o router devolve 422 com ela)."""
 
 
+def threema_id_valido(rid: str | None) -> bool:
+    """O ID tem o formato do Threema (8 letras/números, ou `*` + 7)."""
+    return bool(_THREEMA_ID.match((rid or "").strip().upper()))
+
+
 async def _linha_contatos(session):
-    """A linha de `threema_informar_config` que guarda os contatos avulsos.
-    Import tardio dos modelos, como no `diretorio` (o worker importa este
-    módulo antes do registry do SQLAlchemy fechar)."""
+    """A linha de `threema_informar_config` que guardava os contatos (hoje o
+    espelho). Import tardio dos modelos, como no `diretorio` (o worker
+    importa este módulo antes do registry do SQLAlchemy fechar)."""
     from sqlalchemy import select
 
     from app.models import ThreemaInformarConfig
 
     return (
         await session.execute(
-            select(ThreemaInformarConfig).where(
-                ThreemaInformarConfig.contexto == CONTEXTO_CONTATOS
-            )
+            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == CONTEXTO_CONTATOS)
         )
     ).scalar_one_or_none()
 
 
+async def _contatos_ativos(session):
+    from sqlalchemy import func, select
+
+    from app.models import ThreemaContato
+
+    return (
+        (
+            await session.execute(
+                select(ThreemaContato)
+                .where(ThreemaContato.ativo.is_(True))
+                .order_by(
+                    func.lower(ThreemaContato.nome),
+                    ThreemaContato.created_at,
+                    ThreemaContato.threema_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 async def contatos(session) -> list[dict[str, str]]:
-    """Contatos avulsos cadastrados na tela, `[{id, nome}]`."""
+    """Contatos externos ativos, `[{id, nome}]` (ordem alfabética)."""
+    return [{"id": c.threema_id, "nome": c.nome} for c in await _contatos_ativos(session)]
+
+
+async def _espelhar(session) -> None:
+    """Reescreve a linha antiga (`diretorio`) com os contatos ativos, no
+    formato de sempre. Sem contato e sem linha, não cria nada."""
+    from app.models import ThreemaInformarConfig
+
+    lista = await contatos(session)
     row = await _linha_contatos(session)
-    return parse_recipient_directory(row.recipients if row else "", None)
+    if row is None:
+        if not lista:
+            return
+        row = ThreemaInformarConfig(contexto=CONTEXTO_CONTATOS, recipients="")
+        session.add(row)
+    row.recipients = ",".join(f"{d['id']}:{d['nome']}" for d in lista)
 
 
 async def salvar_contato(session, *, threema_id: str, nome: str) -> list[dict[str, str]]:
-    """Cadastra (ou renomeia) um contato avulso. Commit fica com o caller."""
-    from app.models import ThreemaInformarConfig
+    """Cadastra (ou renomeia, ou reativa) um contato externo. Commit fica com
+    o caller."""
+    from sqlalchemy import select
+
+    from app.models import ThreemaContato
 
     rid = (threema_id or "").strip().upper()
     nome = " ".join((nome or "").split())
@@ -155,28 +203,51 @@ async def salvar_contato(session, *, threema_id: str, nome: str) -> list[dict[st
         raise ContatoInvalidoError("Dê um nome ao contato: é ele que aparece na lista.")
     if ":" in nome or "," in nome or ";" in nome:
         raise ContatoInvalidoError("O nome não pode ter ':' , ',' nem ';'.")
-    row = await _linha_contatos(session)
+    if len(nome) > _TAM_NOME_CONTATO:
+        raise ContatoInvalidoError(f"O nome pode ter até {_TAM_NOME_CONTATO} letras.")
+    row = (
+        await session.execute(select(ThreemaContato).where(ThreemaContato.threema_id == rid))
+    ).scalar_one_or_none()
     if row is None:
-        row = ThreemaInformarConfig(contexto=CONTEXTO_CONTATOS, recipients="")
-        session.add(row)
-    atuais = {d["id"]: d["nome"] for d in parse_recipient_directory(row.recipients, None)}
-    atuais[rid] = nome
-    row.recipients = ",".join(
-        f"{k}:{v}" for k, v in sorted(atuais.items(), key=lambda x: x[1].lower())
-    )
+        session.add(ThreemaContato(threema_id=rid, nome=nome, ativo=True, origem="tela"))
+    else:
+        row.nome = nome
+        row.ativo = True
     await session.flush()
-    return [{"id": k, "nome": v} for k, v in atuais.items()]
+    await _espelhar(session)
+    await session.flush()
+    return await contatos(session)
 
 
 async def remover_contato(session, threema_id: str) -> None:
-    """Tira o contato avulso da lista. Quem veio de Admin › Usuários ou do
-    `.env` não sai por aqui (não é daqui que ele vem)."""
-    row = await _linha_contatos(session)
+    """Tira o contato externo da lista. Quem veio de Admin › Usuários ou do
+    `.env` não sai por aqui (não é daqui que ele vem). Contato que algum envio
+    ou grupo do Cadastro usa não é apagado (a cascata o tiraria calado de lá):
+    fica inativo — some do seletor e o envio avisa "contato inativo"."""
+    from sqlalchemy import exists, select
+
+    from app.models import ThreemaContato, ThreemaEnvioDestinatario, ThreemaGrupoMembro
+
+    rid = (threema_id or "").strip().upper()
+    row = (
+        await session.execute(select(ThreemaContato).where(ThreemaContato.threema_id == rid))
+    ).scalar_one_or_none()
     if row is None:
         return
-    rid = (threema_id or "").strip().upper()
-    atuais = [d for d in parse_recipient_directory(row.recipients, None) if d["id"] != rid]
-    row.recipients = ",".join(f"{d['id']}:{d['nome']}" for d in atuais)
+    em_uso = (
+        await session.execute(
+            select(
+                exists().where(ThreemaEnvioDestinatario.contato_id == row.id)
+                | exists().where(ThreemaGrupoMembro.contato_id == row.id)
+            )
+        )
+    ).scalar_one()
+    if em_uso:
+        row.ativo = False
+    else:
+        await session.delete(row)
+    await session.flush()
+    await _espelhar(session)
     await session.flush()
 
 
@@ -189,8 +260,9 @@ async def diretorio(session) -> list[dict[str, str]]:
     aparece é o do cadastro. Completa com as entradas legadas do `.env`
     (THREEMA_RECIPIENT_NAMES/THREEMA_RECIPIENTS) cujo ID ninguém tem no
     cadastro; quando o dono do código ganhar cadastro, o apelido do `.env`
-    dá lugar ao nome real. No meio dos dois entram os CONTATOS AVULSOS
-    cadastrados na tela (`contatos`), pra quem recebe aviso e não tem login.
+    dá lugar ao nome real. No meio dos dois entram os CONTATOS EXTERNOS
+    ativos (`contatos`, tabela `threema_contato` desde a 0506), pra quem
+    recebe aviso e não tem login.
     Cada linha diz de onde veio em `origem` (usuario | contato | env) — é o
     que deixa a tela oferecer o "remover" só no que ela mesma cadastrou.
     Ordem alfabética. Import tardio dos modelos: este módulo é importado pelo
