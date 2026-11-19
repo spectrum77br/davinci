@@ -171,7 +171,7 @@ async def contatos(session) -> list[dict[str, str]]:
     return [{"id": c.threema_id, "nome": c.nome} for c in await _contatos_ativos(session)]
 
 
-async def _espelhar(session) -> None:
+async def espelhar_contatos(session) -> None:
     """Reescreve a linha antiga (`diretorio`) com os contatos ativos, no
     formato de sempre. Sem contato e sem linha, não cria nada."""
     from app.models import ThreemaInformarConfig
@@ -214,7 +214,7 @@ async def salvar_contato(session, *, threema_id: str, nome: str) -> list[dict[st
         row.nome = nome
         row.ativo = True
     await session.flush()
-    await _espelhar(session)
+    await espelhar_contatos(session)
     await session.flush()
     return await contatos(session)
 
@@ -247,7 +247,7 @@ async def remover_contato(session, threema_id: str) -> None:
     else:
         await session.delete(row)
     await session.flush()
-    await _espelhar(session)
+    await espelhar_contatos(session)
     await session.flush()
 
 

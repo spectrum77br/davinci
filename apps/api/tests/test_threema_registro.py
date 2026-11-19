@@ -322,6 +322,8 @@ _CHAVES_DINAMICAS = {
     ("routers/informar.py", "_CHAVE_ENVIO[contexto]"),
     ("services/ouvidoria.py", "chave_ouvidoria(robo_chave)"),
     ("services/conferencia_shopee/threema_aviso.py", "chave"),
+    # O núcleo do Cadastro (C5): `enviar(chave, …)` valida a chave no catálogo.
+    ("services/threema_envios.py", "chave"),
 }
 _FORA = {"services/threema.py", "services/threema_registro.py"}
 
@@ -475,6 +477,11 @@ def test_chaves_dinamicas_cobrem_o_que_existe():
             assert chave_ouvidoria(robo) is None
         else:
             assert chave_ouvidoria(robo) in CATALOGO
+    # o núcleo (threema_envios.enviar) recusa chave fora do catálogo antes de marcar
+    from app.services import threema_envios
+
+    with pytest.raises(KeyError, match="envio desconhecido"):
+        threema_envios._envio("logistica.nao_existe")
 
 
 def test_todo_envio_gerenciado_do_servidor_tem_marca():

@@ -279,6 +279,13 @@ class Settings(BaseSettings):
     # envio continua igual. Como `get_settings` guarda o valor, mudar o .env
     # exige RECRIAR os containers (`up -d` com o compose de prod), não restart.
     threema_registro_ativo: bool = True
+    # Cadastro dos envios (Cadastros › Envios Threema, tarefa 16): `false` é o
+    # PISO da emergência — todo envio volta à configuração antiga (o .env, as
+    # listas do Informar, dos robôs e das regras), mesmo com o banco fora. O
+    # botão de emergência da tela (`threema_cadastro_estado.usar_legado`) faz
+    # o mesmo sem recriar container. Como `get_settings` guarda o valor, mudar
+    # o .env exige RECRIAR os containers (`up -d` com o compose de prod).
+    threema_cadastro_ativo: bool = True
 
     # Dev: enables /api/dev/mock-login (gated by ENV=development too).
     dev_mock_login: bool = False

@@ -36,6 +36,7 @@ from app.models import (
 from app.models import threema_envio as modelos
 from app.services import threema_envios
 from app.services.threema_catalogo import ENVIOS, K
+from tests.threema_cadastro_apoio import limpar_ouvidoria  # noqa: F401 — fixture
 
 _API = Path(__file__).resolve().parent.parent
 _MIGRATION = _API / "alembic" / "versions" / "0505_threema_cadastro.py"
@@ -369,6 +370,7 @@ async def test_chave_que_saiu_do_codigo_fica_descontinuada_e_volta(db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("limpar_ouvidoria")  # o startup também sincroniza a Ouvidoria
 async def test_startup_do_worker_sincroniza_o_catalogo(db):
     from app import worker
 
@@ -379,6 +381,7 @@ async def test_startup_do_worker_sincroniza_o_catalogo(db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("limpar_ouvidoria")
 async def test_startup_do_worker_sobe_mesmo_com_a_sincronizacao_quebrada(db, monkeypatch):
     from app import worker
 
