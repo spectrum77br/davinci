@@ -195,6 +195,18 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/nf/upload-multiple"): "subiu XMLs de nota fiscal no Mercado Livre",
     ("POST", "/api/devolutions/stock-correction"): "corrigiu estoque no Bling",
     ("POST", "/api/logistica/status/{status_id}/enviar-threema"): "enviou mensagem no Threema",
+    # Envios do Threema sem rótulo até a tarefa 16 (C2): o botão da linha do
+    # pedido, o Encaminhar ao jurídico e o teste do relatório da Denúncia. O
+    # que saiu (para quem, se chegou) fica em Histórico › Envios Threema.
+    (
+        "POST",
+        "/api/logistica/{logistica_id}/enviar-threema",
+    ): "enviou a mensagem da regra no Threema (pelo pedido)",
+    ("POST", "/api/chamados/{chamado_id}/juridico"): "encaminhou o chamado ao jurídico (Threema)",
+    (
+        "POST",
+        "/api/denuncia/relatorios/{dia}/threema/teste",
+    ): "mandou o teste do relatório da Denúncia no Threema",
     ("POST", "/api/logistica/mensagens-cliente/{evento}/teste"): "enviou e-mail de teste",
     ("POST", "/api/logistica/recarregar"): "mandou recarregar a Logística",
     (

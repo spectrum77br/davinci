@@ -54,6 +54,20 @@ type PessoaAcesso = {
 }
 
 const { api } = useApi()
+const route = useRoute()
+const router = useRouter()
+
+// Alternância "Alterações | Envios Threema" (tarefa 16, C2): o que as pessoas
+// mudaram × cada mensagem que o servidor mandou pelo Threema. Fica no endereço
+// (?ver=threema) para o link direto abrir na lista certa.
+const ver = computed<'alteracoes' | 'threema'>(() => (route.query.ver === 'threema' ? 'threema' : 'alteracoes'))
+function trocarVer(v: 'alteracoes' | 'threema') {
+  if (v === ver.value) return
+  const query = { ...route.query }
+  if (v === 'threema') query.ver = 'threema'
+  else delete query.ver
+  router.replace({ query })
+}
 
 const POR_PAGINA = 100
 const itens = ref<Evento[]>([])
@@ -250,7 +264,9 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
     </div>
     <PageHeader
       title="Histórico"
-      description="O que as pessoas mudaram no DaVinci: quem, quando, em qual tela e o valor de antes e de depois. Robôs não entram; senhas nunca aparecem."
+      :description="ver === 'threema'
+        ? 'Cada mensagem que o DaVinci mandou pelo Threema: quando, de qual envio, quem disparou, para quem e se chegou.'
+        : 'O que as pessoas mudaram no DaVinci: quem, quando, em qual tela e o valor de antes e de depois. Robôs não entram; senhas nunca aparecem.'"
     >
       <template #actions>
         <button
@@ -262,6 +278,7 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
           <UserCheck class="size-4" /> Quem pode ver
         </button>
         <button
+          v-if="ver === 'alteracoes'"
           class="inline-flex items-center gap-1.5 h-9 rounded-md border bg-background px-3 text-sm hover:bg-muted"
           :disabled="carregando"
           @click="carregar"
@@ -271,6 +288,26 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
       </template>
     </PageHeader>
 
+    <div class="mb-3">
+      <div class="inline-flex rounded-md border p-px text-sm" role="tablist" aria-label="O que mostrar no Histórico">
+        <button
+          v-for="o in ([['alteracoes', 'Alterações'], ['threema', 'Envios Threema']] as const)"
+          :key="o[0]"
+          type="button"
+          role="tab"
+          class="rounded px-3 py-1.5"
+          :aria-selected="ver === o[0]"
+          :class="ver === o[0] ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+          @click="trocarVer(o[0])"
+        >
+          {{ o[1] }}
+        </button>
+      </div>
+    </div>
+
+    <HistoricoEnviosThreema v-if="ver === 'threema'" />
+
+    <template v-else>
     <div class="flex flex-wrap items-center gap-2 mb-3">
       <div class="relative">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
@@ -369,6 +406,7 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
       <button class="h-8 w-8 rounded border disabled:opacity-40" :disabled="pagina >= paginas" @click="pagina++">›</button>
       <button class="h-8 w-8 rounded border disabled:opacity-40" :disabled="pagina >= paginas" @click="pagina = paginas">»</button>
     </div>
+    </template>
 
     <!-- Gaveta do detalhe -->
     <Teleport to="body">
