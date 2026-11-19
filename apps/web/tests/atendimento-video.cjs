@@ -44,8 +44,8 @@ assert.equal(C.ehVideoArquivo({ name: 'a.pdf', type: '' }), false)
 // ─── o que o painel diz → as opções da escolha ─────────────────────────────
 assert.deepEqual(C.opcoesDeVideo(null).tipos, [])
 assert.match(C.opcoesDeVideo(null).motivo, /Conferindo/)
-const SHOPEE = 'Shopee: o vídeo pela API do chat ainda não foi conferido na documentação oficial — por enquanto, mande o vídeo pelo Seller Center (chat da loja).'
-assert.deepEqual(C.opcoesDeVideo({ video: false, video_motivo: SHOPEE }), { tipos: [], maxBytes: 0, motivo: SHOPEE })
+const TIKTOK = 'TikTok: a API do chat não tem como a loja subir vídeo (só imagem). Mande o vídeo pela Central do Vendedor do TikTok.'
+assert.deepEqual(C.opcoesDeVideo({ video: false, video_motivo: TIKTOK }), { tipos: [], maxBytes: 0, motivo: TIKTOK })
 assert.deepEqual(C.opcoesDeVideo({ video: true, video_tipos: ['video/3gpp', 'video/mp4', 'video/quicktime'], video_max_bytes: 50 * MB }), { tipos: ['video/3gpp', 'video/mp4', 'video/quicktime'], maxBytes: 50 * MB, motivo: null })
 
 // ─── a escolha ──────────────────────────────────────────────────────────────
@@ -65,10 +65,10 @@ assert.deepEqual(C.opcoesDeVideo({ video: true, video_tipos: ['video/3gpp', 'vid
 }
 {
   // Onde o vídeo não sai: a frase da plataforma, e a foto ainda entra.
-  const op = { max: 10, maxBytes: 10 * MB, tipos: TIPOS, video: C.opcoesDeVideo({ video: false, video_motivo: SHOPEE }) }
+  const op = { max: 10, maxBytes: 10 * MB, tipos: TIPOS, video: C.opcoesDeVideo({ video: false, video_motivo: TIKTOK }) }
   const r = C.escolherAnexos([], [arq('demo.mp4'), arq('a.jpg', { type: 'image/jpeg', size: 1000 })], op)
   assert.deepEqual(r.aceitos.map((f) => f.name), ['a.jpg'])
-  assert.deepEqual(r.recusas, [`demo.mp4: ${SHOPEE}`])
+  assert.deepEqual(r.recusas, [`demo.mp4: ${TIKTOK}`])
   // Sem as opções de vídeo (outro chamador, como a foto da troca): recusado igual.
   assert.match(C.escolherAnexos([], [arq('demo.mp4')], { max: 1, maxBytes: 10 * MB, tipos: TIPOS }).recusas[0], /o vídeo não sai por esta conversa/)
 }
@@ -149,13 +149,13 @@ async function principal() {
     assert.equal(m.t.anexos.value[0].estado, 'falhou')
     assert.match(m.t.anexos.value[0].erro, /meta:131053/)
   }
-  // Shopee (foto sim, vídeo não): o vídeo nem entra e a tela diz por quê.
+  // TikTok (foto sim, vídeo não): o vídeo nem entra e a tela diz por quê.
   {
-    const m = montar({ envio: { plataforma: 'shopee', max_anexos: 10, numa_mensagem: false, video: false, video_motivo: SHOPEE } })
-    assert.match(m.t.tituloAnexar.value, /Vídeo não: Shopee/)
+    const m = montar({ envio: { plataforma: 'tiktok', max_anexos: 10, numa_mensagem: false, video: false, video_motivo: TIKTOK } })
+    assert.match(m.t.tituloAnexar.value, /Vídeo não: TikTok/)
     m.t.adicionarAnexos([arq('demo.mp4')])
     assert.equal(m.t.anexos.value.length, 0)
-    assert.deepEqual(m.toasts.erro, [[`demo.mp4: ${SHOPEE}`, undefined]])
+    assert.deepEqual(m.toasts.erro, [[`demo.mp4: ${TIKTOK}`, undefined]])
     assert.equal(m.chamadas.length, 0)
   }
 }

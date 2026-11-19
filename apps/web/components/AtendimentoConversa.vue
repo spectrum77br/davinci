@@ -74,8 +74,9 @@ export function tituloDaNf(
 //
 // Vídeo (19/11/2026, o Eduardo: "tem q deixar enviar vídeo no chat do
 // atendimento tbm em todas plataformas q são possíveis"): o mesmo botão
-// "Anexar", onde a plataforma aceita (`envio_foto.video`, hoje o Zap do
-// número); onde não aceita, escolher um vídeo diz POR QUÊ (`video_motivo`).
+// "Anexar", onde a plataforma aceita (`envio_foto.video`: o Zap do número e o
+// chat da Shopee); onde não aceita, escolher um vídeo diz POR QUÊ (`video_motivo`).
+// O vídeo não tem "apagar" (a API da Shopee não apaga vídeo).
 // O servidor confere pelos bytes e converte para MP4 (H.264, até 720p).
 export const TIPOS_VIDEO = ['video/mp4', 'video/quicktime', 'video/3gpp']
 const RE_EXT_VIDEO = /\.(mp4|m4v|mov|3gp)$/i

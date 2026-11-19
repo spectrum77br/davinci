@@ -739,6 +739,7 @@ class ShopeeClient:
         order_sn: str = "",
         sticker_id: str = "",
         sticker_package_id: str = "",
+        video: dict | None = None,
         business_type: int = NEGOCIO_COMPRADOR,
         conversation_id: int | str | None = None,
     ) -> dict:
@@ -762,10 +763,19 @@ class ShopeeClient:
         Chat de AFILIADO (29/10/2026): `business_type=NEGOCIO_AFILIADO` com o
         `conversation_id` da conversa (sem ele, `ValueError` antes de sair —
         pelo `to_id` sozinho a mensagem iria ao chat de comprador da mesma
-        pessoa). No chat do comprador o corpo é byte a byte o de antes."""
-        tipos = [bool(text), bool(image_url), bool(order_sn), bool(sticker_id)]
+        pessoa). No chat do comprador o corpo é byte a byte o de antes.
+
+        VÍDEO (19/11/2026, `video` = o `content` pronto, montado de
+        `chat_video_upload_result`): `message_type=video` com `{"vid",
+        "video_url" (o caminho RELATIVO do resultado), "thumb_url" (o id da
+        capa), "thumb_width", "thumb_height", "duration_seconds"}`. Conferido
+        num envio real (Barbosa, 19/11): só o `vid` → `invalid_content`;
+        URL inteira no `video_url`/`thumb_url` → `param_error`."""
+        tipos = [bool(text), bool(image_url), bool(order_sn), bool(sticker_id), bool(video)]
         if sum(tipos) != 1:
-            raise ValueError("chat_send_message: mande texto OU imagem OU pedido OU figurinha")
+            raise ValueError(
+                "chat_send_message: mande texto OU imagem OU pedido OU figurinha OU vídeo"
+            )
         negocio: dict[str, Any] = {}
         if business_type:
             conversa = str(conversation_id or "").strip()
@@ -774,6 +784,8 @@ class ShopeeClient:
             negocio = {"business_type": int(business_type), "conversation_id": int(conversa)}
         if image_url:
             corpo = {"message_type": "image", "content": {"image_url": image_url}}
+        elif video:
+            corpo = {"message_type": "video", "content": dict(video)}
         elif order_sn:
             corpo = {"message_type": "order", "content": {"order_sn": str(order_sn)}}
         elif sticker_id:
@@ -866,6 +878,46 @@ class ShopeeClient:
         if not url:
             raise RuntimeError(f"shopee_chat_upload sem url: {str(body)[:300]}")
         return url
+
+    async def chat_upload_video(
+        self, filename: str, content: bytes, mime: str = "video/mp4"
+    ) -> str:
+        """Sobe o VÍDEO do chat (POST multipart /api/v2/sellerchat/upload_video, campo
+        `file`) e devolve o `vid` — o processamento é assíncrono
+        (`chat_video_upload_result`). Não fala com o comprador.
+
+        A doc do sellerchat não abre nem logada (o módulo some do menu): conferido
+        numa leitura real (Barbosa, 19/11/2026) — `{"response": {"vid": "br-…"}}`."""
+        path = "/api/v2/sellerchat/upload_video"
+        r = await self._request_multipart(path, files={"file": (filename, content, mime)})
+        body = _corpo_json(r, "shopee_chat_upload_video")
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            r = await self._request_multipart(path, files={"file": (filename, content, mime)})
+            body = _corpo_json(r, "shopee_chat_upload_video")
+        if body.get("error"):
+            raise RuntimeError(
+                f"shopee_chat_upload_video {body.get('error')}: {body.get('message')}"
+            )
+        vid = str((body.get("response") or {}).get("vid") or "").strip()
+        if not vid:
+            raise RuntimeError(f"shopee_chat_upload_video sem vid: {str(body)[:300]}")
+        return vid
+
+    async def chat_video_upload_result(self, vid: str) -> dict:
+        """O processamento do vídeo subido (GET /api/v2/sellerchat/get_video_upload_result).
+
+        Leitura real (19/11/2026): `{"status": "successful", "video":
+        "api/v4/…/mms/<vid>.<n>.mp4" (RELATIVO), "thumbnail": "<vid>_cover" (id da
+        capa), "duration": 3018 (ms), "width": 540, "height": 960, "size": …}` uns 8 s
+        depois do upload de um vídeo de 3 s; `status="not_found"` para id desconhecido
+        — e o resultado EXPIRA (o mesmo `vid` voltou `not_found` ~15 min depois)."""
+        return await self._call(
+            "GET",
+            "/api/v2/sellerchat/get_video_upload_result",
+            params={"vid": str(vid)},
+            what="shopee_chat_video_resultado",
+        )
 
     async def chat_messages(self, conversation_id: str, *, page_size: int = 20) -> list[dict]:
         """Mensagens de UMA conversa (GET /api/v2/sellerchat/get_message), das

@@ -21,11 +21,23 @@ uma leitura de verdade confirmou):
                        H.264 + AAC; H.264 "High" com B-frames não toca no
                        WhatsApp do Android — por isso todo vídeo é convertido
                        para H.264 "Main" sem B-frames, AAC e `faststart`.
-  Shopee (chat)        A API manda vídeo (leitura de produção: mensagem
-                       `video` da loja com `source=openapi` em 10/11/2026),
-                       mas a documentação do sellerchat só abre logada numa
-                       conta com o app de chat — o formato do envio ainda não
-                       foi lido. Fica FORA até a doc ser lida.
+  Shopee (chat)        SIM. A doc do sellerchat não abre nem logada (o módulo
+                       some do menu da doc e da ferramenta de teste), então
+                       foi conferido por LEITURA REAL, na Barbosa, com o OK do
+                       Eduardo (dois envios de teste a um comprador, apagados
+                       pelo Seller Center): `POST /sellerchat/upload_video`
+                       (multipart `file`) → `vid`; `GET /sellerchat/
+                       get_video_upload_result` até `status=successful` (~8 s
+                       num vídeo de 3 s; o resultado expira em minutos) →
+                       `video` (caminho relativo), `thumbnail` (id da capa),
+                       `duration` (ms), `width`, `height`; `send_message`
+                       `video` com `{vid, video_url: <caminho>, thumb_url:
+                       <id da capa>, thumb_width, thumb_height,
+                       duration_seconds}` — o mesmo formato que o próprio
+                       Seller Center manda (gravado na tela). A API NÃO apaga
+                       vídeo (`delete_message` → `param_error`): o "apagar" do
+                       DaVinci já não oferece. Teto: o do chat da Shopee na
+                       ajuda dela (30 MB, até 3 min); o vídeo vai sozinho.
   TikTok (chat)        A mensagem aceita `VIDEO` com `{"vid": ...}` (doc "Send
                        Message"; a visão geral diz "até 100 MB"), mas nenhuma
                        API do atendimento sobe vídeo (só "Upload Image for
@@ -88,9 +100,25 @@ MAX_DURACAO_S = 180.0
 
 # (plataforma, caixa) que aceitam vídeo pelo DaVinci — e o teto do arquivo
 # convertido em cada uma.
-CAIXAS_COM_VIDEO = frozenset({(PLATAFORMA_WHATSAPP, CANAL_ZAP)})
-# Cloud API: vídeo até 16 MB (doc "Mídia", lida em 19/11/2026).
-MAX_BYTES_PLATAFORMA: dict[str, int] = {PLATAFORMA_WHATSAPP: 16 * 1024 * 1024}
+CAIXAS_COM_VIDEO = frozenset({(PLATAFORMA_WHATSAPP, CANAL_ZAP), ("shopee", CANAL_CHAT)})
+# Cloud API: vídeo até 16 MB (doc "Mídia", lida em 19/11/2026). Shopee: 30 MB
+# (a ajuda da Shopee para o chat; a Open API não publica o teto).
+MAX_BYTES_PLATAFORMA: dict[str, int] = {
+    PLATAFORMA_WHATSAPP: 16 * 1024 * 1024,
+    "shopee": 30 * 1024 * 1024,
+}
+
+# Shopee: o processamento do vídeo subido é assíncrono — a espera tem teto
+# (dentro do `enviar.TEMPO_MAXIMO_FOTO_S`): passou, nada saiu. O balão toca
+# pela CDN de vídeo da Shopee no Brasil (o mesmo host que a releitura devolve).
+SHOPEE_ESPERA_PROCESSAR_S = 90.0
+SHOPEE_INTERVALO_S = 3.0
+SHOPEE_HOST_VIDEO = "https://down-bs-br.vod.susercontent.com"
+_SHOPEE_PRONTO = "successful"
+# Ainda processando (o `not_found` logo depois do upload pode ser só atraso).
+_SHOPEE_ESPERANDO = frozenset(
+    {"", "processing", "transcoding", "uploading", "pending", "not_found"}
+)
 
 # A conversão: lado MENOR até 720 (720p, deitado ou em pé), até 30 quadros
 # por segundo, H.264 Main sem B-frames (o Android do WhatsApp), AAC.
@@ -180,10 +208,6 @@ def _nome_limpo(nome: str | None, extensao: str) -> str:
 
 # Onde há anexo, mas não vídeo: o porquê de cada caixa (19/11/2026).
 _SEM_VIDEO: dict[tuple[str, str], str] = {
-    ("shopee", CANAL_CHAT): (
-        "Shopee: o vídeo pela API do chat ainda não foi conferido na documentação "
-        "oficial — por enquanto, mande o vídeo pelo Seller Center (chat da loja)."
-    ),
     ("tiktok", CANAL_CHAT): (
         "TikTok: a API do chat não tem como a loja subir vídeo (só imagem). Mande o "
         "vídeo pela Central do Vendedor do TikTok."
@@ -523,10 +547,133 @@ async def enviar_video(
     """Sobe o vídeo e manda a mensagem com ele nas LOJAS. Nunca levanta.
 
     O Zap não passa por aqui (`zap.enviar_video`, com o destino das travas).
-    Hoje nenhuma loja tem o envio de vídeo confirmado (ver o topo do módulo):
-    chegar aqui é um caminho que pulou `motivo_sem_video` — nada sai.
+    Hoje: a Shopee (chat). Outra plataforma aqui é um caminho que pulou
+    `motivo_sem_video` — nada sai. O vídeo vai sozinho (o texto, pela caixa).
     """
     from app.services.atendimento.constantes import ResultadoEnvio
 
-    del session, integration, cliente, video, legenda, para
+    del session, integration, para
+    if (legenda or "").strip():
+        return ResultadoEnvio(ok=False, erro=f"{conversa.plataforma} video_com_legenda")
+    if (conversa.plataforma, conversa.canal) == ("shopee", CANAL_CHAT):
+        return await _shopee(conversa, cliente, video)
     return ResultadoEnvio(ok=False, erro=f"video_nao_suportado:{conversa.plataforma}")
+
+
+def conteudo_shopee(vid: str, estado: dict) -> dict | None:
+    """O `content` da mensagem `video` da Shopee a partir do resultado do upload. PURA.
+
+    O formato que o Seller Center manda (gravado em 19/11/2026) e que a Open API
+    aceitou: o caminho RELATIVO do vídeo e o ID da capa — com a URL inteira a
+    Shopee recusa (`param_error`). None = o resultado veio sem vídeo ou sem capa.
+    """
+    caminho = str(estado.get("video") or "").strip()
+    capa = str(estado.get("thumbnail") or "").strip()
+    if not vid or not caminho or not capa:
+        return None
+
+    def _inteiro(v: Any) -> int:
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "vid": vid,
+        "video_url": caminho,
+        "thumb_url": capa,
+        "thumb_width": _inteiro(estado.get("width")),
+        "thumb_height": _inteiro(estado.get("height")),
+        "duration_seconds": max(1, math.ceil(_inteiro(estado.get("duration")) / 1000)),
+    }
+
+
+async def _esperar_processar(cliente: Any, vid: str) -> Any:
+    """O resultado pronto (dict) — ou o `ResultadoEnvio` de falha limpa (nada saiu)."""
+    import asyncio
+    import time
+
+    import httpx
+
+    from app.services.atendimento.constantes import ResultadoEnvio
+    from app.services.atendimento.shopee import _codigo_shopee
+
+    fim = time.monotonic() + SHOPEE_ESPERA_PROCESSAR_S
+    while True:
+        await asyncio.sleep(SHOPEE_INTERVALO_S)
+        try:
+            estado = await cliente.chat_video_upload_result(vid)
+        except httpx.HTTPError:
+            estado = {}  # leitura que falhou: nada saiu — tenta até o prazo
+        except RuntimeError as exc:
+            return ResultadoEnvio(
+                ok=False, erro=f"shopee video_processamento {_codigo_shopee(exc) or 'erro'}"
+            )
+        status = str((estado or {}).get("status") or "").strip().lower()
+        if status == _SHOPEE_PRONTO:
+            return estado
+        if status not in _SHOPEE_ESPERANDO:
+            return ResultadoEnvio(ok=False, erro=f"shopee video_processamento {status[:40]}")
+        if time.monotonic() >= fim:
+            return ResultadoEnvio(ok=False, erro="shopee video_processando")
+
+
+async def _shopee(conversa: AtendimentoConversa, cliente: Any, video: Video) -> Any:
+    """upload_video → espera o processamento → send_message `video` (a régua da foto)."""
+    import httpx
+
+    from app.services.atendimento.constantes import ResultadoEnvio
+    from app.services.atendimento.shopee import (
+        _PISTAS_AMBIGUAS,
+        _codigo_shopee,
+        _erro_operacao,
+        conferir_chat_do_afiliado,
+        negocio_do_envio,
+    )
+
+    to_id = str(conversa.comprador_id or "").strip()
+    if not to_id:
+        return ResultadoEnvio(ok=False, erro="shopee sem_comprador")
+    # 1. Upload: falhou = nada saiu (o vídeo nem existe na conversa).
+    try:
+        vid = await cliente.chat_upload_video(video.nome, video.conteudo, video.mime)
+    except httpx.HTTPError as exc:
+        return ResultadoEnvio(ok=False, erro=f"shopee upload {type(exc).__name__}")
+    except RuntimeError as exc:
+        return ResultadoEnvio(ok=False, erro=f"shopee upload {_codigo_shopee(exc) or 'erro'}")
+    # 2. O processamento: falhou ou passou do prazo = nada saiu.
+    estado = await _esperar_processar(cliente, vid)
+    if isinstance(estado, ResultadoEnvio):
+        return estado
+    conteudo = conteudo_shopee(vid, estado)
+    if conteudo is None:
+        return ResultadoEnvio(ok=False, erro="shopee video_sem_resultado")
+    # 3. A mensagem `video`: a mesma régua do texto e da foto — no chat de
+    # AFILIADO, com o `business_type` 11 e o `conversation_id`.
+    try:
+        resp = await cliente.chat_send_message(to_id, video=conteudo, **negocio_do_envio(conversa))
+    except httpx.HTTPStatusError as exc:
+        return ResultadoEnvio(ok=False, erro=f"shopee token_http_{exc.response.status_code}")
+    except httpx.HTTPError as exc:
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
+    except ValueError:
+        return ResultadoEnvio(ok=False, erro="shopee envio_invalido")
+    except RuntimeError as exc:
+        codigo = _codigo_shopee(exc)
+        if codigo and not any(p in codigo for p in _PISTAS_AMBIGUAS):
+            return ResultadoEnvio(ok=False, erro=f"shopee {codigo}")
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
+    resp = resp if isinstance(resp, dict) else {}
+    message_id = str(resp.get("message_id") or "").strip()
+    return conferir_chat_do_afiliado(
+        conversa,
+        ResultadoEnvio(
+            ok=True,
+            externo_id=message_id or None,
+            payload={
+                **resp,
+                "video_url": f"{SHOPEE_HOST_VIDEO}/{conteudo['video_url'].lstrip('/')}",
+                "shopee_video": {"vid": vid, "duracao_s": conteudo["duration_seconds"]},
+            },
+        ),
+    )

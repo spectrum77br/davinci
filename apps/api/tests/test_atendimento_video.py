@@ -250,8 +250,10 @@ def _c(plataforma: str, canal: str, comprador: str | None = None) -> SimpleNames
 def test_onde_o_video_sai_e_por_que_nao():
     assert video.motivo_sem_video(_c("whatsapp", "zap")) is None
     assert video.teto_da_plataforma(_c("whatsapp", "zap")) == 16 * 1024 * 1024
+    # A Shopee (chat), conferida por leitura real em 19/11/2026.
+    assert video.motivo_sem_video(_c("shopee", "chat")) is None
+    assert video.teto_da_plataforma(_c("shopee", "chat")) == 30 * 1024 * 1024
     esperado = {
-        ("shopee", "chat"): "Seller Center",
         ("tiktok", "chat"): "não tem como a loja subir vídeo",
         ("ml", "pos_venda"): "não aceita vídeo nas mensagens do pedido",
         ("ml", "reclamacao"): "reclamação do Mercado Livre não aceita vídeo",
@@ -280,16 +282,16 @@ def _envio_ligado(monkeypatch) -> None:
 
 async def test_enviar_recusa_video_onde_nao_sai(db, make_user, monkeypatch):
     """Cinto do caminho único: um vídeo que chegasse por outra porta numa
-    conversa da Shopee é recusado com a frase, antes de qualquer upload."""
+    conversa do TikTok é recusado com a frase, antes de qualquer upload."""
     from tests.test_atendimento_foto import _cenario
 
     _envio_ligado(monkeypatch)
-    conversa, user = await _cenario(db, make_user)
+    conversa, user = await _cenario(db, make_user, plataforma="tiktok")
     v = video.Video(conteudo=MP4_CABECA, nome="a.mp4", mime="video/mp4", sha256="s" * 64)
     with pytest.raises(EnvioRecusado) as e:
         await enviar.enviar_foto(db, conversa, v, user=user)
     assert e.value.code == "foto_nao_suportada"
-    assert "Seller Center" in str(e.value.detail)
+    assert "Central do Vendedor" in str(e.value.detail)
 
 
 # ─────────────── a rota e o Zap ───────────────
@@ -479,7 +481,7 @@ async def test_rota_video_onde_nao_sai_diz_por_que(db, client, make_user, auth_a
     _envio_ligado(monkeypatch)
     u = await make_user(role=UserRole.ADMIN)
     auth_as(u)
-    conversa, _ = await _cenario(db, make_user)
+    conversa, _ = await _cenario(db, make_user, plataforma="tiktok")
 
     def nao_converte(*a, **k):  # o arquivo nem chega a ser aberto
         raise AssertionError("não devia abrir o vídeo")
@@ -492,7 +494,7 @@ async def test_rota_video_onde_nao_sai_diz_por_que(db, client, make_user, auth_a
     assert r.status_code == 422, r.text
     d = r.json()["detail"]
     assert (d["code"], d["motivo"]) == ("foto_invalida", "video_nao_suportado")
-    assert "Seller Center" in d["detail"]
+    assert "TikTok" in d["detail"]
     linhas = await db.scalar(
         select(AtendimentoMensagem.id).where(
             AtendimentoMensagem.conversa_id == conversa.id, AtendimentoMensagem.tipo == "video"
@@ -524,11 +526,14 @@ async def test_painel_diz_se_o_video_sai(db, client, envio, pessoa, make_user):
     assert ef["video_max_bytes"] == video.MAX_BYTES_UPLOAD_VIDEO
     assert set(ef["video_tipos"]) == {"video/mp4", "video/quicktime", "video/3gpp"}
     assert ef["video_max_s"] == 180
-    # Na Shopee a foto sai, o vídeo não: o painel leva a frase para a tela.
+    # Na Shopee o vídeo sai (19/11/2026); no TikTok a foto sai e o vídeo não —
+    # o painel leva a frase para a tela.
     shopee, _ = await _cenario(db, make_user)
     ef = await painel.situacao_da_foto(db, shopee)
-    assert ef["pode"] is True
-    assert ef["video"] is False and "Seller Center" in ef["video_motivo"]
+    assert ef["pode"] is True and ef["video"] is True and ef["video_motivo"] is None
+    tiktok, _ = await _cenario(db, make_user, plataforma="tiktok", externo="conv-tt")
+    ef = await painel.situacao_da_foto(db, tiktok)
+    assert ef["video"] is False and "TikTok" in ef["video_motivo"]
 
 
 def test_corpo_do_video_do_zap():
@@ -542,3 +547,289 @@ def test_corpo_do_video_do_zap():
     }
     with pytest.raises(ValueError):
         zap_servico.corpo_imagem("5511", "M1", None, mensagem_id=None, tipo="document")
+
+
+# ─────────────── a Shopee (chat), conferida por leitura real em 19/11/2026 ───────────────
+
+VID_SH = "br-11110120-6v7oy-teste"
+CAMINHO_SH = "api/v4/11110120/mms/br-11110120-6v7oy-teste.16006711795110680.mp4"
+
+
+def _shopee_video(estados: list[str], *, upload=None, envio=None):
+    """A Open API da Shopee de mentira para o vídeo: upload → resultado (na ordem de
+    `estados`, o último se repete) → mensagem. Guarda o corpo de cada mensagem."""
+    contagem = {"resultado": 0}
+    enviados: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p.endswith("/sellerchat/upload_video"):
+            if upload is not None:
+                return upload(request)
+            return httpx.Response(200, json={"error": "", "response": {"vid": VID_SH}})
+        if p.endswith("/sellerchat/get_video_upload_result"):
+            assert request.url.params["vid"] == VID_SH
+            st = estados[min(contagem["resultado"], len(estados) - 1)]
+            contagem["resultado"] += 1
+            pronto = st == "successful"
+            return httpx.Response(
+                200,
+                json={
+                    "error": "",
+                    "response": {
+                        "status": st,
+                        "video": CAMINHO_SH if pronto else "",
+                        "thumbnail": f"{VID_SH}_cover" if pronto else "",
+                        "duration": 3018,
+                        "width": 540,
+                        "height": 960,
+                        "size": 106649,
+                    },
+                },
+            )
+        if p.endswith("/sellerchat/send_message"):
+            enviados.append(json.loads(request.content))
+            if envio is not None:
+                return envio(request)
+            return httpx.Response(
+                200, json={"error": "", "response": {"message_id": "m-v1", "conversation_id": 777}}
+            )
+        return httpx.Response(404, json={"error": "error_not_found"})
+
+    return handler, enviados, contagem
+
+
+@pytest.fixture
+def shopee(monkeypatch):
+    """O envio ligado e a espera do processamento sem dormir."""
+    _envio_ligado(monkeypatch)
+    monkeypatch.setattr(video, "SHOPEE_INTERVALO_S", 0)
+
+
+def _video_pronto() -> video.Video:
+    # Já convertido (a rota converte antes); aqui o que importa é o caminho da Shopee.
+    return video.Video(
+        conteudo=MP4_CABECA + b"v" * 100,
+        nome="demo.mp4",
+        mime="video/mp4",
+        sha256="a" * 64,
+        duracao=3.0,
+    )
+
+
+def _sellerchat(rede) -> list[str]:
+    return [p.rsplit("/", 1)[-1] for _, p in rede.caminhos() if "/sellerchat/" in p]
+
+
+async def test_shopee_video_sobe_espera_e_manda(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    handler, enviados, _ = _shopee_video(["not_found", "processing", "successful"])
+    rede = _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    assert (m.status, m.tipo, m.externo_id) == ("enviada", "video", "m-v1")
+    # Upload → espera o processamento → UMA mensagem.
+    assert _sellerchat(rede) == [
+        "upload_video",
+        "get_video_upload_result",
+        "get_video_upload_result",
+        "get_video_upload_result",
+        "send_message",
+    ]
+    upload = rede.feitos[0]
+    assert b'name="file"' in upload.content and MP4_CABECA in upload.content
+    # O formato que o Seller Center manda e a Open API aceitou: o caminho
+    # RELATIVO do vídeo e o ID da capa (com URL inteira a Shopee recusa).
+    assert enviados == [
+        {
+            "to_id": 555,
+            "message_type": "video",
+            "content": {
+                "vid": VID_SH,
+                "video_url": CAMINHO_SH,
+                "thumb_url": f"{VID_SH}_cover",
+                "thumb_width": 540,
+                "thumb_height": 960,
+                "duration_seconds": 4,
+            },
+        }
+    ]
+    # O balão toca pela CDN de vídeo da Shopee.
+    (anexo,) = m.anexos
+    assert anexo["tipo"] == "video"
+    assert anexo["url"] == f"https://down-bs-br.vod.susercontent.com/{CAMINHO_SH}"
+    assert m.payload["video"]["sha256"] == "a" * 64 and "foto" not in m.payload
+
+
+async def test_shopee_video_processamento_falhou_nada_sai(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    handler, enviados, _ = _shopee_video(["processing", "failed"])
+    _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    # Falha LIMPA: nada chegou ao comprador ("Tentar de novo" é da pessoa).
+    assert (m.status, m.erro) == ("falhou", "shopee video_processamento failed")
+    assert enviados == []
+
+
+async def test_shopee_video_que_demora_demais_nada_sai(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    monkeypatch.setattr(video, "SHOPEE_ESPERA_PROCESSAR_S", 0)
+    handler, enviados, contagem = _shopee_video(["processing"])
+    _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    assert (m.status, m.erro) == ("falhou", "shopee video_processando")
+    assert enviados == [] and contagem["resultado"] == 1
+
+
+async def test_shopee_video_upload_recusado_nada_sai(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    handler, enviados, contagem = _shopee_video(
+        ["successful"],
+        upload=lambda req: httpx.Response(200, json={"error": "error_param", "message": "x"}),
+    )
+    _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    assert m.status == "falhou" and m.erro.startswith("shopee upload")
+    assert enviados == [] and contagem["resultado"] == 0
+
+
+async def test_shopee_video_sem_resposta_fica_incerto_sem_reenviar(
+    db, make_user, monkeypatch, shopee
+):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    def sem_resposta(request):
+        raise httpx.ReadTimeout("a Shopee não respondeu")
+
+    handler, enviados, _ = _shopee_video(["successful"], envio=sem_resposta)
+    _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    assert m.status == "revisar"
+    assert len(enviados) == 1  # uma tentativa só: o incerto nunca é reenviado sozinho
+
+
+async def test_shopee_video_recusado_com_codigo_falhou(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    handler, enviados, _ = _shopee_video(
+        ["successful"],
+        envio=lambda req: httpx.Response(
+            200, json={"error": "invalid_content", "message": "Invalid content"}
+        ),
+    )
+    _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    assert (m.status, m.erro) == ("falhou", "shopee invalid_content")
+
+
+async def test_shopee_video_vai_sozinho(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    rede = _Rede(monkeypatch, _shopee_video(["successful"])[0])
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user)
+    with pytest.raises(EnvioRecusado) as e:
+        await enviar.enviar_foto(db, conversa, _video_pronto(), legenda="veja", user=user)
+    assert e.value.code == "foto_invalida" and "vídeo vai sozinho" in str(e.value.detail)
+    assert _sellerchat(rede) == []
+
+
+async def test_shopee_video_no_chat_de_afiliado(db, make_user, monkeypatch, shopee):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    handler, enviados, _ = _shopee_video(
+        ["successful"],
+        envio=lambda req: httpx.Response(
+            200,
+            json={
+                "error": "",
+                "response": {"message_id": "m-a1", "conversation_id": "379920374879551489"},
+            },
+        ),
+    )
+    _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user, externo="379920374879551489")
+    conversa.dados = {"afiliado": True}
+    await db.commit()
+    m = await enviar.enviar_foto(db, conversa, _video_pronto(), user=user)
+    assert (m.status, m.externo_id) == ("enviada", "m-a1")
+    (corpo,) = enviados
+    assert (corpo["business_type"], corpo["conversation_id"]) == (11, 379920374879551489)
+
+
+@COM_FFMPEG
+async def test_rota_shopee_video_convertido(db, client, make_user, auth_as, monkeypatch, videos):
+    from tests.test_atendimento_foto import _cenario, _cliente, _Rede, _shopee_real
+
+    _envio_ligado(monkeypatch)
+    monkeypatch.setattr(video, "SHOPEE_INTERVALO_S", 0)
+    u = await make_user(role=UserRole.ADMIN)
+    auth_as(u)
+    handler, enviados, _ = _shopee_video(["successful"])
+    rede = _Rede(monkeypatch, handler)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, _ = await _cenario(db, make_user)
+    r = await client.post(
+        f"{URL}/conversas/{conversa.id}/foto",
+        files={"arquivo": ("IMG_0001.MOV", videos.mov, "video/quicktime")},
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["mensagem"]
+    assert (m["status"], m["tipo"]) == ("enviada", "video")
+    assert m["anexos"][0]["url"].startswith("https://down-bs-br.vod.susercontent.com/")
+    # Sobe o MP4 convertido (não o MOV do celular).
+    upload = next(p for p in rede.feitos if p.url.path.endswith("/upload_video"))
+    assert b'filename="IMG_0001.mp4"' in upload.content and videos.mov not in upload.content
+    assert len(enviados) == 1
+
+
+def test_cliente_shopee_mensagem_de_video():
+    import asyncio
+
+    from app.services.marketplaces.shopee import ShopeeClient
+
+    feitos: list[httpx.Request] = []
+
+    async def correr() -> dict:
+        def h(request):
+            feitos.append(request)
+            return httpx.Response(200, json={"error": "", "response": {"message_id": "1"}})
+
+        c = ShopeeClient({"shop_id": 111, "access_token": "t", "expires_at": 9_999_999_999})
+        original = httpx.AsyncClient
+
+        def fabrica(*a, **k):
+            k["transport"] = httpx.MockTransport(h)
+            return original(*a, **k)
+
+        httpx.AsyncClient = fabrica
+        try:
+            with pytest.raises(ValueError):
+                await c.chat_send_message(5, text="oi", video={"vid": "x"})
+            return await c.chat_send_message(5, video={"vid": "x", "video_url": "p"})
+        finally:
+            httpx.AsyncClient = original
+
+    assert asyncio.run(correr()) == {"message_id": "1"}
+    (req,) = feitos
+    assert json.loads(req.content) == {
+        "to_id": 5,
+        "message_type": "video",
+        "content": {"vid": "x", "video_url": "p"},
+    }
