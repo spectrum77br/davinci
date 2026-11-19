@@ -444,6 +444,7 @@ _CLEANUP_TABLES = (
     "mail_messages",
     "mail_mailboxes",
     "historico_evento",  # FK SET NULL -> users
+    "threema_envio_registro",  # 0504: FK SET NULL -> users (ator_id)
     "historico_alteracao",
     "historico_acesso",  # FK -> users: antes de users
     "claude_conectores",  # FK -> users: antes de users

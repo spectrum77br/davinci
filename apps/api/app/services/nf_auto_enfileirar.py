@@ -86,10 +86,11 @@ from app.models import (
     StoreInfo,
 )
 from app.redis_client import redis
-from app.services import nf_emissao_gerar, threema
+from app.services import nf_emissao_gerar, threema, threema_registro
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.prioridade_estoque import aplicar_prioridade_estoque
 from app.services.sku_tags import classify_sku_tag
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -700,7 +701,8 @@ async def _notificar_sem_estoque(
             "Estoque negativo — movido pra Aguardando Cancelamento:",
         )
         client = threema.ThreemaClient(contexto="estoque")
-        result = await client.send_to_all(texto, gerais)
+        with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO):
+            result = await client.send_to_all(texto, gerais)
         logger.info(
             "nf_auto_enfileirar_threema",
             sent=result.get("sent"),
@@ -782,7 +784,10 @@ async def _enviar_aviso(
     marcas (a próxima passada tenta de novo); canal sem config → deixa as
     marcas (tentar a cada passada não adianta). Erro ao montar o texto (banco)
     sobe depois de desfazer as marcas — o savepoint de quem chama desfaz a
-    transação. O envio é BEST-EFFORT."""
+    transação. O envio é BEST-EFFORT.
+
+    Registro (tarefa 16): quem chama marca de qual envio é o aviso, com
+    `threema_registro.envio(K....)` em volta da chamada."""
     try:
         texto = await montar_texto()
     except Exception:
@@ -845,7 +850,8 @@ async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> 
             " NÃO foi movido; confira antes de emitir:",
         )
 
-    await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE):
+        await _enviar_aviso(_texto, gerais, marcas, evento=evento)
 
 
 async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
@@ -889,7 +895,8 @@ async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
             + "\n".join(f"Kit {skus.get(k) or 'sem SKU no DaVinci'} (id Bling {k})" for k in novos)
         )
 
-    await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO):
+        await _enviar_aviso(_texto, gerais, marcas, evento=evento)
 
 
 async def _sem_leitura_longa(
@@ -977,7 +984,8 @@ async def _avisar_sem_leitura(session, longos: dict[str, list[str]]) -> None:
             texto += f"\n… e mais {total - len(mostrar)}"
         return texto
 
-    await _enviar_aviso(_texto, gerais, [_AVISO_SEM_LEITURA_CHAVE], evento=evento)
+    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING):
+        await _enviar_aviso(_texto, gerais, [_AVISO_SEM_LEITURA_CHAVE], evento=evento)
 
 
 async def _esperando_o_bling(
@@ -1064,7 +1072,8 @@ async def _avisar_recusa_83955(session, pedidos: dict[str, list[str]]) -> None:
             " situação à mão:",
         )
 
-    await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO):
+        await _enviar_aviso(_texto, gerais, marcas, evento=evento)
 
 
 async def _pedidos_restricao(

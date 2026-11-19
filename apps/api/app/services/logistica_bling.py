@@ -38,10 +38,17 @@ from app.models import (
     SituacaoBling,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_match, logistica_rules, logistica_track, threema
+from app.services import (
+    logistica_match,
+    logistica_rules,
+    logistica_track,
+    threema,
+    threema_registro,
+)
 from app.services.amazon_shipment_status import AMAZON_SHIPPED, amazon_shipment_confirmed
 from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA, SITUACOES_ENVIADO_ETIQUETA
 from app.services.marketplaces.bling import BlingClient
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -876,7 +883,8 @@ async def enviar_threema_em_lote(
         if client is None:
             client = threema.ThreemaClient(contexto="logistica")
         try:
-            result = await client.send_to_all(texto, recipients=recipients)
+            with threema_registro.envio(K.LOGISTICA_MENSAGEM_REGRA, escopo=rule.id):
+                result = await client.send_to_all(texto, recipients=recipients)
         except threema.ThreemaConfigError as e:
             logger.warning("logistica_threema_lote_sem_config", err=str(e))
             break

@@ -273,6 +273,12 @@ class Settings(BaseSettings):
     # "7KMPCBS5:Londres,M5TT27JA:Cairo,444UXUXN:Churchill"). ID sem nome cai no
     # próprio ID.
     threema_recipient_names: str = ""
+    # Registro de cada envio (tabela `threema_envio_registro`, tarefa 16):
+    # uma linha por destinatário, com quando, para quem e se chegou. É de
+    # melhor esforço (nunca derruba o envio). `false` desliga a gravação; o
+    # envio continua igual. Como `get_settings` guarda o valor, mudar o .env
+    # exige RECRIAR os containers (`up -d` com o compose de prod), não restart.
+    threema_registro_ativo: bool = True
 
     # Dev: enables /api/dev/mock-login (gated by ENV=development too).
     dev_mock_login: bool = False

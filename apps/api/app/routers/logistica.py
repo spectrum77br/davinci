@@ -130,8 +130,10 @@ from app.services import (
     logistica_track_sync,
     flex_config,
     threema,
+    threema_registro,
     tracken,
 )
+from app.services.threema_catalogo import K
 from app.worker_pool import get_arq_marketplace_pool
 
 logger = structlog.get_logger()
@@ -814,9 +816,10 @@ async def enviar_threema(
         recipients = threema.parse_recipients(s.threema_recipients) or None
     texto = threema.compose_texto(texto, pedido=payload.pedido, loja=payload.loja)
     try:
-        result = await threema.ThreemaClient(contexto="logistica").send_to_all(
-            texto, recipients=recipients or None
-        )
+        with threema_registro.envio(K.LOGISTICA_MENSAGEM_REGRA, escopo=status_id):
+            result = await threema.ThreemaClient(contexto="logistica").send_to_all(
+                texto, recipients=recipients or None
+            )
     except threema.ThreemaConfigError as e:
         raise HTTPException(422, detail={"code": str(e)}) from e
     logger.info(
@@ -1927,9 +1930,10 @@ async def enviar_threema_pedido(
         loja=c.plataforma,
     )
     try:
-        result = await threema.ThreemaClient(contexto="logistica").send_to_all(
-            texto, recipients=recipients or None
-        )
+        with threema_registro.envio(K.LOGISTICA_MENSAGEM_REGRA, escopo=rule.id):
+            result = await threema.ThreemaClient(contexto="logistica").send_to_all(
+                texto, recipients=recipients or None
+            )
     except threema.ThreemaConfigError as e:
         raise HTTPException(422, detail={"code": str(e)}) from e
     # Enviou pra ao menos um → o aviso foi feito: carimba e o pedido resolve

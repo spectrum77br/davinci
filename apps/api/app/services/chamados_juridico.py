@@ -34,7 +34,8 @@ from app.models import (
     User,
 )
 from app.services import chamados as chamados_svc
-from app.services import threema
+from app.services import threema, threema_registro
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -279,7 +280,8 @@ async def encaminhar(
         ch, link=link, n_msgs=len(d["mensagens"]), n_fotos=d["n_fotos"], quem=quem, obs=obs
     )
     try:
-        result = await client.send_to_all(texto, recipients)
+        with threema_registro.envio(K.CHAMADOS_ENCAMINHAR_JURIDICO):
+            result = await client.send_to_all(texto, recipients)
     except threema.ThreemaConfigError as e:
         raise chamados_svc.ChamadoError("threema_nao_configurado") from e
     sent = [r for r in result.get("sent", []) if r not in result.get("failed", [])]

@@ -29,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Devolution
 from app.services import chamados_devolucao as cd
-from app.services import threema
+from app.services import threema, threema_registro
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -205,9 +206,10 @@ async def avisar_prazos(session: AsyncSession) -> int:
         logger.warning("devolucao_prazo_aviso_sem_threema", devolucoes=len(devs))
         return 0
     try:
-        res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(
-            _texto_aviso(devs), destinos
-        )
+        with threema_registro.envio(K.DEVOLUCOES_PRAZO_CONTESTACAO):
+            res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(
+                _texto_aviso(devs), destinos
+            )
     except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima rodada
         logger.warning("devolucao_prazo_aviso_falhou", err=str(e)[:200])
         return 0

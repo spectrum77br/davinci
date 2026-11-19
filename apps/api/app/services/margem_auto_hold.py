@@ -169,10 +169,11 @@ from app.models import (
     OuvidoriaRobo,
 )
 from app.security.cipher import decrypt_json
-from app.services import aprovar_link, informar, threema
+from app.services import aprovar_link, informar, threema, threema_registro
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
+from app.services.threema_catalogo import K
 from app.services.verificar_margem import (
     BLING_ORDERS_TABLE,
     SITUACAO_BLING_TABLE,
@@ -520,7 +521,8 @@ async def _avisar_threema(
         ),
     )
     try:
-        result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
+        with threema_registro.envio(K.MARGEM_PEDIDO_SEGURADO):
+            result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
         logger.info(
             "margem_auto_hold_threema",
             pedido_bling=str(r["pedido_bling"]),
@@ -713,7 +715,10 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
             ),
         )
         try:
-            result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
+            with threema_registro.envio(K.MARGEM_MARGEM_ALTA):
+                result = await threema.ThreemaClient(contexto="margem").send_to_all(
+                    msg, recipients
+                )
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             logger.warning(
                 "margem_alerta_alta_falhou",
@@ -1135,7 +1140,8 @@ async def _avisar_threema_reavaliacao(
         rodape=rodape + f"Ver no DaVinci: {aprovar_link.url_margem(pedido_bling)}",
     )
     try:
-        result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
+        with threema_registro.envio(K.MARGEM_REAVALIACAO):
+            result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
         logger.info(
             "margem_reavaliar_threema",
             pedido_bling=pedido_bling,

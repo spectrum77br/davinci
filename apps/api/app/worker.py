@@ -45,6 +45,7 @@ from app.services import (
     flex_config,
     flex_motor,
     threema,
+    threema_registro,
 )
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
 from app.services.alerts import emit_alert
@@ -104,6 +105,7 @@ from app.services.product_cost_sync import (
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
+from app.services.threema_catalogo import K
 from app.services.valuation_estoque_snapshot import (
     repor_snapshot_se_faltar,
     run_valuation_estoque_snapshot,
@@ -3362,7 +3364,8 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
     destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
     if destinos:
         try:
-            await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
+            with threema_registro.envio(K.LOGISTICA_VIGIA_AUTOMACAO):
+                await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
         except Exception as exc:  # noqa: BLE001 — aviso é best-effort
             logger.warning("logistica_vigia_threema_falhou", erro=str(exc)[:200])
     async with session_scope() as s:
@@ -4123,7 +4126,8 @@ async def alerts_cleanup(ctx: dict) -> None:
     rodadas com mais de 30 dias (`ouvidoria_rodadas` cresce centenas de linhas
     por dia com os 7 robôs) e ocorrências FECHADAS há mais de 180 dias — menos
     as `ignorada`, que são a memória de "não cobre mais isto" e, apagadas,
-    fariam o robô reabrir a linha."""
+    fariam o robô reabrir a linha. E o registro dos envios do Threema com mais
+    de 180 dias (`threema_envio_registro`)."""
     cutoff = datetime.now(UTC) - timedelta(days=60)
     async with session_scope() as s:
         result = await s.execute(delete(Alert).where(Alert.created_at < cutoff))
@@ -4134,6 +4138,13 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("ouvidoria_gc_rodadas_done", deleted=n)
     except Exception:  # noqa: BLE001 — limpeza não pode derrubar o tick
         logger.exception("ouvidoria_gc_rodadas_unhandled")
+    # Registro dos envios do Threema (tarefa 16): guarda 180 dias.
+    try:
+        async with session_scope() as s:
+            n = await threema_registro.limpar(s)
+        logger.info("threema_registro_gc_done", deleted=n)
+    except Exception:  # noqa: BLE001 — limpeza não pode derrubar o tick
+        logger.exception("threema_registro_gc_unhandled")
     try:
         async with session_scope() as s:
             n = await ouvidoria_gc_ocorrencias(s)

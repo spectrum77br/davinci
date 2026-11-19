@@ -26,6 +26,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import threema_registro
 
 logger = structlog.get_logger()
 
@@ -361,25 +362,67 @@ class ThreemaClient:
 
         Retorna `{"sent": [ids ok], "failed": [ids que falharam]}`. Não
         interrompe no 1º erro — tenta todos.
+
+        Cada chamada vira um lote no registro (`threema_registro.gravar`), com
+        a marca do envio que estiver ativa (`threema_registro.envio`): uma
+        linha por destinatário; erro de configuração grava 1 linha e relança;
+        erro de rede no meio grava o que já foi tentado e relança. O registro
+        é de melhor esforço e não muda nada do envio.
         """
-        self._require_config()
-        alvos = recipients or parse_recipients(get_settings().threema_recipients)
-        if not alvos:
-            raise ThreemaConfigError("threema_recipients_missing")
+        tentativas: list[threema_registro.Tentativa] = []
         sent: list[str] = []
         failed: list[str] = []
-        for rid in alvos:
-            try:
-                mid = await self.send_simple(rid, text)
-                sent.append(rid)
-                logger.info(
-                    "threema_sent",
-                    to=rid,
-                    message_id=mid,
-                    contexto=self.contexto,
-                    canal=self.canal,
-                )
-            except ThreemaSendError as e:
-                failed.append(rid)
-                logger.warning("threema_recipient_failed", to=rid, status=e.status)
+        try:
+            self._require_config()
+            alvos = recipients or parse_recipients(get_settings().threema_recipients)
+            if not alvos:
+                raise ThreemaConfigError("threema_recipients_missing")
+            for rid in alvos:
+                try:
+                    mid = await self.send_simple(rid, text)
+                    sent.append(rid)
+                    tentativas.append(
+                        threema_registro.Tentativa(rid, True, 200, str(mid or "") or None)
+                    )
+                    logger.info(
+                        "threema_sent",
+                        to=rid,
+                        message_id=mid,
+                        contexto=self.contexto,
+                        canal=self.canal,
+                    )
+                except ThreemaSendError as e:
+                    failed.append(rid)
+                    tentativas.append(
+                        threema_registro.Tentativa(rid, False, e.status, None, f"http_{e.status}")
+                    )
+                    logger.warning("threema_recipient_failed", to=rid, status=e.status)
+                except Exception as e:
+                    # Erro de rede no meio: registra este e relança (como hoje).
+                    tentativas.append(threema_registro.Tentativa(rid, False, None, None, _erro(e)))
+                    raise
+        except Exception as e:
+            if not tentativas:
+                # Nem chegou a tentar ninguém (config, sem destinatário).
+                tentativas.append(threema_registro.Tentativa(None, False, None, None, _erro(e)))
+            await self._registrar(text, tentativas)
+            raise
+        await self._registrar(text, tentativas)
         return {"sent": sent, "failed": failed}
+
+    async def _registrar(self, text: str, tentativas) -> None:
+        # getattr: subclasse de teste pode pular o __init__.
+        await threema_registro.gravar(
+            contexto=getattr(self, "contexto", None),
+            canal=getattr(self, "canal", None),
+            texto=text,
+            tentativas=tentativas,
+            segredos=(getattr(self, "secret", "") or "",),
+        )
+
+
+def _erro(e: BaseException) -> str:
+    """Código curto do erro pro registro (sem corpo, sem segredo)."""
+    if isinstance(e, ThreemaConfigError):
+        return str(e)[:200]
+    return f"{type(e).__name__}: {str(e)[:150]}"

@@ -63,9 +63,10 @@ from app.models import (
     PrioridadeEstoqueMovimento,
     StockMovement,
 )
-from app.services import nf_emissao_gerar, threema
+from app.services import nf_emissao_gerar, threema, threema_registro
 from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.marketplaces.bling import BlingCloudflareError
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -513,7 +514,8 @@ async def avisar_falhas(session: AsyncSession) -> int:
             for r in lote
         )
         try:
-            res = await threema.ThreemaClient(contexto="estoque").send_to_all(texto, destinos)
+            with threema_registro.envio(K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA):
+                res = await threema.ThreemaClient(contexto="estoque").send_to_all(texto, destinos)
         except Exception as exc:  # noqa: BLE001
             logger.warning("prioridade_estoque_threema_falhou", erro=str(exc)[:200])
             return avisados

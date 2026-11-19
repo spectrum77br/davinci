@@ -29,7 +29,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica, ThreemaInformarConfig
-from app.services import logistica_amazon_canal, logistica_rules, threema
+from app.services import logistica_amazon_canal, logistica_rules, threema, threema_registro
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -247,7 +248,8 @@ async def run(
     for row, tipo in pendentes:
         texto = mensagem_aviso(row, tipo, hoje)
         try:
-            res = await client.send_to_all(texto, recipients)
+            with threema_registro.envio(K.LOGISTICA_AMAZON_PRAZOS):
+                res = await client.send_to_all(texto, recipients)
         except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima
             resumo["falhas"] += 1
             logger.warning(

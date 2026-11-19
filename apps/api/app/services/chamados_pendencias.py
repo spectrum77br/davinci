@@ -33,10 +33,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados as chamados_svc
-from app.services import threema
+from app.services import threema, threema_registro
 from app.services.chamados_devolucao import TIPO_ABERTURA
 from app.services.chamados_devolucao_sync import ABERTURA_FALHOU_ACOMPANHA
 from app.services.chamados_tiktok_reembolso import _destinatarios, e_chamado_reembolso
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -246,9 +247,10 @@ async def varrer(
                         + ("\n…" if len(linhas) > 15 else "")
                     )
                     try:
-                        await threema.ThreemaClient(contexto=contexto).send_to_all(
-                            texto, recipients=alvos
-                        )
+                        with threema_registro.envio(K.CHAMADOS_ABERTURAS_PRESAS):
+                            await threema.ThreemaClient(contexto=contexto).send_to_all(
+                                texto, recipients=alvos
+                            )
                     except Exception as e:  # noqa: BLE001 — cada canal é best-effort
                         logger.warning(
                             "chamados_pendencias_threema_falhou",

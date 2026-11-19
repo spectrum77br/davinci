@@ -35,9 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import session_scope
 from app.models import DenunciaRelatorio, ThreemaInformarConfig
-from app.services import ouvidoria, threema
+from app.services import ouvidoria, threema, threema_registro
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.denuncia_robo import FUSO
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -161,7 +162,8 @@ async def enviar_teste(session: AsyncSession, dia: date, para: str, agora: datet
         return {"enviado": False, "motivo": "destinatário fora do diretório do Threema"}
     client = threema.ThreemaClient(contexto="chamados")
     try:
-        r = await client.send_to_all(texto(dia, row.numeros, link_excel(dia, agora)), [rid])
+        with threema_registro.envio(K.DENUNCIA_RELATORIO_DIARIO, origem="teste"):
+            r = await client.send_to_all(texto(dia, row.numeros, link_excel(dia, agora)), [rid])
     except threema.ThreemaConfigError as e:
         r = {"sent": [], "failed": [rid], "erro": str(e)}
     logger.info(
@@ -207,7 +209,8 @@ async def enviar_pendente(session: AsyncSession, agora: datetime | None = None) 
     try:
         async with ouvidoria.Rodada(session, ROBO) as rodada:
             try:
-                r = await client.send_to_all(msg, alvos)
+                with threema_registro.envio(K.DENUNCIA_RELATORIO_DIARIO):
+                    r = await client.send_to_all(msg, alvos)
             except threema.ThreemaConfigError as e:
                 r = {"sent": [], "failed": alvos, "erro": str(e)}
             rodada.contadores["enviados"] = len(r.get("sent") or [])

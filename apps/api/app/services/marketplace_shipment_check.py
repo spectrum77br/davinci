@@ -206,11 +206,13 @@ def _destinos_do_aviso() -> list[str]:
 async def _avisar_threema(texto: str) -> None:
     """Melhor esforço: aviso não pode derrubar a varredura."""
     try:
-        from app.services import threema
+        from app.services import threema, threema_registro
+        from app.services.threema_catalogo import K
 
         destinos = _destinos_do_aviso()
         if destinos:
-            await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
+            with threema_registro.envio(K.LOGISTICA_LOJA_MUDA):
+                await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
     except Exception as e:  # noqa: BLE001
         logger.warning("shipment_check_aviso_falhou", err=str(e)[:200])
 

@@ -45,8 +45,9 @@ from app.models import (
     ThreemaInformarConfig,
 )
 from app.redis_client import redis
-from app.services import threema
+from app.services import threema, threema_registro
 from app.services.denuncia_robo import PASSOS, montar_painel
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -231,7 +232,8 @@ async def rodar(session: AsyncSession, agora: datetime | None = None) -> dict:
         return {"avisadas": 0, "erro": motivo}
     link = f"{(get_settings().app_url or '').rstrip('/')}/denuncia?aba=robo"
     try:
-        r = await client.send_to_all(texto(novas, link), alvos)
+        with threema_registro.envio(K.DENUNCIA_ROBO_PRECISA_ALGUEM):
+            r = await client.send_to_all(texto(novas, link), alvos)
     except threema.ThreemaConfigError as e:
         r = {"sent": [], "failed": alvos, "erro": str(e)}
     if not r.get("sent"):

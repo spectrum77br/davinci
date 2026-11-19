@@ -334,6 +334,7 @@ from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 from app.models.sync_log import SyncLog
 from app.models.tarefa import Tarefa
+from app.models.threema_envio import ThreemaEnvioRegistro
 from app.models.user import User
 from app.models.user_settings import UserSettings
 
@@ -635,6 +636,7 @@ __all__ = [
     "IMOBILIZADO_STATUS",
     "Imobilizado",
     "ImobilizadoHistorico",
+    "ThreemaEnvioRegistro",
     "ThreemaInformarConfig",
     "User",
     "UserRole",

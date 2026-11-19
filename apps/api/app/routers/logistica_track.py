@@ -33,7 +33,13 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import DevolucaoRastreio, Logistica, User
 from app.redis_client import redis
-from app.services import devolucao_rastreio_sync, logistica_track, logistica_track_sync
+from app.services import (
+    devolucao_rastreio_sync,
+    logistica_track,
+    logistica_track_sync,
+    threema_registro,
+)
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["logistica_track"])
@@ -121,7 +127,8 @@ async def receive_17track_push(
             applied += 1
     await session.commit()
     if graves:
-        await logistica_track_sync.avisar_graves(graves)
+        with threema_registro.envio(K.LOGISTICA_CORREIOS_GRAVE):
+            await logistica_track_sync.avisar_graves(graves)
 
     logger.info("logistica_17track_push_applied", numbers=len(updates), rows=applied)
     return {"ack": True, "numbers": len(updates), "rows": applied}

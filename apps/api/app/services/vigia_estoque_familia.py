@@ -38,8 +38,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import session_scope
 from app.models import IntegrationPlatform, Product, ProductLink
-from app.services import threema
+from app.services import threema, threema_registro
 from app.services.estoque_familia import chave_familia, familia_ligada, saldo_publicavel
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -190,9 +191,10 @@ async def vigia_estoque_familia_sweep() -> dict:
         return resumo
 
     try:
-        envio = await threema.ThreemaClient(contexto="estoque").send_to_all(
-            _texto_aviso(atrasados, medida["total"]), recipients
-        )
+        with threema_registro.envio(K.PRODUTOS_VIGIA_SOMA_FAMILIA):
+            envio = await threema.ThreemaClient(contexto="estoque").send_to_all(
+                _texto_aviso(atrasados, medida["total"]), recipients
+            )
         resumo["avisados"] = len(envio.get("sent", []))
         resumo["falharam"] = len(envio.get("failed", []))
     except Exception as exc:  # noqa: BLE001

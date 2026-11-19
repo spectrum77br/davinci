@@ -65,9 +65,10 @@ from app.models import (
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
-from app.services import aprovar_link, informar, ouvidoria, threema
+from app.services import aprovar_link, informar, ouvidoria, threema, threema_registro
 from app.services.logistica_ingest import _ids_pendentes
 from app.services.margem_auto_hold import _motivo as _motivo_margem
+from app.services.threema_catalogo import K
 from app.services.verificar_margem import SNAPSHOT_TABLE
 
 logger = structlog.get_logger()
@@ -114,6 +115,15 @@ _CONTEXTOS = (
     "conferencia_shopee",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
+# O envio do catálogo (Cadastros › Envios Threema) de cada botão Informar: é a
+# marca do registro de cada mensagem (`threema_registro.envio`).
+_CHAVE_ENVIO = {
+    "logistica": K.LOGISTICA_INFORMAR,
+    "controle_estoque": K.CONTROLE_ESTOQUE_INFORMAR,
+    "margem": K.MARGEM_INFORMAR,
+    "devolucoes": K.DEVOLUCOES_INFORMAR,
+    "logistica_amazon": K.LOGISTICA_AMAZON_INFORMAR,
+}
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
 # exceção: o gerente (Cairo) vê e usa o botão de lá (incluindo o cadastro do
@@ -542,10 +552,11 @@ async def enviar(
     sent_ok: set[str] = set()
     failed: set[str] = set()
     try:
-        for msg in mensagens:
-            result = await client.send_to_all(msg, recipients)
-            sent_ok.update(result.get("sent", []))
-            failed.update(result.get("failed", []))
+        with threema_registro.envio(_CHAVE_ENVIO[contexto]):
+            for msg in mensagens:
+                result = await client.send_to_all(msg, recipients)
+                sent_ok.update(result.get("sent", []))
+                failed.update(result.get("failed", []))
     except threema.ThreemaConfigError as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,

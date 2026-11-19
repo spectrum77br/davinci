@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Chamado, ThreemaInformarConfig
 from app.services import chamados as chamados_svc
-from app.services import threema
+from app.services import threema, threema_registro
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -78,7 +79,8 @@ async def avisar(session: AsyncSession, ch: Chamado, parado: str, resumo: str) -
         )
     else:
         try:
-            r = await client.send_to_all(texto(ch, parado, resumo), alvos)
+            with threema_registro.envio(K.CHAMADOS_IA_PARADA):
+                r = await client.send_to_all(texto(ch, parado, resumo), alvos)
         except threema.ThreemaConfigError as e:
             logger.warning("chamados_ia_aviso_sem_config", chamado_id=str(ch.id), erro=str(e))
             r = {"sent": [], "failed": alvos}

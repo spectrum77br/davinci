@@ -44,8 +44,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import ConferenciaShopeeExecucao, ThreemaInformarConfig
-from app.services import threema
+from app.services import threema, threema_registro
 from app.services.conferencia_shopee import calculo, plataformas, saida
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -55,6 +56,13 @@ VALE_LINK = timedelta(days=7)
 # (Threema ligado depois, cadastro feito dias depois) não dispara aviso.
 JANELA_REENVIO = timedelta(hours=6)
 MAX_BYTES = 3500
+# O envio do catálogo (Cadastros › Envios Threema) de cada plataforma: é a
+# marca do registro de cada mensagem (`threema_registro.envio`).
+CHAVE_ENVIO = {
+    "shopee": K.MARKETING_CONFERENCIA_SHOPEE,
+    "ml": K.MARKETING_CONFERENCIA_ML,
+    "amazon": K.MARKETING_CONFERENCIA_AMAZON,
+}
 
 
 # ─────────────────────────────────────────────── chave por plataforma
@@ -240,7 +248,10 @@ async def _enviar_um_a_um(
     """Um destinatário por vez (como o teste da Denúncia): o send_to_all só
     segura ThreemaSendError, e um timeout de rede no 2º escapava do laço
     depois de o 1º já ter recebido — sem carimbo, o varredor reenviava a
-    todos de 10 em 10 min. Basta UM entregue para carimbar."""
+    todos de 10 em 10 min. Basta UM entregue para carimbar.
+
+    Registro (tarefa 16): quem chama marca o envio da plataforma
+    (`CHAVE_ENVIO`) com `threema_registro.envio`."""
     sent: list[str] = []
     failed: list[str] = []
     erro: str | None = None
@@ -295,7 +306,9 @@ async def enviar_pendente(
     msg = texto(
         row.relatorio, link_excel(row.id, agora), link_davinci(row.id, row.plataforma)
     )
-    r = await _enviar_um_a_um(client, msg, alvos, row.id)
+    chave = CHAVE_ENVIO.get(plataformas.de({"plataforma": row.plataforma}))
+    with threema_registro.envio(chave):
+        r = await _enviar_um_a_um(client, msg, alvos, row.id)
     if not r.get("sent"):
         logger.warning(
             "conferencia_shopee_threema_falhou",

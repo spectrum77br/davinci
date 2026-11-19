@@ -63,7 +63,7 @@ from app.models import (
     OuvidoriaRobo,
     OuvidoriaRodada,
 )
-from app.services import threema
+from app.services import threema, threema_registro
 
 logger = structlog.get_logger()
 
@@ -1275,13 +1275,18 @@ async def avisar_pendentes(
     if not pendentes:
         return {"avisadas": 0}
     texto = texto_aviso(robo.nome, pendentes, link=link_painel(robo_chave))
+    # Import tardio: o catálogo dos envios lê o ROBOS deste módulo.
+    from app.services.threema_catalogo import chave_ouvidoria
+
     try:
         # O assunto vem do CATÁLOGO (RoboDef), não da linha do banco: é
         # ele que sabe de qual conversa do Threema o robô faz parte.
         contexto = (ROBOS[robo_chave].contexto if robo_chave in ROBOS else "") or None
-        resultado = await threema.ThreemaClient(contexto=contexto).send_to_all(
-            texto, recipients=alvos
-        )
+        # Registro: cada robô é um envio próprio (`ouvidoria.<chave>`).
+        with threema_registro.envio(chave_ouvidoria(robo_chave)):
+            resultado = await threema.ThreemaClient(contexto=contexto).send_to_all(
+                texto, recipients=alvos
+            )
     except Exception as e:  # noqa: BLE001 — aviso é best-effort; sem carimbo retenta
         logger.warning("ouvidoria_threema_falhou", robo=robo_chave, err=str(e)[:200])
         return {"avisadas": 0, "motivo": "threema_falhou", "erro": str(e)[:200]}

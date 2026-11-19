@@ -59,9 +59,10 @@ from app.models import (
     IntegrationPlatform,
 )
 from app.services import chamados as chamados_svc
-from app.services import logistica_tiktok, threema
+from app.services import logistica_tiktok, threema, threema_registro
 from app.services.devolucao_returns import epoch_to_dt
 from app.services.marketplaces.tiktok import TikTokClient
+from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
@@ -422,7 +423,10 @@ async def _avisar(texto: str) -> None:
     if not alvos:
         return
     try:
-        await threema.ThreemaClient(contexto="devolucoes").send_to_all(texto, recipients=alvos)
+        with threema_registro.envio(K.CHAMADOS_TIKTOK_SO_REEMBOLSO):
+            await threema.ThreemaClient(contexto="devolucoes").send_to_all(
+                texto, recipients=alvos
+            )
     except Exception as e:  # noqa: BLE001 — aviso é best-effort
         logger.warning("tiktok_reembolso_threema_falhou", err=str(e)[:200])
 
