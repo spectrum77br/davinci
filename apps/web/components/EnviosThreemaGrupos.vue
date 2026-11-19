@@ -99,15 +99,17 @@ function usadoEm(g: GrupoOut): string {
 <template>
   <div class="space-y-3">
     <div class="flex flex-wrap items-center gap-2">
-      <p class="flex-1 text-sm text-muted-foreground">
-        Mudar um grupo muda quem recebe em todos os envios que o usam.
+      <p class="flex-1 text-sm text-muted-foreground" data-texto-grupos>
+        Mudar um grupo muda quem recebe em todos os envios que o usam. Hoje só os envios do Mac
+        aceitam grupo, e eles só passam a ler a lista daqui quando o Mac ler o Cadastro: até lá,
+        mudar um grupo não muda quem recebe nada.
       </p>
       <button type="button" class="inline-flex h-9 items-center gap-1 rounded-md border px-3 text-sm hover:bg-muted" data-acao="novo-grupo" @click="novo">
         <Plus class="size-4" /> Novo grupo
       </button>
     </div>
-    <p v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" data-erro>{{ erro }}</p>
-    <p v-if="msg" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{{ msg }}</p>
+    <p v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300" data-erro>{{ erro }}</p>
+    <p v-if="msg" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">{{ msg }}</p>
 
     <div v-if="aberto" class="space-y-2 rounded-md border p-3" data-form-grupo>
       <label class="block text-sm">
@@ -134,7 +136,7 @@ function usadoEm(g: GrupoOut): string {
           <tr><th class="text-left">Grupo</th><th class="text-left">Quem está</th><th class="text-left">Uso</th><th /></tr>
         </thead>
         <tbody>
-          <tr v-if="!carregando && !grupos.length">
+          <tr v-if="!carregando && pessoas && !grupos.length">
             <td colspan="4" class="py-6 text-center text-muted-foreground">Nenhum grupo ainda.</td>
           </tr>
           <tr v-for="g in grupos" :key="g.id" :data-grupo="g.id" class="align-top">
@@ -143,8 +145,8 @@ function usadoEm(g: GrupoOut): string {
               <div v-if="g.descricao" class="text-xs text-muted-foreground">{{ g.descricao }}</div>
             </td>
             <td class="text-xs">
-              <span v-if="!g.membros.length" class="text-red-700">ninguém</span>
-              <span v-for="(m, i) in g.membros" :key="i" :class="m.valido ? '' : 'text-amber-700'">
+              <span v-if="!g.membros.length" class="text-red-700 dark:text-red-400">ninguém</span>
+              <span v-for="(m, i) in g.membros" :key="i" :class="m.valido ? '' : 'text-amber-700 dark:text-amber-400'">
                 {{ m.nome }}<span v-if="!m.valido"> ({{ m.aviso }})</span><span v-if="i < g.membros.length - 1">, </span>
               </span>
             </td>

@@ -27,6 +27,9 @@ export type Envio = {
   frequencia_texto: string
   onde_roda: 'servidor' | 'mac' | 'externo'
   remetente: string | null
+  // A conversa por onde sai DE VERDADE (apelidos + canais do servidor);
+  // 'desativado' = o canal está desligado no servidor. null = Mac/informativo.
+  canal: string | null
   gerenciado: boolean
   migrado: boolean
   fatia: string | null
@@ -36,6 +39,7 @@ export type Envio = {
   escopo_tipo: string | null
   editavel: boolean
   desligavel: boolean
+  por_que_nao_desliga: string | null
   por_que_nao_edita: string | null
   onde_configurar: string | null
   tem_reaviso: boolean
@@ -54,6 +58,8 @@ export type Envio = {
     nomes: NomeQuem[]
     avisos: string[]
     total: number
+    // Item 1: quantas regras têm lista própria e quem recebe só por elas.
+    por_regra?: { regras: number; extras: string[] } | null
   }
   depende_de: Depende[]
   ultimo: Ultimo | null
@@ -143,7 +149,7 @@ export const SITUACAO: Record<string, { rotulo: string }> = {
   desligado: { rotulo: 'Desligado' },
   bloqueado: { rotulo: 'Depende de algo desligado' },
   falhando: { rotulo: 'Último envio falhou' },
-  mac_env: { rotulo: 'O Mac usa o .env' },
+  mac_env: { rotulo: 'O Mac ainda usa a lista dele' },
   informativo: { rotulo: 'Informativo' },
   externo: { rotulo: 'Fora do DaVinci' },
 }
@@ -164,6 +170,46 @@ export function quemRecebeTexto(e: Pick<Envio, 'quem_recebe' | 'gerenciado'>, ma
   return `${nomes.slice(0, max).join(', ')} e mais ${nomes.length - max}`
 }
 
+/** Item 1: "lista própria em 9 regras (+ harry potter)" — quem recebe pelo
+ *  👤 de uma regra não pode sumir da coluna. '' quando não há. */
+export function porRegraTexto(e: Pick<Envio, 'quem_recebe'>): string {
+  const p = e.quem_recebe.por_regra
+  if (!p || !p.regras) return ''
+  const regras = `lista própria em ${p.regras} ${p.regras === 1 ? 'regra' : 'regras'}`
+  return p.extras.length ? `${regras} (+ ${p.extras.join(', ')})` : regras
+}
+
+// O nome de gente de cada remetente/conversa do Threema.
+const CONVERSAS: Record<string, string> = {
+  geral: 'Geral',
+  logistica: 'Logística',
+  logistica_amazon: 'Logística (Amazon)',
+  chamados: 'Chamados',
+  estoque: 'Estoque',
+  controle_estoque: 'Controle de Estoque',
+  margem: 'Margem',
+  margem_auto: 'Margem (automático)',
+  devolucoes: 'Devoluções',
+  juridico: 'Jurídico',
+  importacao: 'Importação',
+  flex: 'Flex',
+}
+export function nomeConversa(c: string | null | undefined): string {
+  if (!c) return ''
+  return CONVERSAS[c] || c
+}
+
+/** "Logística · sai pela conversa Geral" (o remetente do código pode ser um
+ *  apelido; o servidor decide a conversa de verdade). */
+export function remetenteTexto(e: Pick<Envio, 'remetente' | 'canal' | 'onde_roda'>): string {
+  if (e.onde_roda === 'mac') return 'o do Mac'
+  if (!e.remetente) return e.onde_roda === 'servidor' ? 'depende da origem do chamado' : '—'
+  const nome = nomeConversa(e.remetente)
+  if (e.canal === 'desativado') return `${nome} · canal desativado no servidor (não sai)`
+  if (!e.canal || e.canal === e.remetente) return nome
+  return `${nome} · sai pela conversa ${nomeConversa(e.canal)}`
+}
+
 /** "há 5 min", "há 2 h", "há 3 dias". */
 export function haQuanto(iso: string | null | undefined, agora: Date = new Date()): string {
   if (!iso) return '—'
@@ -177,25 +223,45 @@ export function haQuanto(iso: string | null | undefined, agora: Date = new Date(
   return `há ${Math.round(h / 24)} dias`
 }
 
+// O que o Threema respondeu (ou por que não saiu), em frase de gente. Um só
+// dicionário para o Cadastro e o Histórico falarem igual.
 const ERROS: Record<string, string> = {
-  http_400: 'pedido recusado (400)',
-  http_401: 'remetente recusado (401)',
-  http_402: 'sem crédito (402)',
-  http_404: 'ID inexistente (404)',
+  http_400: 'pedido recusado pelo Threema (400)',
+  http_401: 'remetente recusado: ID ou senha do gateway (401)',
+  http_402: 'sem crédito no Threema (402)',
+  http_404: 'esse ID do Threema não existe (404)',
   http_413: 'mensagem grande demais (413)',
-  sem_destinatario_valido: 'ninguém válido',
+  http_500: 'Threema fora do ar (500)',
+  http_502: 'Threema fora do ar (502)',
+  http_503: 'Threema fora do ar (503)',
+  sem_destinatario_valido: 'ninguém válido para receber',
   threema_recipients_missing: 'ninguém para receber',
-  threema_gateway_id_missing: 'remetente sem ID',
-  threema_gateway_secret_missing: 'remetente sem senha',
-  threema_contexto_desativado: 'canal desativado',
+  threema_gateway_id_missing: 'remetente sem ID configurado no servidor',
+  threema_gateway_secret_missing: 'remetente sem senha configurada no servidor',
+  threema_contexto_desativado: 'canal desativado no servidor',
+  threema_contexto_desconhecido: 'remetente desconhecido',
+  threema_contexto_missing: 'envio sem remetente definido',
+  threema_context_channels_invalid: 'mapa de canais do servidor inválido',
+  threema_contexto_gateway_id_repetido: 'dois canais com o mesmo remetente',
 }
 export function fraseErro(e: string | null | undefined): string {
   if (!e) return ''
-  return ERROS[e] || e
+  if (ERROS[e]) return ERROS[e]
+  const http = /^http_(\d{3})$/.exec(e)
+  if (http) return `o Threema respondeu erro ${http[1]}`
+  // Erro de rede gravado pelo envio ("ConnectTimeout: …", "ReadError: …").
+  if (/^[A-Za-z]*(Error|Timeout|Exception)\b/.test(e)) return 'falha de conexão com o Threema'
+  return e
 }
 
 /** "há 2 h, 3/3" ou "há 2 h, falhou: sem crédito (402)". */
-export function ultimoEnvioTexto(u: Ultimo | null, agora: Date = new Date()): string {
+export function ultimoEnvioTexto(
+  u: Ultimo | null,
+  agora: Date = new Date(),
+  e?: Pick<Envio, 'onde_roda' | 'quem_recebe'>,
+): string {
+  // O Mac só registra aqui quando passar a ler o Cadastro (C13).
+  if (!u && e?.onde_roda === 'mac' && e.quem_recebe.via === 'mac_env') return 'o Mac ainda não registra aqui'
   if (!u) return 'nenhum registrado'
   const quando = haQuanto(u.criado_em, agora)
   if (!u.total) return `${quando}, não saiu: ${fraseErro(u.erro) || 'erro'}`
@@ -249,6 +315,13 @@ export function textoConfirmarDesligar(e: Pick<Envio, 'nome' | 'ao_desligar' | '
   return `Desligar "${e.nome}"?\n${efeito}`
 }
 
+/** "Se desligar: os avisos deste período se perdem." (o que ACONTECERIA; não
+ *  é o estado de agora). '' quando não há o que dizer. */
+export function textoSeDesligar(e: Pick<Envio, 'desligavel' | 'ao_desligar_texto'>): string {
+  if (!e.desligavel || !e.ao_desligar_texto) return ''
+  return `Se desligar: ${e.ao_desligar_texto}.`
+}
+
 /** "Mandar '[TESTE] nome' para A, B?" */
 export function textoConfirmarTeste(e: Pick<Envio, 'nome' | 'quem_recebe'>): string {
   const nomes = e.quem_recebe.nomes.map((n) => n.nome).join(', ')
@@ -267,39 +340,92 @@ export function threemaIdValido(v: string | null | undefined): boolean {
 export type EnviosDaPessoa = {
   usuario: { id: string; nome: string; tem_threema: boolean }
   envios: {
+    // via: 'legado' (configuração antiga: a lista guarda o ID), 'cadastro'
+    // (lê daqui) ou 'mac_env' (o Mac ainda usa a lista dele; a daqui não vale)
     chave: string; nome: string; painel: string; onde_roda: string; via: string; unico: boolean; grupo: string | null
     // item 1 na configuração antiga: as regras em que a pessoa está no 👤
     regras?: string[]
+    // configuração antiga: onde a lista é editada hoje (onde tirar o ID)
+    onde?: string | null
   }[]
   total: number
   unicos: number
   pela_configuracao_antiga: number
+  // envios do Mac que ainda usam a lista de lá (o DaVinci não sabe quem está)
+  envios_do_mac_no_env?: number
 }
 
 /** O aviso de Usuários antes de suspender, excluir ou mexer no Threema de
- *  alguém. null = a pessoa não recebe envio nenhum (não precisa perguntar). */
+ *  alguém. null = a pessoa não recebe envio nenhum (não precisa perguntar).
+ *
+ *  O texto vai por via: na configuração antiga a lista guarda o ID — ela
+ *  CONTINUA recebendo depois de suspender ou de apagar o Threema dela aqui
+ *  (só sai tirando o ID de lá); "única pessoa" só existe no que já lê o
+ *  Cadastro. */
 export function textoAvisoPessoa(r: EnviosDaPessoa, acao: string): string | null {
-  if (!r.total) return null
-  const plural = r.total === 1 ? 'envio' : 'envios'
-  const linhas = [`${r.usuario.nome} recebe ${r.total} ${plural} do Threema.`]
-  const unicos = r.envios.filter((e) => e.unico)
+  const antigas = r.envios.filter((e) => e.via === 'legado')
+  const daqui = r.envios.filter((e) => e.via === 'cadastro')
+  if (!antigas.length && !daqui.length) return null
+  const total = antigas.length + daqui.length
+  const linhas = [`${r.usuario.nome} recebe ${total} ${total === 1 ? 'envio' : 'envios'} do Threema.`]
+  const unicos = daqui.filter((e) => e.unico)
   if (unicos.length) {
-    const nomes = unicos.slice(0, 6).map(nomeDoUso).join(', ')
-    const mais = unicos.length > 6 ? ` e mais ${unicos.length - 6}` : ''
-    linhas.push(`Em ${unicos.length} é a única pessoa — eles param de chegar a alguém: ${nomes}${mais}.`)
-  }
-  if (r.pela_configuracao_antiga) {
     linhas.push(
-      `${r.pela_configuracao_antiga} usam a configuração antiga: o ID dela continua nessas listas `
-      + '(suspender não tira). Acerte em Cadastros › Envios Threema.',
+      `Em ${unicos.length} ela é a única da lista: esses avisos deixam de chegar a qualquer pessoa — `
+      + `${listaDeUsos(unicos)}.`,
     )
   }
+  if (antigas.length) {
+    const curta = acao.replace(/ \(desabilitar\)/, '').replace(/ (esta pessoa|este usuário)$/, '')
+    const efeito = /^trocar/.test(acao)
+      ? 'o ID antigo dela continua nessas listas: os avisos seguem indo para ele, não para o novo'
+      : `o ID dela continua nessas listas e ela CONTINUA recebendo (${curta} aqui não tira)`
+    const onde = resumirLugares(antigas.map((e) => e.onde).filter((x): x is string => !!x))
+    const lugares = onde.slice(0, 8).join('; ') + (onde.length > 8 ? `; e mais ${onde.length - 8} lugares` : '')
+    linhas.push(
+      `${antigas.length} ${antigas.length === 1 ? 'usa' : 'usam'} a configuração antiga `
+      + `(${listaDeUsos(antigas, 4)}): ${efeito}.`
+      + (lugares ? ` Para tirar: ${lugares}.` : ''),
+    )
+  }
+  if (r.envios_do_mac_no_env) {
+    linhas.push(
+      `Fora isso, ${r.envios_do_mac_no_env} envios do Mac ainda usam a lista do próprio Mac: o DaVinci não sabe se ela está lá.`,
+    )
+  }
+  linhas.push(`A lista completa: Cadastros › Envios Threema › "Só os envios de ${r.usuario.nome}".`)
   linhas.push(`Quer mesmo ${acao}?`)
   return linhas.join('\n')
 }
 
+// "Onde tirar" sem repetir 11 vezes "Ouvidoria › Robôs › X › Avisar": os
+// robôs viram uma linha, e as listas fixas do servidor, outra.
+const ROBOS = 'Ouvidoria › Robôs › '
+const FIXA = /^lista fixa no servidor, só o técnico muda \(\.env do servidor: (.+)\)$/
+function resumirLugares(onde: string[]): string[] {
+  const unicos = [...new Set(onde)]
+  const robos = unicos.filter((o) => o.startsWith(ROBOS))
+  const fixas = unicos.map((o) => FIXA.exec(o)?.[1]).filter((x): x is string => !!x)
+  const out = unicos.filter((o) => !o.startsWith(ROBOS) && !FIXA.test(o))
+  if (robos.length === 1) out.push(robos[0])
+  else if (robos.length > 1) out.push(`${ROBOS}Avisar de ${robos.length} robôs`)
+  if (fixas.length) {
+    const nomes = [...new Set(fixas.flatMap((x) => x.split(' / ')))]
+    out.push(`lista fixa no servidor, só o técnico muda (${nomes.join(', ')})`)
+  }
+  return out
+}
+
+function listaDeUsos(usos: EnviosDaPessoa['envios'], max = 6): string {
+  const nomes = usos.slice(0, max).map(nomeDoUso).join(', ')
+  return usos.length > max ? `${nomes} e mais ${usos.length - max}` : nomes
+}
+
+// Item 1: o nome da regra só quando é uma (o status de uma regra pode ser
+// "Cancelado | Não entregue | Retido na alfândega | Interno").
 function nomeDoUso(e: EnviosDaPessoa['envios'][number]): string {
-  return e.regras?.length ? `${e.nome} (regra ${e.regras.join(', ')})` : e.nome
+  if (!e.regras?.length) return e.nome
+  return e.regras.length === 1 ? `${e.nome} (regra ${e.regras[0]})` : `${e.nome} (${e.regras.length} regras)`
 }
 
 /** A confirmação ao desativar um contato externo em uso. Na configuração

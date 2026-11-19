@@ -63,7 +63,7 @@ const ROTULO = { usuario: 'pessoa', grupo: 'grupo', contato: 'contato' } as cons
         <button type="button" :aria-label="`tirar ${r.nome}`" @click="tirar(i)"><X class="size-3" /></button>
       </span>
     </div>
-    <p v-if="cheio" class="text-xs text-amber-700">No máximo {{ max }} por lista.</p>
+    <p v-if="cheio" class="text-xs text-amber-700 dark:text-amber-400">No máximo {{ max }} por lista.</p>
     <div class="relative">
       <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
       <input
@@ -87,7 +87,8 @@ const ROTULO = { usuario: 'pessoa', grupo: 'grupo', contato: 'contato' } as cons
               {{ u.nome }}
               <span v-if="escolhido('usuario', u.id)" class="text-xs text-muted-foreground">✓</span>
             </button>
-            <NuxtLink v-if="!u.valido" :to="`/users/${u.id}`" class="text-xs text-amber-700 underline">
+            <!-- Em outra aba: a escolha ainda não salva da gaveta não se perde. -->
+            <NuxtLink v-if="!u.valido" :to="`/users/${u.id}`" target="_blank" class="text-xs text-amber-700 underline dark:text-amber-400">
               {{ u.aviso || 'sem Threema' }}: acertar
             </NuxtLink>
           </li>

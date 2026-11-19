@@ -133,9 +133,18 @@ const BASE = {
   observacao: null, semeado_em: null, depende_de: [], ultimo: null, situacao: 'mac_env', situacoes: ['mac_env'], faixas: [],
   destinatarios: [], antes: null, regras: [], emergencia: { usar_legado: false, alterado_por: null, alterado_em: null, env_desligado: false },
 }
+// Até a C13 o Mac usa a lista e o liga/desliga dele: aqui só a lista se edita.
 const MAC = {
-  ...BASE, chave: 'devolucoes.codigos_ml_tuta', nome: 'Códigos de devolução do ML', onde_roda: 'mac', editavel: true, desligavel: true,
+  ...BASE, chave: 'devolucoes.codigos_ml_tuta', nome: 'Códigos de devolução do ML', onde_roda: 'mac', editavel: true, desligavel: false,
+  por_que_nao_desliga: 'Quem liga e desliga este aviso hoje é o próprio Mac: o Ligado daqui passa a valer quando o Mac ler o Cadastro.',
+  ativo_texto: 'ligado no Mac (quem liga e desliga é o próprio Mac)',
   quem_recebe: { via: 'mac_env', motivo: null, fonte: '.env do Mac (DEVOL_CODIGOS_THREEMA_TO)', nomes: [], avisos: [], total: 0 },
+}
+// Depois que o Mac lê o Cadastro (via=cadastro no registro), o Ligado vale.
+const MAC_LE = {
+  ...MAC, desligavel: true, por_que_nao_desliga: null, ativo_texto: 'ligado',
+  quem_recebe: { ...MAC.quem_recebe, via: 'cadastro', nomes: [{ nome: 'harry potter', tipo: 'usuario' }], total: 1 },
+  destinatarios: [{ tipo: 'usuario', id: 'u-h', nome: 'harry potter', valido: true, aviso: null }],
 }
 const SERVIDOR = {
   ...BASE, chave: 'logistica.informar', painel: 'Logística', nome: 'Informar da Logística', onde_roda: 'servidor', remetente: 'logistica',
@@ -164,27 +173,58 @@ const SEM_LOTES = { items: [], mais: false }
     for (const ok of ['ABCD1234', ' abcd1234 ', '*ABC1234']) assert.ok(lib.threemaIdValido(ok), ok)
     for (const ruim of ['', 'ABC', 'ABCD12345', 'ABCD-123', '**ABC123']) assert.ok(!lib.threemaIdValido(ruim), ruim)
     assert.equal(lib.normalizarThreema(' abcd1234 '), 'ABCD1234')
+    // O aviso vai por via. Configuração antiga: a lista guarda o ID — ela
+    // CONTINUA recebendo depois de suspender (nunca "param de chegar"), e o
+    // aviso diz onde tirar. "Única" só no que já lê o Cadastro.
     const r = {
       usuario: { id: 'u', nome: 'cairo sa', tem_threema: true },
       envios: [
-        { chave: 'a', nome: 'Prazo de contestação', painel: 'Devoluções', onde_roda: 'servidor', via: 'legado', unico: true, grupo: null },
-        { chave: 'b', nome: 'Kit', painel: 'Controle de Estoque', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null },
+        { chave: 'a', nome: 'Prazo de contestação', painel: 'Devoluções', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null, onde: 'lista fixa no servidor, só o técnico muda (.env do servidor: THREEMA_RECIPIENTS)' },
+        { chave: 'b', nome: 'Kit', painel: 'Controle de Estoque', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null, onde: 'Controle de Estoque › Informar' },
+        { chave: 'c', nome: 'Relatório da noite', painel: 'Chamados', onde_roda: 'mac', via: 'mac_env', unico: false, grupo: null },
+        { chave: 'd', nome: 'Vigia migrado', painel: 'Logística', onde_roda: 'servidor', via: 'cadastro', unico: true, grupo: null },
       ],
-      total: 2, unicos: 1, pela_configuracao_antiga: 2,
+      total: 4, unicos: 1, pela_configuracao_antiga: 2, envios_do_mac_no_env: 9,
     }
     const t = lib.textoAvisoPessoa(r, 'suspender esta pessoa')
-    assert.match(t, /^cairo sa recebe 2 envios do Threema\./)
-    assert.match(t, /Em 1 é a única pessoa — eles param de chegar a alguém: Prazo de contestação\./)
-    assert.match(t, /2 usam a configuração antiga: o ID dela continua nessas listas \(suspender não tira\)/)
+    assert.match(t, /^cairo sa recebe 3 envios do Threema\./, 'o do Mac (lista de lá) não conta')
+    assert.match(t, /Em 1 ela é a única da lista: esses avisos deixam de chegar a qualquer pessoa — Vigia migrado\./)
+    assert.match(t, /2 usam a configuração antiga \(Prazo de contestação, Kit\): o ID dela continua nessas listas e ela CONTINUA recebendo \(suspender aqui não tira\)\./)
+    assert.match(t, /Para tirar: Controle de Estoque › Informar; lista fixa no servidor, só o técnico muda \(THREEMA_RECIPIENTS\)\./)
+    // os robôs da Ouvidoria e as listas fixas viram uma linha cada
+    const varios = {
+      ...r,
+      envios: [
+        ...['Vigia A', 'Vigia B'].map((n) => ({ chave: n, nome: n, painel: 'Ouvidoria', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null, onde: `Ouvidoria › Robôs › ${n} › Avisar (sem ninguém, o .env do servidor)` })),
+        { chave: 'x', nome: 'X', painel: 'P', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null, onde: 'lista fixa no servidor, só o técnico muda (.env do servidor: TIKTOK_REEMBOLSO_THREEMA_RECIPIENTS / NF_SEM_ESTOQUE_THREEMA_RECIPIENTS)' },
+        { chave: 'y', nome: 'Y', painel: 'P', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null, onde: 'lista fixa no servidor, só o técnico muda (.env do servidor: NF_SEM_ESTOQUE_THREEMA_RECIPIENTS)' },
+      ],
+    }
+    assert.match(lib.textoAvisoPessoa(varios, 'x'), /Para tirar: Ouvidoria › Robôs › Avisar de 2 robôs; lista fixa no servidor, só o técnico muda \(TIKTOK_REEMBOLSO_THREEMA_RECIPIENTS, NF_SEM_ESTOQUE_THREEMA_RECIPIENTS\)\./)
+    assert.match(t, /Fora isso, 9 envios do Mac ainda usam a lista do próprio Mac: o DaVinci não sabe se ela está lá\./)
+    assert.match(t, /"Só os envios de cairo sa"/)
     assert.match(t, /Quer mesmo suspender esta pessoa\?$/)
+    assert.ok(!/param de chegar/.test(t))
+    assert.match(lib.textoAvisoPessoa(r, 'apagar o Threema'), /\(apagar o Threema aqui não tira\)/)
+    assert.match(lib.textoAvisoPessoa(r, 'excluir (desabilitar) este usuário'), /\(excluir aqui não tira\)/)
+    assert.match(lib.textoAvisoPessoa(r, 'trocar o Threema'), /o ID antigo dela continua nessas listas: os avisos seguem indo para ele, não para o novo\./)
     assert.equal(lib.textoAvisoPessoa({ ...r, envios: [], total: 0, unicos: 0, pela_configuracao_antiga: 0 }, 'x'), null)
+    assert.equal(lib.textoAvisoPessoa({ ...r, envios: [r.envios[2]], total: 1, unicos: 0, pela_configuracao_antiga: 0 }, 'x'), null, 'só o Mac: nada a perguntar')
     // item 1: a pessoa só no 👤 de uma regra — o aviso diz qual
     const soRegra = {
       ...r,
-      envios: [{ chave: 'logistica.mensagem_regra', nome: 'Mensagem da regra', painel: 'Logística', onde_roda: 'servidor', via: 'legado', unico: true, grupo: null, regras: ['Extraviado'] }],
-      total: 1, unicos: 1, pela_configuracao_antiga: 1,
+      envios: [{ chave: 'logistica.mensagem_regra', nome: 'Mensagem da regra', painel: 'Logística', onde_roda: 'servidor', via: 'legado', unico: false, grupo: null, regras: ['Extraviado'], onde: 'Logística › Status: o 👤 de cada regra' }],
+      total: 1, unicos: 0, pela_configuracao_antiga: 1, envios_do_mac_no_env: 0,
     }
-    assert.match(lib.textoAvisoPessoa(soRegra, 'x'), /chegar a alguém: Mensagem da regra \(regra Extraviado\)\./)
+    const tr = lib.textoAvisoPessoa(soRegra, 'x')
+    assert.match(tr, /1 usa a configuração antiga \(Mensagem da regra \(regra Extraviado\)\)/)
+    assert.ok(!/Fora isso/.test(tr))
+    // várias regras: só a contagem (o nome de uma regra pode ser enorme)
+    const duas = { ...soRegra, envios: [{ ...soRegra.envios[0], regras: ['A | B | C', 'D | E'] }] }
+    assert.match(lib.textoAvisoPessoa(duas, 'x'), /\(Mensagem da regra \(2 regras\)\)/)
+    // configuração antiga: até 4 nomes e "e mais N"
+    const muitos = { ...soRegra, envios: ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => ({ ...soRegra.envios[0], chave: n, nome: n, regras: [] })) }
+    assert.match(lib.textoAvisoPessoa(muitos, 'x'), /6 usam a configuração antiga \(a, b, c, d e mais 2\)/)
     // contato externo: o Cadastro e a configuração antiga dizem coisas diferentes
     const roma = {
       nome: 'Roma',
@@ -209,7 +249,7 @@ const SEM_LOTES = { items: [], mais: false }
         if (url === '/api/threema/pessoas') return PESSOAS
         if (url.endsWith('/registros')) return SEM_LOTES
         if (opts.method === 'PATCH') {
-          detalhe = { ...MAC, ativo: false, destinatarios: [{ tipo: 'usuario', id: 'u-h', nome: 'harry potter', valido: true, aviso: null }], avisos_da_edicao: ['O Mac ainda usa o .env: esta lista passa a valer quando o Mac ler o Cadastro.'] }
+          detalhe = { ...MAC, destinatarios: [{ tipo: 'usuario', id: 'u-h', nome: 'harry potter', valido: true, aviso: null }], avisos_da_edicao: ['O Mac ainda usa o .env: esta lista passa a valer quando o Mac ler o Cadastro.'] }
           return detalhe
         }
         return detalhe
@@ -227,18 +267,19 @@ const SEM_LOTES = { items: [], mais: false }
     assert.ok(!/data-acao="testar"/.test(html), 'o envio do Mac não tem teste daqui')
     assert.match(html, /data-acao="salvar"[^>]*disabled|disabled[^>]*data-acao="salvar"/, 'sem mudança, Salvar fica apagado')
 
-    // desligar pede confirmação; recusar não grava
-    m.estado.form.ativo = false
+    // até o Mac ler o Cadastro, o liga/desliga é dele: sem a caixa Ligado
+    assert.ok(!/data-campo="ativo"/.test(html), 'Mac no .env: sem o Ligado')
+    assert.match(html, /data-sem-interruptor[^>]*>\s*Quem liga e desliga este aviso hoje é o próprio Mac/)
+    assert.match(html, /ligado no Mac \(quem liga e desliga é o próprio Mac\)/)
+    assert.match(html, /O Mac ainda não registra os envios aqui/)
+    // a lista se edita (vale depois da C13), sem pergunta
     m.estado.form.lista = [{ tipo: 'usuario', id: 'u-h', nome: 'harry potter' }]
-    responderConfirm = false
+    const nConfirm = confirmacoes.length
     await m.estado.salvar()
-    assert.equal(confirmacoes.at(-1), lib.textoConfirmarDesligar(MAC))
-    assert.ok(!m.chamadas.some((c) => c.method === 'PATCH'))
-    responderConfirm = true
-    await m.estado.salvar()
+    assert.equal(confirmacoes.length, nConfirm, 'mudar a lista não pergunta')
     const patch = m.chamadas.find((c) => c.method === 'PATCH')
     assert.equal(patch.url, '/api/threema/envios/devolucoes.codigos_ml_tuta')
-    assert.deepEqual(patch.body, { ativo: false, destinatarios: [{ tipo: 'usuario', id: 'u-h' }] }, 'só o que mudou')
+    assert.deepEqual(patch.body, { destinatarios: [{ tipo: 'usuario', id: 'u-h' }] }, 'só o que mudou')
     assert.deepEqual(m.emitidos.at(-1), ['mudou'])
     assert.match(m.estado.msg, /^Salvo\. O Mac ainda usa o \.env/)
     assert.equal(m.estado.temMudanca, false)
@@ -246,6 +287,47 @@ const SEM_LOTES = { items: [], mais: false }
     m.estado.form.observacao = ' confere o ID '
     await m.estado.salvar()
     assert.deepEqual(m.chamadas.filter((c) => c.method === 'PATCH').at(-1).body, { observacao: 'confere o ID' })
+  }
+
+  // ---------------------------------------------------------------- gaveta: Mac que já lê o Cadastro
+  {
+    let detalhe = MAC_LE
+    const m = montar('../components/EnviosThreemaGaveta.vue', {
+      props: { chave: MAC_LE.chave, regra: null },
+      responder: (url, opts) => {
+        if (url === '/api/threema/pessoas') return PESSOAS
+        if (url.endsWith('/registros')) return SEM_LOTES
+        if (opts.method === 'PATCH') {
+          detalhe = { ...MAC_LE, ativo: false, ativo_texto: 'desligado', avisos_da_edicao: [] }
+          return detalhe
+        }
+        return detalhe
+      },
+    })
+    await esperar(); await esperar(); await esperar()
+    const html = await m.html()
+    assert.match(html, /data-campo="ativo"/)
+    assert.ok(!/O Mac ainda usa o \.env: esta lista/.test(html), 'já lê o Cadastro: sem o aviso azul')
+    assert.match(html, /Se desligar: ao religar, os pendentes saem de uma vez\./)
+    // desligar pede confirmação; recusar não grava
+    m.estado.form.ativo = false
+    responderConfirm = false
+    await m.estado.salvar()
+    assert.equal(confirmacoes.at(-1), lib.textoConfirmarDesligar(MAC_LE))
+    assert.ok(!m.chamadas.some((c) => c.method === 'PATCH'))
+    // fechar com mudança não salva pergunta antes (e recusar mantém aberta)
+    m.estado.fechar()
+    assert.equal(confirmacoes.at(-1), 'Descartar as mudanças que não foram salvas?')
+    assert.equal(m.emitidos.length, 0)
+    responderConfirm = true
+    await m.estado.salvar()
+    assert.deepEqual(m.chamadas.find((c) => c.method === 'PATCH').body, { ativo: false })
+    assert.equal(m.estado.msg, 'Salvo.')
+    // sem mudança, fecha sem perguntar
+    const n = confirmacoes.length
+    m.estado.fechar()
+    assert.equal(confirmacoes.length, n)
+    assert.deepEqual(m.emitidos.at(-1), ['fechar'])
   }
 
   // ---------------------------------------------------------------- gaveta: servidor não migrado
@@ -429,6 +511,5 @@ const SEM_LOTES = { items: [], mais: false }
     sfc('../pages/users/index.vue')
     sfc('../pages/users/[id].vue')
   }
-
   console.log('envios-threema-edicao-sfc: ok')
 })().catch((e) => { console.error(e); process.exit(1) })

@@ -7,6 +7,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { CheckCircle2, ChevronDown, ChevronRight, MessageSquare, RefreshCw, Search, XCircle } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
+import { fraseErro, nomeConversa } from '~/lib/enviosThreema'
 
 type Destinatario = {
   nome: string | null
@@ -43,6 +44,7 @@ type Resposta = {
 }
 
 const { api } = useApi()
+const route = useRoute()
 
 const POR_PAGINA = 100
 const itens = ref<Lote[]>([])
@@ -51,9 +53,13 @@ const carregando = ref(false)
 const erro = ref<string | null>(null)
 const pagina = ref(1)
 
+// O endereço pode chegar filtrado (o "Ver tudo no Histórico" da gaveta de
+// Cadastros › Envios Threema manda ?chave=<envio>&dias=180).
+const PERIODOS = [1, 7, 30, 90, 180]
+const diasDoEndereco = Number(route.query.dias)
 const busca = ref('')
-const dias = ref(7)
-const envio = ref('')
+const dias = ref(PERIODOS.includes(diasDoEndereco) ? diasDoEndereco : 7)
+const envio = ref(typeof route.query.chave === 'string' ? route.query.chave : '')
 const resultado = ref<'' | 'ok' | 'falhou'>('')
 const origem = ref('')
 
@@ -146,26 +152,10 @@ function quem(l: Lote): string {
   if (l.origem === 'automatico') return 'automático'
   return l.ator ? `${l.ator} (${ORIGEM[l.origem]})` : ORIGEM[l.origem]
 }
-// O que o Threema respondeu, em frase de gente.
-const ERROS: Record<string, string> = {
-  http_400: 'pedido recusado pelo Threema (400)',
-  http_401: 'remetente recusado: ID ou senha do gateway (401)',
-  http_402: 'sem crédito no Threema (402)',
-  http_404: 'esse ID do Threema não existe (404)',
-  http_413: 'mensagem grande demais (413)',
-  http_500: 'Threema fora do ar (500)',
-  threema_gateway_id_missing: 'remetente sem ID configurado no servidor',
-  threema_gateway_secret_missing: 'remetente sem senha configurada no servidor',
-  threema_recipients_missing: 'ninguém para receber',
-  threema_contexto_desativado: 'canal desativado no servidor',
-  threema_contexto_desconhecido: 'remetente desconhecido',
-  threema_contexto_missing: 'envio sem remetente definido',
-  threema_context_channels_invalid: 'mapa de canais do servidor inválido',
-  threema_contexto_gateway_id_repetido: 'dois canais com o mesmo remetente',
-}
+// O que o Threema respondeu, em frase de gente: o mesmo dicionário de
+// Cadastros › Envios Threema (lib/enviosThreema).
 function frase(e: string | null): string {
-  if (!e) return ''
-  return ERROS[e] || e
+  return fraseErro(e)
 }
 function situacao(l: Lote): { texto: string; classe: string } {
   if (l.total === 0) return { texto: 'não saiu', classe: 'pill-danger' }
@@ -205,6 +195,7 @@ function alternar(l: Lote) {
       </select>
       <select v-model="envio" class="h-9 max-w-[18rem] rounded-md border bg-background px-2 text-sm" title="Qual envio">
         <option value="">Envio: todos</option>
+        <option v-if="envio && !enviosConhecidos.some((e) => e.chave === envio)" :value="envio">Envio: {{ envio }}</option>
         <option v-for="e in enviosConhecidos" :key="e.chave" :value="e.chave">
           {{ e.painel ? `${e.painel} › ${e.nome}` : e.nome }}
         </option>
@@ -231,7 +222,7 @@ function alternar(l: Lote) {
       <span class="ml-auto text-sm text-muted-foreground">{{ de }}–{{ ate }} de {{ total.toLocaleString('pt-BR') }}</span>
     </div>
 
-    <div v-if="erro" class="mb-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
+    <div v-if="erro" class="mb-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">{{ erro }}</div>
 
     <div class="table-card overflow-x-auto">
       <table class="w-full text-sm">
@@ -266,7 +257,7 @@ function alternar(l: Lote) {
               <td class="text-muted-foreground">{{ resumoPessoas(l) || '—' }}</td>
               <td class="whitespace-nowrap">
                 <span :class="situacao(l).classe">{{ situacao(l).texto }}</span>
-                <div v-if="l.erro_geral" class="mt-0.5 text-xs text-red-700">{{ frase(l.erro_geral) }}</div>
+                <div v-if="l.erro_geral" class="mt-0.5 text-xs text-red-700 dark:text-red-400">{{ frase(l.erro_geral) }}</div>
               </td>
               <td class="text-muted-foreground">
                 <ChevronDown v-if="aberto === l.lote_id" class="size-4" />
@@ -282,17 +273,15 @@ function alternar(l: Lote) {
                     <span class="font-medium">{{ d.nome || 'Sem nome' }}</span>
                     <span v-if="d.id" class="text-xs text-muted-foreground" title="ID do Threema (só o começo)">{{ d.id }}</span>
                     <span v-if="d.ok" class="text-xs text-muted-foreground">recebeu</span>
-                    <span v-else class="text-xs text-red-700">{{ frase(d.erro) || 'não recebeu' }}</span>
+                    <span v-else class="text-xs text-red-700 dark:text-red-400">{{ frase(d.erro) || 'não recebeu' }}</span>
                   </li>
                 </ul>
-                <p v-else class="text-sm text-red-700">
+                <p v-else class="text-sm text-red-700 dark:text-red-400">
                   A mensagem não chegou a sair para ninguém<span v-if="l.erro_geral">: {{ frase(l.erro_geral) }}</span>.
                 </p>
-                <p class="mt-2 text-xs text-muted-foreground">
-                  Remetente: {{ l.contexto || 'geral' }}<span v-if="l.canal && l.canal !== l.contexto"> (canal {{ l.canal }})</span>
+                <p class="mt-2 text-xs text-muted-foreground" :title="l.envio.chave ? `chave ${l.envio.chave}` : undefined">
+                  Remetente: {{ nomeConversa(l.contexto || 'geral') }}<span v-if="l.canal && l.canal !== l.contexto"> (sai pela conversa {{ nomeConversa(l.canal) }})</span>
                   · {{ fmtCompleta(l.criado_em) }}
-                  <span v-if="l.bytes"> · {{ l.bytes.toLocaleString('pt-BR') }} bytes</span>
-                  <span v-if="l.envio.chave"> · chave {{ l.envio.chave }}</span>
                 </p>
               </td>
             </tr>

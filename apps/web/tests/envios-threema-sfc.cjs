@@ -111,7 +111,7 @@ function montar(rel, { responder, props = {}, query = {}, user = { role: 'admin'
 // ---------------------------------------------------------------- dados falsos
 const BASE = {
   painel: 'Logística', aba: null, descricao: 'Descrição curta.', frequencia_tipo: 'evento',
-  frequencia_texto: 'conferido às :13 e :43', onde_roda: 'servidor', remetente: 'logistica',
+  frequencia_texto: 'conferido às :13 e :43', onde_roda: 'servidor', remetente: 'logistica', canal: 'geral',
   gerenciado: true, migrado: false, fatia: 'F1', interruptor: 'proprio', ao_desligar: 'descarta',
   ao_desligar_texto: 'os avisos deste período se perdem', escopo_tipo: null, editavel: false,
   desligavel: true, por_que_nao_edita: 'Ainda usa a configuração antiga. Para mudar quem recebe: .env do servidor (NF_SEM_ESTOQUE_THREEMA_RECIPIENTS).',
@@ -143,7 +143,7 @@ const INFORMATIVO = {
 }
 const MAC = {
   ...BASE, chave: 'devolucoes.codigos_ml_tuta', painel: 'Devoluções', nome: 'Códigos de devolução do ML', onde_roda: 'mac',
-  remetente: null, editavel: true, por_que_nao_edita: null, fatia: 'mac',
+  remetente: null, canal: null, editavel: true, por_que_nao_edita: null, fatia: 'mac', desligavel: false,
   quem_recebe: { via: 'mac_env', motivo: null, fonte: '.env do Mac (DEVOL_CODIGOS_THREEMA_TO)', nomes: [], avisos: [], total: 0 },
   situacao: 'mac_env', situacoes: ['mac_env'],
   faixas: [{ tipo: 'azul', situacao: 'mac_env', texto: 'O Mac ainda usa o .env (DEVOL_CODIGOS_THREEMA_TO).' }],
@@ -166,10 +166,29 @@ const LISTA = {
   assert.equal(lib.haQuanto('2026-11-19T10:00:00Z', agora), 'há 2 h')
   assert.equal(lib.haQuanto('2026-11-16T12:00:00Z', agora), 'há 3 dias')
   const u = { ...VIGIA.ultimo, criado_em: '2026-11-19T10:00:00Z' }
-  assert.equal(lib.ultimoEnvioTexto(u, agora), 'há 2 h, 1/2 — falhou: sem crédito (402)')
+  assert.equal(lib.ultimoEnvioTexto(u, agora), 'há 2 h, 1/2 — falhou: sem crédito no Threema (402)')
   assert.equal(lib.ultimoEnvioTexto({ ...u, falhas: 0, entregues: 2 }, agora), 'há 2 h, 2/2')
-  assert.equal(lib.ultimoEnvioTexto({ ...u, total: 0, entregues: 0, erro: 'sem_destinatario_valido' }, agora), 'há 2 h, não saiu: ninguém válido')
+  assert.equal(lib.ultimoEnvioTexto({ ...u, total: 0, entregues: 0, erro: 'sem_destinatario_valido' }, agora), 'há 2 h, não saiu: ninguém válido para receber')
   assert.equal(lib.ultimoEnvioTexto(null), 'nenhum registrado')
+  // o Mac só registra aqui depois de ler o Cadastro (C13)
+  assert.equal(lib.ultimoEnvioTexto(null, agora, MAC), 'o Mac ainda não registra aqui')
+  assert.equal(lib.ultimoEnvioTexto(null, agora, VIGIA), 'nenhum registrado')
+  // um dicionário só de erros (o Histórico usa o mesmo), com o erro de rede em frase
+  assert.equal(lib.fraseErro('http_500'), 'Threema fora do ar (500)')
+  assert.equal(lib.fraseErro('http_418'), 'o Threema respondeu erro 418')
+  assert.equal(lib.fraseErro('ConnectTimeout: timed out'), 'falha de conexão com o Threema')
+  assert.equal(lib.fraseErro('qualquer coisa'), 'qualquer coisa')
+  // remetente × a conversa por onde sai de verdade
+  assert.equal(lib.remetenteTexto({ remetente: 'chamados', canal: 'geral', onde_roda: 'servidor' }), 'Chamados · sai pela conversa Geral')
+  assert.equal(lib.remetenteTexto({ remetente: 'logistica', canal: 'logistica', onde_roda: 'servidor' }), 'Logística')
+  assert.equal(lib.remetenteTexto({ remetente: 'juridico', canal: 'desativado', onde_roda: 'servidor' }), 'Jurídico · canal desativado no servidor (não sai)')
+  assert.equal(lib.remetenteTexto({ remetente: null, canal: null, onde_roda: 'mac' }), 'o do Mac')
+  // item 1: quem recebe só pela lista de uma regra não some da coluna
+  assert.equal(lib.porRegraTexto({ quem_recebe: { por_regra: { regras: 9, extras: ['harry potter'] } } }), 'lista própria em 9 regras (+ harry potter)')
+  assert.equal(lib.porRegraTexto({ quem_recebe: { por_regra: { regras: 1, extras: [] } } }), 'lista própria em 1 regra')
+  assert.equal(lib.porRegraTexto(VIGIA), '')
+  assert.equal(lib.textoSeDesligar(VIGIA), 'Se desligar: os avisos deste período se perdem.')
+  assert.equal(lib.textoSeDesligar(MAC), '', 'o Mac ainda não desliga daqui')
   assert.match(lib.classeFaixa('vermelho'), /bg-red-50/)
   assert.match(lib.classeFaixa('ambar'), /bg-amber-50/)
   assert.deepEqual(Object.keys(lib.SITUACAO).sort(), ['bloqueado', 'desligado', 'externo', 'falhando', 'informativo', 'invalido', 'legado', 'mac_env', 'ninguem', 'ok'])
@@ -201,9 +220,14 @@ const LISTA = {
     assert.match(html, /data-faixa="mac_env"/)
     assert.match(html, /londres, harry potter, heisenberg, cairo sa e mais 1/)
     assert.match(html, /text-red-700 font-medium[^>]*>ninguém</, 'ninguém em vermelho')
-    assert.match(html, />o \.env do Mac</, 'o Mac sem lista daqui usa o .env (não é "ninguém")')
+    assert.match(html, />a lista do próprio Mac</, 'o Mac sem lista daqui usa a dele (não é "ninguém")')
     assert.match(html, /última mensagem: Logística — automação parada:/)
-    assert.match(html, /1\/2 — falhou: sem crédito \(402\)/)
+    assert.match(html, /1\/2 — falhou: sem crédito no Threema \(402\)/)
+    assert.match(html, /o Mac ainda não registra aqui/)
+    // a coluna Ações tem título e fica presa à direita; o nome também abre
+    assert.match(html, /<th class="coluna-acoes text-right"[^>]*>Ações<\/th>/)
+    assert.equal([...html.matchAll(/<td class="coluna-acoes /g)].length, 4)
+    assert.equal([...html.matchAll(/data-abrir-nome/g)].length, 4)
     // informativo em cinza; Editar só no editável
     assert.match(html, /data-envio="pedidos\.correcao_dia_envio" class="align-top text-muted-foreground bg-muted\/20"/)
     const botoes = [...html.matchAll(/data-envio="([^"]+)"[\s\S]*?>(Editar|Detalhes)<\/button>/g)].map((x) => [x[1], x[2]])
@@ -243,10 +267,24 @@ const LISTA = {
     })
     await m.montar()
     assert.deepEqual(m.chamadas[0].query, { pessoa: 'u-1' })
-    assert.match(await m.html(), /Só os envios de harry potter/)
+    const htmlPessoa = await m.html()
+    assert.match(htmlPessoa, /Só os envios de harry potter/)
+    assert.match(htmlPessoa, /fora os do Mac, que ainda usam a lista de lá/)
     m.estado.tirarDoEndereco('pessoa')
     await esperar(); await esperar()
     assert.deepEqual(m.chamadas.at(-1).query, {}, 'tirar a pessoa recarrega tudo')
+  }
+  {
+    // carregando: diz que está carregando (não fica uma área em branco)
+    let soltar
+    const m = montar('../pages/envios-threema.vue', { responder: () => new Promise((r) => { soltar = () => r(LISTA) }) })
+    const montando = m.montar()
+    await esperar()
+    assert.match(await m.html(), /data-carregando[^>]*>\s*Carregando envios…/)
+    soltar()
+    await montando
+    await esperar()
+    assert.ok(!/data-carregando/.test(await m.html()))
   }
   {
     // emergência ligada: a caixa fica vermelha e diz quem ligou
@@ -286,16 +324,32 @@ const LISTA = {
     assert.deepEqual(m.chamadas[1].query, { limit: 50 })
     const html = await m.html()
     assert.match(html, /role="dialog"/)
-    assert.match(html, /data-so-leitura[^>]*>Ainda usa a configuração antiga\. Para mudar quem recebe: \.env do servidor/, 'só leitura, com onde mudar')
+    // a faixa âmbar já diz onde mudar: a caixa "só leitura" não repete
+    assert.match(html, /data-faixa="legado"[^>]*>Usa a configuração antiga: NF_SEM_ESTOQUE[^<]*Para mudar quem recebe: \.env do servidor/)
+    assert.ok(!/data-so-leitura/.test(html), 'sem a mesma frase duas vezes')
     assert.match(html, /De onde vem: NF_SEM_ESTOQUE_THREEMA_RECIPIENTS do servidor/)
+    assert.match(html, /data-remetente[^>]*>[^<]*remetente: Logística · sai pela conversa Geral/)
+    assert.ok(!/chave logistica\.vigia_automacao</.test(html), 'a chave fica só no title')
+    assert.match(html, /title="chave logistica\.vigia_automacao"/)
     assert.match(html, /pill-warning[^>]*>1\/2 receberam/)
-    assert.match(html, /harry potter<span class="text-red-700"> \(sem crédito \(402\)\)/)
+    assert.match(html, /harry potter<span class="text-red-700 dark:text-red-400"> \(sem crédito no Threema \(402\)\)/)
     assert.match(html, /Ver tudo no Histórico/)
-    assert.match(html, /Desligado: os avisos deste período se perdem\./)
+    assert.deepEqual(m.estado.linkHistorico, { path: '/historico', query: { ver: 'threema', chave: 'logistica.vigia_automacao', dias: '180' } }, 'o Histórico abre neste envio')
+    assert.match(html, /data-se-desligar[^>]*>\s*Se desligar: os avisos deste período se perdem\./)
     assert.ok(!/TSTL0001/.test(html))
     m.props.chave = null
     await esperar()
     assert.equal(await m.html(), '', 'sem envio, sem gaveta')
+  }
+  {
+    // sem a faixa âmbar (ex.: emergência), a caixa "só leitura" diz onde mudar
+    const SEM_FAIXA = { ...DETALHE_VIGIA, faixas: [] }
+    const m = montar('../components/EnviosThreemaGaveta.vue', {
+      props: { chave: 'logistica.vigia_automacao', regra: null },
+      responder: (url) => (url.endsWith('/registros') ? LOTES : SEM_FAIXA),
+    })
+    await esperar(); await esperar()
+    assert.match(await m.html(), /data-so-leitura[^>]*>Ainda usa a configuração antiga\. Para mudar quem recebe: \.env do servidor/)
   }
   {
     // Item 1: as regras, a marcada pelo endereço; sem Histórico para quem não o vê.
@@ -319,7 +373,7 @@ const LISTA = {
     assert.match(html, /Quem recebe: [\s\S]*?harry potter/)
     assert.match(html, /usa o padrão do envio/)
     assert.match(html, /sempre \(o interruptor é a Mensagem de cada regra\)/)
-    assert.ok(!/Desligado: /.test(html), 'item 1 não tem desligar')
+    assert.ok(!/Se desligar: /.test(html), 'item 1 não tem desligar')
     assert.ok(!/Ver tudo no Histórico/.test(html))
     assert.match(html, /Nenhum envio registrado/)
   }

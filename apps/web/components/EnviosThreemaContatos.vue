@@ -13,6 +13,9 @@ const emit = defineEmits<{ (e: 'mudou'): void }>()
 const { api } = useApi()
 
 const lista = ref<ContatoOut[]>([])
+// Só depois de carregar a lista dá para dizer "nenhum contato" (se a
+// consulta falhou, o vazio enganaria).
+const carregou = ref(false)
 const carregando = ref(false)
 const erro = ref<string | null>(null)
 const msg = ref<string | null>(null)
@@ -21,6 +24,7 @@ async function carregar() {
   carregando.value = true
   try {
     lista.value = (await api<Pessoas>('/api/threema/pessoas')).contatos
+    carregou.value = true
   } catch {
     erro.value = 'Não deu para carregar os contatos.'
   } finally {
@@ -95,8 +99,8 @@ const ORIGEM: Record<string, string> = { tela: 'cadastrado aqui', migracao: 'vei
     <p class="text-sm text-muted-foreground">
       Quem recebe aviso e não tem login no DaVinci. Quem tem login vem de Configurações › Usuários.
     </p>
-    <p v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" data-erro>{{ erro }}</p>
-    <p v-if="msg" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{{ msg }}</p>
+    <p v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300" data-erro>{{ erro }}</p>
+    <p v-if="msg" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">{{ msg }}</p>
 
     <div class="flex flex-wrap items-end gap-2 rounded-md border p-3" data-form-contato>
       <label class="text-sm">
@@ -114,7 +118,7 @@ const ORIGEM: Record<string, string> = { tela: 'cadastrado aqui', migracao: 'vei
       <button type="button" class="inline-flex h-9 items-center gap-1 rounded-md bg-primary px-3 text-sm text-primary-foreground disabled:opacity-50" :disabled="!novo.nome.trim() || !idOk || salvando" @click="criar">
         <Plus class="size-4" /> Cadastrar
       </button>
-      <span v-if="novo.threema_id && !idOk" class="text-xs text-amber-700" data-id-invalido>
+      <span v-if="novo.threema_id && !idOk" class="text-xs text-amber-700 dark:text-amber-400" data-id-invalido>
         O ID do Threema tem 8 letras/números.
       </span>
     </div>
@@ -125,7 +129,7 @@ const ORIGEM: Record<string, string> = { tela: 'cadastrado aqui', migracao: 'vei
           <tr><th class="text-left">Contato</th><th class="text-left">ID</th><th class="text-left">Uso</th><th class="text-left">Situação</th><th /></tr>
         </thead>
         <tbody>
-          <tr v-if="!carregando && !lista.length">
+          <tr v-if="!carregando && carregou && !lista.length">
             <td colspan="5" class="py-6 text-center text-muted-foreground">Nenhum contato externo.</td>
           </tr>
           <tr v-for="c in lista" :key="c.id" :data-contato="c.id" class="align-top" :class="{ 'text-muted-foreground': !c.ativo }">
@@ -133,7 +137,7 @@ const ORIGEM: Record<string, string> = { tela: 'cadastrado aqui', migracao: 'vei
               <div class="font-medium">{{ c.nome }}</div>
               <div v-if="c.observacao" class="text-xs text-muted-foreground">{{ c.observacao }}</div>
               <div class="text-xs text-muted-foreground">{{ ORIGEM[c.origem] || c.origem }}</div>
-              <div v-if="c.e_de_usuario" class="text-xs text-amber-700">o ID é de {{ c.e_de_usuario }} em Usuários</div>
+              <div v-if="c.e_de_usuario" class="text-xs text-amber-700 dark:text-amber-400">o ID é de {{ c.e_de_usuario }} em Usuários</div>
             </td>
             <td class="text-xs">{{ c.threema_id }}</td>
             <td class="text-xs text-muted-foreground">

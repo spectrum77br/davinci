@@ -57,7 +57,7 @@ const esperar = () => new Promise((r) => setTimeout(r, 0))
 
 // O setup de verdade fora de um app (os `watch` ficam vivos) e o HTML de um app
 // SSR com o MESMO estado — o molde de tests/atendimento-email-lojas.cjs.
-function montar(rel, responder) {
+function montar(rel, responder, query = {}) {
   const { descriptor, filename } = sfc(rel)
   const script = compileScript(descriptor, { id: path.basename(rel), inlineTemplate: false })
   const tpl = compileTemplate({ source: descriptor.template.content, filename, id: path.basename(rel), compilerOptions: { isTS: true, bindingMetadata: script.bindings } })
@@ -67,6 +67,7 @@ function montar(rel, responder) {
   const g = {
     ref: Vue.ref, computed: Vue.computed, reactive: Vue.reactive, watch: Vue.watch, nextTick: Vue.nextTick,
     onMounted: (fn) => montados.push(fn),
+    useRoute: () => ({ query }),
     useApi: () => ({
       api: async (url, opts = {}) => {
         chamadas.push({ url, query: { ...(opts.query || {}) } })
@@ -158,7 +159,10 @@ const RESPOSTA = {
   html = await m.html()
   assert.match(html, /sem crédito no Threema \(402\)/)
   assert.match(html, /TS••••••/)
-  assert.match(html, /chave logistica\.vigia_automacao/)
+  // a chave fica só no title; bytes não aparecem; o remetente em nome de gente
+  assert.match(html, /title="chave logistica\.vigia_automacao"/)
+  assert.ok(!/bytes/.test(html))
+  assert.match(html, /Remetente: Logística ·/)
   m.estado.alternar(LOTE_PARCIAL)
   assert.ok(!/sem crédito/.test(await m.html()), 'clicar de novo fecha')
 
@@ -182,6 +186,19 @@ const RESPOSTA = {
   m.estado.limparFiltros()
   await esperar(); await esperar()
   assert.deepEqual(m.chamadas.at(-1).query, { dias: 7, limit: 100, offset: 0 })
+
+  // O "Ver tudo no Histórico" da gaveta chega com ?chave=&dias=: já filtrado.
+  {
+    const m2 = montar('../components/HistoricoEnviosThreema.vue', () => RESPOSTA, { ver: 'threema', chave: 'logistica.informar', dias: '180' })
+    await m2.montar()
+    assert.deepEqual(m2.chamadas[0].query, { dias: 180, limit: 100, offset: 0, chave: 'logistica.informar' })
+    const h = await m2.html()
+    assert.match(h, /<option value="logistica\.informar"[^>]*>Envio: logistica\.informar/, 'o envio do endereço aparece no filtro mesmo sem lote no período')
+    // período fora da lista volta para 7 dias
+    const m3 = montar('../components/HistoricoEnviosThreema.vue', () => RESPOSTA, { dias: '999' })
+    await m3.montar()
+    assert.equal(m3.chamadas[0].query.dias, 7)
+  }
 
   console.log('historico-envios-threema-sfc: ok')
 })().catch((e) => { console.error(e); process.exit(1) })

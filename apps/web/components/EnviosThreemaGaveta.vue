@@ -11,11 +11,11 @@
 // acontece com os avisos), quem recebe (Pessoas, Grupos e Contatos
 // externos), observação, re-aviso (Ouvidoria) e a lista de cada regra
 // (item 1). "Mandar teste" manda "[TESTE] <nome>" para quem recebe agora.
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { CheckCircle2, Send, X, XCircle } from 'lucide-vue-next'
 import {
-  FREQUENCIA, ONDE_RODA, ORIGEM, classeFaixa, fraseErro, haQuanto, textoConfirmarDesligar,
-  textoConfirmarTeste, type Detalhe, type Lote, type Pessoas, type Regra, type RefSel,
+  FREQUENCIA, ONDE_RODA, ORIGEM, classeFaixa, fraseErro, haQuanto, remetenteTexto, textoConfirmarDesligar,
+  textoConfirmarTeste, textoSeDesligar, type Detalhe, type Lote, type Pessoas, type Regra, type RefSel,
 } from '~/lib/enviosThreema'
 
 const props = defineProps<{ chave: string | null; regra?: string | null }>()
@@ -60,7 +60,9 @@ async function carregar(chave: string) {
 const aberto = computed(() => !!props.chave)
 const podeVerHistorico = computed(() => (auth.user as any)?.historico === true)
 
+// Fechar (fundo, Esc ou X) com mudança não salva pergunta antes.
 function fechar() {
+  if (temMudanca.value && !confirm('Descartar as mudanças que não foram salvas?')) return
   emit('fechar')
 }
 function aoTeclar(ev: KeyboardEvent) {
@@ -112,7 +114,19 @@ const mudouObs = computed(() => (form.observacao.trim() || null) !== (detalhe.va
 const mudouReaviso = computed(
   () => !!detalhe.value?.tem_reaviso && !!form.reaviso && form.reaviso !== detalhe.value.reaviso_horas,
 )
-const temMudanca = computed(() => mudouLista.value || mudouAtivo.value || mudouObs.value || mudouReaviso.value)
+const temMudanca = computed(
+  () => !!detalhe.value?.editavel && (mudouLista.value || mudouAtivo.value || mudouObs.value || mudouReaviso.value),
+)
+
+// A faixa âmbar "Usa a configuração antiga" já diz onde mudar: a caixa de
+// "só leitura" não repete a mesma frase logo abaixo.
+const temFaixaLegado = computed(() => !!detalhe.value?.faixas.some((f) => f.situacao === 'legado'))
+
+// Link do Histórico já filtrado neste envio (e no período longo do registro).
+const linkHistorico = computed(() => ({
+  path: '/historico',
+  query: { ver: 'threema', chave: detalhe.value?.chave || '', dias: '180' },
+}))
 
 function desfazer() {
   if (detalhe.value) preencher(detalhe.value)
@@ -205,6 +219,17 @@ async function salvarRegra(r: Regra, padrao = false) {
   }
 }
 
+// ?envio=…&regra=<id>: a regra marcada fica à vista (a 12ª fica abaixo da dobra).
+watch(
+  () => [detalhe.value?.chave, props.regra] as const,
+  async ([chave, regra]) => {
+    if (!chave || !regra || typeof document === 'undefined') return
+    await nextTick()
+    const el = document.querySelector(`[data-regra="${CSS.escape(regra)}"]`)
+    if (el && 'scrollIntoView' in el) (el as HTMLElement).scrollIntoView({ block: 'center' })
+  },
+)
+
 // Por último: o `immediate` lê o estado da edição, declarado acima.
 watch(
   () => props.chave,
@@ -234,10 +259,9 @@ watch(
       <div class="flex items-start gap-3 border-b px-5 py-4">
         <div class="min-w-0 flex-1">
           <h2 class="text-base font-semibold leading-tight">{{ detalhe?.nome || chave }}</h2>
-          <p v-if="detalhe" class="mt-0.5 text-xs text-muted-foreground">
+          <p v-if="detalhe" class="mt-0.5 text-xs text-muted-foreground" :title="`chave ${detalhe.chave}`">
             {{ detalhe.painel }}<span v-if="detalhe.aba"> › {{ detalhe.aba }}</span>
             · {{ FREQUENCIA[detalhe.frequencia_tipo] }} · {{ ONDE_RODA[detalhe.onde_roda] }}
-            · chave {{ detalhe.chave }}
           </p>
         </div>
         <button type="button" class="-mr-2 -mt-1 rounded p-1 hover:bg-muted" aria-label="fechar" @click="fechar">
@@ -247,7 +271,7 @@ watch(
 
       <div class="flex-1 space-y-5 overflow-y-auto px-5 py-5 text-sm">
         <p v-if="carregando && !detalhe" class="text-muted-foreground">carregando…</p>
-        <p v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-red-700">{{ erro }}</p>
+        <p v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-red-700 dark:bg-red-950/30 dark:text-red-300">{{ erro }}</p>
 
         <template v-if="detalhe">
           <ul v-if="detalhe.faixas.length" class="space-y-1">
@@ -263,9 +287,8 @@ watch(
           <section>
             <h3 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">O que é</h3>
             <p>{{ detalhe.descricao }}</p>
-            <p class="mt-1 text-xs text-muted-foreground">
-              Quando sai: {{ detalhe.frequencia_texto }} · remetente:
-              {{ detalhe.remetente || (detalhe.onde_roda === 'servidor' ? 'dinâmico (pela origem do chamado)' : 'o do Mac') }}
+            <p class="mt-1 text-xs text-muted-foreground" data-remetente>
+              Quando sai: {{ detalhe.frequencia_texto }} · remetente: {{ remetenteTexto(detalhe) }}
             </p>
           </section>
 
@@ -274,18 +297,18 @@ watch(
             <div v-if="detalhe.quem_recebe.nomes.length" class="flex flex-wrap gap-1">
               <span v-for="(n, i) in detalhe.quem_recebe.nomes" :key="i" class="pill-muted">{{ n.nome }}</span>
             </div>
-            <p v-else-if="detalhe.gerenciado" :class="detalhe.onde_roda === 'mac' ? 'text-muted-foreground' : 'font-medium text-red-700'">
-              {{ detalhe.onde_roda === 'mac' ? 'Ninguém na lista daqui: o Mac usa o .env.' : 'Ninguém: este aviso não está saindo.' }}
+            <p v-else-if="detalhe.gerenciado" :class="detalhe.onde_roda === 'mac' ? 'text-muted-foreground' : 'font-medium text-red-700 dark:text-red-400'">
+              {{ detalhe.onde_roda === 'mac' ? 'Ninguém na lista daqui: o Mac usa a lista dele.' : 'Ninguém: este aviso não está saindo.' }}
             </p>
             <p v-else class="text-muted-foreground">—</p>
             <p v-if="detalhe.quem_recebe.fonte" class="mt-1 text-xs text-muted-foreground">
               De onde vem: {{ detalhe.quem_recebe.fonte }}
             </p>
-            <ul v-if="detalhe.quem_recebe.avisos.length" class="mt-1 list-disc pl-5 text-xs text-amber-700">
+            <ul v-if="detalhe.quem_recebe.avisos.length" class="mt-1 list-disc pl-5 text-xs text-amber-700 dark:text-amber-400">
               <li v-for="(a, i) in detalhe.quem_recebe.avisos" :key="i">{{ a }}</li>
             </ul>
             <p
-              v-if="!detalhe.editavel && detalhe.por_que_nao_edita"
+              v-if="!detalhe.editavel && detalhe.por_que_nao_edita && !temFaixaLegado"
               class="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300"
               data-so-leitura
             >{{ detalhe.por_que_nao_edita }}</p>
@@ -340,7 +363,7 @@ watch(
 
           <section v-if="detalhe.editavel" data-bloco="edicao" class="space-y-3 rounded-md border p-3">
             <h3 class="text-xs font-semibold uppercase text-muted-foreground">Editar</h3>
-            <p v-if="detalhe.onde_roda === 'mac'" class="rounded border border-sky-300 bg-sky-50 px-2 py-1 text-xs text-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
+            <p v-if="detalhe.onde_roda === 'mac' && detalhe.quem_recebe.via === 'mac_env'" class="rounded border border-sky-300 bg-sky-50 px-2 py-1 text-xs text-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
               O Mac ainda usa o .env: esta lista passa a valer quando o Mac ler o Cadastro. Lista vazia = o Mac continua no .env.
             </p>
             <label v-if="detalhe.desligavel" class="flex items-center gap-2">
@@ -351,7 +374,7 @@ watch(
               </span>
             </label>
             <p v-else class="text-xs text-muted-foreground" data-sem-interruptor>
-              Sem interruptor: quem liga e desliga é a Mensagem de cada regra.
+              {{ detalhe.por_que_nao_desliga || 'Sem interruptor: quem liga e desliga é a Mensagem de cada regra.' }}
             </p>
             <div>
               <div class="mb-1 text-xs font-medium">Quem recebe{{ detalhe.escopo_tipo === 'regra_status' ? ' (padrão)' : '' }}</div>
@@ -377,18 +400,18 @@ watch(
             </div>
           </section>
 
-          <p v-if="erroEdicao" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700" data-erro-edicao>{{ erroEdicao }}</p>
+          <p v-if="erroEdicao" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-300" data-erro-edicao>{{ erroEdicao }}</p>
           <p v-if="msg" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300" data-msg>{{ msg }}</p>
 
           <section>
             <h3 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">Liga e desliga</h3>
             <p>{{ detalhe.ativo_texto }}</p>
-            <p v-if="detalhe.desligavel && detalhe.ao_desligar_texto" class="text-xs text-muted-foreground">
-              Desligado: {{ detalhe.ao_desligar_texto }}.
+            <p v-if="textoSeDesligar(detalhe)" class="text-xs text-muted-foreground" data-se-desligar>
+              {{ textoSeDesligar(detalhe) }}
             </p>
             <ul v-if="detalhe.depende_de.length" class="mt-1 space-y-0.5 text-xs">
-              <li v-for="d in detalhe.depende_de" :key="d.alvo" :class="d.ok ? 'text-muted-foreground' : 'text-amber-700'">
-                Depende de: {{ d.texto }} — {{ d.estado }}
+              <li v-for="d in detalhe.depende_de" :key="d.alvo" :class="d.ok ? 'text-muted-foreground' : 'text-amber-700 dark:text-amber-400'">
+                Precisa: {{ d.texto }} — hoje: {{ d.estado }}
               </li>
             </ul>
             <p v-if="detalhe.tem_reaviso && detalhe.reaviso_horas" class="mt-1 text-xs text-muted-foreground">
@@ -413,7 +436,11 @@ watch(
                 @click="testar"
               ><Send class="size-3" /> {{ testando ? 'mandando…' : 'Mandar teste' }}</button>
             </div>
-            <p v-if="!lotes.length" class="text-xs text-muted-foreground">Nenhum envio registrado.</p>
+            <p v-if="!lotes.length" class="text-xs text-muted-foreground">
+              {{ detalhe.onde_roda === 'mac' && detalhe.quem_recebe.via === 'mac_env'
+                ? 'O Mac ainda não registra os envios aqui (passa a registrar quando ler o Cadastro).'
+                : 'Nenhum envio registrado.' }}
+            </p>
             <ul v-else class="divide-y rounded border">
               <li v-for="l in lotes" :key="l.lote_id" class="px-3 py-2">
                 <div class="flex flex-wrap items-center gap-2">
@@ -426,16 +453,16 @@ watch(
                   <li v-for="(x, i) in l.destinatarios" :key="i" class="inline-flex items-center gap-1">
                     <CheckCircle2 v-if="x.ok" class="size-3 text-emerald-600" />
                     <XCircle v-else class="size-3 text-red-600" />
-                    {{ x.nome || x.id }}<span v-if="!x.ok" class="text-red-700"> ({{ fraseErro(x.erro) || 'não recebeu' }})</span>
+                    {{ x.nome || x.id }}<span v-if="!x.ok" class="text-red-700 dark:text-red-400"> ({{ fraseErro(x.erro) || 'não recebeu' }})</span>
                   </li>
                 </ul>
-                <p v-else-if="l.erro_geral" class="mt-1 text-xs text-red-700">{{ fraseErro(l.erro_geral) }}</p>
+                <p v-else-if="l.erro_geral" class="mt-1 text-xs text-red-700 dark:text-red-400">{{ fraseErro(l.erro_geral) }}</p>
               </li>
             </ul>
             <p v-if="maisLotes" class="mt-1 text-xs text-muted-foreground">Mostrando os últimos 50.</p>
             <NuxtLink
               v-if="podeVerHistorico"
-              :to="{ path: '/historico', query: { ver: 'threema' } }"
+              :to="linkHistorico"
               class="mt-1 inline-block text-xs underline"
             >Ver tudo no Histórico</NuxtLink>
           </section>
