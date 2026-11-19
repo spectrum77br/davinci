@@ -9,7 +9,9 @@ destinatarios` com a reserva `chamados_ia`, `_destinatarios_sem_estoque`,
 `avisar_graves`, `entregar_resultado` do Tuta, o `send_to_all` que cai no
 THREEMA_RECIPIENTS...). Onde a lista é montada no meio de uma função maior,
 a expressão é copiada aqui E um teste confere que ela continua no código —
-se alguém mudar o ponto de envio, este arquivo reprova.
+se alguém mudar o ponto de envio, este arquivo reprova. Os botões que
+montam a lista dentro da rota (os 5 Informar e o botão da regra do item 1)
+são conferidos também pela ROTA de verdade, com o envio capturado.
 
 Três cenários (`threema_cadastro_apoio`): o "cheio", parecido com produção,
 o "reservas", com as fontes principais vazias, e o "vazias", com toda linha
@@ -25,7 +27,7 @@ import pytest
 import respx
 
 from app.config import get_settings
-from app.models import OuvidoriaRobo
+from app.models import OuvidoriaRobo, UserRole
 from app.routers import informar as informar_router
 from app.services import (
     chamados_ia_aviso,
@@ -335,26 +337,102 @@ async def test_mac_e_informativos_nao_tem_lista_no_servidor(db):
 
 # Onde a lista é montada no meio de uma função maior, a cópia acima vale só
 # enquanto a expressão continuar no código.
-_EXPRESSOES = {
-    "worker.py": "threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)",
-    "services/devolucao_prazo.py": "threema.parse_recipients(get_settings().threema_recipients)",
+_EXPRESSOES: dict[str, tuple[str, ...]] = {
+    "worker.py": ("threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)",),
+    "services/devolucao_prazo.py": ("threema.parse_recipients(get_settings().threema_recipients)",),
     "services/prioridade_estoque_movimentos.py": (
-        "threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)"
+        "threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)",
     ),
     "services/vigia_estoque_familia.py": (
-        'getattr(settings, "vigia_estoque_familia_threema_recipients", "")'
+        'getattr(settings, "vigia_estoque_familia_threema_recipients", "")',
     ),
-    "services/nf_auto_enfileirar.py": "get_settings().nf_sem_estoque_threema_recipients",
-    "services/logistica_bling.py": "threema.parse_recipients(rule.threema_recipients) or None",
-    "routers/logistica.py": "threema.parse_recipients(rule.threema_recipients) or None",
-    "services/threema.py": "recipients or parse_recipients(get_settings().threema_recipients)",
+    "services/nf_auto_enfileirar.py": ("get_settings().nf_sem_estoque_threema_recipients",),
+    "services/logistica_bling.py": ("threema.parse_recipients(rule.threema_recipients) or None",),
+    "routers/logistica.py": (
+        # botão da linha do pedido
+        "threema.parse_recipients(rule.threema_recipients) or None",
+        # botão da regra (a rota também é conferida de verdade abaixo)
+        "threema.parse_recipients(s.threema_recipients) or None",
+    ),
+    # os 5 Informar (`_informar` acima; a rota também é conferida abaixo)
+    "routers/informar.py": ('threema.parse_recipients(row.recipients if row else "")',),
+    "services/threema.py": ("recipients or parse_recipients(get_settings().threema_recipients)",),
 }
 
 
 @pytest.mark.parametrize("arquivo", sorted(_EXPRESSOES))
 def test_a_expressao_copiada_continua_no_ponto_de_envio(arquivo):
     fonte = (_APP / arquivo).read_text(encoding="utf-8")
-    assert _EXPRESSOES[arquivo] in fonte, arquivo
+    for expressao in _EXPRESSOES[arquivo]:
+        assert expressao in fonte, (arquivo, expressao)
+
+
+# ─────────────────────────────────────────── pela rota de verdade
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("limpar_ouvidoria")
+@pytest.mark.parametrize("variante", ["cheio", "reservas", "vazias"])
+async def test_informar_pela_rota_de_verdade(db, monkeypatch, client, make_user, auth_as, variante):
+    """`POST /api/informar/{ctx}/enviar` dos 5 contextos manda para
+    `legado(chave)` — e, com a lista vazia, não manda (422)."""
+    await montar(db, monkeypatch, variante=variante)
+    auth_as(await make_user(role=UserRole.ADMIN))
+    monkeypatch.setattr(threema, "ThreemaClient", _Captura)
+    diferentes = {}
+    for ctx in sorted(informar_router._CONTEXTOS_ENVIO):
+        chave = informar_router._CHAVE_ENVIO[ctx]
+        _Captura.chamadas = []
+        r = await client.post(f"/api/informar/{ctx}/enviar")
+        leg = list((await threema_envios.legado(chave, session=db)).ids)
+        if leg:
+            assert r.status_code == 200, (ctx, r.text)
+            assert _Captura.chamadas, ctx
+        else:
+            assert r.status_code == 422, (ctx, r.text)
+            assert r.json()["detail"]["code"] == "sem_destinatarios"
+        # o Informar manda várias mensagens: todas para a mesma lista
+        for enviada in _Captura.chamadas or [[]]:
+            if enviada != leg:
+                diferentes[ctx] = (leg, enviada)
+    assert diferentes == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("limpar_ouvidoria")
+@pytest.mark.parametrize("variante", ["cheio", "reservas", "vazias"])
+async def test_botao_da_regra_pela_rota_de_verdade(
+    db, monkeypatch, client, make_user, auth_as, variante
+):
+    """`POST /api/logistica/status/{id}/enviar-threema` sem escolha avulsa
+    manda para `legado(item 1, escopo=regra)`: o 👤 da regra, ou o
+    THREEMA_RECIPIENTS pelo `send_to_all` de verdade quando ela não tem 👤."""
+    c = await montar(db, monkeypatch, variante=variante)
+    s = get_settings()
+    monkeypatch.setattr(s, "threema_gateway_id", "*TSTGW01")
+    monkeypatch.setattr(s, "threema_gateway_secret", "s3cr3t-paridade")
+    monkeypatch.setattr(s, "threema_separate_chats", False)
+    monkeypatch.setattr(s, "threema_context_channels", {})
+    auth_as(await make_user(role=UserRole.ADMIN))
+    com_mensagem = [r for r in c.regras.values() if (r.mensagem_threema or "").strip()]
+    assert len(com_mensagem) == 2
+    for regra in com_mensagem:
+        enviados: list[str] = []
+
+        def _resp(request: httpx.Request, enviados=enviados) -> httpx.Response:
+            enviados.append(dict(httpx.QueryParams(request.content.decode()))["to"])
+            return httpx.Response(200, text="abc")
+
+        with respx.mock(base_url=threema.THREEMA_API_BASE, assert_all_called=False) as router:
+            router.post("/send_simple").mock(side_effect=_resp)
+            r = await client.post(f"/api/logistica/status/{regra.id}/enviar-threema")
+        leg = list(
+            (
+                await threema_envios.legado(K.LOGISTICA_MENSAGEM_REGRA, escopo=regra.id, session=db)
+            ).ids
+        )
+        assert enviados == leg, (regra.status_plataforma, r.status_code, r.text)
+        assert r.status_code == (200 if leg else 422), r.text
 
 
 def test_tuta_continua_buscando_o_usuario_pelo_nome():
