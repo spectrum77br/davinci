@@ -1129,7 +1129,7 @@ async def gravar_registros_robo(session: AsyncSession, itens: Sequence) -> dict:
             desconhecidas.add(i.chave)
             chave = None
         rid = (i.destinatario or "").strip().upper()[:8] or None
-        nome, user_id = nomes.get(rid, (None, None)) if rid else (None, None)
+        nome, user_id, contato_id = nomes.get(rid, (None, None, None)) if rid else (None,) * 3
         lote = (
             uuid.uuid5(uuid.NAMESPACE_URL, f"davinci:threema:mac:{i.lote}")
             if i.lote
@@ -1156,6 +1156,7 @@ async def gravar_registros_robo(session: AsyncSession, itens: Sequence) -> dict:
                 "destinatario_id": rid,
                 "destinatario_nome": nome,
                 "user_id": user_id,
+                "contato_id": contato_id,
                 "ok": bool(i.ok),
                 "http_status": i.http_status,
                 "erro": (i.erro or "")[:200] or None,

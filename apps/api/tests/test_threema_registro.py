@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.historico import contexto as historico_contexto
 from app.historico import sql as historico_sql
-from app.models import Base, ThreemaEnvioRegistro, User, UserRole, UserStatus
+from app.models import Base, ThreemaContato, ThreemaEnvioRegistro, User, UserRole, UserStatus
 from app.services import threema, threema_registro
 from app.services.threema_catalogo import CATALOGO, K, constantes
 
@@ -82,6 +82,9 @@ async def _usuario(db: AsyncSession, *, nome: str, threema_id: str, ativo: bool 
 @pytest.mark.asyncio
 async def test_uma_linha_por_destinatario_com_status_e_message_id(db, monkeypatch):
     londres = await _usuario(db, nome="Londres Teste", threema_id="tsta0001")
+    roma = ThreemaContato(nome="Roma contato", threema_id="TSTD0004", origem="tela")
+    db.add(roma)
+    await db.commit()
     monkeypatch.setattr(
         threema_registro,
         "get_settings",
@@ -99,13 +102,15 @@ async def test_uma_linha_por_destinatario_com_status_e_message_id(db, monkeypatc
     with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
         router.post("/send_simple").mock(side_effect=_resp)
         with threema_registro.envio(K.LOGISTICA_VIGIA_AUTOMACAO):
-            out = await _cliente().send_to_all(texto, ["TSTA0001", "TSTB0002", "TSTC0003"])
-    assert out == {"sent": ["TSTA0001", "TSTC0003"], "failed": ["TSTB0002"]}
+            out = await _cliente().send_to_all(
+                texto, ["TSTA0001", "TSTB0002", "TSTC0003", "TSTD0004"]
+            )
+    assert out == {"sent": ["TSTA0001", "TSTC0003", "TSTD0004"], "failed": ["TSTB0002"]}
 
     linhas = await _linhas(db)
-    assert len(linhas) == 3
+    assert len(linhas) == 4
     assert len({r.lote_id for r in linhas}) == 1
-    a, b, c = linhas
+    a, b, c, d = linhas
     for r in linhas:
         assert r.envio_chave == K.LOGISTICA_VIGIA_AUTOMACAO
         assert r.contexto == "logistica"
@@ -124,11 +129,15 @@ async def test_uma_linha_por_destinatario_com_status_e_message_id(db, monkeypatc
         "0a1b2c3d4e5f6789",
     )
     assert a.destinatario_nome == "Londres Teste" and a.user_id == londres.id
+    assert a.contato_id is None
     # 402 (sem crédito) fica como falha com o status
     assert (b.destinatario_id, b.ok, b.http_status, b.erro) == ("TSTB0002", False, 402, "http_402")
     assert b.destinatario_nome is None and b.message_id is None
     # sem usuário: o nome do THREEMA_RECIPIENT_NAMES
     assert c.destinatario_nome == "Roma do env" and c.user_id is None and c.ok
+    assert c.contato_id is None
+    # contato externo: o nome e o id dele (renomear não perde a ligação)
+    assert (d.destinatario_nome, d.user_id, d.contato_id) == ("Roma contato", None, roma.id)
 
 
 @pytest.mark.asyncio

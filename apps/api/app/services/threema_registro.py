@@ -177,15 +177,20 @@ def _host() -> str | None:
         return None
 
 
-async def _nomes(session, ids: set[str]) -> dict[str, tuple[str, uuid.UUID | None]]:
-    """{ID: (nome, user_id)}. Usuário do cadastro primeiro (o ativo vence o
-    suspenso), depois o contato avulso, depois o nome do .env."""
+Nome = tuple[str, uuid.UUID | None, uuid.UUID | None]
+
+
+async def _nomes(session, ids: set[str]) -> dict[str, Nome]:
+    """{ID: (nome, user_id, contato_id)}. Usuário do cadastro primeiro (o
+    ativo vence o suspenso), depois o contato externo ativo (com o id dele em
+    `threema_contato`, para o registro continuar ligado ao contato se ele for
+    renomeado), depois o nome do .env."""
     from sqlalchemy import func, select
 
     from app.models import User, UserStatus
     from app.services import threema
 
-    out: dict[str, tuple[str, uuid.UUID | None]] = {}
+    out: dict[str, Nome] = {}
     if not ids:
         return out
     rows = (
@@ -201,18 +206,23 @@ async def _nomes(session, ids: set[str]) -> dict[str, tuple[str, uuid.UUID | Non
     for r in ativos:
         rid = (r.threema or "").strip().upper()
         if rid in ids and rid not in out:
-            out[rid] = ((r.name or r.email or "")[:_TAM_NOME], r.id)
+            out[rid] = ((r.name or r.email or "")[:_TAM_NOME], r.id, None)
     faltam = ids - set(out)
     if faltam:
-        for d in await threema.contatos(session):
-            if d["id"] in faltam and d["id"] not in out:
-                out[d["id"]] = (d["nome"][:_TAM_NOME], None)
+        linhas = await threema._contatos_ativos(session)
+        if linhas is None:  # antes do alembic (0505): a linha antiga, sem id
+            contatos = [(d["id"], d["nome"], None) for d in await threema.contatos(session)]
+        else:
+            contatos = [(c.threema_id, c.nome, c.id) for c in linhas]
+        for rid, nome, contato_id in contatos:
+            if rid in faltam and rid not in out:
+                out[rid] = (nome[:_TAM_NOME], None, contato_id)
     faltam = ids - set(out)
     if faltam:
         s = get_settings()
         for d in threema.parse_recipient_directory(s.threema_recipient_names, None):
             if d["id"] in faltam and d["id"] not in out:
-                out[d["id"]] = (d["nome"][:_TAM_NOME], None)
+                out[d["id"]] = (d["nome"][:_TAM_NOME], None, None)
     return out
 
 
@@ -224,7 +234,7 @@ def _linhas(
     texto: str,
     tentativas: Sequence[Tentativa],
     segredos: Sequence[str],
-    nomes: dict[str, tuple[str, uuid.UUID | None]],
+    nomes: dict[str, Nome],
 ) -> list[dict]:
     from app.historico.contexto import ator_atual
 
@@ -255,14 +265,14 @@ def _linhas(
     out = []
     for t in tentativas:
         rid = (t.destinatario or "").strip().upper()[:8] or None
-        nome, user_id = nomes.get(rid, (None, None)) if rid else (None, None)
+        nome, user_id, contato_id = nomes.get(rid, (None, None, None)) if rid else (None,) * 3
         out.append(
             {
                 **base,
                 "destinatario_id": rid,
                 "destinatario_nome": nome,
                 "user_id": user_id,
-                "contato_id": None,
+                "contato_id": contato_id,
                 "ok": bool(t.ok),
                 "http_status": t.http_status,
                 "erro": _limpar_erro(t.erro, segredos),
