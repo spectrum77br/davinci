@@ -808,6 +808,18 @@ def _flex_local_de_fabrica():
 
 
 @pytest.fixture(autouse=True)
+def _registro_threema_sem_disjuntor():
+    """O registro dos envios do Threema pula a gravação por 60 s depois de
+    uma falha (disjuntor do processo, `threema_registro`): um teste que
+    derruba o banco do registro não pode calar o registro dos seguintes."""
+    from app.services import threema_registro
+
+    threema_registro.reiniciar_disjuntor()
+    yield
+    threema_registro.reiniciar_disjuntor()
+
+
+@pytest.fixture(autouse=True)
 def _garantia_da_equipe_sem_cache():
     """O prazo da garantia como a equipe diz (`agente.garantia_equipe`, 16/11/2026) fica num
     cache do processo, por hora: cada teste começa — e termina — sem ele."""

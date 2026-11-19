@@ -24,6 +24,14 @@ Duas peças, SEM mudar a assinatura de nada:
    tabela ausente ou lento = o envio segue igual e fica só o log
    `threema_registro_falhou`. `THREEMA_REGISTRO_ATIVO=false` desliga.
 
+   DISJUNTOR: depois de uma falha (timeout ou erro), o registro fica PULADO
+   por 60 s no processo (o log `threema_registro_falhou` leva `pausa_s`; na
+   volta, `threema_registro_retomado` diz quantos lotes ficaram sem linha). Sem ele,
+   com o banco degradado, cada `send_to_all` ganharia até +3 s — e os pontos
+   que mandam em laço (Informar da Margem, 1 mensagem por pedido, dentro da
+   requisição; avisos da Amazon e das Devoluções; Conferência) somariam
+   isso. Com ele, o atraso total fica em ~3 s por minuto, não por envio.
+
 Quem disparou vem do Histórico (`historico.contexto.ator_atual`): com pessoa
 identificada no pedido, origem `manual` (com `ator_*` e `req_id`); sem pessoa
 (worker, robô, rota de agente), `automatico`. A marca pode forçar `teste`.
@@ -41,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -58,6 +67,8 @@ VIAS = ("cadastro", "legado", "cache", "forcado", "env")
 # Guarda do registro (a limpeza diária do worker apaga o que passou disto).
 DIAS_GUARDA = 180
 _TIMEOUT_S = 3.0
+# Disjuntor: depois de uma falha, quantos segundos o registro fica pulado.
+_PAUSA_S = 60.0
 _TAM_ESCOPO = 80
 _TAM_TITULO = 160
 _TAM_ERRO = 200
@@ -85,6 +96,23 @@ class Tentativa:
 
 
 _marca: ContextVar[Marca | None] = ContextVar("threema_envio_marca", default=None)
+
+# Disjuntor do processo (até quando, em `_relogio()`, o registro é pulado).
+_pausado_ate = 0.0
+_pulados = 0
+
+
+def _relogio() -> float:
+    """Relógio do disjuntor (separado para o teste adiantar sem mexer no
+    relógio do asyncio)."""
+    return time.monotonic()
+
+
+def reiniciar_disjuntor() -> None:
+    """Fecha o disjuntor (os testes chamam entre um caso e outro)."""
+    global _pausado_ate, _pulados
+    _pausado_ate = 0.0
+    _pulados = 0
 
 
 def marca_atual() -> Marca | None:
@@ -277,20 +305,30 @@ async def gravar(
     segredos: Sequence[str] = (),
 ) -> int:
     """Grava as tentativas de UMA chamada de envio (um lote). Devolve quantas
-    linhas gravou (0 quando desligado ou quando falhou). NUNCA levanta."""
+    linhas gravou (0 quando desligado, quando falhou ou com o disjuntor
+    aberto). NUNCA levanta."""
+    global _pausado_ate, _pulados
     if not tentativas:
         return 0
     try:
         if not get_settings().threema_registro_ativo:
             return 0
+        if _relogio() < _pausado_ate:
+            _pulados += 1
+            return 0
+        if _pulados:
+            logger.info("threema_registro_retomado", pulados=_pulados)
+            _pulados = 0
         marca = _marca.get()
         async with asyncio.timeout(_TIMEOUT_S):
             return await _inserir(marca, contexto, canal, texto, list(tentativas), segredos)
     except Exception as exc:  # noqa: BLE001 — registro nunca derruba o envio
+        _pausado_ate = _relogio() + _PAUSA_S
         logger.warning(
             "threema_registro_falhou",
             erro=type(exc).__name__,
             detalhe=_limpar_erro(str(exc), segredos),
+            pausa_s=_PAUSA_S,
         )
         return 0
 

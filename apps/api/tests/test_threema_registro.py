@@ -206,6 +206,42 @@ async def test_banco_lento_tem_teto(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_banco_lento_em_laco_paga_o_teto_uma_vez_so(db, monkeypatch):
+    """Disjuntor: os pontos que mandam em laço (Informar da Margem, 1 por
+    pedido, dentro da requisição) não somam o teto de cada envio. Depois da
+    1ª falha, o registro fica pulado por `_PAUSA_S`; passado isso, volta."""
+    tentativas = 0
+
+    async def _lento(*a, **k):
+        nonlocal tentativas
+        tentativas += 1
+        await asyncio.sleep(30)
+
+    relogio = [1000.0]
+    original = threema_registro._inserir
+    monkeypatch.setattr(threema_registro, "_relogio", lambda: relogio[0])
+    monkeypatch.setattr(threema_registro, "_inserir", _lento)
+    monkeypatch.setattr(threema_registro, "_TIMEOUT_S", 0.2)
+    inicio = asyncio.get_running_loop().time()
+    with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
+        router.post("/send_simple").mock(return_value=httpx.Response(200, text="mid"))
+        cli = _cliente()
+        for _ in range(30):
+            out = await cli.send_to_all("aviso", ["TSTA0001"])
+            assert out["sent"] == ["TSTA0001"]
+        gasto = asyncio.get_running_loop().time() - inicio
+        assert tentativas == 1, "só a 1ª chamada tentou gravar"
+        assert gasto < 3, f"30 envios com o banco lento levaram {gasto:.1f} s"
+        # passada a pausa, tenta de novo (e o banco voltou)
+        relogio[0] += threema_registro._PAUSA_S + 1
+        monkeypatch.setattr(threema_registro, "_inserir", original)
+        monkeypatch.setattr(threema_registro, "_TIMEOUT_S", 3.0)
+        await cli.send_to_all("de volta", ["TSTA0001"])
+    linhas = await _linhas(db)
+    assert [r.titulo for r in linhas] == ["de volta"]
+
+
+@pytest.mark.asyncio
 async def test_desligado_nao_grava(db, monkeypatch):
     monkeypatch.setattr(
         threema_registro,
