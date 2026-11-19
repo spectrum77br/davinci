@@ -1195,8 +1195,9 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
     do pedido (`danfe.nf_da_conversa`: o número, ou a frase de por que não há)
     para o atalho "Anexar a NF".
     """
-    from app.services.atendimento import danfe, enviar, foto
+    from app.services.atendimento import danfe, enviar, foto, video
 
+    motivo_video = video.motivo_sem_video(conversa)
     base = {
         "tipos": sorted(foto.TIPOS_ACEITOS),
         "max_bytes": foto.MAX_BYTES_UPLOAD,
@@ -1212,6 +1213,14 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
         "pdf": foto.como_vai_o_pdf(conversa),
         "nf_numero": None,
         "nf_motivo": None,
+        # 19/11/2026: o vídeo — se sai por esta conversa, o porquê quando não
+        # sai (a tela mostra ao escolher um vídeo) e o teto do arquivo que a
+        # tela manda (o servidor converte para o teto da plataforma).
+        "video": motivo_video is None,
+        "video_motivo": motivo_video,
+        "video_tipos": sorted(video.TIPOS_VIDEO),
+        "video_max_bytes": video.MAX_BYTES_UPLOAD_VIDEO,
+        "video_max_s": int(video.MAX_DURACAO_S),
     }
     try:
         async with session.begin_nested():

@@ -182,6 +182,14 @@ class EnvioFotoOut(BaseModel):
     # não há (a frase da tela).
     nf_numero: str | None = None
     nf_motivo: str | None = None
+    # O vídeo (19/11/2026, `video.py`): se sai por esta conversa; o porquê
+    # quando não sai; os tipos e o teto do arquivo que a tela manda (o
+    # servidor converte para o teto da plataforma) e a duração máxima.
+    video: bool = False
+    video_motivo: str | None = None
+    video_tipos: list[str] = Field(default_factory=list)
+    video_max_bytes: int = 0
+    video_max_s: int = 0
 
 
 class TrocaAbertaOut(BaseModel):

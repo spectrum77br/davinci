@@ -52,8 +52,9 @@ assert.match(C.tituloDaNf({ nf_numero: null, nf_motivo: 'O pedido 1 ainda não t
 assert.equal(C.tituloDaNf(null, ''), 'anexar a NF deste pedido')
 
 // ─── a tela ─────────────────────────────────────────────────────────────────
-// O botão de anexo aceita PDF (pelo seletor e pela conferência do tipo).
-assert.match(fonte, /accept="image\/jpeg,image\/png,application\/pdf"/)
+// O botão de anexo aceita PDF (pelo seletor e pela conferência do tipo) — e,
+// desde 19/11/2026, vídeo (onde não sai, a escolha diz por quê).
+assert.match(fonte, /accept="image\/jpeg,image\/png,application\/pdf,video\/mp4,video\/quicktime,video\/3gpp"/)
 assert.match(fonte, /const TIPOS_FOTO = \['image\/jpeg', 'image\/png', 'application\/pdf'\]/)
 // O atalho busca a DANFE como arquivo (blob) pela rota da conversa e anexa como PDF.
 assert.match(fonte, /\$fetch\.raw<Blob>\(`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/nf`, \{ credentials: 'include', responseType: 'blob' \}\)/)

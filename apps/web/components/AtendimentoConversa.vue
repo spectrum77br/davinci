@@ -71,20 +71,49 @@ export function tituloDaNf(
 // O que entra na lista de anexos: o tipo, o tamanho, o mesmo arquivo duas
 // vezes (nome + tamanho + data) e o teto da caixa (`max_anexos` do painel).
 // Devolve os aceitos, na ordem, e uma frase por recusado.
+//
+// Vídeo (19/11/2026, o Eduardo: "tem q deixar enviar vídeo no chat do
+// atendimento tbm em todas plataformas q são possíveis"): o mesmo botão
+// "Anexar", onde a plataforma aceita (`envio_foto.video`, hoje o Zap do
+// número); onde não aceita, escolher um vídeo diz POR QUÊ (`video_motivo`).
+// O servidor confere pelos bytes e converte para MP4 (H.264, até 720p).
+export const TIPOS_VIDEO = ['video/mp4', 'video/quicktime', 'video/3gpp']
+const RE_EXT_VIDEO = /\.(mp4|m4v|mov|3gp)$/i
+export function ehVideoArquivo(f: { name: string; type: string }): boolean {
+  const tipo = (f.type || '').toLowerCase()
+  return tipo.startsWith('video/') || (!tipo && RE_EXT_VIDEO.test(f.name || ''))
+}
+export type OpcoesVideo = { tipos: string[]; maxBytes: number; motivo: string | null }
+export function opcoesDeVideo(
+  ef: { video?: boolean; video_motivo?: string | null; video_tipos?: string[]; video_max_bytes?: number } | null | undefined,
+): OpcoesVideo {
+  if (!ef) return { tipos: [], maxBytes: 0, motivo: 'Conferindo se o vídeo pode sair…' }
+  if (!ef.video) return { tipos: [], maxBytes: 0, motivo: ef.video_motivo || 'O vídeo não sai por esta conversa.' }
+  return { tipos: ef.video_tipos?.length ? ef.video_tipos : TIPOS_VIDEO, maxBytes: ef.video_max_bytes || 50 * 1024 * 1024, motivo: null }
+}
 export function escolherAnexos(
   atuais: { arquivo: { name: string; size: number; lastModified: number } }[],
   novos: File[],
-  op: { max: number; maxBytes: number; tipos: string[] },
+  op: { max: number; maxBytes: number; tipos: string[]; video?: OpcoesVideo | null },
 ): { aceitos: File[]; recusas: string[] } {
   const aceitos: File[] = []
   const recusas: string[] = []
   const chave = (f: { name: string; size: number; lastModified: number }) => `${f.name}|${f.size}|${f.lastModified}`
   const vistos = new Set(atuais.map((a) => chave(a.arquivo)))
+  const comVideo = !!op.video && !op.video.motivo
   let cheio = false
   for (const f of novos) {
-    if (!op.tipos.includes(f.type)) {
-      recusas.push(`${f.name}: só dá para mandar foto JPG ou PNG, ou PDF.`)
-    } else if (f.size > op.maxBytes) {
+    const video = ehVideoArquivo(f)
+    if (video && !comVideo) {
+      // Onde o vídeo não sai, a frase da plataforma (e o caminho dela).
+      recusas.push(`${f.name}: ${op.video?.motivo || 'o vídeo não sai por esta conversa.'}`)
+    } else if (video && op.video && f.type && !op.video.tipos.includes(f.type)) {
+      recusas.push(`${f.name}: só dá para mandar vídeo MP4, MOV ou 3GP.`)
+    } else if (video && op.video && f.size > op.video.maxBytes) {
+      recusas.push(`${f.name}: o vídeo passa de ${Math.round(op.video.maxBytes / (1024 * 1024))} MB — mande um mais curto.`)
+    } else if (!video && !op.tipos.includes(f.type)) {
+      recusas.push(comVideo ? `${f.name}: só dá para mandar foto JPG ou PNG, PDF ou vídeo (MP4, MOV).` : `${f.name}: só dá para mandar foto JPG ou PNG, ou PDF.`)
+    } else if (!video && f.size > op.maxBytes) {
       recusas.push(`${f.name}: passa de ${Math.round(op.maxBytes / (1024 * 1024))} MB — escolha um menor.`)
     } else if (vistos.has(chave(f))) {
       recusas.push(`${f.name}: já está anexado.`)
@@ -98,10 +127,12 @@ export function escolherAnexos(
   if (cheio) recusas.push(op.max === 1 ? 'Aqui vai um anexo por vez.' : `Cabem até ${op.max} anexos de uma vez — os outros ficaram de fora.`)
   return { aceitos, recusas }
 }
-// O botão de enviar: "Enviar foto", "Enviar PDF" ou "Enviar 3 anexos".
-export function rotuloEnviarAnexos(itens: { pdf: boolean }[]): string {
-  if (itens.length === 1) return itens[0].pdf ? 'Enviar PDF' : 'Enviar foto'
-  return itens.every((a) => !a.pdf) ? `Enviar ${itens.length} fotos` : `Enviar ${itens.length} anexos`
+// O botão de enviar: "Enviar foto", "Enviar PDF", "Enviar vídeo" ou "Enviar 3 anexos".
+export function rotuloEnviarAnexos(itens: { pdf: boolean; video?: boolean }[]): string {
+  if (itens.length === 1) return itens[0].video ? 'Enviar vídeo' : itens[0].pdf ? 'Enviar PDF' : 'Enviar foto'
+  if (itens.every((a) => !a.pdf && !a.video)) return `Enviar ${itens.length} fotos`
+  if (itens.every((a) => a.video)) return `Enviar ${itens.length} vídeos`
+  return `Enviar ${itens.length} anexos`
 }
 </script>
 
@@ -1240,6 +1271,8 @@ function pecasDe(m: Mensagem, ctx?: ContextoAnexo | null): Peca[] {
     const nome = s('nome') || s('name') || s('filename') || s('titulo') || TIPO_LABEL[tipo] || tipo || 'anexo'
     const imagem = !!url && (tipo.includes('imag') || tipo.startsWith('image') || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(url))
     if (url && imagem) return { chave, tipo: 'imagem', url, nome }
+    // O vídeo (19/11/2026): o que a loja manda e o do comprador (Shopee, TikTok) tocam no balão.
+    if (url && (tipo === 'video' || tipo.startsWith('video/'))) return { chave, tipo: 'video', url, nome }
     if (url) return { chave, tipo: 'link', url, nome }
     return { chave, tipo: 'nome', nome }
   })
@@ -3123,6 +3156,8 @@ function aoCriarNota(m: Mensagem) {
 // legenda opcional do Zap vai com a última). Cada uma guarda o seu estado:
 // a que falhou mostra o porquê e reenvia sozinha; a incerta (pode ter saído)
 // não reenvia — a trava de repetida do servidor segura o clique de novo.
+// Vídeo (19/11/2026): entra na mesma lista, onde a plataforma aceita
+// (`envio_foto.video`); cada vídeo é uma mensagem, com as mesmas regras.
 const envioFoto = computed(() => painelDados.value?.envio_foto ?? null)
 const TIPOS_FOTO = ['image/jpeg', 'image/png', 'application/pdf']
 const MAX_FOTO = 10 * 1024 * 1024
@@ -3153,6 +3188,7 @@ type Anexo = {
   arquivo: File
   previa: string
   pdf: boolean
+  video: boolean
   nfChave?: string
   estado: 'pendente' | 'enviando' | 'enviada' | 'falhou' | 'incerta'
   erro?: string
@@ -3168,6 +3204,15 @@ const anexosNumaMensagem = computed(() => !!envioFoto.value?.numa_mensagem)
 const aEnviar = computed(() => anexos.value.filter((a) => a.estado === 'pendente' || a.estado === 'falhou'))
 const anexosCheios = computed(() => anexos.value.filter((a) => a.estado !== 'enviada').length >= maxAnexos.value)
 const temNfAnexada = computed(() => anexos.value.some((a) => a.nfChave && a.estado !== 'enviada'))
+// O vídeo (19/11/2026): sai aqui? (senão, a frase da plataforma ao escolher um).
+const videoAqui = computed(() => opcoesDeVideo(envioFoto.value))
+const tituloAnexar = computed(() => {
+  if (motivoSemFoto.value) return motivoSemFoto.value
+  if (anexosCheios.value) return maxAnexos.value > 1 ? `já há ${maxAnexos.value} anexos (o máximo de uma vez) — envie ou tire um` : 'já há um anexo — envie ou descarte'
+  const oque = videoAqui.value.motivo ? 'fotos (JPG ou PNG) ou PDF' : 'fotos (JPG ou PNG), PDF ou vídeo (MP4, MOV)'
+  const base = maxAnexos.value > 1 ? `anexar ${oque} para mandar ao comprador — até ${maxAnexos.value} de uma vez; também dá para colar (Ctrl+V) ou arrastar` : `anexar ${oque.replace('fotos', 'uma foto')} para mandar ao comprador`
+  return videoAqui.value.motivo && envioFoto.value ? `${base}. Vídeo não: ${videoAqui.value.motivo}` : base
+})
 function descartarFoto() {
   for (const a of anexos.value) URL.revokeObjectURL(a.previa)
   anexos.value = []
@@ -3182,7 +3227,7 @@ function tirarAnexo(id: number) {
   if (!anexos.value.length) legendaFoto.value = ''
 }
 function novoAnexo(arquivo: File, nfChave?: string): Anexo {
-  return { id: ++seqAnexo, arquivo, previa: URL.createObjectURL(arquivo), pdf: arquivo.type === 'application/pdf', nfChave, estado: 'pendente' }
+  return { id: ++seqAnexo, arquivo, previa: URL.createObjectURL(arquivo), pdf: arquivo.type === 'application/pdf', video: ehVideoArquivo(arquivo), nfChave, estado: 'pendente' }
 }
 function adicionarAnexos(arquivos: File[]) {
   if (!arquivos.length || enviandoFoto.value) return
@@ -3193,7 +3238,7 @@ function adicionarAnexos(arquivos: File[]) {
   const { aceitos, recusas } = escolherAnexos(
     anexos.value.filter((a) => a.estado !== 'enviada'),
     arquivos,
-    { max: maxAnexos.value, maxBytes: envioFoto.value?.max_bytes || MAX_FOTO, tipos: TIPOS_FOTO },
+    { max: maxAnexos.value, maxBytes: envioFoto.value?.max_bytes || MAX_FOTO, tipos: TIPOS_FOTO, video: videoAqui.value },
   )
   if (recusas.length) toasts.error(recusas.length === 1 ? recusas[0] : 'Alguns arquivos não entraram', recusas.length === 1 ? undefined : recusas)
   if (aceitos.length) anexos.value = [...anexos.value, ...aceitos.map((f) => novoAnexo(f))]
@@ -3458,7 +3503,8 @@ const tentandoId = ref<string | null>(null)
 function podeTentarDeNovo(m: Mensagem): boolean {
   const d = detalhe.value
   if (!d || !props.canEdit || observacao.value || !d.envio.pode_enviar) return false
-  if (m.status !== 'falhou' || lado(m) !== 'loja' || !m.texto || m.tipo === 'imagem') return false
+  // A foto e o vídeo (19/11/2026) com legenda não: o de novo mandaria só o texto.
+  if (m.status !== 'falhou' || lado(m) !== 'loja' || !m.texto || m.tipo === 'imagem' || m.tipo === 'video') return false
   // A apagada (03/11/2026) saiu e foi apagada de propósito: mandar de novo não.
   if (m.apagada) return false
   if (m.origem !== 'davinci_humano' && m.origem !== 'davinci_ia') return false
@@ -4313,7 +4359,10 @@ watch(() => props.conversaId, (novo, velho) => {
                     <!-- Zap (Onda 3): a nossa cópia — o vídeo só carrega no play; o áudio já traz a duração
                          (09/11/2026, o dono: "0:00" parecia quebrado); o documento baixa (nunca abre aqui). -->
                     <audio v-else-if="pc.tipo === 'audio'" :src="pc.url" controls preload="metadata" class="h-10 w-64 max-w-full" :title="pc.nome" data-midia-zap="audio" />
-                    <video v-else-if="pc.tipo === 'video'" :src="pc.url" controls preload="none" playsinline class="max-h-64 w-64 max-w-full rounded-md border bg-black" :title="pc.nome" data-midia-zap="video" />
+                    <video v-else-if="pc.tipo === 'video' && RE_MIDIA_ZAP.test(pc.url)" :src="pc.url" controls preload="none" playsinline class="max-h-64 w-64 max-w-full rounded-md border bg-black" :title="pc.nome" data-midia-zap="video" />
+                    <!-- O vídeo da plataforma (19/11/2026): toca aqui; se não carregar (link vencido), volta o link. -->
+                    <video v-else-if="pc.tipo === 'video' && !fotoFalhou[pc.chave]" :src="pc.url" controls preload="none" playsinline class="max-h-64 w-64 max-w-full rounded-md border bg-black" :title="pc.nome" data-midia="video" @error="fotoFalhou[pc.chave] = true" />
+                    <a v-else-if="pc.tipo === 'video'" :href="pc.url" target="_blank" rel="noopener noreferrer" class="max-w-[220px] truncate rounded border bg-background px-2 py-0.5 text-xs underline">{{ pc.nome }}</a>
                     <a
                       v-else-if="pc.tipo === 'documento'"
                       :href="pc.url"
@@ -4481,14 +4530,15 @@ watch(() => props.conversaId, (novo, velho) => {
             <template v-if="modoCaixa === 'responder' && !canalExterno">
               <!-- Na aba em que responde OUTRA conversa, a foto não sai (ela é desta). -->
               <template v-if="!respondePorOutra">
-              <input ref="fotoInput" type="file" accept="image/jpeg,image/png,application/pdf" :multiple="maxAnexos > 1" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
+              <!-- O vídeo entra no seletor SEMPRE: onde a plataforma não aceita, a escolha diz por quê. -->
+              <input ref="fotoInput" type="file" accept="image/jpeg,image/png,application/pdf,video/mp4,video/quicktime,video/3gpp" :multiple="maxAnexos > 1" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
               <Button
                 size="sm"
                 variant="outline"
                 class="ml-auto h-7 px-2 text-xs"
                 :disabled="!!motivoSemFoto || enviandoFoto || anexosCheios"
-                :title="motivoSemFoto || (anexosCheios ? (maxAnexos > 1 ? `já há ${maxAnexos} anexos (o máximo de uma vez) — envie ou tire um` : 'já há um anexo — envie ou descarte') : maxAnexos > 1 ? `anexar fotos (JPG ou PNG) ou PDF para mandar ao comprador — até ${maxAnexos} de uma vez; também dá para colar (Ctrl+V) ou arrastar` : 'anexar uma foto (JPG ou PNG) ou um PDF para mandar ao comprador')"
-                aria-label="anexar foto ou PDF"
+                :title="tituloAnexar"
+                aria-label="anexar foto, PDF ou vídeo"
                 @click="escolherFoto"
               >
                 <ImagePlus class="size-3.5" /><span class="ml-1">Anexar</span>
@@ -4524,6 +4574,11 @@ watch(() => props.conversaId, (novo, velho) => {
                 <a v-if="a.pdf" :href="a.previa" target="_blank" rel="noopener" class="flex size-16 flex-col items-center justify-center gap-0.5 rounded border bg-background text-muted-foreground hover:bg-muted" title="abrir o PDF para conferir">
                   <FileText class="size-6" /><span class="text-[10px] underline">abrir</span>
                 </a>
+                <!-- O vídeo: o 1º quadro (sem som, sem tocar sozinho); o "▶" diz que é vídeo. -->
+                <template v-else-if="a.video">
+                  <video :src="a.previa" muted playsinline preload="metadata" class="size-16 rounded border bg-black object-cover" :class="a.estado === 'enviada' ? 'opacity-60' : ''" :aria-label="`vídeo ${i + 1}`" data-anexo-video />
+                  <span class="pointer-events-none absolute bottom-0.5 left-0.5 rounded bg-black/70 px-1 text-[10px] leading-4 text-white">▶ vídeo</span>
+                </template>
                 <img v-else :src="a.previa" :alt="`anexo ${i + 1}`" class="size-16 rounded border object-cover" :class="a.estado === 'enviada' ? 'opacity-60' : ''" />
                 <span class="absolute left-0.5 top-0.5 rounded bg-background/90 px-1 text-[10px] font-medium leading-4">{{ i + 1 }}</span>
                 <span v-if="a.estado === 'enviando'" class="absolute inset-0 flex items-center justify-center rounded bg-background/60"><Loader2 class="size-4 animate-spin" /></span>
@@ -4542,9 +4597,10 @@ watch(() => props.conversaId, (novo, velho) => {
               </li>
             </ul>
             <div class="text-muted-foreground">
-              {{ anexos.length === 1 ? `${anexos[0].arquivo.name} · ${(anexos[0].arquivo.size / 1024).toFixed(0)} KB · ` : `${anexos.length} anexos · ` }}{{ envioFoto?.legenda_obrigatoria ? (anexos.length > 1 ? 'vão todos numa mensagem, junto do texto abaixo' : 'vai junto do texto abaixo') : anexos.length > 1 ? `cada um vai numa mensagem, na ordem${envioFoto?.legenda_permitida ? ' (a legenda vai com o último)' : ''}` : envioFoto?.legenda_permitida ? 'pode ir com uma legenda (opcional)' : 'vai sozinha (o texto vai pela caixa, separado)' }}
+              {{ anexos.length === 1 ? `${anexos[0].arquivo.name} · ${tamanhoLegivel(anexos[0].arquivo.size)} · ` : `${anexos.length} anexos · ` }}{{ envioFoto?.legenda_obrigatoria ? (anexos.length > 1 ? 'vão todos numa mensagem, junto do texto abaixo' : 'vai junto do texto abaixo') : anexos.length > 1 ? `cada um vai numa mensagem, na ordem${envioFoto?.legenda_permitida ? ' (a legenda vai com o último)' : ''}` : envioFoto?.legenda_permitida ? 'pode ir com uma legenda (opcional)' : anexos[0].video ? 'vai sozinho (o texto vai pela caixa, separado)' : 'vai sozinha (o texto vai pela caixa, separado)' }}
             </div>
             <div v-if="anexos.some((a) => a.pdf)" class="text-muted-foreground" data-pdf-como>{{ envioFoto?.pdf === 'imagem' ? 'Este chat não aceita PDF: o PDF vai como IMAGEM (as páginas, até 3).' : 'Vai como arquivo PDF.' }}</div>
+            <div v-if="anexos.some((a) => a.video && a.estado !== 'enviada')" class="text-muted-foreground" data-video-como>O vídeo vai como MP4 (até 720p, até {{ Math.round((envioFoto?.video_max_s || 180) / 60) }} min): o DaVinci prepara antes de sair — pode levar alguns segundos.</div>
             <!-- O que não saiu (ou pode ter saído), um por linha; no chat, reenvia só ele. -->
             <ul v-if="anexos.some((a) => a.erro)" class="space-y-0.5" data-anexos-erros>
               <li v-for="a in anexos.filter((x) => x.erro)" :key="a.id" class="flex items-start gap-1.5" :class="a.estado === 'falhou' ? 'text-red-700 dark:text-red-300' : 'text-muted-foreground'">
@@ -4564,8 +4620,8 @@ watch(() => props.conversaId, (novo, velho) => {
               v-model="legendaFoto"
               :maxlength="envioFoto?.legenda_max || limite || 350"
               class="h-7 w-full rounded-md border bg-background px-2 text-xs"
-              :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto do anexo (obrigatório aqui)' : 'Legenda (opcional) — vai junto da foto'"
-              aria-label="texto que vai junto da foto"
+              :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto do anexo (obrigatório aqui)' : anexos[anexos.length - 1]?.video ? 'Legenda (opcional) — vai junto do vídeo' : 'Legenda (opcional) — vai junto da foto'"
+              aria-label="texto que vai junto do anexo"
             />
             <div v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</div>
             <div class="flex flex-wrap items-center justify-end gap-1">
@@ -4575,7 +4631,7 @@ watch(() => props.conversaId, (novo, velho) => {
                 size="sm"
                 class="h-7 px-2 text-xs"
                 :disabled="!!motivoSemFoto || enviandoFoto || (!!envioFoto?.legenda_obrigatoria && !legendaFoto.trim())"
-                :title="aEnviar.length > 1 ? 'mandar os anexos ao comprador, na ordem' : aEnviar[0].pdf ? 'mandar o PDF ao comprador' : 'mandar a foto ao comprador'"
+                :title="aEnviar.length > 1 ? 'mandar os anexos ao comprador, na ordem' : aEnviar[0].video ? 'mandar o vídeo ao comprador' : aEnviar[0].pdf ? 'mandar o PDF ao comprador' : 'mandar a foto ao comprador'"
                 data-enviar-anexos
                 @click="enviarFoto()"
               >

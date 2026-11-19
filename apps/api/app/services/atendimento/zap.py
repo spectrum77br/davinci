@@ -205,21 +205,30 @@ def corpo_texto(to: str, texto: str, *, mensagem_id: UUID | None) -> dict[str, A
 
 
 def corpo_imagem(
-    to: str, media_id: str, legenda: str | None, *, mensagem_id: UUID | None
+    to: str,
+    media_id: str,
+    legenda: str | None,
+    *,
+    mensagem_id: UUID | None,
+    tipo: str = "image",
 ) -> dict[str, Any]:
     """O corpo do `POST /{pnid}/messages` da FOTO (§6.8): o id da mídia subida e a legenda.
 
-    Sem legenda, a chave `caption` nem vai (a foto sai sozinha).
+    Sem legenda, a chave `caption` nem vai (a foto sai sozinha). O VÍDEO
+    (19/11/2026, doc "Mensagens de vídeo" da Meta) tem o mesmo formato com
+    `tipo="video"`: `{"type": "video", "video": {"id", "caption"?}}`.
     """
-    imagem: dict[str, Any] = {"id": media_id}
+    if tipo not in ("image", "video"):
+        raise ValueError(f"tipo de mídia fora da lista: {tipo}")
+    midia: dict[str, Any] = {"id": media_id}
     if legenda:
-        imagem["caption"] = legenda
+        midia["caption"] = legenda
     corpo: dict[str, Any] = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": to,
-        "type": "image",
-        "image": imagem,
+        "type": tipo,
+        tipo: midia,
     }
     if mensagem_id is not None:
         corpo["biz_opaque_callback_data"] = str(mensagem_id)
@@ -415,6 +424,26 @@ async def _postar(
     return ResultadoEnvio(ok=True, externo_id=wamid[:191], payload={"zap": zap})
 
 
+async def enviar_video(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    destino: ZapDestino,
+    copia: zap_midia.CopiaDeSaida,
+    legenda: str | None,
+    *,
+    mensagem_id: UUID | None,
+) -> ResultadoEnvio:
+    """O VÍDEO (19/11/2026): o mesmo caminho da foto, com a mensagem `type=video`.
+
+    A cópia já é o MP4 convertido (`video.preparar`: H.264 Main sem B-frames
+    + AAC, até 16 MB). O `payload` leva `video_url` (a nossa cópia) para o
+    balão tocar. Nunca levanta.
+    """
+    return await enviar_imagem(
+        session, conversa, destino, copia, legenda, mensagem_id=mensagem_id, tipo="video"
+    )
+
+
 async def enviar_imagem(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -423,6 +452,7 @@ async def enviar_imagem(
     legenda: str | None,
     *,
     mensagem_id: UUID | None,
+    tipo: str = "image",
 ) -> ResultadoEnvio:
     """A FOTO (§6.8): `POST /{pnid}/media` e depois a mensagem `type=image`. Nunca levanta.
 
@@ -474,11 +504,12 @@ async def enviar_imagem(
             erro=f"zap_upload:{motivo}",
             payload={"zap": {"http": exc.http_status, "etapa": "upload"}},
         )
-    corpo = corpo_imagem(destino.to, media_id, legenda, mensagem_id=mensagem_id)
+    corpo = corpo_imagem(destino.to, media_id, legenda, mensagem_id=mensagem_id, tipo=tipo)
     resultado = await _postar(destino, corpo, log)
     zap = dict((resultado.payload or {}).get("zap") or {})
     zap["media_id"] = media_id[:64]
-    resultado.payload = {**(resultado.payload or {}), "zap": zap, "imagem_url": copia.url}
+    chave_url = "video_url" if tipo == "video" else "imagem_url"
+    resultado.payload = {**(resultado.payload or {}), "zap": zap, chave_url: copia.url}
     return resultado
 
 

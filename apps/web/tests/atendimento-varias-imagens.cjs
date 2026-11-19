@@ -87,7 +87,7 @@ function montar({ envio, respostas = [], confirmar = true, modo = 'responder' })
   }
   const nomes = ['ref', 'computed', 'onBeforeUnmount', 'envioFoto', 'motivoSemFoto', 'MAX_FOTO', 'TIPOS_FOTO', 'escolherAnexos', 'toasts', 'modoCaixa', 'respondePorOutra', 'canalExterno', 'props', 'detalhe',
     'tituloDaNf', 'painelCarregando', 'LEGENDA_NF', 'erroDaApi', 'api', 'destinosReclamacao', 'destinoCaixa', 'rolarProFim', 'erroEnvioLegivel', 'statusDoErro', 'ultimaVista', 'RE_UUID', 'aberta', 'enviandoIds', 'envioSimulado', 'carregar', 'confirm', 'FormData',
-    'provide', 'CHAVE_ANEXAR_NA_CAIXA', 'fimDoEnvioDeAnexos', 'andarFila']
+    'provide', 'CHAVE_ANEXAR_NA_CAIXA', 'fimDoEnvioDeAnexos', 'andarFila', 'opcoesDeVideo', 'ehVideoArquivo']
   const valores = [Vue.ref, Vue.computed, () => {}, Vue.ref({ pode: true, max_bytes: 10 * 1024 * 1024, ...envio }), Vue.ref(''), 10 * 1024 * 1024, TIPOS, C.escolherAnexos,
     { success: (t) => toasts.ok.push(t), error: (t, l) => toasts.erro.push([t, l]), warning: (t, l) => toasts.aviso.push([t, l]) },
     Vue.ref(modo), Vue.ref(false), Vue.ref(false), { canEdit: true, flags: null }, detalhe,
@@ -96,7 +96,7 @@ function montar({ envio, respostas = [], confirmar = true, modo = 'responder' })
     api, Vue.ref([]), Vue.ref(''), () => {}, (e) => `recusou: ${e}`, (e) => e?.status ?? null,
     (d) => d.mensagens[d.mensagens.length - 1].id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     (id) => id === 'c1', new Set(), () => false, async () => {}, () => confirmar, FD,
-    (k, v) => providos.set(k, v), CHAVE_ANEXAR, (_, __, resultado) => fins.push(resultado), () => { andou++ }]
+    (k, v) => providos.set(k, v), CHAVE_ANEXAR, (_, __, resultado) => fins.push(resultado), () => { andou++ }, C.opcoesDeVideo, C.ehVideoArquivo]
   const t = new Function(...nomes, js)(...valores)
   return { t, chamadas, toasts, detalhe, providos, fins, andou: () => andou }
 }
@@ -214,7 +214,7 @@ async function principal() {
   }
 
   // ─── a tela ───────────────────────────────────────────────────────────────
-  assert.match(fonte, /accept="image\/jpeg,image\/png,application\/pdf" :multiple="maxAnexos > 1"/)
+  assert.match(fonte, /accept="image\/jpeg,image\/png,application\/pdf,video\/mp4,video\/quicktime,video\/3gpp" :multiple="maxAnexos > 1"/)
   assert.match(fonte, /@paste="aoColar"/)
   assert.match(fonte, /@dragover="aoArrastarSobre"/)
   assert.match(fonte, /@drop="aoSoltar"/)

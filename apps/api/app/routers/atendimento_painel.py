@@ -18,7 +18,8 @@ mesmo escopo por equipe (`_conversa_ou_404`):
        `arquivo`, `legenda` no ML (obrigatória) e no Zap (opcional, 27/10/2026),
        `ultima_vista_id`, `confirmar`) — pelo caminho único de saída
        (`enviar.enviar_foto`): as mesmas travas e os mesmos códigos do POST
-       /responder (409/422).
+       /responder (409/422). Ou UM VÍDEO (19/11/2026, `video.py`), onde a
+       plataforma aceita: conferido pelos bytes e convertido antes de sair.
   POST /api/atendimento/adspower/aberto         registra quem abriu qual perfil
        do AdsPower e quando (o DaVinci não fala com o AdsPower: quem abre é o
        navegador de quem clicou, na API local do computador dele).
@@ -69,7 +70,7 @@ from app.schemas.atendimento_painel import (
     NotaOut,
     PainelOut,
 )
-from app.services.atendimento import danfe, enviar, foto, instagram, painel
+from app.services.atendimento import danfe, enviar, foto, instagram, painel, video
 from app.services.atendimento.constantes import (
     PLATAFORMA_SITE,
     PLATAFORMA_WHATSAPP,
@@ -213,6 +214,12 @@ async def enviar_foto(
     tela manda uma por vez, na ordem (cada uma é uma mensagem). Anexo que não
     serve → 422 com `anexo` = qual (1, 2…).
 
+    Vídeo (19/11/2026): reconhecido pelos BYTES (MP4/MOV/3GP), sozinho no
+    pedido; onde a plataforma não aceita vídeo → 422 com a frase de
+    `video.motivo_sem_video`, ANTES de abrir o arquivo. Senão, sondado e
+    convertido (`video.validar_para_a_caixa`, ffmpeg, em thread) antes da
+    linha em voo — falhou aqui = nada saiu.
+
     Trava → 409 com o `code` (texto/foto reprovados → 422), como o
     /responder. Erro da PLATAFORMA não é erro HTTP: volta 200 com a mensagem
     em `falhou`/`revisar`. Com o envio desligado, recusa ANTES de olhar o
@@ -247,9 +254,13 @@ async def enviar_foto(
                 "motivo": "anexos_demais",
             },
         )
-    imagens: list[foto.Foto] = []
+    imagens: list[foto.Foto | video.Video] = []
+    teto_leitura = max(foto.MAX_BYTES_UPLOAD, video.MAX_BYTES_UPLOAD_VIDEO) + 1
     for i, arq in enumerate(arquivo, 1):
-        dados = await arq.read(foto.MAX_BYTES_UPLOAD + 1)
+        dados = await arq.read(teto_leitura)
+        if video.eh_video(dados):
+            imagens.append(await _video_da_rota(c, arq, dados, i=i, total=total))
+            continue
         try:
             # A conferência e, no PDF (a NF), a conversão: o PDF só fica PDF onde a
             # plataforma aceita arquivo (pós-venda do ML); nos chats sem arquivo vira
@@ -289,6 +300,33 @@ async def enviar_foto(
         )
         raise _recusa_http(e) from e
     return ResponderOut(mensagem=_mensagem_out(m, conversa=c, nomes={user.id: _nome(user)}))
+
+
+async def _video_da_rota(c, arq: UploadFile, dados: bytes, *, i: int, total: int) -> video.Video:
+    """O vídeo do POST /foto, pronto para sair (ou 422 com a frase da tela)."""
+
+    def _recusa(code: str, detalhe: str) -> HTTPException:
+        return HTTPException(
+            422,
+            detail={
+                "code": enviar.RECUSA_FOTO_INVALIDA,
+                "detail": detalhe if total == 1 else f"{arq.filename or f'Anexo {i}'}: {detalhe}",
+                "motivo": code,
+                **({"anexo": i} if total > 1 else {}),
+            },
+        )
+
+    motivo = video.motivo_sem_video(c)
+    if motivo:
+        raise _recusa("video_nao_suportado", motivo)
+    if total > 1:
+        raise _recusa("video_sozinho", "O vídeo vai sozinho numa mensagem: mande um de cada vez.")
+    try:
+        return await asyncio.to_thread(
+            video.validar_para_a_caixa, c, dados, arq.filename, arq.content_type
+        )
+    except foto.FotoInvalida as e:
+        raise _recusa(e.code, e.detail) from e
 
 
 @router.get("/conversas/{conversa_id}/nf")

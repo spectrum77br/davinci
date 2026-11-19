@@ -262,6 +262,10 @@ def especie(mime: str | None) -> str | None:
     return item[1] if item else None
 
 
+# O `guardar_saida` tem um parâmetro `especie` (19/11/2026): o nome da função, para lá.
+_especie_do_tipo = especie
+
+
 def eh_inline(mime: str | None) -> bool:
     """A rota entrega `inline` (o navegador mostra) só imagem, áudio e vídeo da lista."""
     return especie(mime) in ESPECIES_INLINE
@@ -935,17 +939,21 @@ async def guardar_saida(
     dados: bytes,
     mime: str,
     agora: datetime | None = None,
+    especie: str = "imagem",
 ) -> CopiaDeSaida:
     """A nossa cópia da foto de SAÍDA (§6.8): o arquivo + `atendimento_zap_midias` (`saida`).
 
     Antes de falar com a Meta: o balão mostra a foto (pela rota) mesmo
     enquanto ela sai, e mesmo se não sair. Não commita (vai junto da linha
-    em voo); se a gravação falhar, o arquivo não fica órfão.
+    em voo); se a gravação falhar, o arquivo não fica órfão. O VÍDEO de saída
+    (19/11/2026) também: `especie="video"` (o MP4 já convertido).
     """
     agora = agora or _agora()
+    if especie not in ("imagem", "video"):
+        raise ValueError("espécie de saída fora da lista")
     real = detectar_tipo(dados)
-    if real is None or especie(real) != "imagem":
-        raise ValueError("a foto de saída não é imagem da lista")
+    if real is None or _especie_do_tipo(real) != especie:
+        raise ValueError(f"o arquivo de saída não é {especie} da lista")
     midia_id = uuid4()
     rel = caminho_relativo(numero_id, agora, midia_id, TIPOS_ACEITOS[real][0])
     final = _raiz() / rel

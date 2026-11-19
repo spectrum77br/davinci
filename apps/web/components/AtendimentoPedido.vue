@@ -219,6 +219,13 @@ export type EnvioFoto = {
   // A NF cheia do pedido para o atalho "NF" (o número), ou por que não há.
   nf_numero?: string | null
   nf_motivo?: string | null
+  // O vídeo (19/11/2026): se sai por esta conversa; o porquê quando não sai;
+  // os tipos e o teto do arquivo que a tela manda; a duração máxima (s).
+  video?: boolean
+  video_motivo?: string | null
+  video_tipos?: string[]
+  video_max_bytes?: number
+  video_max_s?: number
 }
 export type Painel = {
   pedido: { numero_bling: string; bling_id: number | null; numeroloja: string | null; situacao_id: string | null; situacao: string | null } | null

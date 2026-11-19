@@ -305,6 +305,8 @@ RECUSA_CONVERSA_OCUPADA = "conversa_ocupada"
 #   foto_nao_suportada — a plataforma/caixa não aceita foto pelo DaVinci;
 #   foto_invalida      — o arquivo não serve (tipo, tamanho) ou a legenda
 #                        não cabe nesta plataforma (Shopee/TikTok: foto sozinha).
+# Os mesmos dois valem para o VÍDEO (19/11/2026, `video.py`): onde o vídeo não
+# sai, `foto_nao_suportada` com a frase de `video.motivo_sem_video`.
 RECUSA_FOTO_NAO_SUPORTADA = "foto_nao_suportada"
 RECUSA_FOTO_INVALIDA = "foto_invalida"
 # Mensagem automática do motor (05/10/2026, `enviar_automatica`).
@@ -1435,8 +1437,10 @@ async def _aplicar_resultado(
         mensagem.status = MSG_FALHOU
         mensagem.erro = (resultado.erro or resultado.bloqueio or "envio_falhou")[:500]
     mensagem.payload = payload
-    url = (resultado.payload or {}).get("imagem_url")
-    if resultado.ok and mensagem.tipo == "imagem" and _url_do_balao(url):
+    # O vídeo (19/11/2026) volta em `video_url` — no Zap, a nossa cópia.
+    chave_url = "video_url" if mensagem.tipo == "video" else "imagem_url"
+    url = (resultado.payload or {}).get(chave_url)
+    if resultado.ok and mensagem.tipo in ("imagem", "video") and _url_do_balao(url):
         # A foto que saiu: o balão mostra a imagem pela URL da plataforma — ou,
         # no Zap (27/10/2026), pela nossa cópia (URL RELATIVA da rota).
         primeiro = (mensagem.anexos or [{}])[0]
@@ -2247,13 +2251,19 @@ TEMPO_MAXIMO_FOTO_S = 150
 
 
 async def _conferir_foto_repetida(
-    session: AsyncSession, conversa: AtendimentoConversa, sha256: str, *, para: str | None = None
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    sha256: str,
+    *,
+    para: str | None = None,
+    video: bool = False,
 ) -> None:
     """A mesma imagem já saiu (ou está saindo) nesta conversa há pouco? → `envio_repetido`.
 
     Na reclamação, só a que foi ao MESMO destino (`para`, o `receiver_role`).
     Vale também para cada imagem de uma mensagem com várias (`payload.fotos`,
-    o ML, 03/11/2026)."""
+    o ML, 03/11/2026) e para o vídeo (`payload.video`, 19/11/2026: o
+    `sha256` do arquivo que a pessoa escolheu, não o da conversão)."""
     repetida = await session.scalar(
         select(AtendimentoMensagem.id)
         .where(
@@ -2264,6 +2274,7 @@ async def _conferir_foto_repetida(
             or_(
                 AtendimentoMensagem.payload["foto"]["sha256"].astext == sha256,
                 AtendimentoMensagem.payload["fotos"].contains([{"sha256": sha256}]),
+                AtendimentoMensagem.payload["video"]["sha256"].astext == sha256,
             ),
             *((AtendimentoMensagem.payload["para"].astext == para,) if para is not None else ()),
         )
@@ -2272,8 +2283,15 @@ async def _conferir_foto_repetida(
     if repetida is not None:
         raise EnvioRecusado(
             RECUSA_ENVIO_REPETIDO,
-            "Esta mesma foto acabou de ser enviada nesta conversa (há menos de 2 minutos). "
-            "Ela não foi enviada de novo.",
+            (
+                "Este mesmo vídeo acabou de ser enviado nesta conversa (há menos de 2 minutos). "
+                "Ele não foi enviado de novo."
+            )
+            if video
+            else (
+                "Esta mesma foto acabou de ser enviada nesta conversa (há menos de 2 minutos). "
+                "Ela não foi enviada de novo."
+            ),
         )
 
 
@@ -2295,19 +2313,30 @@ async def _preparar_foto(
     vai para o disco junto da linha em voo (devolvida: é ela que sobe).
     Várias (03/11/2026): `foto` pode ser a lista — só onde vão numa mensagem
     (o ML); uma linha, um anexo por imagem, cada uma na trava de repetida.
+    Vídeo (19/11/2026, `video.Video`, já convertido pela rota): um por
+    mensagem, só onde a plataforma aceita (`video.motivo_sem_video`); a linha
+    é `tipo='video'` e a marca vai em `payload.video`.
     """
     from app.services.atendimento import foto as foto_mod
+    from app.services.atendimento import video as video_mod
 
     fotos = list(foto) if isinstance(foto, list | tuple) else [foto]
+    eh_video = any(isinstance(f, video_mod.Video) for f in fotos)
 
     await travar_conversa(session, conversa)
     destino = await _destino(session, conversa, origem=ORIGEM_HUMANO, para=para)
     _exigir_para(conversa, para)
-    motivo = foto_mod.motivo_sem_foto(conversa)
+    motivo = (
+        video_mod.motivo_sem_video(conversa) if eh_video else foto_mod.motivo_sem_foto(conversa)
+    )
     if motivo:
         raise EnvioRecusado(RECUSA_FOTO_NAO_SUPORTADA, motivo)
     if not fotos:
         raise EnvioRecusado(RECUSA_FOTO_INVALIDA, "Nenhum anexo para mandar.")
+    if eh_video and len(fotos) > 1:
+        raise EnvioRecusado(
+            RECUSA_FOTO_INVALIDA, "O vídeo vai sozinho numa mensagem: mande um de cada vez."
+        )
     if len(fotos) > 1 and not foto_mod.numa_mensagem(conversa):
         raise EnvioRecusado(
             RECUSA_FOTO_INVALIDA,
@@ -2323,7 +2352,17 @@ async def _preparar_foto(
             RECUSA_FOTO_INVALIDA, "A mesma imagem foi anexada duas vezes — tire a repetida."
         )
     legenda_ok: str | None = None
-    if foto_mod.legenda_obrigatoria(conversa):
+    if eh_video:
+        # Vídeo: a legenda só onde a plataforma leva junto (o Zap, opcional).
+        if video_mod.legenda_permitida(conversa):
+            if (legenda or "").strip():
+                legenda_ok = _preparar_legenda(legenda, conversa=conversa, rotulo="do vídeo")
+        elif (legenda or "").strip():
+            raise EnvioRecusado(
+                RECUSA_FOTO_INVALIDA,
+                "Nesta plataforma o vídeo vai sozinho: mande o texto pela caixa de resposta.",
+            )
+    elif foto_mod.legenda_obrigatoria(conversa):
         # ML: a foto vai DENTRO de uma mensagem — o texto passa pelo validador
         # como qualquer resposta (vazio = `texto_invalido`).
         legenda_ok = _preparar_texto(legenda, conversa=conversa, origem=ORIGEM_HUMANO)
@@ -2338,11 +2377,24 @@ async def _preparar_foto(
             "Nesta plataforma a foto vai sozinha: mande o texto pela caixa de resposta.",
         )
     for f in fotos:
-        await _conferir_foto_repetida(session, conversa, f.sha256, para=destino.receiver_role)
+        await _conferir_foto_repetida(
+            session, conversa, f.sha256, para=destino.receiver_role, video=eh_video
+        )
     if ultima_vista_id is not None and not confirmar:
         await _conferir_mudou(session, conversa, ultima_vista_id)
     pronta: tuple[str, bytes, str] | None = None
-    if destino.zap is not None:
+    if destino.zap is not None and eh_video:
+        # O vídeo chega CONVERTIDO (a rota, `video.validar_para_a_caixa`): MP4
+        # dentro do teto da Cloud API (16 MB). Cinto: outro jeito não sobe.
+        v = fotos[0]
+        if v.mime != video_mod.VIDEO_MP4 or v.tamanho > video_mod.MAX_BYTES_PLATAFORMA.get(
+            PLATAFORMA_WHATSAPP, 0
+        ):
+            raise EnvioRecusado(
+                RECUSA_FOTO_INVALIDA, "O vídeo não foi preparado para o WhatsApp — anexe de novo."
+            )
+        pronta = (v.nome, v.conteudo, v.mime)
+    elif destino.zap is not None:
         # O teto da Cloud API (5 MB): reduz ANTES — a cópia é o que sai.
         try:
             pronta = foto_mod.preparar_para(PLATAFORMA_WHATSAPP, fotos[0])
@@ -2353,9 +2405,18 @@ async def _preparar_foto(
     # O PDF (a NF, 28/10/2026) só chega aqui como PDF no pós-venda do ML
     # (`foto.para_a_caixa`): a linha é um ARQUIVO, sem URL de balão.
     def _tipo(f) -> str:
+        if isinstance(f, video_mod.Video):
+            return "video"
         return "arquivo" if f.mime == foto_mod.PDF else "imagem"
 
-    tipo = "arquivo" if any(_tipo(f) == "arquivo" for f in fotos) else "imagem"
+    def _duracao(f) -> dict:
+        d = getattr(f, "duracao", None)
+        return {"duracao": round(float(d), 1)} if d else {}
+
+    if eh_video:
+        tipo = "video"
+    else:
+        tipo = "arquivo" if any(_tipo(f) == "arquivo" for f in fotos) else "imagem"
     marcas = [{"sha256": f.sha256, "mime": f.mime, "bytes": f.tamanho} for f in fotos]
     mensagem = AtendimentoMensagem(
         conversa_id=conversa.id,
@@ -2367,14 +2428,21 @@ async def _preparar_foto(
         texto=legenda_ok,
         # A URL só existe depois do upload (`_aplicar_resultado` põe).
         anexos=[
-            {"tipo": _tipo(f), "nome": f.nome, "mime": f.mime, "tamanho": f.tamanho}
+            {
+                "tipo": _tipo(f),
+                "nome": f.nome,
+                "mime": f.mime,
+                "tamanho": f.tamanho,
+                **_duracao(f),
+            }
             for f in fotos
         ],
         enviada_em=None,
         status=MSG_ENVIANDO,
         rascunho_id=None,
         payload={
-            "foto": marcas[0],
+            # O vídeo (19/11/2026) tem a marca dele; a foto e o PDF, a de sempre.
+            **({"video": marcas[0]} if eh_video else {"foto": marcas[0]}),
             # Várias numa mensagem (o ML): cada uma, para a trava de repetida.
             **({"fotos": marcas} if len(marcas) > 1 else {}),
             # Reclamação: a quem foi (o `receiver_role`, o mesmo da leitura).
@@ -2405,14 +2473,17 @@ async def _preparar_foto(
             nome=nome,
             dados=dados,
             mime=mime,
+            especie="video" if eh_video else "imagem",
         )
-        # O balão mostra a NOSSA cópia desde já (enviando, enviada ou não).
+        # O balão mostra a NOSSA cópia desde já (enviando, enviada ou não) —
+        # a foto, ou o vídeo tocável (19/11/2026).
         mensagem.anexos = [
             {
-                "tipo": "imagem",
+                "tipo": "video" if eh_video else "imagem",
                 "nome": nome,
                 "mime": copia.mime,
                 "tamanho": len(dados),
+                **(_duracao(fotos[0]) if eh_video else {}),
                 "midia_id": str(copia.midia_id),
                 "status": zap_midia.M_BAIXADA,
                 "url": copia.url,
@@ -2422,7 +2493,9 @@ async def _preparar_foto(
     return mensagem, destino, legenda_ok, copia
 
 
-def _preparar_legenda(legenda: str | None, *, conversa: AtendimentoConversa) -> str | None:
+def _preparar_legenda(
+    legenda: str | None, *, conversa: AtendimentoConversa, rotulo: str = "da foto"
+) -> str | None:
     """A legenda OPCIONAL (Zap): o validador da caixa + o teto da legenda (1.024).
 
     Levanta `texto_invalido` com TODOS os motivos de uma vez; vazia depois de
@@ -2443,7 +2516,7 @@ def _preparar_legenda(legenda: str | None, *, conversa: AtendimentoConversa) -> 
     )
     teto = foto_mod.limite_da_legenda(conversa)
     if teto is not None and len(normalizado) > teto:
-        motivos.append(f"A legenda da foto passa de {teto} caracteres ({len(normalizado)}).")
+        motivos.append(f"A legenda {rotulo} passa de {teto} caracteres ({len(normalizado)}).")
     if motivos:
         raise EnvioRecusado(RECUSA_TEXTO_INVALIDO, motivos)
     return normalizado
@@ -2467,9 +2540,13 @@ async def _chamar_plataforma_foto(
     NOSSA cópia (já reduzida) dentro do mesmo teto de tempo — ANTES do
     `clientes.cliente_da_integracao`, que com `None` daria
     `cliente_indisponivel`. Os nomeados só vêm com o Zap (o único chamador).
+    Vídeo (19/11/2026): `zap.enviar_video` no Zap; nas lojas,
+    `video.enviar_video`.
     """
     from app.services.atendimento import foto as foto_mod
+    from app.services.atendimento import video as video_mod
 
+    eh_video = isinstance(foto, video_mod.Video)
     s = get_settings()
     if s.atendimento_simulador and s.is_prod:
         return ResultadoEnvio(ok=False, erro="simulador_em_producao")
@@ -2478,9 +2555,10 @@ async def _chamar_plataforma_foto(
     if zap_destino is not None:
         if copia is None:
             return ResultadoEnvio(ok=False, erro="zap_sem_copia")
+        enviar_midia = zap.enviar_video if eh_video else zap.enviar_imagem
         try:
             return await asyncio.wait_for(
-                zap.enviar_imagem(
+                enviar_midia(
                     session, conversa, zap_destino, copia, legenda, mensagem_id=mensagem_id
                 ),
                 timeout=TEMPO_MAXIMO_FOTO_S,
@@ -2505,9 +2583,10 @@ async def _chamar_plataforma_foto(
         return ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
     # Reclamação (28/10/2026): o anexo vai na mensagem ao comprador/mediador.
     extra = {"para": para} if para is not None else {}
+    enviar_anexo = video_mod.enviar_video if eh_video else foto_mod.enviar_imagem
     try:
         return await asyncio.wait_for(
-            foto_mod.enviar_imagem(session, conversa, integration, cliente, foto, legenda, **extra),
+            enviar_anexo(session, conversa, integration, cliente, foto, legenda, **extra),
             timeout=TEMPO_MAXIMO_FOTO_S,
         )
     except TimeoutError:
@@ -2532,6 +2611,7 @@ async def enviar_foto(
 
     Ou várias (a lista, 03/11/2026) numa mensagem só — onde a plataforma junta
     (`foto.numa_mensagem`, o ML, com o texto); nos chats a tela manda uma por vez.
+    Ou UM vídeo (19/11/2026, `video.Video` já convertido: `video.py`).
 
     O mesmo contrato do `enviar_resposta`: `EnvioRecusado` = nada saiu (trava
     nossa); erro da plataforma vira `falhou`/`revisar` na mensagem; COMMITA
