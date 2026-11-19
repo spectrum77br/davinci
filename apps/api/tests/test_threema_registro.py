@@ -537,6 +537,106 @@ def test_todo_envio_gerenciado_do_servidor_tem_marca():
     assert usadas - gerenciados == set()
 
 
+# Cada marca do servidor, (arquivo, função, chave) → quantas: a FOTO conferida
+# uma a uma contra a tabela do desenho (seção 2). Os testes acima garantem que
+# toda chave existe e todo envio é usado, mas não que cada ponto usa a chave
+# CERTA — trocar as duas marcas da Margem (25 × 26), ou as do item 1 e do 43,
+# passaria calado e a linha de base por chave sairia trocada. Mudou um ponto
+# de envio de propósito? Atualize aqui junto.
+_MARCAS = {
+    # item 1: motor (5 min), botão da regra, botão da linha do pedido
+    ("services/logistica_bling.py", "enviar_threema_em_lote", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
+    ("routers/logistica.py", "enviar_threema", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
+    ("routers/logistica.py", "enviar_threema_pedido", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
+    # itens 2, 3, 11, 17 e 28 (o mapa contexto → chave tem teste próprio)
+    ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
+    ("services/logistica_amazon_avisos.py", "run", "K.LOGISTICA_AMAZON_PRAZOS"): 1,  # 4
+    # 5: cron, botão ⟳ e webhook do 17track (pelo avisar_graves)
+    ("services/logistica_track_sync.py", "_aplicar_localizacoes", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
+    ("services/logistica_track_sync.py", "atualizar_linha", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
+    ("routers/logistica_track.py", "receive_17track_push", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
+    ("worker.py", "logistica_vigia", "K.LOGISTICA_VIGIA_AUTOMACAO"): 1,  # 6
+    ("services/marketplace_shipment_check.py", "_avisar_threema", "K.LOGISTICA_LOJA_MUDA"): 1,
+    # 8: o mesmo avisar_graves, chamado pelo rastreio das devoluções
+    ("services/devolucao_rastreio_sync.py", "run", "K.DEVOLUCOES_PACOTE_VOLTA_GRAVE"): 1,
+    ("services/devolucao_prazo.py", "avisar_prazos", "K.DEVOLUCOES_PRAZO_CONTESTACAO"): 1,  # 9
+    ("services/devolucao_acao_avisos.py", "run", "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA"): 1,  # 10
+    ("services/tuta_devolucoes.py", "entregar_resultado", "K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR"): 1,
+    ("services/chamados_tiktok_reembolso.py", "_avisar", "K.CHAMADOS_TIKTOK_SO_REEMBOLSO"): 1,
+    ("services/chamados_pendencias.py", "varrer", "K.CHAMADOS_ABERTURAS_PRESAS"): 1,  # 14
+    ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
+    ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,  # 16
+    # 18 a 22 (NF automática)
+    (
+        "services/nf_auto_enfileirar.py",
+        "_notificar_sem_estoque",
+        "K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "_avisar_negativo_fora_do_lote",
+        "K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "avisar_kit_sem_composicao",
+        "K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "_avisar_sem_leitura",
+        "K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "_avisar_recusa_83955",
+        "K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO",
+    ): 1,
+    (
+        "services/prioridade_estoque_movimentos.py",
+        "avisar_falhas",
+        "K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA",
+    ): 1,  # 23
+    (
+        "services/vigia_estoque_familia.py",
+        "vigia_estoque_familia_sweep",
+        "K.PRODUTOS_VIGIA_SOMA_FAMILIA",
+    ): 1,  # 24
+    # 25, 26 e 27 (Margem)
+    ("services/margem_auto_hold.py", "_avisar_threema", "K.MARGEM_PEDIDO_SEGURADO"): 1,
+    (
+        "services/margem_auto_hold.py",
+        "_avisar_threema_reavaliacao",
+        "K.MARGEM_REAVALIACAO",
+    ): 1,
+    ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
+    # 29 a 42 (um envio por robô; o mapa robô → chave tem teste próprio)
+    ("services/ouvidoria.py", "avisar_pendentes", "chave_ouvidoria(robo_chave)"): 1,
+    # 43: o relatório do dia e o teste dele
+    ("services/denuncia_relatorio_threema.py", "enviar_pendente", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
+    ("services/denuncia_relatorio_threema.py", "enviar_teste", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
+    ("services/denuncia_robo_aviso.py", "rodar", "K.DENUNCIA_ROBO_PRECISA_ALGUEM"): 1,  # 44
+    # 45 a 47 (o mapa plataforma → chave tem teste próprio)
+    ("services/conferencia_shopee/threema_aviso.py", "enviar_pendente", "chave"): 1,
+    # o núcleo do Cadastro (C5): forcar_para e lista resolvida
+    ("services/threema_envios.py", "enviar", "chave"): 2,
+}
+
+
+def test_cada_marca_usa_a_chave_certa():
+    achadas: dict[tuple[str, str | None, str], int] = {}
+    for rel, arvore in _arvores().items():
+        pais = _pais_de(rel)
+        for no in ast.walk(arvore):
+            if _e_marca(no):
+                arg = ast.unparse(no.args[0]) if no.args else ""
+                k = (rel, _funcao(no, pais), arg)
+                achadas[k] = achadas.get(k, 0) + 1
+    faltam = {k: v for k, v in _MARCAS.items() if achadas.get(k) != v}
+    sobram = {k: v for k, v in achadas.items() if _MARCAS.get(k) != v}
+    assert (faltam, sobram) == ({}, {})
+
+
 # ─────────────────────────────────────────────────────────── migration 0504
 
 _MIGRATION = _API / "alembic" / "versions" / "0504_threema_envio_registro.py"
