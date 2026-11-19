@@ -219,6 +219,29 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/notas-fiscais/export-job"): "exportou notas fiscais",
     ("POST", "/api/ouvidoria/robos/{chave}/rodar"): "mandou rodar um robô",
     ("POST", "/api/informar/{contexto}/enviar"): "enviou relatório no Threema",
+    # Cadastros › Envios Threema (tarefa 16, C7). O teste não muda o banco (o
+    # registro do envio fica fora do Histórico): sem esta linha não ficaria
+    # rastro de quem mandou.
+    ("PATCH", "/api/threema/envios/{chave}"): "alterou um envio do Threema",
+    (
+        "PUT",
+        "/api/threema/envios/{chave}/regras/{status_id}",
+    ): "mudou quem recebe a mensagem de uma regra (Threema)",
+    (
+        "DELETE",
+        "/api/threema/envios/{chave}/regras/{status_id}",
+    ): "voltou a regra para quem recebe o padrão (Threema)",
+    ("POST", "/api/threema/envios/{chave}/teste"): "mandou o teste de um envio do Threema",
+    ("POST", "/api/threema/grupos"): "criou um grupo do Threema",
+    ("PATCH", "/api/threema/grupos/{grupo_id}"): "alterou um grupo do Threema",
+    ("DELETE", "/api/threema/grupos/{grupo_id}"): "apagou um grupo do Threema",
+    ("POST", "/api/threema/contatos"): "cadastrou um contato externo do Threema",
+    ("PATCH", "/api/threema/contatos/{contato_id}"): "alterou um contato externo do Threema",
+    ("DELETE", "/api/threema/contatos/{contato_id}"): "apagou um contato externo do Threema",
+    (
+        "POST",
+        "/api/threema/emergencia",
+    ): "ligou ou desligou a emergência dos Envios Threema (configuração antiga)",
     ("POST", "/api/email-padroes/{padrao_id}/enviar-teste"): "enviou e-mail de teste",
     ("POST", "/api/metrics/reset"): "zerou as métricas",
     ("POST", "/api/product-links/remover-mortos"): "mandou remover os vínculos mortos",

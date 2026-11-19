@@ -206,11 +206,19 @@ async def test_sino_quebrado_nao_derruba_o_envio(db, monkeypatch):
 
 
 # Quem usa o núcleo nesta fase, e com quais funções. Nenhum é ponto de envio:
-# o startup do worker sincroniza o catálogo e a tela de Cadastros › Envios
-# Threema (C6) só LÊ (quem recebe, o legado, do que depende).
+# o startup do worker sincroniza o catálogo, a tela de Cadastros › Envios
+# Threema (C6) só LÊ (quem recebe, o legado, do que depende) e a edição (C7)
+# só manda o "[TESTE]" do botão (conferido abaixo).
 _USOS_DO_NUCLEO = {
     "worker.py": {"sincronizar"},
     "services/threema_envios_tela.py": {"resolver", "legado", "dependencias", "_dedupe"},
+    "services/threema_envios_edicao.py": {
+        "sincronizar",
+        "_interruptor_legado",
+        "_dedupe",
+        "enviar",
+        "limpar_cache",
+    },
 }
 
 
@@ -234,3 +242,16 @@ def test_nenhum_ponto_de_envio_chama_o_nucleo_nesta_fase():
     for rel, permitidas in _USOS_DO_NUCLEO.items():
         chamadas = set(re.findall(r"threema_envios\.(\w+)\(", (app / rel).read_text()))
         assert chamadas <= permitidas, rel
+    # O único `enviar` fora das fatias: o botão "Mandar teste" (origem teste,
+    # para a lista resolvida com forcar_para).
+    import ast
+
+    arvore = ast.parse((app / "services/threema_envios_edicao.py").read_text())
+    enviar = [
+        n
+        for n in ast.walk(arvore)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "enviar"
+    ]
+    assert len(enviar) == 1
+    kw = {k.arg: ast.unparse(k.value) for k in enviar[0].keywords}
+    assert kw["origem"] == "'teste'" and "forcar_para" in kw

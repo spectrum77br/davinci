@@ -3,6 +3,7 @@ import { computed, reactive, ref } from 'vue'
 import { ArrowLeft, Save, Trash2, X } from 'lucide-vue-next'
 import { ACTIONS, RESOURCES, RESOURCE_GROUPS, RESOURCE_LABELS, type Action, type Resource } from '~/composables/useCan'
 import { errosDaApi, formatBRL, type Pessoa } from '~/lib/imobilizado'
+import { normalizarThreema, textoAvisoPessoa, threemaIdValido, type EnviosDaPessoa } from '~/lib/enviosThreema'
 
 definePageMeta({ middleware: ['admin'] })
 
@@ -388,7 +389,36 @@ async function seguirImobilizado(transferir: boolean) {
   } finally { imob.enviando = false }
 }
 
+// Antes de suspender, excluir ou mexer no Threema de quem recebe aviso:
+// "Fulano recebe N envios; em X é a única" (Cadastros › Envios Threema,
+// tarefa 16). Melhor esforço: se a consulta falhar, segue sem perguntar.
+async function textoEnviosThreema(acao: string): Promise<string | null> {
+  try {
+    return textoAvisoPessoa(await api<EnviosDaPessoa>(`/api/threema/pessoas/${userId}/envios`), acao)
+  } catch {
+    return null
+  }
+}
+
 async function saveCadastral(ignorarImobilizado = false) {
+  const threemaNovo = normalizarThreema(form.threema)
+  if (threemaNovo && !threemaIdValido(threemaNovo)) {
+    error.value = 'O ID do Threema tem 8 letras/números (ex.: ABCD1234): confira.'
+    return
+  }
+  // Volta da janela do Imobilizado: a pessoa já confirmou.
+  if (!ignorarImobilizado && user.value) {
+    const antes = normalizarThreema(user.value.threema)
+    const acao = user.value.status === 'active' && form.status !== 'active'
+      ? 'suspender esta pessoa'
+      : antes && antes !== threemaNovo
+        ? (threemaNovo ? 'trocar o Threema' : 'apagar o Threema')
+        : null
+    if (acao) {
+      const texto = await textoEnviosThreema(acao)
+      if (texto && !confirm(texto)) return
+    }
+  }
   saving.value = true
   error.value = null
   try {
@@ -412,7 +442,9 @@ async function saveCadastral(ignorarImobilizado = false) {
     })
     resetPerms()
   } catch (e: any) {
-    if (!(await avisarImobilizado(e, 'salvar'))) error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (!(await avisarImobilizado(e, 'salvar'))) {
+      error.value = e?.data?.detail?.message || e?.data?.detail?.code || e?.message || 'erro'
+    }
   } finally {
     saving.value = false
   }
@@ -436,7 +468,10 @@ async function savePerms() {
 
 async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
   // Volta da janela do Imobilizado: a pessoa já confirmou a exclusão.
-  if (!jaConfirmou && !confirm('Excluir (desabilitar) este usuário?')) return
+  if (!jaConfirmou) {
+    const avisoThreema = await textoEnviosThreema('excluir (desabilitar) este usuário')
+    if (!confirm(avisoThreema || 'Excluir (desabilitar) este usuário?')) return
+  }
   deleting.value = true
   error.value = null
   try {

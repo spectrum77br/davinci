@@ -27,11 +27,31 @@ from app.schemas.users import (
 )
 from app.security.password import hash_password
 from app.services import imobilizado as imobilizado_svc
+from app.services import threema
 
 _settings = get_settings()
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/users", tags=["users"])
+
+
+def _threema_normalizado(valor: str | None) -> str | None:
+    """O campo Threema: vazio = sem Threema; preenchido, só no formato do
+    Threema (8 letras/números, ou `*` + 7 do Gateway), em maiúsculas. Antes
+    (tarefa 16, C7) aceitava qualquer texto, e um ID digitado errado calava
+    o aviso sem ninguém ver: o Threema responde 404 e a pessoa não recebe."""
+    rid = (valor or "").strip().upper()
+    if not rid:
+        return None
+    if not threema.threema_id_valido(rid):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "threema_invalido",
+                "message": "O ID do Threema tem 8 letras/números (ex.: ABCD1234): confira.",
+            },
+        )
+    return rid
 
 
 def _to_out(u: User) -> UserOut:
@@ -207,7 +227,7 @@ async def create_user(
         bling_login=body.bling_login,
         adspower=body.adspower,
         duoke=body.duoke,
-        threema=body.threema,
+        threema=_threema_normalizado(body.threema),
         stock_tags=_normalize_stock_tags(body.stock_tags),
         sales_teams=_normalize_sales_teams(body.sales_teams),
         commercial_team=body.commercial_team,
@@ -238,6 +258,8 @@ async def patch_user(
         raise HTTPException(404, detail={"code": "user_not_found"})
 
     data = body.model_dump(exclude_unset=True)
+    if "threema" in data:
+        data["threema"] = _threema_normalizado(data["threema"])
 
     if "email" in data and data["email"]:
         new_email = data["email"].lower().strip()

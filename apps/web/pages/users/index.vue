@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { TABS_CONFIGURACOES, TABS_USUARIOS } from '~/lib/navGroups'
+import { normalizarThreema, textoAvisoPessoa, threemaIdValido, type EnviosDaPessoa } from '~/lib/enviosThreema'
 import { ref } from 'vue'
 import { Plus, RefreshCw, X } from 'lucide-vue-next'
 
@@ -74,7 +75,7 @@ async function createUser() {
     draft.value = { email: '', name: '', password: '', tuta: '', upseller: '', bling_login: '', adspower: '', duoke: '', threema: '' }
     await refresh()
   } catch (e: any) {
-    createErr.value = e?.data?.detail?.code || e?.message || 'erro'
+    createErr.value = e?.data?.detail?.message || e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     creating.value = false
   }
@@ -98,16 +99,34 @@ function startEditThreema(u: UserRow) {
   threemaDraft.value = u.threema || ''
 }
 
+// Antes de trocar ou apagar o Threema de quem recebe aviso: "Fulano recebe N
+// envios; em X é a única" (Cadastros › Envios Threema, tarefa 16). O aviso é
+// de melhor esforço: se a consulta falhar, segue sem perguntar.
+async function confirmarEnviosThreema(u: UserRow, acao: string): Promise<boolean> {
+  try {
+    const r = await api<EnviosDaPessoa>(`/api/threema/pessoas/${u.id}/envios`)
+    const texto = textoAvisoPessoa(r, acao)
+    return !texto || confirm(texto)
+  } catch {
+    return true
+  }
+}
+
 async function saveThreema(u: UserRow) {
-  const v = threemaDraft.value.trim().toUpperCase() || null
+  const v = normalizarThreema(threemaDraft.value) || null
   editingThreema.value = null
   if (v === (u.threema || null)) return
+  if (v && !threemaIdValido(v)) {
+    error.value = `Threema "${v}": o ID tem 8 letras/números (ex.: ABCD1234). Nada foi salvo.`
+    return
+  }
+  if (u.threema && !(await confirmarEnviosThreema(u, v ? 'trocar o Threema' : 'apagar o Threema'))) return
   savingThreema.value = true
   try {
     await api(`/api/users/${u.id}`, { method: 'PATCH', body: { threema: v } })
     u.threema = v
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = e?.data?.detail?.message || e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     savingThreema.value = false
   }

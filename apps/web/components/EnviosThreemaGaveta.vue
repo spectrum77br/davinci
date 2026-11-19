@@ -5,12 +5,17 @@
 // status (item 1) e os últimos envios.
 //
 // Envio do servidor ainda não migrado é só leitura: a lista é a configuração
-// antiga, e a gaveta diz onde ela é editada hoje.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CheckCircle2, X, XCircle } from 'lucide-vue-next'
+// antiga, e a gaveta diz onde ela é editada hoje. A edição (C7, só admin)
+// vale para o envio que lê o Cadastro — o do servidor migrado e o do Mac
+// (que só passa a ler daqui na C13): liga/desliga (a confirmação diz o que
+// acontece com os avisos), quem recebe (Pessoas, Grupos e Contatos
+// externos), observação, re-aviso (Ouvidoria) e a lista de cada regra
+// (item 1). "Mandar teste" manda "[TESTE] <nome>" para quem recebe agora.
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { CheckCircle2, Send, X, XCircle } from 'lucide-vue-next'
 import {
-  FREQUENCIA, ONDE_RODA, ORIGEM, classeFaixa, fraseErro, haQuanto,
-  type Detalhe, type Lote,
+  FREQUENCIA, ONDE_RODA, ORIGEM, classeFaixa, fraseErro, haQuanto, textoConfirmarDesligar,
+  textoConfirmarTeste, type Detalhe, type Lote, type Pessoas, type Regra, type RefSel,
 } from '~/lib/enviosThreema'
 
 const props = defineProps<{ chave: string | null; regra?: string | null }>()
@@ -39,8 +44,10 @@ async function carregar(chave: string) {
     ])
     if (meu !== seq) return
     detalhe.value = d
+    preencher(d)
     lotes.value = r.items
     maisLotes.value = r.mais
+    if (d.editavel) carregarPessoas()
   } catch (e: any) {
     if (meu !== seq) return
     detalhe.value = null
@@ -49,18 +56,6 @@ async function carregar(chave: string) {
     if (meu === seq) carregando.value = false
   }
 }
-
-watch(
-  () => props.chave,
-  (c) => {
-    if (c) carregar(c)
-    else {
-      detalhe.value = null
-      lotes.value = []
-    }
-  },
-  { immediate: true },
-)
 
 const aberto = computed(() => !!props.chave)
 const podeVerHistorico = computed(() => (auth.user as any)?.historico === true)
@@ -84,6 +79,145 @@ function quemDisparou(l: Lote): string {
   if (l.origem === 'automatico') return l.onde_roda === 'mac' ? 'automático (Mac)' : 'automático'
   return l.ator ? `${l.ator} (${ORIGEM[l.origem]})` : ORIGEM[l.origem]
 }
+
+// ── edição (C7) ─────────────────────────────────────────────────────────────
+const pessoas = ref<Pessoas | null>(null)
+const form = reactive({ ativo: true, observacao: '', reaviso: null as number | null, lista: [] as RefSel[] })
+const salvando = ref(false)
+const testando = ref(false)
+const msg = ref<string | null>(null)
+const erroEdicao = ref<string | null>(null)
+
+async function carregarPessoas() {
+  if (pessoas.value) return
+  try {
+    pessoas.value = await api<Pessoas>('/api/threema/pessoas')
+  } catch {
+    erroEdicao.value = 'Não deu para carregar as pessoas, grupos e contatos.'
+  }
+}
+function paraSel(lista: Detalhe['destinatarios']): RefSel[] {
+  return lista.map((r) => ({ tipo: r.tipo, id: r.id, nome: r.nome }))
+}
+function preencher(d: Detalhe) {
+  form.ativo = d.ativo
+  form.observacao = d.observacao || ''
+  form.reaviso = d.reaviso_horas
+  form.lista = paraSel(d.destinatarios)
+}
+const chaves = (l: { tipo: string; id: string }[]) => l.map((r) => `${r.tipo}:${r.id}`).join(',')
+const mudouLista = computed(() => !!detalhe.value && chaves(form.lista) !== chaves(detalhe.value.destinatarios))
+const mudouAtivo = computed(() => !!detalhe.value?.desligavel && form.ativo !== detalhe.value.ativo)
+const mudouObs = computed(() => (form.observacao.trim() || null) !== (detalhe.value?.observacao || null))
+const mudouReaviso = computed(
+  () => !!detalhe.value?.tem_reaviso && !!form.reaviso && form.reaviso !== detalhe.value.reaviso_horas,
+)
+const temMudanca = computed(() => mudouLista.value || mudouAtivo.value || mudouObs.value || mudouReaviso.value)
+
+function desfazer() {
+  if (detalhe.value) preencher(detalhe.value)
+  erroEdicao.value = null
+}
+
+async function salvar() {
+  const d = detalhe.value
+  if (!d || !temMudanca.value || salvando.value) return
+  if (mudouAtivo.value && !form.ativo && !confirm(textoConfirmarDesligar(d))) return
+  const body: Record<string, unknown> = {}
+  if (mudouAtivo.value) body.ativo = form.ativo
+  if (mudouObs.value) body.observacao = form.observacao.trim() || null
+  if (mudouReaviso.value) body.reaviso_horas = form.reaviso
+  if (mudouLista.value) body.destinatarios = form.lista.map(({ tipo, id }) => ({ tipo, id }))
+  salvando.value = true
+  erroEdicao.value = null
+  msg.value = null
+  try {
+    const r = await api<Detalhe & { avisos_da_edicao: string[] }>(
+      `/api/threema/envios/${encodeURIComponent(d.chave)}`, { method: 'PATCH', body },
+    )
+    detalhe.value = r
+    preencher(r)
+    msg.value = ['Salvo.', ...(r.avisos_da_edicao || [])].join(' ')
+    emit('mudou')
+  } catch (e: any) {
+    erroEdicao.value = e?.data?.detail?.message || 'Não deu para salvar.'
+  } finally {
+    salvando.value = false
+  }
+}
+
+const podeTestar = computed(() => {
+  const d = detalhe.value
+  return !!d && d.gerenciado && d.onde_roda === 'servidor' && d.quem_recebe.nomes.length > 0
+})
+async function testar() {
+  const d = detalhe.value
+  if (!d || testando.value || !confirm(textoConfirmarTeste(d))) return
+  testando.value = true
+  erroEdicao.value = null
+  msg.value = null
+  try {
+    const r = await api<{ enviados: string[]; falharam: string[]; remetente: string }>(
+      `/api/threema/envios/${encodeURIComponent(d.chave)}/teste`, { method: 'POST' },
+    )
+    msg.value = `Teste enviado (remetente ${r.remetente})`
+      + (r.enviados.length ? ` para: ${r.enviados.join(', ')}.` : '.')
+      + (r.falharam.length ? ` Não chegou para: ${r.falharam.join(', ')}.` : '')
+    await carregar(d.chave)
+  } catch (e: any) {
+    erroEdicao.value = e?.data?.detail?.message || 'O teste não saiu.'
+  } finally {
+    testando.value = false
+  }
+}
+
+// Item 1: a lista própria de cada regra de status.
+const regraEditando = ref<string | null>(null)
+const listaRegra = ref<RefSel[]>([])
+function editarRegra(r: Regra) {
+  regraEditando.value = r.id
+  listaRegra.value = paraSel(r.cadastro)
+  carregarPessoas()
+}
+async function salvarRegra(r: Regra, padrao = false) {
+  const d = detalhe.value
+  if (!d) return
+  salvando.value = true
+  erroEdicao.value = null
+  try {
+    const url = `/api/threema/envios/${encodeURIComponent(d.chave)}/regras/${r.id}`
+    const resp = padrao
+      ? await api<Detalhe>(url, { method: 'DELETE' })
+      : await api<Detalhe>(url, {
+        method: 'PUT', body: { destinatarios: listaRegra.value.map(({ tipo, id }) => ({ tipo, id })) },
+      })
+    detalhe.value = resp
+    preencher(resp)
+    regraEditando.value = null
+    msg.value = 'Salvo.'
+    emit('mudou')
+  } catch (e: any) {
+    erroEdicao.value = e?.data?.detail?.message || 'Não deu para salvar a regra.'
+  } finally {
+    salvando.value = false
+  }
+}
+
+// Por último: o `immediate` lê o estado da edição, declarado acima.
+watch(
+  () => props.chave,
+  (c) => {
+    if (c) carregar(c)
+    else {
+      detalhe.value = null
+      lotes.value = []
+    }
+    msg.value = null
+    erroEdicao.value = null
+    regraEditando.value = null
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -179,12 +313,70 @@ function quemDisparou(l: Lote): string {
                 <p v-else class="mt-0.5 text-xs text-muted-foreground">sem Mensagem Threema (não envia)</p>
                 <p class="mt-1 text-xs">
                   Quem recebe:
-                  <template v-if="r.usa_padrao">usa o padrão do envio</template>
+                  <template v-if="detalhe.editavel">
+                    {{ r.cadastro.length ? r.cadastro.map((x) => x.nome).join(', ') : 'usa o padrão do envio' }}
+                  </template>
+                  <template v-else-if="r.usa_padrao">usa o padrão do envio</template>
                   <template v-else>{{ r.antes.nomes.map((n) => n.nome).join(', ') }}</template>
                 </p>
+                <div v-if="detalhe.editavel" class="mt-1 space-y-2" data-regra-edicao>
+                  <template v-if="regraEditando === r.id">
+                    <EnviosThreemaSeletor v-model="listaRegra" :pessoas="pessoas" />
+                    <div class="flex gap-2">
+                      <button type="button" class="h-8 rounded-md border bg-primary px-3 text-xs text-primary-foreground disabled:opacity-50" :disabled="salvando || !listaRegra.length" @click="salvarRegra(r)">Salvar a lista da regra</button>
+                      <button type="button" class="h-8 rounded-md border px-3 text-xs" @click="regraEditando = null">cancelar</button>
+                    </div>
+                  </template>
+                  <div v-else class="flex gap-2">
+                    <button type="button" class="h-7 rounded-md border px-2 text-xs hover:bg-muted" @click="editarRegra(r)">Lista própria</button>
+                    <button v-if="r.cadastro.length" type="button" class="h-7 rounded-md border px-2 text-xs hover:bg-muted" :disabled="salvando" @click="salvarRegra(r, true)">Voltar ao padrão</button>
+                  </div>
+                </div>
               </li>
             </ul>
           </section>
+
+          <section v-if="detalhe.editavel" data-bloco="edicao" class="space-y-3 rounded-md border p-3">
+            <h3 class="text-xs font-semibold uppercase text-muted-foreground">Editar</h3>
+            <p v-if="detalhe.onde_roda === 'mac'" class="rounded border border-sky-300 bg-sky-50 px-2 py-1 text-xs text-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
+              O Mac ainda usa o .env: esta lista passa a valer quando o Mac ler o Cadastro. Lista vazia = o Mac continua no .env.
+            </p>
+            <label v-if="detalhe.desligavel" class="flex items-center gap-2">
+              <input v-model="form.ativo" type="checkbox" class="size-4" data-campo="ativo" />
+              Ligado
+              <span v-if="!form.ativo && detalhe.ao_desligar_texto" class="text-xs text-muted-foreground">
+                (desligado: {{ detalhe.ao_desligar_texto }})
+              </span>
+            </label>
+            <p v-else class="text-xs text-muted-foreground" data-sem-interruptor>
+              Sem interruptor: quem liga e desliga é a Mensagem de cada regra.
+            </p>
+            <div>
+              <div class="mb-1 text-xs font-medium">Quem recebe{{ detalhe.escopo_tipo === 'regra_status' ? ' (padrão)' : '' }}</div>
+              <EnviosThreemaSeletor v-model="form.lista" :pessoas="pessoas" />
+            </div>
+            <label v-if="detalhe.tem_reaviso" class="block">
+              <span class="text-xs font-medium">Re-aviso das pendências (horas)</span>
+              <input v-model.number="form.reaviso" type="number" min="1" max="720" class="mt-1 h-9 w-28 rounded-md border bg-background px-2 text-sm" data-campo="reaviso" />
+            </label>
+            <label class="block">
+              <span class="text-xs font-medium">Observação</span>
+              <textarea v-model="form.observacao" rows="2" maxlength="2000" class="mt-1 w-full rounded-md border bg-background px-2 py-1 text-sm" data-campo="observacao" />
+            </label>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="h-9 rounded-md bg-primary px-4 text-sm text-primary-foreground disabled:opacity-50"
+                :disabled="!temMudanca || salvando"
+                data-acao="salvar"
+                @click="salvar"
+              >{{ salvando ? 'salvando…' : 'Salvar' }}</button>
+              <button v-if="temMudanca" type="button" class="text-sm text-muted-foreground underline" @click="desfazer">desfazer</button>
+            </div>
+          </section>
+
+          <p v-if="erroEdicao" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700" data-erro-edicao>{{ erroEdicao }}</p>
+          <p v-if="msg" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300" data-msg>{{ msg }}</p>
 
           <section>
             <h3 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">Liga e desliga</h3>
@@ -202,13 +394,23 @@ function quemDisparou(l: Lote): string {
             </p>
           </section>
 
-          <section v-if="detalhe.observacao">
+          <section v-if="detalhe.observacao && !detalhe.editavel">
             <h3 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">Observação</h3>
             <p class="whitespace-pre-line">{{ detalhe.observacao }}</p>
           </section>
 
           <section data-bloco="envios">
-            <h3 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">Últimos envios</h3>
+            <div class="mb-1 flex items-center gap-2">
+              <h3 class="text-xs font-semibold uppercase text-muted-foreground">Últimos envios</h3>
+              <button
+                v-if="podeTestar"
+                type="button"
+                class="ml-auto inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs hover:bg-muted disabled:opacity-50"
+                :disabled="testando"
+                data-acao="testar"
+                @click="testar"
+              ><Send class="size-3" /> {{ testando ? 'mandando…' : 'Mandar teste' }}</button>
+            </div>
             <p v-if="!lotes.length" class="text-xs text-muted-foreground">Nenhum envio registrado.</p>
             <ul v-else class="divide-y rounded border">
               <li v-for="l in lotes" :key="l.lote_id" class="px-3 py-2">

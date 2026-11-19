@@ -4,6 +4,8 @@ tarefa 16)."""
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -30,3 +32,63 @@ class RegistroRoboIn(BaseModel):
 
 class RegistrosRoboIn(BaseModel):
     itens: list[RegistroRoboIn] = Field(max_length=MAX_REGISTROS_ROBO)
+
+
+# ─────────────────────────────────────────────────────────── edição (C7)
+
+
+class RefIn(BaseModel):
+    """Quem recebe: um usuário, um grupo ou um contato externo."""
+
+    tipo: Literal["usuario", "grupo", "contato"]
+    id: UUID
+
+
+class MembroIn(BaseModel):
+    """Membro de grupo: usuário ou contato externo."""
+
+    tipo: Literal["usuario", "contato"]
+    id: UUID
+
+
+class EnvioPatchIn(BaseModel):
+    """PATCH /envios/{chave}. Campo ausente = não mexe; `observacao: null`
+    apaga a observação."""
+
+    ativo: bool | None = None
+    observacao: str | None = Field(default=None, max_length=2000)
+    destinatarios: list[RefIn] | None = Field(default=None, max_length=100)
+    reaviso_horas: int | None = Field(default=None, ge=1, le=24 * 30)
+
+
+class RegraIn(BaseModel):
+    destinatarios: list[RefIn] = Field(max_length=100)
+
+
+class GrupoIn(BaseModel):
+    nome: str = Field(max_length=200)
+    descricao: str | None = Field(default=None, max_length=1000)
+    membros: list[MembroIn] = Field(default_factory=list, max_length=100)
+
+
+class GrupoPatchIn(BaseModel):
+    nome: str | None = Field(default=None, max_length=200)
+    descricao: str | None = Field(default=None, max_length=1000)
+    membros: list[MembroIn] | None = Field(default=None, max_length=100)
+
+
+class ContatoIn(BaseModel):
+    nome: str = Field(max_length=200)
+    threema_id: str = Field(max_length=16)
+    observacao: str | None = Field(default=None, max_length=1000)
+
+
+class ContatoPatchIn(BaseModel):
+    nome: str | None = Field(default=None, max_length=200)
+    threema_id: str | None = Field(default=None, max_length=16)
+    ativo: bool | None = None
+    observacao: str | None = Field(default=None, max_length=1000)
+
+
+class EmergenciaIn(BaseModel):
+    usar_legado: bool

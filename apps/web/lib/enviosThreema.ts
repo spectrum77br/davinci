@@ -208,3 +208,87 @@ export const ORIGEM: Record<Lote['origem'], string> = {
   manual: 'botão',
   teste: 'teste',
 }
+
+// ─────────────────────────────────────────────── edição (C7)
+
+export type PessoaUsuario = {
+  id: string
+  nome: string
+  email: string
+  admin: boolean
+  tem_threema: boolean
+  valido: boolean
+  aviso: string | null
+}
+export type GrupoOut = {
+  id: string
+  nome: string
+  descricao: string | null
+  membros: RefOut[]
+  usado_em: { chave?: string; nome: string; regra?: string | null }[]
+}
+export type ContatoOut = {
+  id: string
+  nome: string
+  threema_id: string
+  ativo: boolean
+  origem: string
+  observacao: string | null
+  usado_em: { chave?: string; grupo?: string; nome: string }[]
+  e_de_usuario: string | null
+}
+export type Pessoas = { usuarios: PessoaUsuario[]; grupos: GrupoOut[]; contatos: ContatoOut[] }
+export type RefSel = { tipo: 'usuario' | 'grupo' | 'contato'; id: string; nome: string }
+
+/** A confirmação ao desligar, com o que acontece com os avisos. */
+export function textoConfirmarDesligar(e: Pick<Envio, 'nome' | 'ao_desligar' | 'ao_desligar_texto'>): string {
+  const efeito = e.ao_desligar_texto
+    ? `Enquanto estiver desligado, ${e.ao_desligar_texto}.`
+    : 'Enquanto estiver desligado, este aviso não sai.'
+  return `Desligar "${e.nome}"?\n${efeito}`
+}
+
+/** "Mandar '[TESTE] nome' para A, B?" */
+export function textoConfirmarTeste(e: Pick<Envio, 'nome' | 'quem_recebe'>): string {
+  const nomes = e.quem_recebe.nomes.map((n) => n.nome).join(', ')
+  return `Mandar "[TESTE] ${e.nome}" pelo Threema agora para: ${nomes}?`
+}
+
+// Mesmo formato do servidor (services/threema._THREEMA_ID).
+const THREEMA_ID = /^(?:[A-Z0-9]{8}|\*[A-Z0-9]{7})$/
+export function normalizarThreema(v: string | null | undefined): string {
+  return (v || '').trim().toUpperCase()
+}
+export function threemaIdValido(v: string | null | undefined): boolean {
+  return THREEMA_ID.test(normalizarThreema(v))
+}
+
+export type EnviosDaPessoa = {
+  usuario: { id: string; nome: string; tem_threema: boolean }
+  envios: { chave: string; nome: string; painel: string; onde_roda: string; via: string; unico: boolean; grupo: string | null }[]
+  total: number
+  unicos: number
+  pela_configuracao_antiga: number
+}
+
+/** O aviso de Usuários antes de suspender, excluir ou mexer no Threema de
+ *  alguém. null = a pessoa não recebe envio nenhum (não precisa perguntar). */
+export function textoAvisoPessoa(r: EnviosDaPessoa, acao: string): string | null {
+  if (!r.total) return null
+  const plural = r.total === 1 ? 'envio' : 'envios'
+  const linhas = [`${r.usuario.nome} recebe ${r.total} ${plural} do Threema.`]
+  const unicos = r.envios.filter((e) => e.unico)
+  if (unicos.length) {
+    const nomes = unicos.slice(0, 6).map((e) => e.nome).join(', ')
+    const mais = unicos.length > 6 ? ` e mais ${unicos.length - 6}` : ''
+    linhas.push(`Em ${unicos.length} é a única pessoa — eles param de chegar a alguém: ${nomes}${mais}.`)
+  }
+  if (r.pela_configuracao_antiga) {
+    linhas.push(
+      `${r.pela_configuracao_antiga} usam a configuração antiga: o ID dela continua nessas listas `
+      + '(suspender não tira). Acerte em Cadastros › Envios Threema.',
+    )
+  }
+  linhas.push(`Quer mesmo ${acao}?`)
+  return linhas.join('\n')
+}

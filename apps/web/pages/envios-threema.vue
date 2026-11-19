@@ -10,7 +10,12 @@
 // migrado. Os IDs do Threema nunca aparecem inteiros.
 //
 // Endereço: ?envio=<chave> abre a gaveta do envio (&regra=<id> marca a regra
-// de status do item 1); ?pessoa=<id> mostra só os envios daquela pessoa.
+// de status do item 1); ?pessoa=<id> mostra só os envios daquela pessoa;
+// ?aba=grupos|contatos abre Grupos ou Contatos externos.
+//
+// Edição (C7, só admin): na gaveta, para o envio que lê o Cadastro (o do
+// servidor migrado e o do Mac); Grupos e Contatos externos nas abas; e o
+// botão de emergência, que volta TODOS os envios para a configuração antiga.
 import { computed, onMounted, ref, watch } from 'vue'
 import { MessageSquare, RefreshCw, Search, ShieldAlert, X } from 'lucide-vue-next'
 import { TABS_CADASTROS } from '~/lib/navGroups'
@@ -98,6 +103,45 @@ const porPainel = computed(() => {
 })
 
 const migrados = computed(() => (lista.value?.envios ?? []).filter((e) => e.migrado).length)
+
+// Abas da página: Envios | Grupos | Contatos externos (no endereço, ?aba=).
+const ABAS = [['envios', 'Envios'], ['grupos', 'Grupos'], ['contatos', 'Contatos externos']] as const
+type Aba = (typeof ABAS)[number][0]
+const aba = computed<Aba>(() =>
+  route.query.aba === 'grupos' || route.query.aba === 'contatos' ? route.query.aba : 'envios',
+)
+function trocarAba(a: Aba) {
+  const query = { ...route.query }
+  if (a === 'envios') delete query.aba
+  else query.aba = a
+  delete query.envio
+  delete query.regra
+  router.replace({ query })
+}
+
+// Emergência: um clique volta todos os envios para a configuração antiga
+// (vale no próximo envio, sem recriar container).
+const mudandoEmergencia = ref(false)
+async function alternarEmergencia() {
+  const atual = lista.value?.emergencia
+  if (!atual || mudandoEmergencia.value) return
+  const ligar = !atual.usar_legado
+  const pergunta = ligar
+    ? 'Ligar a emergência? TODOS os envios voltam para a configuração antiga no próximo envio '
+      + '(o Cadastro deixa de valer até desligar).'
+    : 'Desligar a emergência? Os envios migrados voltam a ler a lista daqui.'
+  if (!confirm(pergunta)) return
+  mudandoEmergencia.value = true
+  erro.value = null
+  try {
+    await api('/api/threema/emergencia', { method: 'POST', body: { usar_legado: ligar } })
+    await carregar()
+  } catch (e: any) {
+    erro.value = e?.data?.detail?.message || 'Não deu para mudar a emergência.'
+  } finally {
+    mudandoEmergencia.value = false
+  }
+}
 const contagem = computed(() => lista.value?.contagem ?? ({} as Record<string, number>))
 
 // Descrição longa: "ver mais" por linha.
@@ -156,148 +200,173 @@ function fechar() {
           </template>
           <template v-else>Desligada. Os envios migrados leem a lista daqui.</template>
         </p>
+        <button
+          type="button"
+          class="mt-1 h-7 rounded-md border bg-background px-2 text-xs hover:bg-muted disabled:opacity-50"
+          :disabled="mudandoEmergencia"
+          data-acao="emergencia"
+          @click="alternarEmergencia"
+        >{{ lista.emergencia.usar_legado ? 'Desligar a emergência' : 'Ligar a emergência' }}</button>
       </div>
-    </div>
-
-    <div class="flex flex-wrap items-center gap-2">
-      <div class="relative">
-        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-        <input
-          v-model="busca"
-          class="h-9 w-72 max-w-full rounded-md border bg-background pl-8 pr-3 text-sm"
-          placeholder="envio, pessoa, remetente…"
-        />
-      </div>
-      <select v-model="painel" class="h-9 rounded-md border bg-background px-2 text-sm" title="Painel">
-        <option value="">Painel: todos</option>
-        <option v-for="p in lista?.paineis ?? []" :key="p" :value="p">{{ p }}</option>
-      </select>
-      <select v-model="ondeRoda" class="h-9 rounded-md border bg-background px-2 text-sm" title="Onde roda">
-        <option value="">Onde roda: todos</option>
-        <option v-for="(rotulo, k) in ONDE_RODA" :key="k" :value="k">{{ rotulo }}</option>
-      </select>
-      <select v-model="situacao" class="h-9 rounded-md border bg-background px-2 text-sm" title="Situação">
-        <option value="">Situação: todas</option>
-        <option v-for="(s, k) in SITUACAO" :key="k" :value="k">
-          {{ s.rotulo }} ({{ contagem[k] ?? 0 }})
-        </option>
-      </select>
-      <span v-if="pessoa" class="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs">
-        Só os envios de {{ lista?.pessoa?.nome || 'uma pessoa' }}
-        <button type="button" aria-label="tirar o filtro da pessoa" @click="tirarDoEndereco('pessoa')">
-          <X class="size-3" />
-        </button>
-      </span>
-      <button v-if="temFiltro" type="button" class="text-sm text-muted-foreground underline" @click="limparFiltros">
-        limpar filtros
-      </button>
-      <button
-        type="button"
-        class="inline-flex items-center gap-1.5 h-9 rounded-md border bg-background px-3 text-sm hover:bg-muted"
-        :disabled="carregando"
-        @click="carregar"
-      >
-        <RefreshCw class="size-4" :class="{ 'animate-spin': carregando }" /> atualizar
-      </button>
     </div>
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 
-    <div v-if="lista && !lista.envios.length" class="rounded-md border py-10 text-center text-sm text-muted-foreground">
-      <MessageSquare class="mx-auto mb-2 size-6 opacity-50" />
-      Nenhum envio com esses filtros.
-    </div>
+    <nav class="flex gap-4 border-b" aria-label="Seções de Envios Threema">
+      <button
+        v-for="[k, rotulo] in ABAS"
+        :key="k"
+        type="button"
+        class="-mb-px border-b-2 px-1 py-2 text-sm"
+        :class="aba === k ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'"
+        :aria-current="aba === k ? 'page' : undefined"
+        @click="trocarAba(k)"
+      >{{ rotulo }}</button>
+    </nav>
 
-    <section v-for="g in porPainel" :key="g.painel" class="space-y-2">
-      <h2 class="text-sm font-semibold text-muted-foreground">{{ g.painel }}</h2>
-      <div class="table-card overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead>
-            <tr>
-              <th class="text-left min-w-[18rem]">Envio</th>
-              <th class="text-left">Frequência</th>
-              <th class="text-left min-w-[12rem]">Quem recebe</th>
-              <th class="text-left">Depende de</th>
-              <th class="text-left">Ativo</th>
-              <th class="text-left whitespace-nowrap">Último envio</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="e in g.envios"
-              :key="e.chave"
-              :data-envio="e.chave"
-              class="align-top"
-              :class="{ 'text-muted-foreground bg-muted/20': !e.gerenciado }"
-            >
-              <td>
-                <div class="font-medium">
-                  {{ e.nome }}<span v-if="e.aba" class="font-normal text-muted-foreground"> · {{ e.aba }}</span>
-                </div>
-                <div class="text-xs text-muted-foreground">
-                  <span :class="abertas.has(e.chave) ? '' : 'line-clamp-2'">{{ e.descricao }}</span>
-                  <button
-                    v-if="e.descricao.length > 140"
-                    type="button"
-                    class="underline"
-                    @click="alternarDescricao(e.chave)"
-                  >{{ abertas.has(e.chave) ? 'ver menos' : 'ver mais' }}</button>
-                </div>
-                <div v-if="e.ultimo?.titulo" class="mt-0.5 text-xs text-muted-foreground">
-                  última mensagem: {{ e.ultimo.titulo }}
-                </div>
-                <ul v-if="e.faixas.length" class="mt-1 space-y-1">
-                  <li
-                    v-for="(f, i) in e.faixas"
-                    :key="i"
-                    class="rounded border px-2 py-1 text-xs"
-                    :class="classeFaixa(f.tipo)"
-                    :data-faixa="f.situacao"
-                  >{{ f.texto }}</li>
-                </ul>
-              </td>
-              <td class="whitespace-nowrap">
-                <span class="pill-muted">{{ FREQUENCIA[e.frequencia_tipo] }}</span>
-                <div class="mt-0.5 text-xs text-muted-foreground whitespace-normal max-w-[12rem]">{{ e.frequencia_texto }}</div>
-                <div class="text-xs text-muted-foreground">{{ ONDE_RODA[e.onde_roda] }}</div>
-              </td>
-              <td>
-                <span
-                  v-if="e.gerenciado && !e.quem_recebe.nomes.length"
-                  class="text-xs"
-                  :class="e.onde_roda === 'mac' ? 'text-muted-foreground' : 'text-red-700 font-medium'"
-                >{{ e.onde_roda === 'mac' ? 'o .env do Mac' : 'ninguém' }}</span>
-                <span v-else>{{ quemRecebeTexto(e) }}</span>
-              </td>
-              <td class="text-xs">
-                <ul v-if="e.depende_de.length" class="space-y-0.5">
-                  <li v-for="d in e.depende_de" :key="d.alvo" :class="d.ok ? 'text-muted-foreground' : 'text-amber-700'">
-                    {{ d.ok ? '✓' : '!' }} {{ d.texto }}<span v-if="!d.ok"> ({{ d.estado }})</span>
-                  </li>
-                </ul>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="text-xs">
-                <span :class="e.ativo ? '' : 'text-muted-foreground'">{{ e.ativo_texto }}</span>
-              </td>
-              <td class="text-xs whitespace-nowrap">
-                <span
-                  :class="e.ultimo && (e.ultimo.falhas || !e.ultimo.total) ? 'text-red-700' : 'text-muted-foreground'"
-                >{{ ultimoEnvioTexto(e.ultimo) }}</span>
-              </td>
-              <td class="whitespace-nowrap text-right">
-                <button
-                  type="button"
-                  class="h-8 rounded-md border px-2 text-xs hover:bg-muted"
-                  @click="abrir(e)"
-                >{{ e.editavel ? 'Editar' : 'Detalhes' }}</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+    <EnviosThreemaGrupos v-if="aba === 'grupos'" @mudou="carregar" />
+    <EnviosThreemaContatos v-else-if="aba === 'contatos'" @mudou="carregar" />
+    <template v-else>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="relative">
+          <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+          <input
+            v-model="busca"
+            class="h-9 w-72 max-w-full rounded-md border bg-background pl-8 pr-3 text-sm"
+            placeholder="envio, pessoa, remetente…"
+          />
+        </div>
+        <select v-model="painel" class="h-9 rounded-md border bg-background px-2 text-sm" title="Painel">
+          <option value="">Painel: todos</option>
+          <option v-for="p in lista?.paineis ?? []" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <select v-model="ondeRoda" class="h-9 rounded-md border bg-background px-2 text-sm" title="Onde roda">
+          <option value="">Onde roda: todos</option>
+          <option v-for="(rotulo, k) in ONDE_RODA" :key="k" :value="k">{{ rotulo }}</option>
+        </select>
+        <select v-model="situacao" class="h-9 rounded-md border bg-background px-2 text-sm" title="Situação">
+          <option value="">Situação: todas</option>
+          <option v-for="(s, k) in SITUACAO" :key="k" :value="k">
+            {{ s.rotulo }} ({{ contagem[k] ?? 0 }})
+          </option>
+        </select>
+        <span v-if="pessoa" class="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs">
+          Só os envios de {{ lista?.pessoa?.nome || 'uma pessoa' }}
+          <button type="button" aria-label="tirar o filtro da pessoa" @click="tirarDoEndereco('pessoa')">
+            <X class="size-3" />
+          </button>
+        </span>
+        <button v-if="temFiltro" type="button" class="text-sm text-muted-foreground underline" @click="limparFiltros">
+          limpar filtros
+        </button>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 h-9 rounded-md border bg-background px-3 text-sm hover:bg-muted"
+          :disabled="carregando"
+          @click="carregar"
+        >
+          <RefreshCw class="size-4" :class="{ 'animate-spin': carregando }" /> atualizar
+        </button>
       </div>
-    </section>
+
+
+      <div v-if="lista && !lista.envios.length" class="rounded-md border py-10 text-center text-sm text-muted-foreground">
+        <MessageSquare class="mx-auto mb-2 size-6 opacity-50" />
+        Nenhum envio com esses filtros.
+      </div>
+
+      <section v-for="g in porPainel" :key="g.painel" class="space-y-2">
+        <h2 class="text-sm font-semibold text-muted-foreground">{{ g.painel }}</h2>
+        <div class="table-card overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr>
+                <th class="text-left min-w-[18rem]">Envio</th>
+                <th class="text-left">Frequência</th>
+                <th class="text-left min-w-[12rem]">Quem recebe</th>
+                <th class="text-left">Depende de</th>
+                <th class="text-left">Ativo</th>
+                <th class="text-left whitespace-nowrap">Último envio</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="e in g.envios"
+                :key="e.chave"
+                :data-envio="e.chave"
+                class="align-top"
+                :class="{ 'text-muted-foreground bg-muted/20': !e.gerenciado }"
+              >
+                <td>
+                  <div class="font-medium">
+                    {{ e.nome }}<span v-if="e.aba" class="font-normal text-muted-foreground"> · {{ e.aba }}</span>
+                  </div>
+                  <div class="text-xs text-muted-foreground">
+                    <span :class="abertas.has(e.chave) ? '' : 'line-clamp-2'">{{ e.descricao }}</span>
+                    <button
+                      v-if="e.descricao.length > 140"
+                      type="button"
+                      class="underline"
+                      @click="alternarDescricao(e.chave)"
+                    >{{ abertas.has(e.chave) ? 'ver menos' : 'ver mais' }}</button>
+                  </div>
+                  <div v-if="e.ultimo?.titulo" class="mt-0.5 text-xs text-muted-foreground">
+                    última mensagem: {{ e.ultimo.titulo }}
+                  </div>
+                  <ul v-if="e.faixas.length" class="mt-1 space-y-1">
+                    <li
+                      v-for="(f, i) in e.faixas"
+                      :key="i"
+                      class="rounded border px-2 py-1 text-xs"
+                      :class="classeFaixa(f.tipo)"
+                      :data-faixa="f.situacao"
+                    >{{ f.texto }}</li>
+                  </ul>
+                </td>
+                <td class="whitespace-nowrap">
+                  <span class="pill-muted">{{ FREQUENCIA[e.frequencia_tipo] }}</span>
+                  <div class="mt-0.5 text-xs text-muted-foreground whitespace-normal max-w-[12rem]">{{ e.frequencia_texto }}</div>
+                  <div class="text-xs text-muted-foreground">{{ ONDE_RODA[e.onde_roda] }}</div>
+                </td>
+                <td>
+                  <span
+                    v-if="e.gerenciado && !e.quem_recebe.nomes.length"
+                    class="text-xs"
+                    :class="e.onde_roda === 'mac' ? 'text-muted-foreground' : 'text-red-700 font-medium'"
+                  >{{ e.onde_roda === 'mac' ? 'o .env do Mac' : 'ninguém' }}</span>
+                  <span v-else>{{ quemRecebeTexto(e) }}</span>
+                </td>
+                <td class="text-xs">
+                  <ul v-if="e.depende_de.length" class="space-y-0.5">
+                    <li v-for="d in e.depende_de" :key="d.alvo" :class="d.ok ? 'text-muted-foreground' : 'text-amber-700'">
+                      {{ d.ok ? '✓' : '!' }} {{ d.texto }}<span v-if="!d.ok"> ({{ d.estado }})</span>
+                    </li>
+                  </ul>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+                <td class="text-xs">
+                  <span :class="e.ativo ? '' : 'text-muted-foreground'">{{ e.ativo_texto }}</span>
+                </td>
+                <td class="text-xs whitespace-nowrap">
+                  <span
+                    :class="e.ultimo && (e.ultimo.falhas || !e.ultimo.total) ? 'text-red-700' : 'text-muted-foreground'"
+                  >{{ ultimoEnvioTexto(e.ultimo) }}</span>
+                </td>
+                <td class="whitespace-nowrap text-right">
+                  <button
+                    type="button"
+                    class="h-8 rounded-md border px-2 text-xs hover:bg-muted"
+                    @click="abrir(e)"
+                  >{{ e.editavel ? 'Editar' : 'Detalhes' }}</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </template>
 
     <EnviosThreemaGaveta
       :chave="envioAberto"

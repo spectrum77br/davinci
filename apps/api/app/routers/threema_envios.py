@@ -13,9 +13,12 @@ capturaria o caminho). Tudo é só de admin, menos:
   mesmo do executor de NF). Leem a lista de cada envio do Mac e gravam no
   registro o que mandaram.
 
-Nesta fase (C6) a tela é só de leitura: nenhum envio do servidor está
-migrado, e quem recebe cada um é a configuração antiga, que a tela mostra
-com o lugar onde ela é editada hoje.
+Nenhum envio do servidor está migrado nesta fase: quem recebe cada um é a
+configuração antiga, que a tela mostra com o lugar onde ela é editada hoje.
+A edição (C7, só admin) vale só para o envio que lê o Cadastro — o do
+servidor migrado e o do Mac; o do servidor não migrado responde 422
+`envio_nao_migrado` (editar aqui não mudaria nada). Grupos, contatos
+externos, o envio de teste e o botão de emergência também são só de admin.
 """
 
 from __future__ import annotations
@@ -31,7 +34,19 @@ from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
 from app.models import User, UserRole
 from app.routers.nf import _require_nf_agent_token
-from app.schemas.threema_envios import RegistrosRoboIn
+from app.schemas.threema_envios import (
+    ContatoIn,
+    ContatoPatchIn,
+    EmergenciaIn,
+    EnvioPatchIn,
+    GrupoIn,
+    GrupoPatchIn,
+    RefIn,
+    RegistrosRoboIn,
+    RegraIn,
+)
+from app.services import threema
+from app.services import threema_envios_edicao as edicao
 from app.services import threema_envios_tela as tela
 from app.services.threema_catalogo import CATALOGO
 
@@ -178,3 +193,209 @@ async def detalhe_envio(chave: str, session: Sessao, _admin: Admin) -> dict:
         return await tela.detalhe(session, chave)
     except tela.TelaError as e:
         raise _erro(e) from e
+
+
+# --- edição de admin (C7) -----------------------------------------------------------
+
+
+def _autor(user: User) -> str:
+    return (user.name or user.email or "admin")[:120]
+
+
+def _refs(itens: list[RefIn] | None) -> list[edicao.RefIn] | None:
+    if itens is None:
+        return None
+    return [edicao.RefIn(tipo=r.tipo, id=r.id) for r in itens]
+
+
+@router.patch("/envios/{chave}")
+async def editar_envio(chave: str, body: EnvioPatchIn, session: Sessao, admin: Admin) -> dict:
+    """Liga/desliga, observação, quem recebe e o re-aviso (robôs da
+    Ouvidoria). Só envio que lê o Cadastro: o do servidor migrado e o do Mac
+    (o do servidor não migrado: 422 `envio_nao_migrado`)."""
+    enviados = body.model_fields_set
+    try:
+        avisos = await edicao.editar_envio(
+            session,
+            chave,
+            autor=_autor(admin),
+            ativo=body.ativo if "ativo" in enviados else None,
+            observacao=body.observacao,
+            mudar_observacao="observacao" in enviados,
+            destinatarios=_refs(body.destinatarios) if "destinatarios" in enviados else None,
+            reaviso_horas=body.reaviso_horas if "reaviso_horas" in enviados else None,
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    corpo = await tela.detalhe(session, chave)
+    corpo["avisos_da_edicao"] = avisos
+    return corpo
+
+
+@router.put("/envios/{chave}/regras/{status_id}")
+async def editar_regra(
+    chave: str, status_id: UUID, body: RegraIn, session: Sessao, admin: Admin
+) -> dict:
+    """Lista própria de uma regra de status (item 1)."""
+    try:
+        await edicao.editar_regra(
+            session, chave, status_id, autor=_autor(admin), destinatarios=_refs(body.destinatarios)
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    return await tela.detalhe(session, chave)
+
+
+@router.delete("/envios/{chave}/regras/{status_id}")
+async def regra_volta_ao_padrao(chave: str, status_id: UUID, session: Sessao, admin: Admin) -> dict:
+    """A regra volta a usar a lista padrão do envio."""
+    try:
+        await edicao.editar_regra(
+            session, chave, status_id, autor=_autor(admin), destinatarios=None
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    return await tela.detalhe(session, chave)
+
+
+@router.post("/envios/{chave}/teste")
+async def testar_envio(chave: str, session: Sessao, admin: Admin) -> dict:
+    """Manda "[TESTE] <nome>" para quem recebe agora, pelo remetente do
+    envio (mesmo desligado). Fica no registro com origem `teste`."""
+    try:
+        return await edicao.testar(session, chave, autor=_autor(admin))
+    except tela.TelaError as e:
+        raise _erro(e) from e
+    except threema.ThreemaConfigError as e:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": "threema_config",
+                "message": f"O remetente deste envio não está pronto no servidor ({e}).",
+            },
+        ) from e
+    except Exception as e:  # noqa: BLE001 — erro de rede do Threema vira frase
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": "threema_falhou",
+                "message": f"O Threema não respondeu ({type(e).__name__}). Tente de novo.",
+            },
+        ) from e
+
+
+@router.post("/emergencia")
+async def emergencia(body: EmergenciaIn, session: Sessao, admin: Admin) -> dict:
+    """Liga/desliga a emergência: TODOS os envios voltam à configuração
+    antiga no próximo envio, sem recriar container."""
+    estado = await edicao.definir_emergencia(
+        session, usar_legado=body.usar_legado, autor=_autor(admin)
+    )
+    await session.commit()
+    return estado
+
+
+@router.get("/grupos")
+async def listar_grupos(session: Sessao, _admin: Admin) -> list[dict]:
+    return (await tela.pessoas(session))["grupos"]
+
+
+@router.post("/grupos", status_code=201)
+async def criar_grupo(body: GrupoIn, session: Sessao, _admin: Admin) -> dict:
+    try:
+        g = await edicao.criar_grupo(
+            session, nome=body.nome, descricao=body.descricao, membros=_refs(body.membros) or []
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    return edicao.grupo_out(g)
+
+
+@router.patch("/grupos/{grupo_id}")
+async def editar_grupo(grupo_id: UUID, body: GrupoPatchIn, session: Sessao, _admin: Admin) -> dict:
+    enviados = body.model_fields_set
+    try:
+        g = await edicao.editar_grupo(
+            session,
+            grupo_id,
+            nome=body.nome if "nome" in enviados else None,
+            descricao=body.descricao,
+            mudar_descricao="descricao" in enviados,
+            membros=_refs(body.membros) if "membros" in enviados else None,
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    return edicao.grupo_out(g)
+
+
+@router.delete("/grupos/{grupo_id}", status_code=204)
+async def apagar_grupo(grupo_id: UUID, session: Sessao, _admin: Admin) -> None:
+    """Grupo em uso por algum envio: 409 com a lista dos envios."""
+    try:
+        await edicao.apagar_grupo(session, grupo_id)
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+
+
+@router.get("/contatos")
+async def listar_contatos(session: Sessao, _admin: Admin) -> list[dict]:
+    return (await tela.pessoas(session))["contatos"]
+
+
+@router.post("/contatos", status_code=201)
+async def criar_contato(body: ContatoIn, session: Sessao, _admin: Admin) -> dict:
+    """ID que já é de alguém de Usuários: 409 "já é de Fulano"."""
+    try:
+        c = await edicao.criar_contato(
+            session, threema_id=body.threema_id, nome=body.nome, observacao=body.observacao
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    return edicao.contato_out(c)
+
+
+@router.patch("/contatos/{contato_id}")
+async def editar_contato(
+    contato_id: UUID, body: ContatoPatchIn, session: Sessao, _admin: Admin
+) -> dict:
+    enviados = body.model_fields_set
+    try:
+        c = await edicao.editar_contato(
+            session,
+            contato_id,
+            nome=body.nome if "nome" in enviados else None,
+            threema_id=body.threema_id if "threema_id" in enviados else None,
+            ativo=body.ativo if "ativo" in enviados else None,
+            observacao=body.observacao,
+            mudar_observacao="observacao" in enviados,
+        )
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
+    return edicao.contato_out(c)
+
+
+@router.delete("/contatos/{contato_id}", status_code=204)
+async def apagar_contato(contato_id: UUID, session: Sessao, _admin: Admin) -> None:
+    """Contato em uso (num envio ou grupo): 409 com onde ele está."""
+    try:
+        await edicao.apagar_contato(session, contato_id)
+    except tela.TelaError as e:
+        await session.rollback()
+        raise _erro(e) from e
+    await session.commit()
