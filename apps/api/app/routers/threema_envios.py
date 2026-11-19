@@ -267,7 +267,8 @@ async def regra_volta_ao_padrao(chave: str, status_id: UUID, session: Sessao, ad
 @router.post("/envios/{chave}/teste")
 async def testar_envio(chave: str, session: Sessao, admin: Admin) -> dict:
     """Manda "[TESTE] <nome>" para quem recebe agora, pelo remetente do
-    envio (mesmo desligado). Fica no registro com origem `teste`."""
+    envio (mesmo desligado). Fica no registro com origem `teste`. Só para
+    envio do servidor que já lê o Cadastro (422 `teste_nao_migrado`)."""
     try:
         return await edicao.testar(session, chave, autor=_autor(admin))
     except tela.TelaError as e:

@@ -146,9 +146,11 @@ async function salvar() {
   }
 }
 
+// Teste só no envio do servidor que já lê o Cadastro (editável): no que usa a
+// configuração antiga, seria um envio real novo para a lista antiga.
 const podeTestar = computed(() => {
   const d = detalhe.value
-  return !!d && d.gerenciado && d.onde_roda === 'servidor' && d.quem_recebe.nomes.length > 0
+  return !!d && d.gerenciado && d.editavel && d.onde_roda === 'servidor' && d.quem_recebe.nomes.length > 0
 })
 async function testar() {
   const d = detalhe.value

@@ -322,7 +322,12 @@ TEXTO_TESTE = (
 
 async def testar(session: AsyncSession, chave: str, *, autor: str) -> dict:
     """Manda '[TESTE] <nome>' para a lista resolvida agora (com o remetente do
-    envio), ignorando o liga/desliga. Origem `teste` no registro."""
+    envio), ignorando o liga/desliga. Origem `teste` no registro.
+
+    Só para envio do servidor que JÁ LÊ o Cadastro (migrado): o teste confere
+    a lista daqui. No envio que ainda usa a configuração antiga, o teste
+    seria um envio real novo para a lista antiga — inclusive com o robô
+    desligado —, e a fase 1 não manda nada novo (revisão da tarefa 16)."""
     d = _envio(chave)
     if not d.gerenciado:
         raise TelaError(422, "envio_informativo", "Este envio é só informativo.")
@@ -332,9 +337,21 @@ async def testar(session: AsyncSession, chave: str, *, autor: str) -> dict:
             "teste_no_mac",
             "O envio do Mac sai do Mac: o teste daqui não usaria o mesmo remetente.",
         )
+    if not d.migrado:
+        raise TelaError(
+            422,
+            "teste_nao_migrado",
+            "Este envio ainda usa a configuração antiga: o teste daqui fica para quando ele "
+            "passar a ler o Cadastro.",
+            onde_configurar=onde_configurar(d),
+        )
     b = await _carregar_base(session)
     quem = await _quem(session, b, d)
     ids = list(threema_envios._dedupe(quem.ids))
+    if not ids and not quem.ativo and quem.via == "cadastro":
+        # Desligado: o teste vai para a lista do Cadastro mesmo assim.
+        lido = await threema_envios._ler_cadastro(d, None, session, so_lista=True)
+        ids = list(threema_envios._dedupe(x.id for x in lido.destinos))
     if not ids:
         raise TelaError(
             422, "sem_destinatarios", "Ninguém recebe este envio: não há para quem mandar o teste."

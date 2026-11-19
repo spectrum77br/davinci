@@ -13,7 +13,8 @@ servidor muda de destinatário nem de liga/desliga.
   re-aviso grava no robô da Ouvidoria;
 * PUT/DELETE das regras (item 1);
 * POST /teste: "[TESTE] <nome>" para quem recebe agora, com o remetente do
-  envio, origem `teste` no registro (não muda quem recebe);
+  envio, origem `teste` no registro (não muda quem recebe) — só no envio que
+  já lê o Cadastro: no que usa a configuração antiga, 422 sem mandar nada;
 * grupos (409 em uso), contatos externos (409 "já é de Fulano", espelho
   antigo atualizado), emergência;
 * Usuários: o campo Threema só aceita o formato do Threema.
@@ -369,9 +370,25 @@ def _gateway(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_gateway")
 async def test_envio_de_teste(db, monkeypatch, client, make_user, auth_as):
-    await montar(db, monkeypatch)
+    c = await montar(db, monkeypatch)
     admin = await _admin(make_user, auth_as)
     antes = await _legado_de_todos(db)
+    # Envio que ainda usa a configuração antiga: nada sai (fase 1 sem envio novo).
+    with respx.mock(base_url=threema.THREEMA_API_BASE, assert_all_called=False) as router:
+        rota = router.post("/send_simple").mock(return_value=httpx.Response(200, text="mid-0"))
+        for chave in (K.LOGISTICA_INFORMAR, K.DENUNCIA_RELATORIO_DIARIO, K.OUVIDORIA_VIGIA_FLEX):
+            r = await client.post(f"/api/threema/envios/{chave}/teste")
+            assert r.status_code == 422, r.text
+            assert r.json()["detail"]["code"] == "teste_nao_migrado"
+            assert r.json()["detail"]["onde_configurar"]
+    assert rota.calls.call_count == 0
+    # Migrado: o teste vai para a lista do Cadastro.
+    migrar(monkeypatch, K.LOGISTICA_INFORMAR, K.DENUNCIA_RELATORIO_DIARIO)
+    migrar(monkeypatch, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA)
+    u = c.usuarios
+    await semeado(db, K.LOGISTICA_INFORMAR, u["harry"], u["heisenberg"])
+    await semeado(db, K.DENUNCIA_RELATORIO_DIARIO, u["harry"], u["cairo_sa"], c.roma)
+    await semeado(db, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA)
     with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
         rota = router.post("/send_simple").mock(return_value=httpx.Response(200, text="mid-1"))
         r = await client.post(f"/api/threema/envios/{K.LOGISTICA_INFORMAR}/teste")
@@ -394,7 +411,8 @@ async def test_envio_de_teste(db, monkeypatch, client, make_user, auth_as):
     ] * 2
     assert linhas[0].titulo == "[TESTE] Informar da Logística"
     assert "s3cr3t" not in str([x.erro for x in linhas])
-    # desligado também testa (o Relatório da Denúncia está desligado no cenário)
+    # desligado também testa (o Relatório da Denúncia está desligado no cenário:
+    # o robô dele, que é o interruptor do envio)
     with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
         router.post("/send_simple").mock(return_value=httpx.Response(402, text="sem credito"))
         r = await client.post(f"/api/threema/envios/{K.DENUNCIA_RELATORIO_DIARIO}/teste")

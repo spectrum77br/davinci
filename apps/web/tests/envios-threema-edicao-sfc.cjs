@@ -4,8 +4,9 @@
 //    avisos), a do teste, o formato do Threema e o aviso de Usuários;
 //  - a gaveta: envio do Mac editável (o seletor de Pessoas, Grupos e
 //    Contatos externos; desligar pede confirmação; o PATCH só leva o que
-//    mudou); envio do servidor não migrado só leitura, com "Mandar teste";
-//    item 1 sem interruptor e com a lista de cada regra;
+//    mudou); envio do servidor não migrado só leitura e SEM "Mandar teste"
+//    (seria envio novo para a lista antiga); item 1 (migrado) com o teste,
+//    sem interruptor e com a lista de cada regra;
 //  - a página: as abas Envios | Grupos | Contatos externos e o botão de
 //    emergência;
 //  - o seletor, os grupos (409 em uso) e os contatos (ID no formato);
@@ -231,7 +232,6 @@ const SEM_LOTES = { items: [], mais: false }
     const m = montar('../components/EnviosThreemaGaveta.vue', {
       props: { chave: SERVIDOR.chave, regra: null },
       responder: (url, opts) => {
-        if (url.endsWith('/teste')) return { enviados: ['harry potter'], falharam: ['heisenberg'], remetente: 'logistica' }
         if (url.endsWith('/registros')) return SEM_LOTES
         return SERVIDOR
       },
@@ -241,12 +241,8 @@ const SEM_LOTES = { items: [], mais: false }
     const html = await m.html()
     assert.ok(!/data-bloco="edicao"/.test(html), 'não migrado: sem edição')
     assert.match(html, /data-so-leitura[^>]*>Ainda usa a configuração antiga\. Para mudar quem recebe: Logística › Informar\./)
-    assert.match(html, /data-acao="testar"/)
-    await m.estado.testar()
-    assert.equal(confirmacoes.at(-1), lib.textoConfirmarTeste(SERVIDOR))
-    const post = m.chamadas.find((c) => c.method === 'POST')
-    assert.equal(post.url, '/api/threema/envios/logistica.informar/teste')
-    assert.equal(m.estado.msg, 'Teste enviado (remetente logistica) para: harry potter. Não chegou para: heisenberg.')
+    assert.ok(!/data-acao="testar"/.test(html), 'não migrado: sem teste (seria envio novo para a lista antiga)')
+    assert.equal(m.estado.podeTestar, false)
   }
 
   // ---------------------------------------------------------------- gaveta: item 1 migrado
@@ -255,12 +251,21 @@ const SEM_LOTES = { items: [], mais: false }
       props: { chave: ITEM1.chave, regra: 'r1' },
       responder: (url, opts) => {
         if (url === '/api/threema/pessoas') return PESSOAS
+        if (url.endsWith('/teste')) return { enviados: ['harry potter'], falharam: ['heisenberg'], remetente: 'logistica' }
         if (url.endsWith('/registros')) return SEM_LOTES
         return ITEM1
       },
     })
     await esperar(); await esperar(); await esperar()
     let html = await m.html()
+    // migrado: o teste confere a lista daqui
+    assert.match(html, /data-acao="testar"/)
+    await m.estado.testar()
+    assert.equal(confirmacoes.at(-1), lib.textoConfirmarTeste(ITEM1))
+    const post = m.chamadas.find((c) => c.method === 'POST')
+    assert.equal(post.url, '/api/threema/envios/logistica.mensagem_regra/teste')
+    assert.equal(m.estado.msg, 'Teste enviado (remetente logistica) para: harry potter. Não chegou para: heisenberg.')
+    html = await m.html()
     assert.match(html, /data-sem-interruptor[^>]*>\s*Sem interruptor: quem liga e desliga é a Mensagem de cada regra\./)
     assert.ok(!/data-campo="ativo"/.test(html), 'item 1 sem o liga/desliga')
     assert.match(html, /Quem recebe \(padrão\)/)
