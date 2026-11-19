@@ -192,9 +192,11 @@ const estado = computed<{ texto: string; cor: string; dica: string } | null>(() 
   // Chamados vai cuidar"): a contestação não saiu pela API, mas o chamado já está
   // na aba Chamados — o caso é dela daqui pra frente, não vermelho aqui.
   if (j.abertura_status === 'falhou') {
-    const porque = porQueNaFila.value || j.abertura_erro || 'erro'
+    const semPonto = (t: string) => t.trim().replace(/[.\s]+$/, '')
+    const porque = semPonto(porQueNaFila.value || j.abertura_erro || 'erro')
     const aba = j.chamado_aba ? ABA_CHAMADOS[j.chamado_aba] || j.chamado_aba : ''
-    const la = aba ? ` Lá está em ${aba}${j.chamado_aba_motivo ? `: ${j.chamado_aba_motivo}` : ''}.` : ''
+    const motivoLa = semPonto(j.chamado_aba_motivo || '')
+    const la = aba ? ` Lá está em ${aba}${motivoLa ? ` — ${motivoLa}` : ''}.` : ''
     // Vinicius: "Aberto fica verdinho, azulzinho é enviado, painel Chamados".
     return { texto: 'Enviado · aba Chamados', cor: AZUL, dica: `Enviado pra aba Chamados, que cuida dele daqui pra frente. Pela API não saiu: ${porque}.${la}` }
   }

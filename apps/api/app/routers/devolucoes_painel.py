@@ -1002,9 +1002,9 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
             out.enviada_at = abertura.enviada_at
         if out.abertura_status == "falhou":
             # Não saiu pela API: daqui pra frente quem cuida é a aba Chamados.
-            from app.routers.chamados import _to_out as chamados_to_out
+            from app.routers.chamados import _one_out as linha_da_aba_chamados
 
-            (linha,) = await chamados_to_out(session, [ch])
+            linha = await linha_da_aba_chamados(session, ch)
             out.chamado_aba = linha.status_aba
             out.chamado_aba_motivo = linha.status_aba_motivo
         msgs = (

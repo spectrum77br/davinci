@@ -201,6 +201,7 @@ async def test_nao_saiu_pela_api_mostra_onde_esta_na_aba_chamados(
     user = await make_user(permissions=_perms())
     auth_as(user)
     await _seed_pedido(db, user, numero="880004", numeroloja="3880004")
+    ml.acao = False  # o ML ainda não liberou: a abertura fica na fila, nunca sai
     r = await client.post(
         "/api/devolutions",
         json=_lancamento(
@@ -214,20 +215,30 @@ async def test_nao_saiu_pela_api_mostra_onde_esta_na_aba_chamados(
     assert r.status_code == 201, r.text
     ch = await _chamado(db, "880004")
 
-    # Saiu: nada da aba Chamados na janela.
+    # Na fila: ainda é da janela, nada da aba Chamados.
     r = await client.get("/api/devolucoes-painel/880004/chamado")
     assert r.status_code == 200, r.text
-    assert r.json()["abertura_status"] == "enviada" and r.json()["chamado_aba"] is None
+    assert r.json()["abertura_status"] == "pendente" and r.json()["chamado_aba"] is None
 
+    # Ficou pendente além do prazo: a abertura falha de vez sem nunca ter saído.
     ab = await _abertura(db, ch.id)
-    ab.status, ab.erro = "falhou", "tiktok_quick_refund"
+    ab.status, ab.erro = "falhou", "devolucao_prazo_esgotado"
     await db.commit()
     r = await client.get("/api/devolucoes-painel/880004/chamado")
     assert r.status_code == 200, r.text
     janela = r.json()
-    assert janela["abertura_status"] == "falhou"
+    assert janela["abertura_status"] == "falhou" and ml.reviews == []
     assert janela["chamado_aba"] == "analise_humano"
-    assert "tiktok_quick_refund" in (janela["chamado_aba_motivo"] or "")
+    assert "devolucao_prazo_esgotado" in (janela["chamado_aba_motivo"] or "")
+
+    # O mesmo Status (e o mesmo porquê) que a coluna da aba Chamados mostra.
+    r = await client.get("/api/chamados", params={"search": "880004"})
+    assert r.status_code == 200, r.text
+    (linha,) = [c for c in r.json()["items"] if c["id"] == str(ch.id)]
+    assert (janela["chamado_aba"], janela["chamado_aba_motivo"]) == (
+        linha["status_aba"],
+        linha["status_aba_motivo"],
+    )
 
 
 # ── Conferência da IA ─────────────────────────────────────────────────────
