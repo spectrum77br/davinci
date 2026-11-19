@@ -5911,6 +5911,18 @@ async def startup(ctx: dict) -> None:
             await ouvidoria_sincronizar_catalogo(s)
     except Exception as e:  # noqa: BLE001 — sem catálogo o worker sobe do mesmo jeito
         logger.warning("ouvidoria_catalogo_startup_falhou", error=str(e)[:200])
+    # Catálogo dos envios do Threema (Cadastros › Envios Threema, tarefa 16):
+    # upsert das colunas do código em threema_envio. NUNCA semeia nem mexe em
+    # quem recebe/ativo — sem semente todo envio segue a configuração de hoje.
+    # Mesma regra da Ouvidoria: falhou (banco antes da 0505, corrida entre
+    # workers) é só log, o worker sobe igual.
+    try:
+        from app.services import threema_envios
+
+        async with session_scope() as s:
+            await threema_envios.sincronizar(s)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("threema_envios_catalogo_startup_falhou", error=str(e)[:200])
     logger.info("worker_startup")
 
 
