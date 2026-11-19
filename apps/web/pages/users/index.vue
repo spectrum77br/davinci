@@ -113,6 +113,11 @@ async function confirmarEnviosThreema(u: UserRow, acao: string): Promise<boolean
 }
 
 async function saveThreema(u: UserRow) {
+  // Enter e blur chamam os dois: o Enter fecha o campo e o blur que vem logo
+  // depois (o campo sumindo, ou a janela de confirmação roubando o foco)
+  // chamava de novo — dois avisos, e cancelar o primeiro não adiantava. Esc
+  // também fecha o campo antes do blur: cancela de verdade.
+  if (editingThreema.value !== u.id) return
   const v = normalizarThreema(threemaDraft.value) || null
   editingThreema.value = null
   if (v === (u.threema || null)) return
