@@ -103,6 +103,12 @@ const porPainel = computed(() => {
 })
 
 const migrados = computed(() => (lista.value?.envios ?? []).filter((e) => e.migrado).length)
+const descricao = computed(() => {
+  const base = 'Cada aviso que sai pelo Threema: o que é, quando sai, quem recebe e se chegou.'
+  if (!lista.value) return base
+  return `${base} ${lista.value.total} envios · ${migrados.value} lendo daqui · `
+    + 'os demais usam a configuração antiga (faixa âmbar).'
+})
 
 // Abas da página: Envios | Grupos | Contatos externos (no endereço, ?aba=).
 const ABAS = [['envios', 'Envios'], ['grupos', 'Grupos'], ['contatos', 'Contatos externos']] as const
@@ -168,47 +174,38 @@ function fechar() {
   <div class="space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
 
-    <div class="flex flex-wrap items-start gap-3">
-      <div class="min-w-0 flex-1">
-        <h1 class="text-xl sm:text-2xl font-semibold">Envios Threema</h1>
-        <p class="text-sm text-muted-foreground">
-          Cada aviso que sai pelo Threema: o que é, quando sai, quem recebe e se chegou.
-          <template v-if="lista">
-            {{ lista.total }} envios · {{ migrados }} lendo daqui ·
-            os demais usam a configuração antiga (faixa âmbar).
-          </template>
-        </p>
-      </div>
-      <div
-        v-if="lista"
-        class="rounded-md border px-3 py-2 text-sm max-w-md"
-        :class="lista.emergencia.usar_legado || lista.emergencia.env_desligado
-          ? 'border-red-300 bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-300'
-          : 'bg-muted/30'"
-      >
-        <div class="flex items-center gap-2 font-medium">
-          <ShieldAlert class="size-4" />
-          Emergência: voltar todos para a configuração antiga
+    <PageHeader title="Envios Threema" :description="descricao">
+      <template v-if="lista" #actions>
+        <div
+          class="rounded-md border px-3 py-2 text-sm max-w-md"
+          :class="lista.emergencia.usar_legado || lista.emergencia.env_desligado
+            ? 'border-red-300 bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-300'
+            : 'bg-muted/30'"
+        >
+          <div class="flex items-center gap-2 font-medium">
+            <ShieldAlert class="size-4" />
+            Emergência: voltar todos para a configuração antiga
+          </div>
+          <p class="mt-0.5 text-xs">
+            <template v-if="lista.emergencia.usar_legado">
+              LIGADA<span v-if="lista.emergencia.alterado_por"> por {{ lista.emergencia.alterado_por }}</span>:
+              todos os envios usam a configuração antiga.
+            </template>
+            <template v-else-if="lista.emergencia.env_desligado">
+              Ligada pelo servidor (THREEMA_CADASTRO_ATIVO=false): todos usam a configuração antiga.
+            </template>
+            <template v-else>Desligada. Os envios migrados leem a lista daqui.</template>
+          </p>
+          <button
+            type="button"
+            class="mt-1 h-7 rounded-md border bg-background px-2 text-xs hover:bg-muted disabled:opacity-50"
+            :disabled="mudandoEmergencia"
+            data-acao="emergencia"
+            @click="alternarEmergencia"
+          >{{ lista.emergencia.usar_legado ? 'Desligar a emergência' : 'Ligar a emergência' }}</button>
         </div>
-        <p class="mt-0.5 text-xs">
-          <template v-if="lista.emergencia.usar_legado">
-            LIGADA<span v-if="lista.emergencia.alterado_por"> por {{ lista.emergencia.alterado_por }}</span>:
-            todos os envios usam a configuração antiga.
-          </template>
-          <template v-else-if="lista.emergencia.env_desligado">
-            Ligada pelo servidor (THREEMA_CADASTRO_ATIVO=false): todos usam a configuração antiga.
-          </template>
-          <template v-else>Desligada. Os envios migrados leem a lista daqui.</template>
-        </p>
-        <button
-          type="button"
-          class="mt-1 h-7 rounded-md border bg-background px-2 text-xs hover:bg-muted disabled:opacity-50"
-          :disabled="mudandoEmergencia"
-          data-acao="emergencia"
-          @click="alternarEmergencia"
-        >{{ lista.emergencia.usar_legado ? 'Desligar a emergência' : 'Ligar a emergência' }}</button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 

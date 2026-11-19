@@ -57,6 +57,16 @@ const lib = requerer('~/lib/enviosThreema')
 const semComentarios = (html) => html.replace(/<!--[\s\S]*?-->/g, '')
 const esperar = () => new Promise((r) => setTimeout(r, 0))
 
+// O PageHeader de verdade (cabeçalho igual ao das outras abas de Cadastros).
+function componente(rel) {
+  const { descriptor } = sfc(rel)
+  const script = compileScript(descriptor, { id: path.basename(rel), inlineTemplate: true })
+  const mod = { exports: {} }
+  new Function('require', 'module', 'exports', transpile(script.content))(requerer, mod, mod.exports)
+  return mod.exports.default
+}
+const PAGE_HEADER = componente('../components/PageHeader.vue')
+
 // O setup de verdade fora de um app e o HTML de um app SSR com o MESMO estado.
 function montar(rel, { responder, props = {}, query = {}, user = { role: 'admin' } }) {
   const { descriptor, filename } = sfc(rel)
@@ -92,6 +102,7 @@ function montar(rel, { responder, props = {}, query = {}, user = { role: 'admin'
   async function html() {
     const a = Vue.createSSRApp({ render: () => Vue.h(filho, { ...propsReativas }) })
     a.config.warnHandler = () => {}
+    a.component('PageHeader', PAGE_HEADER)
     return semComentarios(await renderToString(a))
   }
   return { html, estado, chamadas, route, props: propsReativas, emitidos, async montar() { for (const fn of montados) await fn(); await esperar() } }
@@ -169,14 +180,15 @@ const LISTA = {
   const { fonte } = sfc('../pages/envios-threema.vue')
   assert.match(fonte, /definePageMeta\(\{ middleware: \['admin'\] \}\)/, 'só admin')
   assert.match(fonte, /<RouteTabs :tabs="TABS_CADASTROS" \/>/)
+  assert.match(fonte, /<PageHeader title="Envios Threema" :description="descricao">/, 'cabeçalho igual ao das abas vizinhas')
   {
     const m = montar('../pages/envios-threema.vue', { responder: () => LISTA })
     await m.montar()
     assert.equal(m.chamadas.length, 1)
     assert.deepEqual(m.chamadas[0], { url: '/api/threema/envios', method: 'GET', query: {}, body: undefined })
     let html = await m.html()
-    assert.match(html, /Envios Threema/)
-    assert.match(html, /60 envios · 0 lendo daqui/)
+    assert.match(html, /<h1 class="page-header-title[^"]*">Envios Threema<\/h1>/)
+    assert.match(html, /page-header-description[^>]*>[^<]*60 envios · 0 lendo daqui/)
     assert.match(html, /Emergência: voltar todos para a configuração antiga/)
     assert.match(html, /Desligada\. Os envios migrados leem a lista daqui\./)
     // por painel, na ordem

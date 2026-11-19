@@ -66,8 +66,9 @@ function componente(rel) {
   return mod.exports.default
 }
 const SELETOR = componente('../components/EnviosThreemaSeletor.vue')
+const PAGE_HEADER = componente('../components/PageHeader.vue')
 
-function montar(rel, { responder, props = {}, query = {}, user = { role: 'admin' }, componentes = { EnviosThreemaSeletor: SELETOR } }) {
+function montar(rel, { responder, props = {}, query = {}, user = { role: 'admin' }, componentes = { EnviosThreemaSeletor: SELETOR, PageHeader: PAGE_HEADER } }) {
   const { descriptor, filename } = sfc(rel)
   const script = compileScript(descriptor, { id: path.basename(rel), inlineTemplate: false })
   const tpl = compileTemplate({ source: descriptor.template.content, filename, id: path.basename(rel), compilerOptions: { isTS: true, bindingMetadata: script.bindings } })
