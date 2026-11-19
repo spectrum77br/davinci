@@ -63,6 +63,49 @@ DINHEIRO_TABELA = {("margem_saldo_manual", "valor")}
 _ACOES_PERMISSAO = {"view": "ver", "edit": "editar", "delete": "excluir"}
 
 
+# --- ID do Threema: nunca inteiro na tela (tarefa 16) ----------------------------
+# O gatilho guarda a linha como ela é (o contato externo com o ID, o Threema
+# do usuário, a lista do Informar). Quem lê o Histórico vê só o começo — o
+# mesmo das outras telas (`threema_envios.mascara`, 2 letras). Vale também
+# para o corpo do pedido guardado (POST de um contato, PATCH do usuário).
+COLUNAS_THREEMA = frozenset({"threema", "threema_id", "threema_recipients", "destinatario_id"})
+COLUNAS_THREEMA_POR_TABELA = frozenset({("threema_informar_config", "recipients")})
+CHAVES_THREEMA_CORPO = COLUNAS_THREEMA | {"recipients"}
+_ID_THREEMA = re.compile(r"(?<![A-Za-z0-9*])(?:\*[A-Z0-9]{7}|[A-Z0-9]{8})(?![A-Za-z0-9])")
+
+
+def _mascara_id(m: re.Match) -> str:
+    return f"{m.group(0)[:2]}••••••"
+
+
+def sem_ids_threema(v: Any) -> Any:
+    """O valor com todo ID do Threema trocado pelo começo (texto, lista ou JSON)."""
+    if isinstance(v, str):
+        return _ID_THREEMA.sub(_mascara_id, v)
+    if isinstance(v, list):
+        return [sem_ids_threema(x) for x in v]
+    if isinstance(v, dict) and not _e_marcador(v):
+        return {k: sem_ids_threema(x) for k, x in v.items()}
+    return v
+
+
+def e_coluna_threema(tabela: str | None, campo: str) -> bool:
+    return campo in COLUNAS_THREEMA or (tabela, campo) in COLUNAS_THREEMA_POR_TABELA
+
+
+def corpo_sem_ids_threema(corpo: Any) -> Any:
+    """O corpo guardado do pedido, com o ID do Threema mascarado nas chaves
+    que o carregam (em qualquer profundidade)."""
+    if isinstance(corpo, dict):
+        return {
+            k: sem_ids_threema(v) if k in CHAVES_THREEMA_CORPO else corpo_sem_ids_threema(v)
+            for k, v in corpo.items()
+        }
+    if isinstance(corpo, list):
+        return [corpo_sem_ids_threema(x) for x in corpo]
+    return corpo
+
+
 def _tabela_meta(tabela: str):
     return Base.metadata.tables.get(f"{Base.metadata.schema}.{tabela}")
 
@@ -216,6 +259,15 @@ def campos(a, fk_nomes: dict) -> list[dict]:
     for k in chaves:
         antes = (a.antes or {}).get(k)
         depois = (a.depois or {}).get(k)
+        if e_coluna_threema(a.tabela, k):
+            ma, md = sem_ids_threema(antes), sem_ids_threema(depois)
+            fa = fmt(ma, k, a.tabela) if a.operacao != "I" else None
+            fd = fmt(md, k, a.tabela) if a.operacao != "D" else None
+            if a.operacao == "U" and fa == fd and antes != depois:
+                # ID trocado com o mesmo começo: não pode parecer "nada mudou"
+                fd = f"{fd} (outro ID)"
+            saida.append({"campo": k, "nome": nomes.nome_campo(k), "antes": fa, "depois": fd})
+            continue
 
         # JSON (ex. permissões): só as sub-chaves que mudaram, uma por linha.
         if (

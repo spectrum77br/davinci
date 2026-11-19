@@ -14,7 +14,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.config import get_settings
-from app.models import HistoricoAcesso, ThreemaEnvioRegistro, UserRole
+from app.models import (
+    HistoricoAcesso,
+    HistoricoAlteracao,
+    HistoricoEvento,
+    ThreemaEnvioRegistro,
+    UserRole,
+)
 from app.security.jwt import issue_session_token
 from app.services.threema_catalogo import CATALOGO, K
 
@@ -215,3 +221,85 @@ async def test_filtros(client, db, make_user):
     r = await client.get("/api/historico/threema", params={"limit": 1, "offset": 1})
     assert r.json()["total"] == 4
     assert [i["lote_id"] for i in r.json()["items"]] == [str(lotes["vigia"])]
+
+
+@pytest.mark.asyncio
+async def test_alteracoes_nunca_mostram_o_id_inteiro(client, db, make_user):
+    """Histórico › Alterações: o gatilho guarda a linha como ela é (o contato
+    externo com o ID, o Threema do usuário, a lista do Informar) e o corpo do
+    pedido guarda o que foi digitado. Quem lê vê só o começo do ID — também
+    quem não é admin (o teste no navegador de 19/11 achou o ID inteiro no
+    "cadastrou um contato externo do Threema")."""
+    eu = await make_user(role=UserRole.USER)
+    db.add(HistoricoAcesso(user_id=eu.id, pode_gerenciar=False))
+    req = uuid.uuid4()
+    db.add(
+        HistoricoEvento(
+            req_id=req,
+            ator_id=eu.id,
+            ator_nome="Fulano",
+            metodo="POST",
+            rota="/api/threema/contatos",
+            caminho="/api/threema/contatos",
+            tela="Cadastros › Envios Threema",
+            acao="cadastrou um contato externo do Threema",
+            status=201,
+            corpo={"nome": "Lisboa", "threema_id": "TSTK0011", "observacao": "SKU DG053ABC"},
+            n_alteracoes=3,
+            itens_texto="Lisboa",
+        )
+    )
+    db.add_all(
+        [
+            HistoricoAlteracao(
+                req_id=req,
+                ator_id=eu.id,
+                tabela="threema_contato",
+                operacao="I",
+                registro_id=str(uuid.uuid4()),
+                rotulo="Lisboa",
+                depois={"nome": "Lisboa", "threema_id": "TSTK0011", "ativo": True},
+            ),
+            HistoricoAlteracao(
+                req_id=req,
+                ator_id=eu.id,
+                tabela="threema_informar_config",
+                operacao="U",
+                registro_id=str(uuid.uuid4()),
+                antes={"recipients": "TSTR0001:Roma"},
+                depois={"recipients": "TSTK0011:Lisboa,TSTR0001:Roma"},
+            ),
+            HistoricoAlteracao(
+                req_id=req,
+                ator_id=eu.id,
+                tabela="users",
+                operacao="U",
+                registro_id=str(eu.id),
+                rotulo="Fulano",
+                # mesmo começo: não pode parecer que nada mudou
+                antes={"threema": "TSTA0001"},
+                depois={"threema": "TSTB0002"},
+            ),
+        ]
+    )
+    await db.commit()
+    _logar(client, eu)
+
+    lista = await client.get("/api/historico")
+    assert lista.status_code == 200, lista.text
+    (evento,) = [e for e in lista.json()["items"] if e["acao"].startswith("cadastrou um contato")]
+    r = await client.get(f"/api/historico/{evento['id']}")
+    assert r.status_code == 200, r.text
+    for texto in (lista.text, r.text):
+        for rid in ("TSTK0011", "TSTR0001", "TSTA0001", "TSTB0002"):
+            assert rid not in texto, f"{rid} inteiro no Histórico"
+    d = r.json()
+    assert d["corpo"]["threema_id"] == "TS••••••"
+    assert d["corpo"]["observacao"] == "SKU DG053ABC", "fora das chaves do Threema, nada muda"
+    campos = {(a["tabela"], c["campo"]): c for a in d["alteracoes"] for c in a["campos"]}
+    assert campos[("threema_contato", "threema_id")]["depois"] == "TS••••••"
+    assert campos[("threema_contato", "nome")]["depois"] == "Lisboa"
+    rec = campos[("threema_informar_config", "recipients")]
+    assert (rec["antes"], rec["depois"]) == ("TS••••••:Roma", "TS••••••:Lisboa,TS••••••:Roma")
+    thr = campos[("users", "threema")]
+    assert (thr["antes"], thr["depois"]) == ("TS••••••", "TS•••••• (outro ID)")

@@ -440,7 +440,7 @@ async def detalhe(evento_id: str, acesso: Acesso, session: Sessao) -> dict:
         "status": e.status,
         "caminho": e.caminho,
         "ip": e.ip,
-        "corpo": e.corpo,
+        "corpo": leitura.corpo_sem_ids_threema(e.corpo),
         "n_alteracoes": e.n_alteracoes,
         "itens": e.itens_texto,
         "alteracoes": leitura.agrupar([leitura.alteracao_out(a, fk_nomes) for a in alteracoes]),
