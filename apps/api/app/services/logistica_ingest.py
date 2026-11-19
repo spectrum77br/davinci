@@ -9,6 +9,13 @@ O INSERT é idempotente (`NOT EXISTS` por `pedido_bling`), então re-rodar não
 duplica; a janela de dias dá folga pra pegar pedidos que o sync do Bling só
 trouxe com atraso.
 
+Pedido NOVO entra também pelo motor de 5 min (`recarregar_ml` →
+`inserir_pedidos_novos`, janela curta de `NOVOS_DIAS_MOTOR`). Até 19/11/2026 só
+o cron de hora em hora inseria: o pedido já estava no DaVinci e só aparecia na
+Logística na virada da hora — mediana de 27 min, até ~1 h (Vinicius, 309723:
+pago 09:32, no espelho 09:34, na aba só às 10:00). O de hora em hora continua
+como rede (60 dias + "Problemas" de 360).
+
 Além de inserir, cada rodada REALINHA o `status_bling` de quem já está na
 tabela com o espelho `bling_orders` (que o sync do Bling mantém fresco) — sem
 isso o painel ficava com a foto do momento da ingestão e as regras da aba
@@ -62,9 +69,11 @@ _PLATAFORMA_LABELS = {
 # pedido é o bling_store_id), status_bling via situacao_bling. meli_status fica
 # vazio (só o ML enriquece a assinatura; os outros marketplaces ficam sem
 # Status Plataforma por enquanto — a aba mostra a linha com o status do Bling).
+# Schema pela configuração (era `davinci.` fixo) pra rodar no banco de teste;
+# RETURNING id: o motor de 5 min enriquece na mesma rodada quem acabou de entrar.
 _INSERT_SQL = text(
-    """
-    INSERT INTO davinci.logistica
+    f"""
+    INSERT INTO "{_SCHEMA}".logistica
         (id, data, pedido_bling, pedido_marketplace, plataforma, conta,
          meli_status, status_bling, created_at, updated_at)
     SELECT DISTINCT ON (bo.numero)
@@ -74,14 +83,14 @@ _INSERT_SQL = text(
         bo.numeroloja,
         :label,
         si.account_name,
-        '{}'::jsonb,
+        '{{}}'::jsonb,
         sb.nome,
         now(),
         now()
-    FROM davinci.bling_orders bo
-    JOIN davinci.store_info si
+    FROM "{_SCHEMA}".bling_orders bo
+    JOIN "{_SCHEMA}".store_info si
         ON si.bling_store_id::text = bo.loja AND si.platform = :platform
-    LEFT JOIN davinci.situacao_bling sb ON sb.id::text = bo.situacao
+    LEFT JOIN "{_SCHEMA}".situacao_bling sb ON sb.id::text = bo.situacao
     WHERE bo.data >= now() - make_interval(days => :dias)
       AND (:so_problemas = false OR sb.nome = 'Problemas')
       AND bo.numero IS NOT NULL
@@ -91,11 +100,24 @@ _INSERT_SQL = text(
       -- fica no painel os 90 dias da janela de reclamação e aí o cleanup tira.
       AND (sb.nome IS NULL OR sb.nome NOT IN ('Cancelado', 'Resolvido', 'Perdimento'))
       AND NOT EXISTS (
-          SELECT 1 FROM davinci.logistica l WHERE l.pedido_bling = bo.numero
+          SELECT 1 FROM "{_SCHEMA}".logistica l WHERE l.pedido_bling = bo.numero
       )
     ORDER BY bo.numero, bo.data DESC
+    RETURNING id
     """
 )
+
+# Duas rotinas inserem pedido novo — o motor de 5 min (e o botão "recarregar")
+# e o cron de hora em hora, em workers diferentes — e `logistica.pedido_bling`
+# não tem UNIQUE: dois INSERT ... NOT EXISTS ao mesmo tempo gravariam o mesmo
+# pedido duas vezes. A trava de transação enfileira os dois; o segundo já vê a
+# linha do primeiro (o NOT EXISTS lê depois de pegar a trava).
+_TRAVA_INSERT_SQL = text("SELECT pg_advisory_xact_lock(hashtext('davinci:logistica_ingest'))")
+
+# Janela do motor de 5 min: pedido que chegou agora tem `data` de hoje (ou de
+# ontem, perto da meia-noite / Bling que importa atrasado). Curta pra rodada
+# continuar barata; o cron de hora em hora cobre os 60 dias.
+NOVOS_DIAS_MOTOR = 2
 
 
 # O status_bling de quem JÁ está na tabela ficava congelado na foto da
@@ -436,7 +458,16 @@ async def _ingest_platform(
     (NOT EXISTS por pedido_bling). `so_problemas=True` restringe aos pedidos com
     situação Bling "Problemas" (a passada extra de 360 dias). Retorna quantas
     linhas entraram."""
+    return len(await _inserir(session, platform, dias, so_problemas=so_problemas))
+
+
+async def _inserir(
+    session: AsyncSession, platform: str, dias: int, *, so_problemas: bool = False
+) -> list[UUID]:
+    """O INSERT de uma plataforma, sob a trava (ver `_TRAVA_INSERT_SQL`).
+    Devolve os ids das linhas que entraram."""
     label = _PLATAFORMA_LABELS[platform]
+    await session.execute(_TRAVA_INSERT_SQL)
     res = await session.execute(
         _INSERT_SQL,
         {
@@ -446,16 +477,27 @@ async def _ingest_platform(
             "so_problemas": so_problemas,
         },
     )
-    inserted = res.rowcount or 0
+    ids = list(res.scalars().all())
     await session.commit()
     logger.info(
         "logistica_ingest_inserted",
         platform=platform,
-        inserted=inserted,
+        inserted=len(ids),
         dias=dias,
         so_problemas=so_problemas,
     )
-    return inserted
+    return ids
+
+
+async def inserir_pedidos_novos(
+    session: AsyncSession, *, dias: int = NOVOS_DIAS_MOTOR
+) -> list[UUID]:
+    """Pedidos novos das 4 plataformas (janela curta) pro motor de 5 min.
+    Devolve os ids que entraram — o motor os enriquece na mesma rodada."""
+    ids: list[UUID] = []
+    for platform in ("ml", "shopee", "tiktok", "amazon"):
+        ids += await _inserir(session, platform, dias)
+    return ids
 
 
 async def run_ingest_ml_daily(
@@ -717,6 +759,8 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
 
     - as linhas cuja situação no Bling mudou agora (o `refresh_status_bling`
       devolve exatamente essas — é um UPDATE barato, sem chamada de API);
+    - os pedidos que acabaram de chegar do Bling (`inserir_pedidos_novos`,
+      últimos `NOVOS_DIAS_MOTOR` dias — desde 19/11/2026);
     - as pendentes do painel (o que o operador está olhando).
 
     Até 15/09 este job também fazia os 4 sweeps de pós-venda (todas as linhas
@@ -729,6 +773,9 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     de marketplace, leve, em 1-3 min.
     """
     mudaram = await refresh_status_bling(session)
+    # Pedido que acabou de cair no Bling entra JÁ (antes só na virada da hora)
+    # e é enriquecido nesta mesma rodada — vai junto em `extras`.
+    novos = await inserir_pedidos_novos(session)
     # Situação mudada no Bling = a etiqueta pode ter saído: a linha Amazon
     # (Envio próprio, ainda sem …BR) é relida no Bling nesta rodada, sem
     # esperar a hora do RELER_APOS (Vinicius, 21/09/2026).
@@ -739,10 +786,11 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
     # os ids apagados em `mudaram` não voltam.
     removed = await cleanup_finalizados(session)
-    alvo = await _ids_pendentes(session, extras=list(mudaram) + com_chamado)
+    alvo = await _ids_pendentes(session, extras=list(mudaram) + com_chamado + novos)
     logger.info(
         "logistica_recarregar_inicio",
         status_refresh=len(mudaram),
+        novos=len(novos),
         bling_reler=reler,
         chamados_espelhados=len(com_chamado),
         cleanup=removed,
@@ -754,6 +802,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     )
     return {
         "status_refresh": len(mudaram),
+        "novos": len(novos),
         "bling_reler": reler,
         "chamados_espelhados": len(com_chamado),
         "cleanup": removed,

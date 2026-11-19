@@ -2713,7 +2713,9 @@ async def logistica_ml_ingest(ctx: dict) -> None:
     """De hora em hora (:00 — era 1x/dia; pedido do usuário 25/08): importa os
     novos pedidos Mercado Livre pra aba Logística, realinha o status Bling,
     limpa os finalizados (Cancelado/Resolvido/Perdimento e Entregue +90d) e
-    enriquece o status do Meli. Assim a lista cresce e se limpa sozinha."""
+    enriquece o status do Meli. Assim a lista cresce e se limpa sozinha.
+    Desde 19/11/2026 o pedido novo entra antes, pelo motor de 5 min
+    (`logistica_recarregar`); este fica como rede dos 60 dias."""
     async with session_scope() as s:
         summary = await run_ingest_ml_daily(s)
     logger.info("logistica_ml_ingest_done", **summary)
