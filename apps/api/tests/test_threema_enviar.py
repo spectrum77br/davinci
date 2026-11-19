@@ -211,13 +211,23 @@ async def test_sino_quebrado_nao_derruba_o_envio(db, monkeypatch):
 # só manda o "[TESTE]" do botão (conferido abaixo).
 _USOS_DO_NUCLEO = {
     "worker.py": {"sincronizar"},
-    "services/threema_envios_tela.py": {"resolver", "legado", "dependencias", "_dedupe"},
+    # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
+    # antiga" dos contatos externos e das regras): não manda nada.
+    "services/threema_envios_tela.py": {
+        "resolver",
+        "legado",
+        "dependencias",
+        "_dedupe",
+        "_regras_com_pessoa",
+    },
     "services/threema_envios_edicao.py": {
         "sincronizar",
         "_interruptor_legado",
         "_dedupe",
         "enviar",
         "limpar_cache",
+        # Só LÊ a lista do Cadastro: o "Mandar teste" de envio desligado.
+        "_ler_cadastro",
     },
 }
 
