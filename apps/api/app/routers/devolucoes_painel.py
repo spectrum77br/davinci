@@ -868,7 +868,8 @@ class ChamadoJanelaOut(BaseModel):
     fraude: bool = False
     # 18/11/2026 (Vinicius, 306771: "chegou no painel Chamados, agora o painel
     # Chamados vai cuidar"): a contestação não saiu pela API, mas o chamado já
-    # está na aba Chamados — onde ele está lá (o mesmo Status da coluna).
+    # está na aba Chamados — onde ele está lá (o mesmo Status da coluna). Vem
+    # também com o chamado Encerrado (19/11).
     chamado_aba: str | None = None
     chamado_aba_motivo: str | None = None
 
@@ -1000,8 +1001,13 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
             out.abertura_status = abertura.status
             out.abertura_erro = abertura.erro
             out.enviada_at = abertura.enviada_at
-        if out.abertura_status == "falhou":
-            # Não saiu pela API: daqui pra frente quem cuida é a aba Chamados.
+        if (
+            out.abertura_status == "falhou"
+            or ch.status_plataforma == chamados_svc.STATUS_ENCERRADO
+        ):
+            # Não saiu pela API, ou o chamado foi Encerrado (19/11: 306637 seguia
+            # em Análise Humano lá, 305108 em Aguard. Plataforma): quem cuida é a
+            # aba Chamados — a janela diz em que Status ele está e por quê.
             from app.routers.chamados import _one_out as linha_da_aba_chamados
 
             linha = await linha_da_aba_chamados(session, ch)

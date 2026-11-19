@@ -231,14 +231,101 @@ async def test_nao_saiu_pela_api_mostra_onde_esta_na_aba_chamados(
     assert janela["chamado_aba"] == "analise_humano"
     assert "devolucao_prazo_esgotado" in (janela["chamado_aba_motivo"] or "")
 
-    # O mesmo Status (e o mesmo porquê) que a coluna da aba Chamados mostra.
-    r = await client.get("/api/chamados", params={"search": "880004"})
+    await _mesmo_status_da_aba_chamados(client, ch, janela, "880004")
+
+
+async def _mesmo_status_da_aba_chamados(client, ch: Chamado, janela: dict, numero: str) -> None:
+    """O Status (e o porquê) que a janela traz é o mesmo da coluna da aba Chamados."""
+    r = await client.get("/api/chamados", params={"search": numero})
     assert r.status_code == 200, r.text
     (linha,) = [c for c in r.json()["items"] if c["id"] == str(ch.id)]
     assert (janela["chamado_aba"], janela["chamado_aba_motivo"]) == (
         linha["status_aba"],
         linha["status_aba_motivo"],
     )
+
+
+async def test_encerrado_depois_que_saiu_avisa_retirar_e_diz_onde_esta(
+    client, make_user, auth_as, db, ml
+):
+    """306637 (19/11/2026): a contestação já tinha saído e alguém tirou o motivo do
+    lançamento — o chamado vai pra Encerrado. A janela dizia "Encerrado sem
+    contestar: nada foi pra plataforma" (falso). Agora ela recebe o aviso de
+    retirar (`retirar_contestacao`) e o Status da aba Chamados."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="880005", numeroloja="3880005")
+    r = await client.post(
+        "/api/devolutions",
+        json=_lancamento(
+            "880005",
+            "3880005",
+            condicao_produto="Extraviado",
+            motivo_devolucao="Não recebido",
+            link_abertura=ABERTURA,
+        ),
+    )
+    assert r.status_code == 201 and r.json()["chamado_ml_status"] == "enviada", r.text
+    did = r.json()["id"]
+    ch = await _chamado(db, "880005")
+
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": None})
+    assert p.status_code == 200, p.text
+    r = await client.get("/api/devolucoes-painel/880005/chamado")
+    assert r.status_code == 200, r.text
+    janela = r.json()
+    assert janela["status_plataforma"] == "encerrado" and janela["resolvido"] is False
+    assert janela["abertura_status"] == "enviada"
+    assert janela["abertura_erro"] == "retirar_contestacao"
+    assert janela["enviada_at"] is not None
+    assert janela["chamado_aba"] == "encerrado"
+    await _mesmo_status_da_aba_chamados(client, ch, janela, "880005")
+
+
+async def test_encerrado_que_seguiu_diz_que_a_aba_chamados_ainda_cuida(
+    client, make_user, auth_as, db, ml
+):
+    """305108 (19/11/2026): a contestação saiu, a plataforma encerrou o caso e
+    depois ele seguiu (alguém falou de novo). A aba Chamados continua com ele —
+    a janela recebe esse Status (a tela mostra azul, não "Encerrado")."""
+    from app.services import chamados as chamados_svc
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="880006", numeroloja="3880006")
+    r = await client.post(
+        "/api/devolutions",
+        json=_lancamento(
+            "880006",
+            "3880006",
+            condicao_produto="Extraviado",
+            motivo_devolucao="Não recebido",
+            link_abertura=ABERTURA,
+        ),
+    )
+    assert r.status_code == 201 and r.json()["chamado_ml_status"] == "enviada", r.text
+    ch = await _chamado(db, "880006")
+    # A plataforma encerra DEPOIS de a contestação sair.
+    chamados_svc.set_status_plataforma(
+        ch, chamados_svc.STATUS_ENCERRADO, datetime.now(UTC) + timedelta(minutes=1)
+    )
+    await db.commit()
+
+    r = await client.get("/api/devolucoes-painel/880006/chamado")
+    janela = r.json()
+    assert janela["status_plataforma"] == "encerrado" and janela["abertura_status"] == "enviada"
+    assert janela["abertura_erro"] is None and janela["chamado_aba"] == "encerrado"
+
+    fala = chamados_svc.nova_mensagem(
+        ch, texto="o comprador respondeu", tipo="mensagem", direcao="recebida"
+    )
+    fala.created_at = datetime.now(UTC) + timedelta(minutes=2)  # depois do encerramento
+    db.add(fala)
+    await db.commit()
+    r = await client.get("/api/devolucoes-painel/880006/chamado")
+    janela = r.json()
+    assert janela["chamado_aba"] not in (None, "encerrado", "concluido"), janela
+    await _mesmo_status_da_aba_chamados(client, ch, janela, "880006")
 
 
 # ── Conferência da IA ─────────────────────────────────────────────────────

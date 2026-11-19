@@ -37,7 +37,8 @@ type Janela = {
   ia_nao_abriu?: string | null
   tem_lancamento?: boolean
   fraude?: boolean
-  // Não saiu pela API: onde o chamado está na aba Chamados (Status da coluna).
+  // Onde o chamado está na aba Chamados (Status da coluna) quando ela é quem
+  // cuida: a contestação não saiu pela API, ou o chamado foi Encerrado.
   chamado_aba?: string | null
   chamado_aba_motivo?: string | null
 }
@@ -181,27 +182,64 @@ const ABA_CHAMADOS: Record<string, string> = {
   encerrado: 'Encerrado',
   concluido: 'Concluído',
 }
+const semPonto = (t: string) => t.trim().replace(/[.\s]+$/, '')
+// " Na aba Chamados está em Análise Robô — instrução pendente pro robô: pode continuar."
+function naAbaChamados(j: Janela): string {
+  const aba = j.chamado_aba ? ABA_CHAMADOS[j.chamado_aba] || j.chamado_aba : ''
+  const motivo = semPonto(j.chamado_aba_motivo || '')
+  return aba ? ` Na aba Chamados está em ${aba}${motivo ? ` — ${motivo}` : ''}.` : ''
+}
+// "pro Mercado Livre", "pro TikTok", "pra Shopee", "pra Amazon"; sem nome: "pra plataforma".
+function praPlataforma(plat: string): string {
+  if (!plat) return 'pra plataforma'
+  return ['mercado livre', 'tiktok'].includes(plat.trim().toLowerCase()) ? `pro ${plat}` : `pra ${plat}`
+}
 const estado = computed<{ texto: string; cor: string; dica: string } | null>(() => {
   const j = janela.value
   if (!j) return null
   const prazoTxt = props.prazoContestacao ? `Prazo pra contestar: ${quando(props.prazoContestacao)} (${faltam(props.prazoContestacao)}).` : ''
   if (segurada.value) return { texto: 'Segurado — decidir', cor: VERMELHO, dica: `A IA segurou: o motivo não bate com o que foi escrito. ${prazoTxt}`.trim() }
   if (j.resolvido) return { texto: 'Concluído', cor: CINZA, dica: 'Chamado concluído na aba Chamados' }
-  if (cancelada.value || j.status_plataforma === 'encerrado') return { texto: 'Encerrado', cor: CINZA, dica: 'Encerrado sem contestar: nada foi pra plataforma' }
+  if (cancelada.value || j.status_plataforma === 'encerrado') {
+    // 19/11/2026 (306637, 305108): Encerrado não é sempre "nada foi pra
+    // plataforma". O porquê do encerramento vem da aba Chamados (quem tirou o
+    // motivo, a plataforma…) — a janela não adivinha.
+    const plat = props.plataforma || ''
+    const saiuTxt = `A contestação saiu ${praPlataforma(plat)}${j.enviada_at ? ` em ${quando(j.enviada_at)}` : ''}`
+    // Saiu (ou o robô estava abrindo) e depois o chamado foi encerrado: nenhuma
+    // API cancela — alguém desiste dela no painel da plataforma (o painel antigo
+    // mostrava isso em âmbar).
+    if (saiu.value && (j.abertura_erro === 'retirar_contestacao' || j.abertura_status === 'enviando')) {
+      const comoSaiu = j.abertura_status === 'enviando'
+        ? `O robô estava abrindo a contestação na tela da plataforma${plat ? ` (${plat})` : ''}`
+        : saiuTxt
+      return { texto: 'Retirar na plataforma', cor: AMARELO, dica: `${comoSaiu} e depois o chamado foi encerrado. Se ela estiver aberta lá, desista dela no painel da plataforma: o DaVinci não cancela pela API.${naAbaChamados(j)}` }
+    }
+    if (saiu.value || j.abertura_status === 'falhou') {
+      const comoFoi = saiu.value
+        ? saiuTxt
+        : `Pela API a contestação não saiu: ${semPonto(porQueNaFila.value || j.abertura_erro || 'erro')}`
+      // O caso seguiu depois do encerramento (a aba Chamados ainda trabalha
+      // nele): quem cuida é ela — azul, como no "não saiu" (Vinicius 18/11).
+      if (j.chamado_aba && !['encerrado', 'concluido'].includes(j.chamado_aba)) {
+        return { texto: 'Enviado · aba Chamados', cor: AZUL, dica: `${comoFoi}. O caso foi encerrado e seguiu: quem cuida dele daqui pra frente é a aba Chamados.${naAbaChamados(j)}` }
+      }
+      return { texto: 'Encerrado', cor: CINZA, dica: `${comoFoi}. Depois o caso foi encerrado.${naAbaChamados(j)}` }
+    }
+    // Cancelada antes de sair ("Não", ou o motivo mudou com ela na fila).
+    if (cancelada.value) return { texto: 'Encerrado', cor: CINZA, dica: 'Encerrado sem contestar: nada foi pra plataforma' }
+    return { texto: 'Encerrado', cor: CINZA, dica: `A contestação não saiu pela API e o caso foi encerrado.${naAbaChamados(j)}` }
+  }
   // 18/11/2026 (Vinicius, 306771: "chegou no painel Chamados, agora o painel
   // Chamados vai cuidar"): a contestação não saiu pela API, mas o chamado já está
   // na aba Chamados — o caso é dela daqui pra frente, não vermelho aqui.
   if (j.abertura_status === 'falhou') {
-    const semPonto = (t: string) => t.trim().replace(/[.\s]+$/, '')
     const porque = semPonto(porQueNaFila.value || j.abertura_erro || 'erro')
-    const aba = j.chamado_aba ? ABA_CHAMADOS[j.chamado_aba] || j.chamado_aba : ''
-    const motivoLa = semPonto(j.chamado_aba_motivo || '')
-    const la = aba ? ` Lá está em ${aba}${motivoLa ? ` — ${motivoLa}` : ''}.` : ''
     // Vinicius: "Aberto fica verdinho, azulzinho é enviado, painel Chamados".
-    return { texto: 'Enviado · aba Chamados', cor: AZUL, dica: `Enviado pra aba Chamados, que cuida dele daqui pra frente. Pela API não saiu: ${porque}.${la}` }
+    return { texto: 'Enviado · aba Chamados', cor: AZUL, dica: `Enviado pra aba Chamados, que cuida dele daqui pra frente. Pela API não saiu: ${porque}.${naAbaChamados(j)}` }
   }
   if (saiu.value) {
-    const partes = [`Saiu pra ${props.plataforma || 'a plataforma'}${j.enviada_at ? ` em ${quando(j.enviada_at)}` : ''}`]
+    const partes = [`Saiu ${praPlataforma(props.plataforma || '')}${j.enviada_at ? ` em ${quando(j.enviada_at)}` : ''}`]
     if (motivoAtual.value) partes.push(`motivo ${motivoAtual.value}`)
     if (conf.value?.resultado === 'bate') partes.push('conferido pela IA')
     return { texto: 'Aberto', cor: VERDE, dica: `${partes.join(' · ')}. Foto anexada agora não vai junto: a contestação só sai uma vez.` }
