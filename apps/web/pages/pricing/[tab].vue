@@ -2971,6 +2971,9 @@ type CelulaConferida = {
 type ConferirCelulaResposta = {
   celula: CelulaConferida | null
   erro: string | null
+  // 19/11/2026: a conferência achou anúncio vinculado e tirou o "sem anúncio
+  // vinculado" que um envio antigo tinha gravado.
+  sem_vinculo_tirado?: boolean
 }
 type JobConferencia = {
   id: string
@@ -3146,6 +3149,9 @@ async function consultarConferencia() {
     const rodando = job?.status === 'pending' || job?.status === 'running'
     const terminou = !rodando && (job?.id !== antes.job?.id || job?.status !== antes.job?.status)
     if (terminou || r.ultimo_concluido !== antes.ultimo_concluido) {
+      // A conferência tira o "sem anúncio vinculado" vencido no servidor
+      // (19/11/2026): a grade relê para o cartão sair sem recarregar a página.
+      void loadGrid()
       await carregarConferencia()
       return
     }
@@ -3174,6 +3180,9 @@ async function acompanharConferencia() {
     }
     voltasConferencia++
     const terminou = atual.status !== 'pending' && atual.status !== 'running'
+    // Ver consultarConferencia: no fim, a grade relê (marca "sem anúncio
+    // vinculado" vencida que o servidor tirou).
+    if (terminou) void loadGrid()
     if (terminou || voltasConferencia % VOLTAS_ATE_RELER_CELULAS === 0) {
       await carregarConferencia()
       return
@@ -3323,6 +3332,10 @@ async function conferirCelula(prodId: string, acc: Account) {
     const celula = r.celula ?? null
     celulasRecentes.set(chave, { seq: ++seqCelula, celula })
     if (conferencia.value) conferencia.value.celulas = trocarCelula(conferencia.value.celulas, chave, celula)
+    // O servidor tirou a marca "sem anúncio vinculado" (envio antigo, vínculo
+    // criado depois): sai também da grade aberta, sem reler a grade inteira.
+    const naGrade = r.sem_vinculo_tirado ? cellOf(prodId, acc.id) : undefined
+    if (naGrade?.cell_status === 'no_link') naGrade.cell_status = 'auto'
   } catch (e: any) {
     if (desmontado || dep !== department.value) return
     trocarErroDaCelula(chave, textoErroCelula(e?.data?.detail?.code))

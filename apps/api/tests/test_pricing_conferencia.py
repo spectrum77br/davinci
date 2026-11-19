@@ -1792,12 +1792,16 @@ async def test_rota_da_celula_para_quem_ve_a_tabela(
     # A leitura falhou: 200 com o erro e nada gravado.
     marketplaces.ml.falha_em = {"counhago"}
     r = await client.post(url, json=corpo)
-    assert r.json() == {"celula": None, "erro": "o Mercado Livre recusou o acesso da conta (403)"}
+    assert r.json() == {
+        "celula": None,
+        "erro": "o Mercado Livre recusou o acesso da conta (403)",
+        "sem_vinculo_tirado": False,
+    }
     # Célula que não manda preço (NA): celula null.
     r = await client.post(
         url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(c.b200.id)}
     )
-    assert r.json() == {"celula": None, "erro": None}
+    assert r.json() == {"celula": None, "erro": None, "sem_vinculo_tirado": False}
     # Linha que não existe.
     r = await client.post(
         url, json={"pricing_account_id": str(c.kit.id), "pricing_product_id": str(uuid.uuid4())}
@@ -1824,6 +1828,134 @@ async def test_rota_da_celula_para_quem_ve_a_tabela(
     auth_as(vendedor)
     r = await client.post(url, json=corpo)
     assert (r.status_code, r.json()["detail"]) == (409, {"code": "so_no_servidor"})
+
+
+# =========================================================== "sem anúncio vinculado" vencido
+# 19/11/2026: o envio que não acha vínculo grava cell_status `no_link` e só um
+# envio com sucesso o tirava. Vínculo criado depois (wp60 4g 36.512 na fiore:
+# envio 10:00, vínculo 10:05 de 18/11) deixava o cartão vermelho preso — nem o
+# clique no cartão nem a conferência inteira o apagavam.
+
+
+async def _marcas(db: AsyncSession, c: SimpleNamespace, **estados: CellStatus) -> None:
+    """Grava cell_status nas células "linha__conta" do cenário (a003__kit...)."""
+    for chave, estado in estados.items():
+        linha, conta = chave.split("__")
+        db.add(
+            PricingOverride(
+                user_id=c.kit.user_id,
+                pricing_product_id=getattr(c, linha).id,
+                pricing_account_id=getattr(c, conta).id,
+                cell_status=estado,
+            )
+        )
+    await db.commit()
+
+
+async def _estado(db: AsyncSession, c: SimpleNamespace, chave: str) -> CellStatus:
+    linha, conta = chave.split("__")
+    return (
+        await db.execute(
+            select(PricingOverride.cell_status).where(
+                PricingOverride.pricing_product_id == getattr(c, linha).id,
+                PricingOverride.pricing_account_id == getattr(c, conta).id,
+            )
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_conferencia_tira_o_sem_vinculo_vencido_e_so_ele(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """Célula com anúncio vinculado (ML com leitor, Shopee sem leitor e a
+    leitura que falhou na conta: o vínculo é do banco) perde o no_link; sem
+    vínculo de verdade ele fica; os outros estados não mudam."""
+    c = cenario
+    marketplaces.ml.falha_em = {"ml quebrado"}
+    await _marcas(
+        db,
+        c,
+        a003__kit=CellStatus.NO_LINK,  # MLB100: tem vínculo
+        a003__conta_sh=CellStatus.NO_LINK,  # Shopee sem leitor, com vínculo
+        a003__quebrada=CellStatus.NO_LINK,  # MLB900, a leitura da conta falha
+        z999__kit=CellStatus.NO_LINK,  # sem anúncio de verdade
+        x010__quebrada=CellStatus.NO_LINK,  # a ml quebrado não tem x010
+        a003__conta_amz=CellStatus.ERROR,  # erro do envio: não é desta regra
+        x010__kit=CellStatus.SV,
+    )
+    job = await _rodar(db, admin)
+    assert job.status == BackgroundJobStatus.SUCCEEDED, job.error
+
+    esperado = {
+        "a003__kit": CellStatus.AUTO,
+        "a003__conta_sh": CellStatus.AUTO,
+        "a003__quebrada": CellStatus.AUTO,
+        "z999__kit": CellStatus.NO_LINK,
+        "x010__quebrada": CellStatus.NO_LINK,
+        "a003__conta_amz": CellStatus.ERROR,
+        "x010__kit": CellStatus.SV,
+    }
+    assert {k: await _estado(db, c, k) for k in esperado} == esperado
+    # NA e desligada do cenário continuam.
+    assert await _estado(db, c, "b200__kit") == CellStatus.NA
+    assert await _estado(db, c, "c300__kit") == CellStatus.DISABLED
+
+
+@pytest.mark.asyncio
+async def test_conferencia_parcial_tira_so_nas_contas_escolhidas(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    c = cenario
+    await _marcas(db, c, a003__kit=CellStatus.NO_LINK, a003__conta_sh=CellStatus.NO_LINK)
+    await _rodar_parcial(db, admin, [c.conta_sh.id])
+    assert await _estado(db, c, "a003__conta_sh") == CellStatus.AUTO
+    assert await _estado(db, c, "a003__kit") == CellStatus.NO_LINK
+
+
+@pytest.mark.asyncio
+async def test_clique_no_cartao_tira_o_sem_vinculo_vencido(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """O clique tira a marca e avisa a tela; a leitura que falhou não mexe em
+    nada; o segundo clique não tem o que tirar; sem vínculo a marca fica."""
+    c = cenario
+    await _marcas(db, c, a003__kit=CellStatus.NO_LINK, z999__kit=CellStatus.NO_LINK)
+
+    marketplaces.ml.falha_em = {"counhago"}
+    with pytest.raises(conferencia.LeituraDaCelulaFalhouError):
+        await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
+    assert await _estado(db, c, "a003__kit") == CellStatus.NO_LINK
+
+    marketplaces.ml.falha_em = set()
+    linha = await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
+    assert (linha["situacao"], linha["sem_vinculo_tirado"]) == ("conferida", True)
+    assert await _estado(db, c, "a003__kit") == CellStatus.AUTO
+    linha = await conferencia.conferir_celula("celular", c.kit.id, c.a003.id)
+    assert linha["sem_vinculo_tirado"] is False
+
+    linha = await conferencia.conferir_celula("celular", c.kit.id, c.z999.id)
+    assert (linha["situacao"], linha["sem_vinculo_tirado"]) == ("sem_anuncio", False)
+    assert await _estado(db, c, "z999__kit") == CellStatus.NO_LINK
+
+
+@pytest.mark.asyncio
+async def test_rota_da_celula_avisa_que_tirou_o_sem_vinculo(
+    db: AsyncSession, client: AsyncClient, make_user, cenario, auth_as: Callable, marketplaces
+):
+    c = cenario
+    await _marcas(db, c, a003__conta_sh=CellStatus.NO_LINK)
+    auth_as(await make_user(role=UserRole.USER, permissions=PERM_VER))
+    corpo = {"pricing_account_id": str(c.conta_sh.id), "pricing_product_id": str(c.a003.id)}
+    r = await client.post("/api/pricing/conferencia/celula", json=corpo)
+    assert r.status_code == 200, r.text
+    assert (r.json()["celula"]["situacao"], r.json()["sem_vinculo_tirado"]) == (
+        "nao_suportada",
+        True,
+    )
+    assert await _estado(db, c, "a003__conta_sh") == CellStatus.AUTO
+    r = await client.post("/api/pricing/conferencia/celula", json=corpo)
+    assert r.json()["sem_vinculo_tirado"] is False
 
 
 # =========================================================== job e migration

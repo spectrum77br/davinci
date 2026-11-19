@@ -149,6 +149,10 @@ class ConferirCelulaOut(BaseModel):
 
     celula: ConferenciaCelulaOut | None = None
     erro: str | None = None
+    # A conferência achou anúncio vinculado e tirou o "sem anúncio vinculado"
+    # (no_link) que um envio antigo tinha gravado: a tela tira a marca da
+    # célula na grade aberta (19/11/2026).
+    sem_vinculo_tirado: bool = False
 
 
 class MargemOut(BaseModel):
@@ -472,7 +476,8 @@ async def conferir_celula(
             conferido_em=linha["conferido_em"],
             anuncios=linha["anuncios"],
             job_id=linha["job_id"],
-        )
+        ),
+        sem_vinculo_tirado=bool(linha.get("sem_vinculo_tirado")),
     )
 
 

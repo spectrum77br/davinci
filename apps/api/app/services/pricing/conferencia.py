@@ -90,6 +90,7 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
+    CellStatus,
     Integration,
     PricingAccount,
     PricingConferencia,
@@ -211,6 +212,10 @@ class Celula:
     # Já decidida na montagem (sem_anuncio / nao_suportada); None = ler.
     situacao: str | None = None
     motivo: str | None = None
+    # O resolvedor do envio achou anúncio para a célula (com ou sem leitor de
+    # preço): o "sem anúncio vinculado" (no_link) gravado por um envio antigo
+    # já não vale (`tirar_sem_vinculo_vencido`).
+    tem_vinculo: bool = False
 
 
 @dataclass(slots=True)
@@ -648,6 +653,7 @@ async def montar_celulas(
         if celula.situacao is not None:
             continue
         resolucao = resolucoes[(celula.produto.id, celula.conta.id)]
+        celula.tem_vinculo = bool(resolucao.links)
         if resolucao.links and celula.integracao.id not in lidas:
             # Tem anúncio, mas a plataforma não tem leitor de preço (Magalu).
             celula.situacao = SITUACAO_NAO_SUPORTADA
@@ -737,6 +743,49 @@ def _linha(
         "job_id": job_id,
         "conferido_em": agora,
     }
+
+
+# Lote do UPDATE das marcas (pares conta × linha por comando).
+_LOTE_SEM_VINCULO = 1000
+
+
+async def tirar_sem_vinculo_vencido(
+    session: AsyncSession, celulas: Iterable[Celula]
+) -> set[tuple[UUID, UUID]]:
+    """Tira o "sem anúncio vinculado" (cell_status `no_link`) das células em
+    que a conferência achou anúncio vinculado. Devolve os pares (conta, linha)
+    que mudaram.
+
+    O `no_link` é gravado pelo envio de preço que não achou vínculo e, até
+    19/11/2026, só um envio com sucesso o tirava (`push._persist_cell_status`).
+    Assim, um vínculo criado depois do envio deixava o cartão vermelho preso:
+    nem o clique no cartão nem a conferência inteira o apagavam. Ex.: wp60 4g
+    36.512 na fiore, envio às 10:00 de 18/11 e vínculo às 10:05.
+
+    `tem_vinculo` vem do mesmo resolvedor do envio (`montar_celulas`), então
+    o próximo envio também acharia o anúncio e tiraria a marca. Só o
+    `no_link` muda, para `auto`, como o envio faria; NA, SV, manual,
+    travada, desligada e erro ficam como estão. Quem chama faz o commit."""
+    pares = sorted({(c.conta.id, c.produto.id) for c in celulas if c.tem_vinculo})
+    tirados: set[tuple[UUID, UUID]] = set()
+    for i in range(0, len(pares), _LOTE_SEM_VINCULO):
+        lote = pares[i : i + _LOTE_SEM_VINCULO]
+        res = await session.execute(
+            update(PricingOverride)
+            .where(
+                PricingOverride.cell_status == CellStatus.NO_LINK,
+                tuple_(PricingOverride.pricing_account_id, PricingOverride.pricing_product_id).in_(
+                    lote
+                ),
+            )
+            .values(cell_status=CellStatus.AUTO)
+            .returning(PricingOverride.pricing_account_id, PricingOverride.pricing_product_id)
+            .execution_options(synchronize_session=False)
+        )
+        tirados.update((conta, linha) for conta, linha in res.all())
+    if tirados:
+        logger.info("conferencia_sem_vinculo_tirado", celulas=len(tirados))
+    return tirados
 
 
 async def _gravar(
@@ -1007,6 +1056,9 @@ async def _comecar(job_id: UUID, department: str) -> _Comeco | None:
             # Montadas todas (a disputa de catálogo é por coluna inteira, como
             # no envio); ficam só as das contas escolhidas.
             celulas = [c for c in celulas if c.conta.id in contas]
+        # O vínculo é do banco (não depende da leitura do marketplace): a
+        # marca vencida sai já, no mesmo commit das células imediatas.
+        await tirar_sem_vinculo_vencido(s, celulas)
         imediatas = await _gravar_vivas(
             s,
             [
@@ -1232,6 +1284,15 @@ async def _conferir_celula(
     linha = _linha(celula, department=department, job_id=None, agora=_agora(), leituras=leituras)
     async with _db.SessionLocal() as s:
         gravadas = await _gravar_vivas(s, [linha])
+        # Só depois da leitura que deu certo: a que falhou não grava nada.
+        tirados = await tirar_sem_vinculo_vencido(s, [celula]) if gravadas else set()
         await s.commit()
-    log.info("conferencia_celula", situacao=linha["situacao"], anuncios=len(linha["anuncios"]))
-    return gravadas[0] if gravadas else None
+    log.info(
+        "conferencia_celula",
+        situacao=linha["situacao"],
+        anuncios=len(linha["anuncios"]),
+        sem_vinculo_tirado=bool(tirados),
+    )
+    # `sem_vinculo_tirado` não é coluna: avisa a tela para tirar a marca da
+    # grade aberta sem reler a grade inteira.
+    return {**gravadas[0], "sem_vinculo_tirado": bool(tirados)} if gravadas else None
