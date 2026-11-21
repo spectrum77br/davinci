@@ -81,6 +81,7 @@ from app.models import (
     NfEtiquetaArquivo,
     NfFaturamento,
     NfImpressao,
+    NfNota,
     Product,
     StoreInfo,
 )
@@ -1549,9 +1550,18 @@ async def _temu_feitos_a_mao(session, numeros: list[str]) -> set[str]:
     rastro no banco, então a etiqueta é o sinal de que a NF já saiu — se o
     PATCH pra 21 falhou, o pedido segue em 6 e o sweep emitiria a 2ª NF. No
     automático isso não acontece: o `status_faturamento` nasce no enfileirar,
-    antes de qualquer etiqueta."""
+    antes de qualquer etiqueta.
+
+    21/11 (revisão antes de publicar): a NF que o coletor já casou no nf_nota
+    também tira o pedido — avulso manual cuja etiqueta da Anjun se perdeu no
+    passe em lote (nunca subiu) não deixava sinal nenhum e ganharia a 2ª NF."""
     if not numeros:
         return set()
+    com_nota = (
+        await session.execute(
+            select(NfNota.pedido_bling).where(NfNota.pedido_bling.in_(numeros))
+        )
+    ).scalars().all()
     com_status = (
         await session.execute(
             select(NfFaturamento.pedido_bling).where(
@@ -1567,7 +1577,7 @@ async def _temu_feitos_a_mao(session, numeros: list[str]) -> set[str]:
             )
         )
     ).scalars().all()
-    return set(com_status) | set(com_arquivo)
+    return set(com_status) | set(com_arquivo) | set(com_nota)
 
 
 async def _segurados_pelo_brinde(session, numeros: list[str]) -> set[str]:

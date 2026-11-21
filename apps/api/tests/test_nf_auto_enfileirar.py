@@ -30,6 +30,7 @@ from app.models import (
     NfFaturador,
     NfFaturamento,
     NfImpressao,
+    NfNota,
     Product,
     StoreInfo,
     User,
@@ -739,6 +740,28 @@ async def test_sweep_temu_feito_a_mao_nao_sai_de_novo(
     await db.commit()
 
     assert await nf_auto_enfileirar._candidatos(db) == ["830072", "830074"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_temu_com_nf_no_nf_nota_nao_sai_de_novo(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Temu feita no avulso à mão cuja etiqueta da Anjun nunca subiu (perdida
+    no passe em lote): sem etiqueta e sem status, o único sinal é a NF que o
+    coletor casou no nf_nota — o sweep não pega (seria a 2ª NF). A Shopee com
+    NF no nf_nota segue como antes (a regra é só da Temu)."""
+    monkeypatch.setattr(get_settings(), "nf_auto_temu", True, raising=False)
+    await _seed_temu_e_shopee_no_mesmo_upseller(db, admin)
+    await _seed_loja(db, admin, plataforma="temu", bling_store_id="930073",
+                     account_name="eron")
+    await _seed_pedido(db, numero="830073", loja="930073", sku="a076", bling_id=700073)
+    db.add(NfNota(chave="7" * 44, pedido_bling="830071", numero="1", xml=b"<nfe/>"))
+    db.add(NfNota(chave="8" * 44, pedido_bling="830072", numero="2", xml=b"<nfe/>"))
+    await db.commit()
+
+    # 830071 = Temu com NF (fora); 830072 = Shopee com NF (como antes); 830073 = Temu sem NF
+    assert await nf_auto_enfileirar._candidatos(db) == ["830072", "830073"]
+    assert await nf_auto_enfileirar._temu_feitos_a_mao(db, ["830071", "830073"]) == {"830071"}
 
 
 @pytest.mark.asyncio
