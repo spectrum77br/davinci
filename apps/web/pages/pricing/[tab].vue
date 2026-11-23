@@ -5107,10 +5107,9 @@ watch(department, async () => {
 
 <template>
   <div class="space-y-4">
-    <PageHeader
-      title="Tabela de Preços"
-      description="Gerencie custos, margens e preços de venda por conta"
-    />
+    <!-- M-25 (23/11/2026): sem a linha de descrição; fica só o título e os
+         botões de categoria sobem, com a mesma distância de antes. -->
+    <PageHeader title="Tabela de Preços" />
 
     <!-- ============================================ Department pills -->
     <div class="flex flex-wrap gap-2">
