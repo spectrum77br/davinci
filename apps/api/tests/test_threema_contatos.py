@@ -1,6 +1,6 @@
 """Contatos externos do Threema em `threema_contato` (tarefa 16, C4).
 
-* a migration 0506 COPIA a linha antiga (`threema_informar_config`,
+* a migration 0507 COPIA a linha antiga (`threema_informar_config`,
   contexto `diretorio`) para `threema_contato` (origem `migracao`), mantém a
   linha, não duplica ao rodar de novo e desce apagando só o que copiou;
 * o seletor (Ouvidoria › Robôs e Informar) mostra EXATAMENTE o mesmo de
@@ -33,7 +33,7 @@ from app.models import (
 from app.services import threema
 
 _API = Path(__file__).resolve().parent.parent
-_MIGRATION = _API / "alembic" / "versions" / "0506_threema_contatos_copia.py"
+_MIGRATION = _API / "alembic" / "versions" / "0507_threema_contatos_copia.py"
 
 # A linha antiga como estava em produção (Roma) mais os casos de borda.
 LINHA_ANTIGA = (
@@ -166,10 +166,10 @@ async def _linha(db) -> str | None:
 # ─────────────────────────────────────────────────────────── migration 0506
 
 
-def test_0506_le_a_linha_como_o_parse_de_sempre():
+def test_0507_le_a_linha_como_o_parse_de_sempre():
     mod = _carregar()
-    assert mod.revision == "0506_threema_contatos_copia"
-    assert mod.down_revision == "0505_threema_cadastro"
+    assert mod.revision == "0507_threema_contatos_copia"
+    assert mod.down_revision == "0506_threema_cadastro"
     assert mod.THREEMA_ID_REGEX == threema._THREEMA_ID.pattern
     antigo = threema.parse_recipient_directory(LINHA_ANTIGA, None)
     # mesma leitura do parse (ID em maiúsculas, nome vazio vira o ID, 1º vence),
@@ -182,7 +182,7 @@ def test_0506_le_a_linha_como_o_parse_de_sempre():
 
 
 @pytest.mark.asyncio
-async def test_0506_copia_mantem_a_linha_nao_duplica_e_desce(db):
+async def test_0507_copia_mantem_a_linha_nao_duplica_e_desce(db):
     await _cenario(db)
     await _migrar(db)
     copiados = await _contatos_no_banco(db)
@@ -207,7 +207,7 @@ async def test_0506_copia_mantem_a_linha_nao_duplica_e_desce(db):
 
 
 @pytest.mark.asyncio
-async def test_0506_sem_linha_antiga_nao_copia_nada(db):
+async def test_0507_sem_linha_antiga_nao_copia_nada(db):
     await _migrar(db)
     assert await _contatos_no_banco(db) == []
 
@@ -323,7 +323,7 @@ async def test_validacoes_de_sempre_mais_o_tamanho_do_nome(db):
 @pytest.mark.asyncio
 async def test_antes_do_alembic_o_seletor_le_a_linha_antiga_sem_500(db, monkeypatch):
     """Publicação: o código novo pode subir antes do `alembic upgrade head`
-    (0505/0506). Sem `threema_contato`, quem lê os contatos (o seletor da
+    (0506/0507). Sem `threema_contato`, quem lê os contatos (o seletor da
     Ouvidoria e do Informar, o aviso da IA de Chamado, o teste da Denúncia)
     cai na linha antiga em vez de dar 500, sem envenenar a transação de quem
     chamou; gravar contato responde a frase (422 na rota)."""

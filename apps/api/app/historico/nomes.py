@@ -477,7 +477,7 @@ TABELAS: dict[str, str] = {
     "redes_sociais": "Rede social",
     "marca_emails": "E-mail da marca (Tuta)",
     "users": "Usuário",
-    # Cadastros › Envios Threema (tarefa 16, migration 0505).
+    # Cadastros › Envios Threema (tarefa 16, migration 0506).
     "threema_envio": "Envio do Threema",
     "threema_envio_destinatario": "Quem recebe (Envios Threema)",
     "threema_contato": "Contato externo do Threema",

@@ -10,7 +10,7 @@ estiver ativa. Aqui:
 * o teste ESTÁTICO: todo `send_to_all(` do servidor está dentro de uma marca
   (ou numa função de envio marcada por TODOS os que a chamam), a chave de cada
   marca existe no catálogo e todo envio gerenciado do servidor tem marca;
-* a migration 0504 cria a tabela igual ao modelo e desce;
+* a migration 0505 cria a tabela igual ao modelo e desce;
 * a limpeza de 180 dias.
 """
 
@@ -648,7 +648,7 @@ def test_cada_marca_usa_a_chave_certa():
 
 # ─────────────────────────────────────────────────────────── migration 0504
 
-_MIGRATION = _API / "alembic" / "versions" / "0504_threema_envio_registro.py"
+_MIGRATION = _API / "alembic" / "versions" / "0505_threema_envio_registro.py"
 _TABELA = "threema_envio_registro"
 
 
@@ -702,12 +702,12 @@ async def _catalogo(db, schema: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_0504_cria_igual_ao_model_desce_e_sobe(db):
+async def test_0505_cria_igual_ao_model_desce_e_sobe(db):
     from app.models import threema_envio as modelo_registro
 
     mod = _carregar()
-    assert mod.revision == "0504_threema_envio_registro"
-    assert mod.down_revision == "0503_pricing_ads"
+    assert mod.revision == "0505_threema_envio_registro"
+    assert mod.down_revision == "0504_conciliacao_conferido_esperando"
     assert mod.ORIGENS == modelo_registro.ORIGENS_REGISTRO == threema_registro.ORIGENS
     assert mod.VIAS == modelo_registro.VIAS_REGISTRO == threema_registro.VIAS
     assert mod.ONDE_RODA == modelo_registro.ONDE_RODA_REGISTRO

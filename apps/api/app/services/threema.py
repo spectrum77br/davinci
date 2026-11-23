@@ -109,7 +109,7 @@ def parse_recipient_directory(names_raw: str | None, ids_raw: str | None) -> lis
 # pro "roma" e não havia onde — a única porta era a lista do `.env`, que exige
 # mexer no servidor.
 #
-# Desde a migration 0506 (tarefa 16, C4) os contatos moram em
+# Desde a migration 0507 (tarefa 16, C4) os contatos moram em
 # `threema_contato` (Cadastros › Envios Threema). A linha antiga
 # (`threema_informar_config`, contexto `diretorio`, formato `ID:Nome` do
 # `.env`) continua lá como ESPELHO: toda gravação daqui a reescreve com os
@@ -125,9 +125,9 @@ class ContatoInvalidoError(ValueError):
 
 
 # Janela da publicação: o código novo pode subir ANTES do `alembic upgrade
-# head` (0505/0506; outra pessoa publicando o main também leva este código).
+# head` (0506/0507; outra pessoa publicando o main também leva este código).
 # Enquanto `threema_contato` não existe, a LEITURA dos contatos cai na linha
-# antiga (`diretorio`, que a 0506 mantém como espelho) — as telas de sempre
+# antiga (`diretorio`, que a 0507 mantém como espelho) — as telas de sempre
 # (Informar, Ouvidoria › Robôs, aviso da IA de Chamado, teste da Denúncia)
 # não dão 500. Gravar contato nesse intervalo responde 422 com a frase
 # abaixo. A 1ª leitura boa liga a chave e o processo não confere mais.
@@ -209,7 +209,7 @@ async def _exige_tabela_contato(session) -> None:
 
 async def contatos(session) -> list[dict[str, str]]:
     """Contatos externos ativos, `[{id, nome}]` (ordem alfabética). Antes do
-    alembic (tabela ausente), os da linha antiga, como era antes da 0506."""
+    alembic (tabela ausente), os da linha antiga, como era antes da 0507."""
     linhas = await _contatos_ativos(session)
     if linhas is None:
         row = await _linha_contatos(session)
@@ -309,7 +309,7 @@ async def diretorio(session) -> list[dict[str, str]]:
     (THREEMA_RECIPIENT_NAMES/THREEMA_RECIPIENTS) cujo ID ninguém tem no
     cadastro; quando o dono do código ganhar cadastro, o apelido do `.env`
     dá lugar ao nome real. No meio dos dois entram os CONTATOS EXTERNOS
-    ativos (`contatos`, tabela `threema_contato` desde a 0506), pra quem
+    ativos (`contatos`, tabela `threema_contato` desde a 0507), pra quem
     recebe aviso e não tem login.
     Cada linha diz de onde veio em `origem` (usuario | contato | env) — é o
     que deixa a tela oferecer o "remover" só no que ela mesma cadastrou.

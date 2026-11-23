@@ -1,7 +1,7 @@
 """Cadastro dos envios do Threema (Cadastros › Envios Threema, tarefa 16).
 
 O CÓDIGO DESCREVE cada envio (`services/threema_catalogo`); o BANCO decide quem
-recebe, se está ligado e a observação (tabelas da migration 0505). Este
+recebe, se está ligado e a observação (tabelas da migration 0506). Este
 módulo é o NÚCLEO que junta os dois:
 
 * `legado(chave)` — quem recebe HOJE, montado exatamente como cada ponto de

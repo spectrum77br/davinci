@@ -12,7 +12,7 @@ aviso pro "roma", que não tem login no DaVinci, e a única porta era editar o
 que esta tabela já tirou do arquivo — quem lê é o mesmo
 `parse_recipient_directory`.
 
-Desde a migration 0506 (tarefa 16, C4) os contatos moram em `threema_contato`
+Desde a migration 0507 (tarefa 16, C4) os contatos moram em `threema_contato`
 (Cadastros › Envios Threema). A linha `diretorio` virou ESPELHO: o
 services/threema a reescreve a cada gravação de contato, para que reverter o
 código não perca ninguém. Sai na limpeza da tarefa (C12).

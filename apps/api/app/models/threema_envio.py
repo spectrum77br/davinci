@@ -1,6 +1,6 @@
 """Envios do Threema (Cadastros › Envios Threema, tarefa 16).
 
-`threema_envio_registro` (migration 0504): uma linha por destinatário e por
+`threema_envio_registro` (migration 0505): uma linha por destinatário e por
 tentativa de envio, gravada por `ThreemaClient.send_to_all` (services/
 threema.py) através de `services/threema_registro.py`. Diz quando saiu, de
 qual envio (`envio_chave`, a chave do catálogo `services/threema_catalogo.K`),
@@ -16,7 +16,7 @@ por qual remetente, para quem e se chegou. Uma chamada de envio é um LOTE
     escrito pela máquina e já é, ele mesmo, a trilha. A limpeza diária
     (`worker.alerts_cleanup`) apaga o que passou de 180 dias.
 
-O CADASTRO (migration 0505, C3) — quem recebe cada envio, decidido no banco:
+O CADASTRO (migration 0506, C3) — quem recebe cada envio, decidido no banco:
 
   • `threema_envio`: uma linha por envio do catálogo. As colunas do código
     (painel, nome, descrição, frequência, onde roda) são reescritas pela
@@ -188,7 +188,7 @@ class ThreemaContato(Base, TimestampMixin):
     nome: Mapped[str] = mapped_column(String(80), nullable=False)
     threema_id: Mapped[str] = mapped_column(String(8), nullable=False, unique=True)
     ativo: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    # tela | migracao (cópia da linha `diretorio`, 0506) | semeadura
+    # tela | migracao (cópia da linha `diretorio`, 0507) | semeadura
     origem: Mapped[str] = mapped_column(String(12), nullable=False)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
 

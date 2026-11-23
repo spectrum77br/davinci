@@ -444,7 +444,7 @@ _CLEANUP_TABLES = (
     "mail_messages",
     "mail_mailboxes",
     "historico_evento",  # FK SET NULL -> users
-    "threema_envio_registro",  # 0504: FK SET NULL -> users (ator_id)
+    "threema_envio_registro",  # 0505: FK SET NULL -> users (ator_id)
     "historico_alteracao",
     "historico_acesso",  # FK -> users: antes de users
     "claude_conectores",  # FK -> users: antes de users
@@ -648,7 +648,7 @@ _CLEANUP_TABLES = (
     "nf_etiqueta",
     "nf_impressao",
     "automacoes",
-    # 0505 (Cadastro dos envios Threema): destinatário tem FK → envio,
+    # 0506 (Cadastro dos envios Threema): destinatário tem FK → envio,
     # logistica_status, users, grupo (RESTRICT) e contato; membro → grupo,
     # contato e users. Antes de todas elas.
     "threema_envio_destinatario",

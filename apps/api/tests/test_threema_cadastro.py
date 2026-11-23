@@ -1,6 +1,6 @@
 """Cadastro dos envios do Threema — tabelas e sincronização (tarefa 16, C3).
 
-* a migration 0505 cria as 6 tabelas iguais aos modelos, com os CHECKs e os
+* a migration 0506 cria as 6 tabelas iguais aos modelos, com os CHECKs e os
   índices únicos, insere a linha 1 da emergência, desce e sobe;
 * a sincronização do catálogo faz upsert só das colunas do código, não semeia
   (nada de quem recebe, `semeado_em` NULL), não mexe no que é da pessoa, não
@@ -39,7 +39,7 @@ from app.services.threema_catalogo import ENVIOS, K
 from tests.threema_cadastro_apoio import limpar_ouvidoria  # noqa: F401 — fixture
 
 _API = Path(__file__).resolve().parent.parent
-_MIGRATION = _API / "alembic" / "versions" / "0505_threema_cadastro.py"
+_MIGRATION = _API / "alembic" / "versions" / "0506_threema_cadastro.py"
 TABELAS = (
     "threema_envio",
     "threema_contato",
@@ -103,10 +103,10 @@ async def _catalogo(db, schema: str, tabela: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_0505_cria_igual_aos_modelos_desce_e_sobe(db):
+async def test_0506_cria_igual_aos_modelos_desce_e_sobe(db):
     mod = _carregar()
-    assert mod.revision == "0505_threema_cadastro"
-    assert mod.down_revision == "0504_threema_envio_registro"
+    assert mod.revision == "0506_threema_cadastro"
+    assert mod.down_revision == "0505_threema_envio_registro"
     assert mod.FREQUENCIAS == modelos.FREQUENCIAS_ENVIO
     assert mod.ONDE_RODA == modelos.ONDE_RODA_ENVIO
     assert mod.ORIGENS_CONTATO == modelos.ORIGENS_CONTATO

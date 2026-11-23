@@ -210,7 +210,7 @@ async def _nomes(session, ids: set[str]) -> dict[str, Nome]:
     faltam = ids - set(out)
     if faltam:
         linhas = await threema._contatos_ativos(session)
-        if linhas is None:  # antes do alembic (0505): a linha antiga, sem id
+        if linhas is None:  # antes do alembic (0506): a linha antiga, sem id
             contatos = [(d["id"], d["nome"], None) for d in await threema.contatos(session)]
         else:
             contatos = [(c.threema_id, c.nome, c.id) for c in linhas]

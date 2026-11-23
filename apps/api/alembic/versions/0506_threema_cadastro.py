@@ -28,8 +28,8 @@ DOWNGRADE: apaga só as tabelas novas (o que foi cadastrado nelas se perde;
 as fontes antigas — .env, threema_informar_config, ouvidoria_robos,
 logistica_status — não são tocadas em nenhum sentido).
 
-Revision ID: 0505_threema_cadastro
-Revises: 0504_threema_envio_registro
+Revision ID: 0506_threema_cadastro
+Revises: 0505_threema_envio_registro
 """
 
 from collections.abc import Sequence
@@ -39,8 +39,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0505_threema_cadastro"
-down_revision: str | None = "0504_threema_envio_registro"
+revision: str = "0506_threema_cadastro"
+down_revision: str | None = "0505_threema_envio_registro"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

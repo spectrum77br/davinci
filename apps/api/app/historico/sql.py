@@ -156,7 +156,7 @@ EXCLUIDAS = re.compile(
     # mudança (quem, de quanto para quanto); a mudança da pessoa na linha da
     # Tabela (`pricing_products.garantia_meses`) continua no Histórico.
     r"|pricing_garantia_prazo$"
-    # Envios do Threema (tarefa 16, migration 0504): o registro de cada envio
+    # Envios do Threema (tarefa 16, migration 0505): o registro de cada envio
     # é escrito pela máquina e já é, ele mesmo, a trilha (quem, quando, para
     # quem). Mostrado no Histórico pela alternância "Envios Threema".
     r"|threema_envio_registro$)"

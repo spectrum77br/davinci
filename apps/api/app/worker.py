@@ -5914,7 +5914,7 @@ async def startup(ctx: dict) -> None:
     # Catálogo dos envios do Threema (Cadastros › Envios Threema, tarefa 16):
     # upsert das colunas do código em threema_envio. NUNCA semeia nem mexe em
     # quem recebe/ativo — sem semente todo envio segue a configuração de hoje.
-    # Mesma regra da Ouvidoria: falhou (banco antes da 0505, corrida entre
+    # Mesma regra da Ouvidoria: falhou (banco antes da 0506, corrida entre
     # workers) é só log, o worker sobe igual.
     try:
         from app.services import threema_envios

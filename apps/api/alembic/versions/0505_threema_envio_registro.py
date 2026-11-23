@@ -20,8 +20,8 @@ Fora do Histórico (`historico/sql.EXCLUIDAS`). Limpeza de 180 dias na
 
 DOWNGRADE: apaga a tabela (o registro gravado se perde; nada mais depende dela).
 
-Revision ID: 0504_threema_envio_registro
-Revises: 0503_pricing_ads
+Revision ID: 0505_threema_envio_registro
+Revises: 0504_conciliacao_conferido_esperando
 """
 
 from collections.abc import Sequence
@@ -31,8 +31,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0504_threema_envio_registro"
-down_revision: str | None = "0503_pricing_ads"
+revision: str = "0505_threema_envio_registro"
+down_revision: str | None = "0504_conciliacao_conferido_esperando"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
