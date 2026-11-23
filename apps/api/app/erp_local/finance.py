@@ -122,7 +122,7 @@ def _management(p):
             raise ERPError("entry_cost_centers", "Rateio por centro de custo inválido.") from None
     if centers:
         if not isinstance(centers, dict) or set(centers) - set(COST_CENTERS):
-            raise ERPError("entry_cost_centers", "Os centros de custo são Celular, Mala e Eletro.")
+            raise ERPError("entry_cost_centers", "Os centros de custo são Celular, Eletro e Mala.")
         split = {k: number(v, zero=True) for k, v in centers.items() if str(v).strip()}
         if sum(split.values()) != 100:
             raise ERPError("entry_cost_centers", "O rateio entre os centros de custo soma 100%.")
@@ -282,7 +282,7 @@ def create_entry(erp, db, p):
         if not stock and not metadata.get("cost_centers"):
             raise ERPError(
                 "entry_cost_centers",
-                "Divida a despesa entre Celular, Mala e Eletro (soma 100%).",
+                "Divida a despesa entre Celular, Eletro e Mala (soma 100%).",
             )
     dates = {k: day(p.get(k)) for k in ("issued_on", "competence_on", "due_date")}
     occurrence, count = p.get("occurrence", "once"), p.get("count", 1)

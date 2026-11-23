@@ -167,7 +167,7 @@ def _payable(erp, key, **extra):
 def test_payable_split_by_cost_center_and_lot_difference(erp):
     with pytest.raises(ERPError, match="100%"):
         _payable(erp, "A1", cost_centers={"celular": "50", "mala": "30"})
-    with pytest.raises(ERPError, match="Celular, Mala e Eletro"):
+    with pytest.raises(ERPError, match="Celular, Eletro e Mala"):  # M-23: ordem alfabética
         _payable(erp, "A2", cost_centers={"geral": "100"})
     _payable(
         erp,

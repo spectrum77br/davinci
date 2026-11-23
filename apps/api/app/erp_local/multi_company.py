@@ -29,7 +29,9 @@ COMMANDS = {
     "fiscal.company.adopt",
     "fiscal.route.save",
 }
-PRODUCT_TYPES = ("celular", "mala", "eletro")
+# M-23 (23/11/2026): a ordem alfabética das categorias de todas as telas
+# (services/categorias_ordem.py); é a ordem do select "Tipo de produto".
+PRODUCT_TYPES = ("celular", "eletro", "mala")
 
 
 def _company_id(db, cnpj):
