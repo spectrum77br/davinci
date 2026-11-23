@@ -72,29 +72,51 @@ console.log('pricing filtros: chaves ok')
 
 // ---------- 2) computeds e ações dos filtros, com refs falsas
 const ref = (v) => ({ value: v })
-function montar(contas) {
+// Constante de primeiro nível da página (ex.: EQUIPES_DO_FILTRO).
+const constante = (nome) => {
+  const st = source.statements.find((s) => ts.isVariableStatement(s)
+    && s.declarationList.declarations.some((d) => d.name.getText(source) === nome))
+  assert.ok(st, `${nome} existe na página`)
+  return new Function(`${js(st.getText(source))}\nreturn ${nome}`)()
+}
+const EQUIPES_DO_FILTRO = constante('EQUIPES_DO_FILTRO')
+// `contasDaAba`: a lista da aba Contas (/accounts), de onde vem a equipe da
+// coluna (o /grid não traz). `admin`: o administrador vê sempre 1, 2 e 3.
+function montar(contas, { contasDaAba = [], admin = true } = {}) {
   const plataformasDesmarcadas = ref(new Set())
   const contasDesmarcadas = ref(new Set())
+  const equipesDesmarcadas = ref(new Set())
   const buscaContas = ref('')
   const gridAccountsOrdenadas = ref(contas)
+  const accounts = ref(contasDaAba)
+  const isAdmin = ref(admin)
   const comp = (nome, deps) => {
     const nomes = Object.keys(deps)
     const fn = new Function(...nomes, `${computado(nome)}\nreturn __f`)(...nomes.map((n) => deps[n]))
     return { get value() { return fn() } }
   }
+  const equipesPorConta = comp('equipesPorConta', { accounts })
+  const chavesEquipeDaColuna = new Function('equipesPorConta',
+    `${funcao('chavesEquipeDaColuna')}\nreturn chavesEquipeDaColuna`)(equipesPorConta)
+  const gridEquipeOptions = comp('gridEquipeOptions', { isAdmin, accounts, EQUIPES_DO_FILTRO })
   const base = { chavePlataforma, rotuloPlataforma, chaveConta, nomeColuna, platformLabel, ehCatalogo,
-    plataformasDesmarcadas, contasDesmarcadas, buscaContas, gridAccountsOrdenadas }
+    plataformasDesmarcadas, contasDesmarcadas, equipesDesmarcadas, buscaContas, gridAccountsOrdenadas,
+    gridEquipeOptions, chavesEquipeDaColuna }
   const gridAccounts = comp('gridAccounts', base)
   const gridPlatformOptions = comp('gridPlatformOptions', base)
   const gridContaOptions = comp('gridContaOptions', base)
   const gridContaOptionsBuscadas = comp('gridContaOptionsBuscadas', { ...base, gridContaOptions })
   const rotuloContas = comp('rotuloContas', { ...base, gridContaOptions })
-  const acoes = new Function('plataformasDesmarcadas', 'contasDesmarcadas', 'gridContaOptionsBuscadas', 'gridPlatformOptions', [
-    funcao('alternarFiltro'), funcao('marcarContas'), funcao('marcarPlataformas'),
-    'return { alternarFiltro, marcarContas, marcarPlataformas }',
-  ].join('\n'))(plataformasDesmarcadas, contasDesmarcadas, gridContaOptionsBuscadas, gridPlatformOptions)
-  return { plataformasDesmarcadas, contasDesmarcadas, buscaContas, gridAccounts, gridPlatformOptions,
-    gridContaOptions, gridContaOptionsBuscadas, rotuloContas, ...acoes }
+  const rotuloFiltroEquipes = comp('rotuloFiltroEquipes', base)
+  const acoes = new Function('plataformasDesmarcadas', 'contasDesmarcadas', 'equipesDesmarcadas',
+    'gridContaOptionsBuscadas', 'gridPlatformOptions', 'gridEquipeOptions', [
+      funcao('alternarFiltro'), funcao('marcarContas'), funcao('marcarPlataformas'), funcao('marcarEquipes'),
+      'return { alternarFiltro, marcarContas, marcarPlataformas, marcarEquipes }',
+    ].join('\n'))(plataformasDesmarcadas, contasDesmarcadas, equipesDesmarcadas,
+    gridContaOptionsBuscadas, gridPlatformOptions, gridEquipeOptions)
+  return { plataformasDesmarcadas, contasDesmarcadas, equipesDesmarcadas, buscaContas, gridAccounts,
+    gridPlatformOptions, gridContaOptions, gridContaOptionsBuscadas, rotuloContas, gridEquipeOptions,
+    rotuloFiltroEquipes, ...acoes }
 }
 
 const t = montar(ordenadas)
@@ -145,16 +167,75 @@ semCat.marcarPlataformas(false)
 assert.deepEqual([...semCat.plataformasDesmarcadas.value].sort(), ['amazon', 'ml_kit', 'shopee'])
 console.log('pricing filtros: plataforma e contas ok')
 
+// ---------- 2b) Equipes ▾ (M-26, 23/11/2026): 1, 2 e 3; soma com os outros dois.
+// A grade vem sem equipes (como o /grid); elas vêm da lista da aba Contas.
+const eq = (...ns) => ns.map((n) => ({ numero: n, nome: `Equipe ${n - 100}` }))
+const daAba = [
+  { id: 'a1', equipes: eq(101) },      // Amazon atlas
+  { id: 'a2', equipes: eq(102) },      // Magalu vita
+  { id: 'a3', equipes: eq(101) },      // ML atlas
+  { id: 'a4', equipes: eq(101) },      // ML catálogo atlas (com a da base)
+  { id: 'a5', equipes: eq(101, 102) }, // Shopee kia, vista por duas equipes
+  { id: 'a6', equipes: [] },           // Shopee Atlas, sem equipe
+]
+const e = montar(ordenadas.map((c) => ({ ...c, equipes: [] })), { contasDaAba: daAba })
+const idsE = () => e.gridAccounts.value.map((a) => a.id)
+// Sempre 1, 2 e 3, nessa ordem, mesmo sem conta da equipe 3 no departamento.
+assert.deepEqual(e.gridEquipeOptions.value.map((o) => [o.value, o.label]), [['101', '1'], ['102', '2'], ['103', '3']])
+assert.equal(e.rotuloFiltroEquipes.value, 'Equipes')
+// Tudo marcado = sem filtro: todas as colunas, inclusive a conta sem equipe.
+assert.deepEqual(idsE(), ['a1', 'a2', 'a3', 'a4', 'a5', 'a6'])
+// Só a 1: somem a da 2 e a sem equipe; a vista por duas equipes fica.
+e.alternarFiltro('equipe', '102', false)
+e.alternarFiltro('equipe', '103', false)
+assert.deepEqual(idsE(), ['a1', 'a3', 'a4', 'a5'])
+assert.equal(e.rotuloFiltroEquipes.value, 'Equipes (1)')
+// Só a 3, sem conta dela aqui: a grade fica sem colunas de conta.
+e.alternarFiltro('equipe', '101', false)
+e.alternarFiltro('equipe', '103', true)
+assert.deepEqual(idsE(), [])
+// Limpar desmarca as três; só a 2 de volta, e soma com a Plataforma.
+e.marcarEquipes(false)
+assert.equal(e.rotuloFiltroEquipes.value, 'Equipes (0)')
+assert.deepEqual(idsE(), [])
+e.alternarFiltro('equipe', '102', true)
+assert.deepEqual(idsE(), ['a2', 'a5'])
+e.alternarFiltro('plataforma', 'magalu', false)
+assert.deepEqual(idsE(), ['a5'])
+e.alternarFiltro('plataforma', 'magalu', true)
+// Marcar todas: volta tudo, inclusive a sem equipe.
+e.marcarEquipes(true)
+assert.equal(e.equipesDesmarcadas.value.size, 0)
+assert.deepEqual(idsE(), ['a1', 'a2', 'a3', 'a4', 'a5', 'a6'])
+// Equipe que já venha na própria coluna da grade também vale.
+const naGrade = montar([{ ...amzAtlas, equipes: eq(103) }, mgVita], { contasDaAba: [] })
+naGrade.marcarEquipes(false)
+naGrade.alternarFiltro('equipe', '103', true)
+assert.deepEqual(naGrade.gridAccounts.value.map((a) => a.id), ['a1'])
+// Não é permissão: quem é de equipe só recebe as contas dela, e a lista
+// mostra só a(s) equipe(s) dela.
+const vendedor = montar(ordenadas, { contasDaAba: [{ id: 'a2', equipes: eq(102) }, { id: 'a6', equipes: [] }], admin: false })
+assert.deepEqual(vendedor.gridEquipeOptions.value.map((o) => o.label), ['2'])
+// Sem nenhuma equipe nas contas que vê: as três.
+const semEquipe = montar(ordenadas, { contasDaAba: [], admin: false })
+assert.deepEqual(semEquipe.gridEquipeOptions.value.map((o) => o.label), ['1', '2', '3'])
+console.log('pricing filtros: equipes ok')
+
 // ---------- 3) script: não é lembrado (recarregar volta tudo marcado), a troca
 // de departamento limpa, e o "Enviar todas" usa só as colunas visíveis.
 assert.doesNotMatch(setup, /gridPlatformFilter/)
 assert.match(setup, /const plataformasDesmarcadas = ref<Set<string>>\(new Set\(\)\)/)
 assert.match(setup, /const contasDesmarcadas = ref<Set<string>>\(new Set\(\)\)/)
-assert.doesNotMatch(setup, /(gravarPreferencia|localStorage)[^\n]*(plataformasDesmarcadas|contasDesmarcadas)/)
+assert.match(setup, /const equipesDesmarcadas = ref<Set<string>>\(new Set\(\)\)/)
+assert.doesNotMatch(setup, /(gravarPreferencia|localStorage)[^\n]*(plataformasDesmarcadas|contasDesmarcadas|equipesDesmarcadas)/)
 const iTroca = setup.indexOf('watch(department, async')
 assert.ok(iTroca > 0, 'watch da troca de departamento')
 const trocaDepto = setup.slice(iTroca)
-assert.match(trocaDepto, /plataformasDesmarcadas\.value = new Set\(\)\s*contasDesmarcadas\.value = new Set\(\)/)
+assert.match(trocaDepto, /plataformasDesmarcadas\.value = new Set\(\)\s*contasDesmarcadas\.value = new Set\(\)\s*equipesDesmarcadas\.value = new Set\(\)/)
+// M-26: o Atualizar trata o Equipes como os outros dois (Geral com filtro
+// manda só as colunas visíveis); o Excel continua sem filtro nenhum.
+assert.match(funcao('executarAtualizar'), /!contasDesmarcadas\.value\.size && !equipesDesmarcadas\.value\.size/)
+assert.match(funcao('handleExportExcel'), /const accs = gridAccountsOrdenadas\.value/)
 // M-14: o "Enviar todas" virou "Atualizar anúncio" do Atualizar ▾, pelas
 // colunas visíveis (gridAccounts) e só as escolhidas.
 assert.match(funcao('enviarPrecoDasContas'), /for \(const a of gridAccounts\.value\)/)
@@ -169,8 +250,9 @@ const tabela = tpl.slice(iTabela, tpl.indexOf('</section>', iTabela))
 const barra = tabela.slice(0, tabela.indexOf('<table')).replace(/<!--[\s\S]*?-->/g, '')
 // M-14 (18/11/2026): Recarregar e Conferir anúncios saíram (viraram opções do
 // Atualizar ▾, que era o Enviar ▾).
+// M-26: Equipes ▾ depois do Layout e antes do Excel.
 const ordem = ['v-model="gridSearch"', 'data-filtro="plataforma"', 'data-filtro="contas"', 'data-acao="layout"',
-  'handleExportExcel', 'data-acao="atualizar"', 'data-prazo-reposicao', 'data-acao="margem"']
+  'data-filtro="equipes"', 'handleExportExcel', 'data-acao="atualizar"', 'data-prazo-reposicao', 'data-acao="margem"']
 let antes = -1
 for (const marca of ordem) {
   const i = barra.indexOf(marca)
@@ -184,6 +266,9 @@ assert.doesNotMatch(barra, /<select/, 'Plataforma não é mais select')
 assert.match(barra, /data-menu-plataforma[\s\S]*?Marcar todas[\s\S]*?Limpar[\s\S]*?type="checkbox"/)
 assert.match(barra, /data-menu-contas[\s\S]*?v-model="buscaContas"[\s\S]*?Marcar todas[\s\S]*?Limpar[\s\S]*?type="checkbox"/)
 assert.match(barra, /\{\{ rotuloContas \}\}/)
+assert.match(barra, /data-menu-equipes[\s\S]*?Marcar todas[\s\S]*?Limpar[\s\S]*?v-for="o in gridEquipeOptions"[\s\S]*?type="checkbox"/)
+assert.match(barra, /\{\{ rotuloFiltroEquipes \}\}/)
+assert.match(barra, /alternarFiltro\('equipe', o\.value/)
 
 // Cabeçalho: sem aviãozinho; todo <th> com 24px e o mesmo texto; só Produto à esquerda.
 const cab = tabela.slice(tabela.indexOf('<thead'), tabela.indexOf('</thead>'))
@@ -216,7 +301,8 @@ const out = compileTemplate({
 })
 assert.deepEqual(out.errors, [], 'template compila')
 for (const b of ['gridPlatformOptions', 'gridContaOptionsBuscadas', 'rotuloContas', 'alternarFiltro', 'marcarContas',
-  'marcarPlataformas', 'plataformasDesmarcadas', 'contasDesmarcadas', 'buscaContas']) {
+  'marcarPlataformas', 'plataformasDesmarcadas', 'contasDesmarcadas', 'buscaContas',
+  'gridEquipeOptions', 'rotuloFiltroEquipes', 'marcarEquipes', 'equipesDesmarcadas']) {
   assert.ok(script.bindings[b], `${b} exposto ao template`)
 }
 console.log('pricing-filtros-tabela: ok')

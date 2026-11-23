@@ -2606,6 +2606,9 @@ const gridSearch = ref('')
 const plataformasDesmarcadas = ref<Set<string>>(new Set())
 const contasDesmarcadas = ref<Set<string>>(new Set())
 const buscaContas = ref('')
+// Filtro "Equipes ▾" (M-26, 23/11/2026): a mesma regra dos dois de cima. Guarda
+// o número da equipe desmarcada ('101' = Equipe 1...); vazio = sem filtro.
+const equipesDesmarcadas = ref<Set<string>>(new Set())
 
 // ---------- Feature 8: botão Atualizar ▾ (M-14, 18/11/2026; era o Enviar ▾)
 // O painel junta Atualizar planilha (o antigo Recarregar), Conferir (o antigo
@@ -4437,13 +4440,65 @@ function chaveConta(a: Account): string {
   return (nomeColuna(a) || '').trim().toLocaleLowerCase('pt-BR')
 }
 
-// A coluna só aparece com a plataforma E a conta marcadas.
+// Filtro "Equipes ▾" (M-26, 23/11/2026): a equipe da coluna. O /grid não traz
+// as equipes (é lido a toda hora, 03/11/2026): vêm da lista da aba Contas
+// (/accounts, lida ao abrir a página), pela id. A coluna de catálogo já vem
+// lá com as equipes da conta de kit.
+const equipesPorConta = computed(() => {
+  const m = new Map<string, EquipeDaConta[]>()
+  for (const a of accounts.value) m.set(a.id, a.equipes ?? [])
+  return m
+})
+
+// Os números das equipes da coluna ('101'...); vazio = conta sem equipe.
+function chavesEquipeDaColuna(a: Account): string[] {
+  const eq = a.equipes?.length ? a.equipes : (equipesPorConta.value.get(a.id) ?? [])
+  return eq.map((e) => String(e.numero))
+}
+
+// Opções do Equipes ▾: sempre 1, 2 e 3, nessa ordem, mesmo sem conta da
+// equipe no departamento (101/102/103 = Equipe 1/2/3, como na aba Contas).
+// Não é permissão: quem é de equipe só recebe as contas dela, então a lista
+// mostra só as equipes que aparecem nas contas que a pessoa vê.
+const EQUIPES_DO_FILTRO = [
+  { value: '101', label: '1' },
+  { value: '102', label: '2' },
+  { value: '103', label: '3' },
+]
+const gridEquipeOptions = computed<{ value: string; label: string }[]>(() => {
+  if (isAdmin.value) return EQUIPES_DO_FILTRO
+  const vistas = new Set<string>()
+  for (const a of accounts.value) for (const e of a.equipes ?? []) vistas.add(String(e.numero))
+  const minhas = EQUIPES_DO_FILTRO.filter((o) => vistas.has(o.value))
+  return minhas.length ? minhas : EQUIPES_DO_FILTRO
+})
+
+// "Equipes (1)": com filtro parcial, o botão mostra quantas estão marcadas.
+const rotuloFiltroEquipes = computed(() => {
+  const total = gridEquipeOptions.value.length
+  const marcadas = gridEquipeOptions.value.filter((o) => !equipesDesmarcadas.value.has(o.value)).length
+  return marcadas < total ? `Equipes (${marcadas})` : 'Equipes'
+})
+
+function marcarEquipes(marcar: boolean) {
+  equipesDesmarcadas.value = marcar ? new Set() : new Set(gridEquipeOptions.value.map((o) => o.value))
+}
+
+// A coluna só aparece com a plataforma, a conta E a equipe marcadas. Equipes
+// com tudo marcado não filtra (aparece até conta sem equipe); com alguma
+// desmarcada, a coluna precisa ser de uma equipe marcada (conta de duas
+// equipes aparece se qualquer uma estiver marcada; sem equipe some).
 const gridAccounts = computed<Account[]>(() => {
   const plats = plataformasDesmarcadas.value
   const contas = contasDesmarcadas.value
-  if (!plats.size && !contas.size) return gridAccountsOrdenadas.value
+  const equipes = equipesDesmarcadas.value
+  if (!plats.size && !contas.size && !equipes.size) return gridAccountsOrdenadas.value
+  const equipesMarcadas = new Set(
+    gridEquipeOptions.value.filter((o) => !equipes.has(o.value)).map((o) => o.value),
+  )
   return gridAccountsOrdenadas.value.filter(
-    (a) => !plats.has(chavePlataforma(a)) && !contas.has(chaveConta(a)),
+    (a) => !plats.has(chavePlataforma(a)) && !contas.has(chaveConta(a))
+      && (!equipes.size || chavesEquipeDaColuna(a).some((k) => equipesMarcadas.has(k))),
   )
 })
 
@@ -4494,8 +4549,8 @@ const rotuloContas = computed(() => {
 
 // Uma caixa marcada/desmarcada (no template a ref chega desembrulhada, por
 // isso o filtro vai pelo nome).
-function alternarFiltro(qual: 'plataforma' | 'conta', chave: string, marcar: boolean) {
-  const alvo = qual === 'plataforma' ? plataformasDesmarcadas : contasDesmarcadas
+function alternarFiltro(qual: 'plataforma' | 'conta' | 'equipe', chave: string, marcar: boolean) {
+  const alvo = qual === 'plataforma' ? plataformasDesmarcadas : qual === 'equipe' ? equipesDesmarcadas : contasDesmarcadas
   const s = new Set(alvo.value)
   if (marcar) s.delete(chave)
   else s.add(chave)
@@ -4864,7 +4919,7 @@ async function executarAtualizar() {
   const conferir = atualizarConferir.value && podeConferir.value
   const planilha = atualizarPlanilha.value
   const contas = contasDoAtualizar.value.slice()
-  const semFiltro = !plataformasDesmarcadas.value.size && !contasDesmarcadas.value.size
+  const semFiltro = !plataformasDesmarcadas.value.size && !contasDesmarcadas.value.size && !equipesDesmarcadas.value.size
   const contasDaConferencia = atualizarModoContas.value === 'geral' && semFiltro ? undefined : contas
   painelAtualizarAberto.value = false
   atualizando.value = true
@@ -5083,6 +5138,7 @@ watch(department, async () => {
   // hide columns until the operator notices. Volta tudo marcado.
   plataformasDesmarcadas.value = new Set()
   contasDesmarcadas.value = new Set()
+  equipesDesmarcadas.value = new Set()
   buscaContas.value = ''
   buscaMargemProduto.value = ''
   // Até os mapas, o prazo, a conferência e a margem do departamento novo
@@ -6833,7 +6889,7 @@ watch(department, async () => {
     <section v-else-if="tab === 'tabela'" class="space-y-3">
       <!-- Barra (M-2, 17/11/2026; M-8, 18/11/2026: Plataforma ▾ e Contas ▾
            com caixas; M-14, 18/11/2026): Buscar | Plataforma ▾ | Contas ▾ |
-           Layout ▾ | Excel | Atualizar ▾ | Reposição [N] dias | Margem N% ▾.
+           Layout ▾ | Equipes ▾ (M-26) | Excel | Atualizar ▾ | Reposição [N] dias | Margem N% ▾.
            Todos com 28px (h-7) e o mesmo espaço. Recarregar, Enviar e
            Conferir anúncios viraram as opções do Atualizar ▾. Saíram antes
            Desfazer, Refazer, Custo Bling, Enviar relatório e a paleta Cor. -->
@@ -6990,6 +7046,49 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
+        <!-- Equipes ▾ (M-26, 23/11/2026): 1, 2 e 3, no visual do Plataforma e
+             do Contas. Soma com os dois: a coluna só aparece passando nos três.
+             Filtro parcial: "Equipes (1)". -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm h-7 py-0" data-filtro="equipes" title="Escolher as equipes cujas contas a grade mostra">
+              {{ rotuloFiltroEquipes }}
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-equipes
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div class="flex items-center gap-2 px-1 pb-1 text-xs">
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" data-acao="equipes-marcar-todas" @click="marcarEquipes(true)">Marcar todas</button>
+                <span class="text-muted-foreground">·</span>
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" data-acao="equipes-limpar" @click="marcarEquipes(false)">Limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto border-t pt-1">
+                <label
+                  v-for="o in gridEquipeOptions"
+                  :key="o.value"
+                  class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="!equipesDesmarcadas.has(o.value)"
+                    :data-equipe="o.value"
+                    @change="alternarFiltro('equipe', o.value, ($event.target as HTMLInputElement).checked)"
+                  />
+                  {{ o.label }}
+                </label>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
         <button class="btn btn-sm h-7 py-0" :disabled="!grid?.products.length" @click="handleExportExcel">
           <Download class="h-4 w-4 mr-1" /> Excel
         </button>
@@ -7066,7 +7165,7 @@ watch(department, async () => {
               </div>
               <label
                 class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50"
-                title="As colunas que estão aparecendo pelos filtros Plataforma e Contas"
+                title="As colunas que estão aparecendo pelos filtros Plataforma, Contas e Equipes"
               >
                 <input
                   type="checkbox"

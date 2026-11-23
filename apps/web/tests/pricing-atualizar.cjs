@@ -65,6 +65,7 @@ function montar({ podeEnviar = true, podeConf = true, colunas = [A, B, C], filtr
     gridAccounts: ref(colunas),
     plataformasDesmarcadas: ref(new Set(filtro ? ['amazon'] : [])),
     contasDesmarcadas: ref(new Set()),
+    equipesDesmarcadas: ref(new Set()),
     grid: ref({ cells: [{}] }),
     conferencia: ref(null),
     conferenciaIniciando: ref(false),
