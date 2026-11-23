@@ -16,9 +16,12 @@ o Bling e o Redis são os falsos dos testes da NF automática):
   quando o aviso sai, e ao religar sai tudo numa mensagem;
 * (c) ninguém válido (a única pessoa da lista foi suspensa): não manda,
   acende o sino dos admins e grava o registro `ok=false`. Nos avisos com
-  marca de "já avisei" (19 a 22) a marca FICA, como no canal sem config de
-  hoje (repetir a cada passada de 2 min não adianta: um registro por marca,
-  não um por passada); falha de envio continua desfazendo a marca.
+  marca de "já avisei" (19 a 22) a marca NÃO é gasta: quem acertar a lista
+  recebe o mesmo pedido/kit na passada seguinte. A tentativa que registra
+  sai no máximo uma vez por hora nos que repetem a cada passada (19 a 21;
+  o 22 não volta, então cada um fica no registro); falha de envio continua
+  desfazendo a marca. Com a configuração antiga (emergência) e o .env
+  vazio, o ponto sai antes das marcas, calado, como hoje.
 
 E a semente da fatia: `semear` + `conferir` das 6 chaves dá 0 diferenças e,
 depois dela, cada ponto manda EXATAMENTE para quem o legado mandaria (as duas
@@ -31,13 +34,14 @@ from __future__ import annotations
 import itertools
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import get_settings
 from app.models import (
     NfFaturamento,
     PrioridadeEstoqueMovimento,
     Product,
+    ThreemaEnvioDestinatario,
     User,
     UserRole,
     UserStatus,
@@ -316,21 +320,105 @@ _DE_NOVO = {
 }
 
 
-@pytest.mark.parametrize("chave", list(_DE_NOVO))
-async def test_ninguem_valido_deixa_a_marca_como_o_canal_sem_config(db, monkeypatch, chave):
-    """Ninguém válido é configuração (como o `send_to_all` sem destinatário,
-    que sobe ThreemaConfigError): a marca fica e a passada seguinte não
-    repete o registro a cada 2 min. Quem acerta a lista recebe o próximo."""
-    _admin, _joana, sumido = await _pessoas(db)
+# Os que a passada acha de novo a cada 2 min enquanto valerem (19 a 21); o
+# 22 tira o pedido da fila e não volta.
+_REPETEM = [
+    K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE,
+    K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO,
+    K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING,
+]
+
+
+async def _trocar_por(db, chave: str, quem: User) -> None:
+    """O admin vê o sino e troca, em Cadastros › Envios Threema, quem estava
+    na lista por `quem`."""
+    await db.execute(
+        update(ThreemaEnvioDestinatario)
+        .where(ThreemaEnvioDestinatario.envio_chave == chave)
+        .values(user_id=quem.id)
+    )
+    await db.commit()
+    threema_envios.limpar_cache()
+
+
+@pytest.mark.parametrize("chave", _REPETEM)
+async def test_ninguem_valido_nao_gasta_a_marca_e_quem_acerta_a_lista_recebe(
+    db, monkeypatch, chave
+):
+    """Ninguém válido não gasta a marca de "já avisei": depois que o admin
+    acerta a lista, a passada seguinte avisa o MESMO pedido/kit (antes, a
+    marca do dia ficava e o aviso só voltava no dia seguinte). Enquanto a
+    lista não é acertada, as passadas de 2 min não repetem registro nem sino."""
+    _admin, joana, sumido = await _pessoas(db)
     await semeado(db, chave, sumido)
     chamar, prefixo = _DE_NOVO[chave]
     await chamar(db)
-    assert _marcas(prefixo)
+    assert _Fake.envios == [] and _marcas(prefixo) == []
+    assert len(await _registro(db, chave)) == 1 and len(await _sinos(db, chave)) == 1
+    for _ in range(3):
+        nf_auto_enfileirar._agora_ts.avanca(2)
+        await chamar(db)
+    assert _Fake.envios == [] and _marcas(prefixo) == []
+    assert len(await _registro(db, chave)) == 1 and len(await _sinos(db, chave)) == 1
+    await _trocar_por(db, chave, joana)
     nf_auto_enfileirar._agora_ts.avanca(2)
     await chamar(db)
-    assert _Fake.envios == []
+    assert [(e["chave"], e["destinos"]) for e in _Fake.envios] == [(chave, ["TSTJ0006"])]
+    assert _marcas(prefixo)
+    await chamar(db)  # e a marca de agora vale: não repete
+    assert len(_Fake.envios) == 1
+
+
+@pytest.mark.parametrize("chave", _REPETEM)
+async def test_ninguem_valido_registra_de_novo_so_depois_de_uma_hora(db, monkeypatch, chave):
+    _admin, _joana, sumido = await _pessoas(db)
+    await semeado(db, chave, sumido)
+    chamar, _prefixo = _DE_NOVO[chave]
+    await chamar(db)
+    nf_auto_enfileirar._agora_ts.avanca(58)
+    await chamar(db)
     assert len(await _registro(db, chave)) == 1
+    nf_auto_enfileirar._agora_ts.avanca(3)
+    await chamar(db)
+    assert len(await _registro(db, chave)) == 2
+    assert len(await _sinos(db, chave)) == 1  # o sino é um por dia
+    assert _Fake.envios == []
+
+
+async def test_recusa_83955_ninguem_valido_registra_cada_pedido(db, monkeypatch):
+    """O 22 não volta (o pedido sai da fila com 'erro'): cada aviso que não
+    saiu fica no registro, sem esperar a hora; o sino do dia é um só."""
+    chave = K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO
+    _admin, _joana, sumido = await _pessoas(db)
+    await semeado(db, chave, sumido)
+    await nf_auto_enfileirar._avisar_recusa_83955(db, {"860001": ["b1"]})
+    nf_auto_enfileirar._agora_ts.avanca(2)
+    await nf_auto_enfileirar._avisar_recusa_83955(db, {"860002": ["b2"]})
+    assert _Fake.envios == []
+    assert _marcas(nf_auto_enfileirar._AVISO_RECUSA_83955_PREFIXO) == []
+    registro = await _registro(db, chave)
+    assert len(registro) == 2 and not any(r.ok for r in registro)
     assert len(await _sinos(db, chave)) == 1
+
+
+@pytest.mark.parametrize("chave", list(_DE_NOVO))
+async def test_configuracao_antiga_vazia_sai_antes_das_marcas_como_hoje(db, monkeypatch, chave):
+    """Emergência (vale a configuração antiga) com o .env vazio: o ponto sai
+    antes das marcas, calado, como antes da F1 (o `ativo` do legado é sempre
+    ligado; quem desliga hoje é a lista vazia). Quando o .env ganha alguém, a
+    passada seguinte avisa o mesmo pedido/kit."""
+    await _pessoas(db)
+    monkeypatch.setattr(get_settings(), "threema_cadastro_ativo", False)
+    chamar, prefixo = _DE_NOVO[chave]
+    await chamar(db)
+    assert _Fake.envios == [] and _marcas(prefixo) == []
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+    monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", "TSTJ0006")
+    nf_auto_enfileirar._agora_ts.avanca(2)
+    await chamar(db)
+    assert [(e["chave"], e["via"], e["destinos"]) for e in _Fake.envios] == [
+        (chave, "legado", ["TSTJ0006"])
+    ]
 
 
 class _FakeQueFalha(_Fake):
@@ -509,6 +597,9 @@ async def test_semente_confere_e_cada_ponto_manda_para_quem_o_legado_mandaria(
         assert enviados == ([(chave, "cadastro", esperado[chave])] if esperado[chave] else []), (
             chave
         )
+        if not esperado[chave]:
+            # .env vazio hoje = calado: a semente desligou, nada de sino
+            assert await _registro(db, chave) == [] and await _sinos(db, chave) == [], chave
     grupo = [ID["londres"], ID["harry"], ID["heisenberg"], ID["cairo_sa"]]
     assert esperado == dict.fromkeys(MINHAS, [] if variante == "vazias" else grupo)
 

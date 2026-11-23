@@ -566,6 +566,10 @@ async def test_semente_confere_e_cada_ponto_manda_para_quem_o_legado_mandaria(
         assert enviados == ([(chave, "cadastro", esperado[chave])] if esperado[chave] else []), (
             chave
         )
+        if not esperado[chave] and threema_envios._lista_vazia_desliga(CATALOGO[chave]):
+            # .env vazio hoje = calado: a semente desligou, nada de sino (o
+            # "thatcher" sem Threema do 12 é falha, não desligado: tem sino)
+            assert await _registro(db, chave) == [] and await _sinos(db, chave) == [], chave
     if variante == "cheio":
         assert esperado[K.LOGISTICA_LOJA_MUDA] == [ID["heisenberg"]]
         assert esperado[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR] == [ID["thatcher"]]

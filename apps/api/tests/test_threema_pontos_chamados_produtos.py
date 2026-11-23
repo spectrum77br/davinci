@@ -21,7 +21,9 @@ a TikTok e os anúncios são os falsos dos testes de cada módulo):
 E a semente da fatia: `semear` + `conferir` das 3 chaves dá 0 diferenças e,
 depois dela, cada ponto manda EXATAMENTE para quem o legado mandaria (as duas
 leis do desenho: nenhum aviso para de sair; nenhum vai para quem foi
-suspenso).
+suspenso). O .env vazio é o desligado de hoje destes três (o 24 nasceu
+assim de propósito): a semente grava o envio desligado e a rodada segue
+calada — sem mensagem, sem registro e sem sino, como antes.
 """
 
 from __future__ import annotations
@@ -32,7 +34,13 @@ import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.models import DevolucaoRastreio, ThreemaEnvioDestinatario, UserRole, UserStatus
+from app.models import (
+    DevolucaoRastreio,
+    ThreemaEnvio,
+    ThreemaEnvioDestinatario,
+    UserRole,
+    UserStatus,
+)
 from app.services import (
     chamados_pendencias,
     estoque_familia,
@@ -261,12 +269,61 @@ async def test_ninguem_valido_nao_manda_acende_o_sino_e_registra(db, monkeypatch
 async def test_soma_familia_ninguem_valido_vira_recipients_vazio_no_resumo(
     db, monkeypatch, make_user
 ):
-    await _pessoas(db)
-    await semeado(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)  # semeado sem ninguém (o .env de hoje)
+    """Ligado com a única pessoa da lista suspensa: não manda, o resumo diz
+    `recipients_vazio` e o sino dos admins acende (uma vez por dia)."""
+    admin, _joana, sumido = await _pessoas(db)
+    await semeado(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA, sumido)
     resumo = await _soma_familia(db, monkeypatch, make_user)
     assert resumo["atrasados"] == 1 and resumo["aviso"] == "recipients_vazio"
     assert "avisados" not in resumo
     assert _Fake.envios == []
+    assert [a.user_id for a in await _sinos(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)] == [admin.id]
+    # a rodada das 16:20 registra de novo, mas o sino do dia é um só
+    await _soma_familia(db, monkeypatch, make_user)
+    assert len(await _registro(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)) == 2
+    assert len(await _sinos(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)) == 1
+
+
+async def test_soma_familia_semeada_com_o_env_vazio_nasce_desligada_e_sem_sino(
+    db, monkeypatch, make_user
+):
+    """O item 24 de hoje: o .env do vigia vazio de propósito (mede e loga, não
+    avisa ninguém). A semente da F1 grava o envio DESLIGADO — `ativo` NULL
+    seria "ligado com ninguém", com registro `ok=false` e sino com Telegram
+    para cada admin a cada rodada — e a conferência dá igual. A rodada segue
+    como hoje: `envio_desligado` no resumo, sem mensagem, registro nem sino."""
+    chave = K.PRODUTOS_VIGIA_SOMA_FAMILIA
+    await _pessoas(db)  # há admin para receber o sino, se ele acendesse
+    res = await threema_envios.semear(db, fatia="F1", chaves=[chave], aplicar=True)
+    await db.commit()
+    (plano,) = res.planos
+    assert (plano.refs, plano.ativo) == ([], False)
+    assert any("nasce DESLIGADO" in linha for linha in threema_envios._texto_semente(res))
+    linha = await db.get(ThreemaEnvio, chave, populate_existing=True)
+    assert linha.semeado_em is not None and linha.ativo is False
+    (item,) = await threema_envios.conferir(db, chaves=[chave])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("igual", False, False)
+    for _ in range(2):  # 09:20 e 16:20
+        resumo = await _soma_familia(db, monkeypatch, make_user)
+        assert resumo["atrasados"] == 1 and resumo["aviso"] == "envio_desligado"
+    assert _Fake.envios == []
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+
+
+async def test_conferir_acusa_soma_familia_ligada_sem_ninguem(db):
+    """Semente sem o desligado (a de antes desta correção, ou `ativo` mexido à
+    mão): o portão da fatia tem de mostrar a diferença — com o .env vazio o
+    legado está desligado, e o Cadastro ligado sem ninguém acende o sino."""
+    chave = K.PRODUTOS_VIGIA_SOMA_FAMILIA
+    await semeado(db, chave)  # semeado sem ninguém, `ativo` NULL (= ligado)
+    (item,) = await threema_envios.conferir(db, chaves=[chave])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("diferente", False, True)
+    assert item.so_no_legado == [] and item.so_no_cadastro == []
+    await db.commit()  # a linha de comando abre a sessão dela
+    saida: list[str] = []
+    assert await threema_envios.executar(["conferir", "--chaves", chave], saida.append) == 1
+    texto = "\n".join(saida)
+    assert "lista do .env vazia" in texto and "desligue em Cadastros › Envios Threema" in texto
 
 
 # ─────────────────────────────────────────────── (b) desligado, ponto a ponto
@@ -373,6 +430,9 @@ async def test_semente_confere_e_cada_ponto_manda_para_quem_o_legado_mandaria(
         assert enviados == ([(chave, "cadastro", esperado[chave])] if esperado[chave] else []), (
             chave
         )
+        if not esperado[chave]:
+            # .env vazio hoje = calado: a semente desligou, nada de sino
+            assert await _registro(db, chave) == [] and await _sinos(db, chave) == [], chave
     if variante == "cheio":
         assert esperado[K.CHAMADOS_TIKTOK_SO_REEMBOLSO] == [ID["heisenberg"], ID["cairo_sa"]]
         assert esperado[K.CHAMADOS_ABERTURAS_PRESAS] == [ID["heisenberg"], ID["cairo_sa"]]

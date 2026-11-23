@@ -102,7 +102,13 @@ async def test_semente_de_todas_as_fatias_e_conferir_sem_diferenca(db, monkeypat
     linhas = {r.chave: r for r in (await db.execute(select(ThreemaEnvio))).scalars()}
     for d in ENVIOS:
         assert (linhas[d.chave].semeado_em is not None) == (d.chave in gerenciados), d.chave
-        assert linhas[d.chave].ativo is None  # a semente não mexe no liga/desliga
+    # a semente não mexe no liga/desliga, fora o envio cujo desligado de hoje
+    # é o .env vazio: no cenário, só o da soma por família (o .env dele não
+    # tem ninguém, como em produção) nasce desligado
+    assert {d.chave for d in ENVIOS if linhas[d.chave].ativo is not None} == {
+        K.PRODUTOS_VIGIA_SOMA_FAMILIA
+    }
+    assert linhas[K.PRODUTOS_VIGIA_SOMA_FAMILIA].ativo is False
 
 
 @pytest.mark.asyncio
@@ -411,3 +417,41 @@ async def test_conferir_mostra_desligado_no_cadastro(db, monkeypatch):
     (item,) = await threema_envios.conferir(db, chaves=[K.LOGISTICA_LOJA_MUDA])
     assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("diferente", True, False)
     assert item.so_no_legado == [] and item.so_no_cadastro == []
+
+
+@pytest.mark.asyncio
+async def test_env_vazio_nasce_desligado_e_o_sobrescrever_acompanha_a_lista(db, monkeypatch):
+    """Envio cujo desligado de hoje é o .env vazio (os portões de .env): a
+    semente grava `ativo=false` com a lista vazia — NULL seria ligado com
+    ninguém, com registro e sino a cada rodada — e a conferência dá igual.
+    Refeita com gente no .env (`--sobrescrever`, código de antes da fatia),
+    volta a NULL (o interruptor de hoje). Envio de outra fonte (o usuário pelo
+    nome, o Informar) não é tocado mesmo vazio."""
+    await montar(db, monkeypatch, variante="vazias")
+    _codigo_antes_da(monkeypatch, "F1")
+    chave = K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING
+    res = await _semear(db, "F1", aplicar=True)
+    planos = {p.chave: p for p in res.planos}
+    assert (planos[chave].refs, planos[chave].ativo, planos[chave].grava_ativo) == ([], False, True)
+    tuta = planos[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR]  # "thatcher" sem Threema
+    assert (tuta.refs, tuta.grava_ativo) == ([], False)
+    linhas = {r.chave: r for r in (await db.execute(select(ThreemaEnvio))).scalars()}
+    assert linhas[chave].ativo is False
+    assert linhas[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR].ativo is None
+    itens = await threema_envios.conferir(db, fatia="F1")
+    assert [x.chave for x in itens if x.situacao != "igual"] == []
+    item = next(x for x in itens if x.chave == chave)
+    assert (item.ativo_legado, item.ativo_cadastro, item.desligado_pela_lista) == (
+        False,
+        False,
+        True,
+    )
+    # o .env ganhou gente: a semente envelheceu (lista e liga/desliga)
+    monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", ID["joana"])
+    (item,) = await threema_envios.conferir(db, chaves=[chave])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("diferente", True, False)
+    await _semear(db, "F1", aplicar=True, sobrescrever=True)
+    linha = await db.get(ThreemaEnvio, chave, populate_existing=True)
+    assert linha.ativo is None
+    (item,) = await threema_envios.conferir(db, chaves=[chave])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("igual", True, True)

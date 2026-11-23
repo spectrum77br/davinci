@@ -20,11 +20,13 @@ que está errado há horas — esse não vai se resolver sozinho.
 
 QUEM RECEBE vem de Cadastros › Envios Threema (tarefa 16, F1). A semente
 copiou a lista do `.env` antigo deste vigia, que nasceu vazia de propósito
-(medir por alguns dias antes de começar a acordar alguém). Desligado no
-Cadastro, o vigia roda, mede e loga, mas não manda mensagem; ligado com
-ninguém válido na lista, também não manda — o núcleo grava o registro e
-acende o sino dos admins, e a tela fica vermelha até alguém ser escolhido ou
-o envio ser desligado.
+(medir por alguns dias antes de começar a acordar alguém): com a lista vazia
+o envio nasce DESLIGADO no Cadastro (`threema_envios._lista_vazia_desliga`),
+e o vigia roda, mede e loga, mas não manda mensagem nem acende sino — como
+antes. Para começar a avisar, escolha quem recebe e ligue o envio na tela.
+Ligado com ninguém válido na lista (ex.: a única pessoa foi suspensa), também
+não manda — o núcleo grava o registro e acende o sino dos admins, e a tela
+fica vermelha até alguém ser escolhido ou o envio ser desligado.
 
 ANTI-SPAM: o cron roda 2x por dia. Não há tabela de estado — o aviso repete
 enquanto o problema existir, o que é o comportamento certo para uma coisa que

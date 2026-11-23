@@ -276,6 +276,20 @@ async def _interruptor_legado(d: EnvioDef, session: AsyncSession) -> bool:
     return True
 
 
+def _lista_vazia_desliga(d: EnvioDef) -> bool:
+    """O desligado de HOJE deste envio é a própria lista do .env vazia: o
+    ponto tinha `if not <env>: return` (os portões de .env, §0.7 do desenho)
+    e não há outra chave de liga/desliga. Com a lista vazia ele fica calado:
+    sem mensagem, sem registro e sem sino (ex.: o item 24, que nasceu vazio
+    de propósito).
+
+    No Cadastro, `ativo` NULL vale ligado — e ligado sem ninguém grava o
+    registro `ok=false` e acende o sino dos admins a cada rodada. Por isso a
+    semente grava `ativo=false` quando a lista de hoje sai vazia, e a
+    conferência trata o legado vazio desses envios como desligado."""
+    return d.interruptor == "proprio" and bool(d.legado.envs) and not d.legado.interruptor_env
+
+
 async def _ids_legado(d: EnvioDef, escopo: str | None, session: AsyncSession):
     """(ids, fonte) de hoje. Cada ramo reproduz o ponto de envio citado."""
     from app.services import ouvidoria
@@ -949,6 +963,11 @@ class PlanoEnvio:
     fonte: str = ""
     grupo: str | None = None
     refs: list[Ref] = field(default_factory=list)
+    # Liga/desliga que a semente grava (só nos envios de `_lista_vazia_desliga`):
+    # False = a lista de hoje saiu vazia (o desligado de hoje); None = segue o
+    # interruptor de hoje (ligado). Sem valor nos outros envios (não mexe).
+    ativo: bool | None = None
+    grava_ativo: bool = False
 
 
 @dataclass
@@ -1057,7 +1076,11 @@ async def semear(
       THREEMA_RECIPIENTS de hoje.
     - Envio com `Legado.grupo`: a lista vira o grupo (mesmo nome com pessoas
       diferentes, na rodada ou no banco, PARA com erro e nada é gravado).
-    - Não mexe em `ativo` (NULL = interruptor de hoje). Carimba `semeado_em`.
+    - Não mexe em `ativo` (NULL = interruptor de hoje), fora o envio cujo
+      desligado de hoje é a lista do .env vazia (`_lista_vazia_desliga`):
+      com a lista de hoje vazia ele nasce `ativo=false` (calado, como hoje;
+      NULL seria "ligado com ninguém", com registro e sino a cada rodada) e,
+      com gente, `ativo` NULL. Carimba `semeado_em`.
     - Chave já semeada fica como está (rodar duas vezes não muda nada), a
       menos de `sobrescrever` — que só vale para chave ainda não migrada.
     Commit fica com quem chama. Erros levantam CadastroError com o resultado
@@ -1113,6 +1136,7 @@ async def semear(
             # ID repetido na lista de hoje vira UMA linha (o índice único não
             # deixa duas; a conferência compara conjuntos).
             refs = [r for r in (mapa.ref(rid) for rid in _dedupe(ids)) if r is not None]
+            grava_ativo = regra is None and _lista_vazia_desliga(d)
             plano = PlanoEnvio(
                 d.chave,
                 d.nome,
@@ -1121,6 +1145,8 @@ async def semear(
                 fonte=fonte,
                 grupo=grupo,
                 refs=refs,
+                ativo=(False if not ids else None) if grava_ativo else None,
+                grava_ativo=grava_ativo,
             )
             res.planos.append(plano)
             if grupo:
@@ -1250,11 +1276,16 @@ async def _aplicar_semente(session: AsyncSession, res: ResultadoSemente) -> None
         # contato novo entra também no espelho antigo (services/threema, C4)
         await threema.espelhar_contatos(session)
     agora = datetime.now(UTC)
+    liga_desliga = {p.chave: p.ativo for p in a_semear if p.grava_ativo}
     for chave in dict.fromkeys(p.chave for p in a_semear):
+        valores: dict = {"semeado_em": agora, "updated_at": func.now()}
+        if chave in liga_desliga:
+            # Antes de migrar, só a semente escreve o `ativo` do envio do
+            # servidor (a tela recusa envio não migrado): refazer com
+            # --sobrescrever acompanha a lista de hoje.
+            valores["ativo"] = liga_desliga[chave]
         await session.execute(
-            update(ThreemaEnvio)
-            .where(ThreemaEnvio.chave == chave)
-            .values(semeado_em=agora, updated_at=func.now())
+            update(ThreemaEnvio).where(ThreemaEnvio.chave == chave).values(**valores)
         )
     await session.flush()
 
@@ -1271,7 +1302,13 @@ def _texto_semente(res: ResultadoSemente) -> list[str]:
             continue
         quem = ", ".join(f"{r.nome} ({mascara(r.threema_id)})" for r in p.refs) or "ninguém"
         via = f"grupo '{p.grupo}': " if p.grupo else ""
-        out.append(f"  - {rotulo} — {p.nome}: {via}{quem}  [hoje: {p.fonte}]")
+        desligado = (
+            " — nasce DESLIGADO (hoje a lista vazia do .env é o desligado; ligue na tela"
+            " quando escolher alguém)"
+            if p.grava_ativo and p.ativo is False
+            else ""
+        )
+        out.append(f"  - {rotulo} — {p.nome}: {via}{quem}{desligado}  [hoje: {p.fonte}]")
     for rid, ref in res.contatos_novos.items():
         out.append(f"  + contato novo: {ref.nome} ({mascara(rid)})")
     for caso in res.casos:
@@ -1297,6 +1334,8 @@ class Conferencia:
     so_no_cadastro: list[Destino] = field(default_factory=list)
     ativo_legado: bool = True
     ativo_cadastro: bool | None = None
+    # O legado está desligado só porque a lista do .env está vazia.
+    desligado_pela_lista: bool = False
 
 
 async def conferir(
@@ -1304,7 +1343,9 @@ async def conferir(
 ) -> list[Conferencia]:
     """Compara, por chave e escopo, `legado(chave)` com a expansão do
     Cadastro (quem recebe e se está ligado). Chave sem semente sai como
-    `sem_semente` (usa o legado). Só leitura (fora a sincronização)."""
+    `sem_semente` (usa o legado). No envio de `_lista_vazia_desliga`, o .env
+    vazio conta como desligado: Cadastro ligado sem ninguém é diferença.
+    Só leitura (fora a sincronização)."""
     selecionadas = _selecionar(fatia, chaves)
     await sincronizar(session)
     linhas = {
@@ -1340,6 +1381,10 @@ async def conferir(
             )
         for esc in escopos:
             leg = await legado(d.chave, escopo=esc, session=session)
+            # Lista do .env vazia = o desligado de hoje desses envios: o
+            # Cadastro tem de estar desligado também (ligado com ninguém
+            # acende o sino a cada rodada, o que hoje não acontece).
+            leg_ativo = leg.ativo and (bool(leg.ids) or not _lista_vazia_desliga(d))
             if linha is None or linha.semeado_em is None:
                 out.append(
                     Conferencia(
@@ -1349,7 +1394,8 @@ async def conferir(
                         d.migrado,
                         "sem_semente",
                         fonte=leg.fonte,
-                        ativo_legado=leg.ativo,
+                        ativo_legado=leg_ativo,
+                        desligado_pela_lista=leg.ativo and not leg_ativo,
                     )
                 )
                 continue
@@ -1360,7 +1406,7 @@ async def conferir(
             leg_ids = set(leg.ids)
             so_leg = [x for x in await _nomear(session, leg.ids) if x.id not in cad_ids]
             so_cad = [x for x in lido.destinos if x.id not in leg_ids]
-            igual = not so_leg and not so_cad and leg.ativo == lido.ativo
+            igual = not so_leg and not so_cad and leg_ativo == lido.ativo
             out.append(
                 Conferencia(
                     d.chave,
@@ -1371,8 +1417,9 @@ async def conferir(
                     fonte=leg.fonte,
                     so_no_legado=so_leg,
                     so_no_cadastro=so_cad,
-                    ativo_legado=leg.ativo,
+                    ativo_legado=leg_ativo,
                     ativo_cadastro=lido.ativo,
+                    desligado_pela_lista=leg.ativo and not leg_ativo,
                 )
             )
     return out
@@ -1384,7 +1431,13 @@ def _texto_conferencia(itens: Sequence[Conferencia]) -> list[str]:
         rotulo = c.chave + (f" [regra {c.escopo}]" if c.escopo else "")
         estado = "migrado" if c.migrado else "não migrado"
         if c.situacao == "sem_semente":
-            ligado = "" if c.ativo_legado else " · desligado hoje"
+            ligado = (
+                ""
+                if c.ativo_legado
+                else " · desligado hoje (lista do .env vazia)"
+                if c.desligado_pela_lista
+                else " · desligado hoje"
+            )
             out.append(
                 f"  · {rotulo} — {c.nome}: {estado}, sem semente (usa o legado: {c.fonte}){ligado}"
             )
@@ -1404,8 +1457,15 @@ def _texto_conferencia(itens: Sequence[Conferencia]) -> list[str]:
                 )
             if c.ativo_legado != c.ativo_cadastro:
                 partes.append(
-                    f"ligado: legado={'sim' if c.ativo_legado else 'não'}, "
-                    f"Cadastro={'sim' if c.ativo_cadastro else 'não'}"
+                    f"ligado: legado={'sim' if c.ativo_legado else 'não'}"
+                    + (" (lista do .env vazia)" if c.desligado_pela_lista else "")
+                    + f", Cadastro={'sim' if c.ativo_cadastro else 'não'}"
+                    + (
+                        " — desligue em Cadastros › Envios Threema (ligado sem ninguém"
+                        " acende o sino dos admins a cada rodada)"
+                        if c.desligado_pela_lista and c.ativo_cadastro
+                        else ""
+                    )
                 )
             out.append(f"  ✗ {rotulo} — {c.nome}: {estado}; " + "; ".join(partes))
     return out
