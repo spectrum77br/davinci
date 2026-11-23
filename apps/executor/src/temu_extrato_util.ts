@@ -108,3 +108,32 @@ export function leuTudo(nome: Nome, paginas: Corpo[]): boolean {
   );
   return lidas >= total;
 }
+
+// ---------- o perfil que o robô deixou aberto (23/11) ----------
+/** Por que o robô deixou o perfil aberto: "leitura" = caiu no meio de uma leitura;
+ *  "login" = a Temu pediu login e o perfil ficou na tela de login pra uma pessoa
+ *  entrar (Vinicius, 23/11: "quando é assim precisa deixar na tela a loja"). */
+export type MarcaDoPerfil = "leitura" | "login";
+
+/** Conteúdo do arquivo da marca. */
+export function textoDaMarca(marca: MarcaDoPerfil, agora: Date): string {
+  return `${marca} ${agora.toISOString()}`;
+}
+
+/** Lê o arquivo da marca; a marca antiga (só a data, de antes de 23/11) é "leitura". */
+export function lerMarca(conteudo: string | null): MarcaDoPerfil | null {
+  if (conteudo === null) return null;
+  return conteudo.trim().startsWith("login") ? "login" : "leitura";
+}
+
+/** O que fazer com o perfil que JÁ está aberto quando a rodada começa:
+ *  - sem marca: uma pessoa ou outro robô abriu → não mexe nem fecha;
+ *  - "leitura": este robô caiu no meio → fecha e abre de novo;
+ *  - "login": este robô deixou na tela de login → tenta ler com ele aberto (se a pessoa
+ *    já logou, lê e fecha; se não, fecha só a aba nova e o login continua na frente). */
+export function decidirPerfilAberto(marca: MarcaDoPerfil | null): "em_uso" | "fechar_e_reabrir" | "ler_aberto" {
+  if (marca === null) return "em_uso";
+  return marca === "login" ? "ler_aberto" : "fechar_e_reabrir";
+}
+
+export const eTelaDeLogin = (url: string): boolean => /\/login\.html/.test(url);

@@ -149,3 +149,17 @@ test("totalDoSaldo soma reserva e disponível em centavos", () => {
   assert.equal(u.totalDoSaldo({ result: { reserve_amount: valor(5380) } }), null);
   assert.equal(u.totalDoSaldo(null), null);
 });
+
+test("marca do perfil: login fica aberto, leitura caída fecha, sem marca não mexe", () => {
+  const agora = new Date("2026-11-23T11:30:00Z");
+  assert.equal(u.lerMarca(u.textoDaMarca("login", agora)), "login");
+  assert.equal(u.lerMarca(u.textoDaMarca("leitura", agora)), "leitura");
+  // marca de antes de 23/11: só a data
+  assert.equal(u.lerMarca("2026-11-20T09:00:25.000Z"), "leitura");
+  assert.equal(u.lerMarca(null), null);
+  assert.equal(u.decidirPerfilAberto(null), "em_uso");
+  assert.equal(u.decidirPerfilAberto("leitura"), "fechar_e_reabrir");
+  assert.equal(u.decidirPerfilAberto("login"), "ler_aberto");
+  assert.equal(u.eTelaDeLogin("https://br.seller.temu.com/login.html?redirectUrl=x"), true);
+  assert.equal(u.eTelaDeLogin("https://br.seller.temu.com/payment.html"), false);
+});

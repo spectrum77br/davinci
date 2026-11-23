@@ -19,12 +19,16 @@
  * falha explicada, nunca leitura pela metade. Se o saldo da tela mudar entre o começo e
  * o fim da leitura, ela é descartada (as linhas e o saldo não seriam do mesmo instante).
  *
- * Sessão vencida cai em login.html → `needs_manual_login` (ninguém está olhando a
- * tela do mini): alguém entra no perfil uma vez e a próxima rodada passa. Perfil que
- * já está aberto no AdsPower por uma pessoa ou outro robô não é tocado nem fechado; o
- * que ESTE robô deixou aberto (caiu no meio, o AdsPower não respondeu ao fechar) tem
- * uma marca em disco e é fechado na rodada seguinte — sem ela, uma queda travava a
- * loja pra sempre em "perfil em uso".
+ * Sessão vencida cai em login.html → `needs_manual_login`. O robô DEIXA o perfil aberto
+ * na tela de login, na frente (23/11, Vinicius: "quando é assim precisa deixar na tela
+ * a loja que já vou logar"), com a marca "login": a pessoa só digita senha e código. Na
+ * rodada seguinte (06:00 ou ⟳), com o perfil ainda aberto, o robô tenta ler numa aba
+ * nova: se a pessoa já logou, lê e fecha o perfil; se não, fecha só a aba dele e deixa
+ * o login na frente de novo (nada de abas acumulando).
+ * Perfil que já está aberto no AdsPower por uma pessoa ou outro robô (sem marca) não é
+ * tocado nem fechado; o que ESTE robô deixou aberto por ter caído no meio (marca
+ * "leitura") é fechado e aberto de novo — sem a marca, uma queda travava a loja pra
+ * sempre em "perfil em uso".
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -36,12 +40,17 @@ import { log } from "./log";
 import * as adspower from "./adspower";
 import {
   chaveDaResposta,
+  decidirPerfilAberto,
+  eTelaDeLogin,
+  lerMarca,
   leuTudo,
   linhasDaPagina,
   montarLeitura,
+  textoDaMarca,
   totalDoSaldo,
   totalInformado,
   type Corpo,
+  type MarcaDoPerfil,
   type Nome,
 } from "./temu_extrato_util";
 
@@ -72,6 +81,9 @@ const TETO_PAGINAS = 60;
 /** 5 páginas = 50 saques; a Temu saca a cada 14 dias (o extrato cobre 30). */
 const TETO_PAGINAS_SAQUES = 5;
 const MARCAS = path.join(os.tmpdir(), "davinci-temu-perfis");
+/** O painel mostra o que vem depois de "needs_manual_login:" + "— alguém precisa entrar
+ *  no perfil e digitar o código". */
+const MOTIVO_LOGIN = "needs_manual_login: a Temu pediu login — o perfil ficou aberto na tela de login, no Mac mini";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Pausa de pessoa entre um clique e outro. */
@@ -80,17 +92,21 @@ const pausa = () => sleep(1200 + Math.floor(Math.random() * 1300));
 // ---------- o perfil que este robô abriu ----------
 const arquivoDaMarca = (perfil: string) => path.join(MARCAS, perfil.replace(/[^\w.-]/g, "_"));
 
-function marcar(perfil: string): void {
+function marcar(perfil: string, marca: MarcaDoPerfil): void {
   try {
     fs.mkdirSync(MARCAS, { recursive: true });
-    fs.writeFileSync(arquivoDaMarca(perfil), new Date().toISOString());
+    fs.writeFileSync(arquivoDaMarca(perfil), textoDaMarca(marca, new Date()));
   } catch (e) {
     log.warn(`não consegui gravar a marca do perfil ${perfil}: ${String(e)}`);
   }
 }
 
-function temMarca(perfil: string): boolean {
-  return fs.existsSync(arquivoDaMarca(perfil));
+function marcaDoPerfil(perfil: string): MarcaDoPerfil | null {
+  try {
+    return lerMarca(fs.readFileSync(arquivoDaMarca(perfil), "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 /** Fecha o perfil (3 tentativas) e tira a marca. Devolve se ele ficou fechado. */
@@ -243,10 +259,16 @@ async function lerLista(
   return { corpos, erro: `${nome} passou de ${teto} páginas` };
 }
 
-/** Abre o perfil, lê a tela e fecha. Devolve a leitura montada ou o motivo da falha. */
+/** Abre o perfil, lê a tela e fecha. Devolve a leitura montada ou o motivo da falha.
+ *  Login pedido: o perfil fica aberto na tela de login (ver o topo do arquivo). */
 async function coletar(perfil: string, p: PedidoTemu): Promise<{ leitura: Corpo } | { reason: string }> {
   let browser: Browser | null = null;
   let page: Page | null = null;
+  let pediuLogin = false;
+  const login = () => {
+    pediuLogin = true;
+    return { reason: MOTIVO_LOGIN };
+  };
   try {
     const ws = await adspower.start(perfil);
     browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
@@ -257,14 +279,10 @@ async function coletar(perfil: string, p: PedidoTemu): Promise<{ leitura: Corpo 
     // até 60 s pela Visão geral; login aparece na hora, não depois do prazo
     const prazo = Date.now() + 60000;
     while (!coletor.saldoPrimeiro && Date.now() < prazo) {
-      if (/\/login\.html/.test(page.url())) {
-        return { reason: "needs_manual_login: a Temu pediu login no perfil do AdsPower" };
-      }
+      if (eTelaDeLogin(page.url())) return login();
       await sleep(500);
     }
-    if (/\/login\.html/.test(page.url())) {
-      return { reason: "needs_manual_login: a Temu pediu login no perfil do AdsPower" };
-    }
+    if (eTelaDeLogin(page.url())) return login();
     if (!coletor.saldoPrimeiro) {
       const motivo = coletor.ultimoErro ? ` (a Temu respondeu: ${coletor.ultimoErro})` : "";
       return { reason: `a tela de Pagamentos da Temu não carregou em 60 s${motivo}` };
@@ -320,18 +338,46 @@ async function coletar(perfil: string, p: PedidoTemu): Promise<{ leitura: Corpo 
       }),
     };
   } finally {
-    try {
-      if (page) await page.close();
-    } catch {
-      /* ignora */
+    if (pediuLogin) {
+      await deixarNoLogin(perfil, browser, page);
+    } else {
+      try {
+        if (page) await page.close();
+      } catch {
+        /* ignora */
+      }
+      try {
+        if (browser) await browser.disconnect();
+      } catch {
+        /* ignora */
+      }
+      await fecharPerfil(perfil);
     }
-    try {
-      if (browser) await browser.disconnect();
-    } catch {
-      /* ignora */
-    }
-    await fecharPerfil(perfil);
   }
+}
+
+/** A Temu pediu login: o perfil fica aberto com a tela de login na frente e a marca
+ *  "login". Se já havia outra aba no login (deixada numa rodada anterior), fecha a aba
+ *  desta rodada e põe aquela na frente — uma aba de login só, nada acumulando. */
+async function deixarNoLogin(perfil: string, browser: Browser | null, page: Page | null): Promise<void> {
+  try {
+    const outras = browser ? (await browser.pages()).filter((pg) => pg !== page && eTelaDeLogin(pg.url())) : [];
+    if (outras.length && page) {
+      await page.close().catch(() => undefined);
+      await outras[0].bringToFront();
+    } else if (page) {
+      await page.bringToFront();
+    }
+  } catch (e) {
+    log.warn(`Temu: não consegui pôr a tela de login na frente no perfil ${perfil}: ${String(e)}`);
+  }
+  try {
+    if (browser) await browser.disconnect();
+  } catch {
+    /* ignora */
+  }
+  marcar(perfil, "login");
+  log.info(`Temu: pediu login — deixei o perfil ${perfil} aberto na tela de login pra alguém entrar`);
 }
 
 /** Entrega a leitura. DaVinci ocupado (409: a rodada da loja está correndo), fora do
@@ -367,17 +413,24 @@ async function enviar(leitura: Corpo): Promise<{ ok: boolean; corpo: Record<stri
 export async function lerTela(perfilUserId: string, p: PedidoTemu): Promise<{ leitura: Corpo } | { reason: string }> {
   await adspower.garantirAberto();
   if (await adspower.active(perfilUserId)) {
-    if (!temMarca(perfilUserId)) {
+    const decisao = decidirPerfilAberto(marcaDoPerfil(perfilUserId));
+    if (decisao === "em_uso") {
       // aberto por uma pessoa ou por outro robô: não mexe nem fecha
       return { reason: "perfil da Temu já está aberto no AdsPower (em uso): não mexi" };
     }
-    log.warn(`Temu ${p.loja}: o perfil ${perfilUserId} ficou aberto de uma leitura anterior — fechando`);
-    if (!(await fecharPerfil(perfilUserId))) {
-      return { reason: "não consegui fechar o perfil que eu mesmo deixei aberto na leitura anterior" };
+    if (decisao === "fechar_e_reabrir") {
+      log.warn(`Temu ${p.loja}: o perfil ${perfilUserId} ficou aberto de uma leitura anterior — fechando`);
+      if (!(await fecharPerfil(perfilUserId))) {
+        return { reason: "não consegui fechar o perfil que eu mesmo deixei aberto na leitura anterior" };
+      }
+      await sleep(3000);
+    } else {
+      // "ler_aberto": deixei na tela de login — se a pessoa já entrou, a leitura passa e
+      // o perfil fecha no fim; se não, o login continua na frente
+      log.info(`Temu ${p.loja}: o perfil ${perfilUserId} está aberto na tela de login que deixei — tentando ler`);
     }
-    await sleep(3000);
   }
-  marcar(perfilUserId);
+  marcar(perfilUserId, "leitura");
   return coletar(perfilUserId, p);
 }
 
