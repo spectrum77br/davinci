@@ -5,8 +5,8 @@ gerenciados — quem recebe e se está ligado.
 "Hoje" é a função antiga de verdade sempre que ela existe
 (`ouvidoria.destinatarios`, `_recipients_margem_auto`, `_destinatarios` do
 TikTok, `recipients_auto` da Amazon e das Devoluções, `denuncia_robo_aviso.
-destinatarios` com a reserva `chamados_ia`, `_destinatarios_sem_estoque`,
-o `send_to_all` que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
+destinatarios` com a reserva `chamados_ia`, o `send_to_all` que cai no
+THREEMA_RECIPIENTS...). Onde a lista é montada no
 meio de uma função maior, a expressão é copiada aqui E um teste confere que
 ela continua no código — se alguém mudar o ponto de envio, este arquivo
 reprova. Os botões que montam a lista dentro da rota (os 5 Informar e o
@@ -45,7 +45,6 @@ from app.services import (
     devolucao_acao_avisos,
     logistica_amazon_avisos,
     margem_auto_hold,
-    nf_auto_enfileirar,
     ouvidoria,
     threema,
     threema_envios,
@@ -89,8 +88,8 @@ async def _tuta_antes_da_f1(db) -> list[str]:
     return P(user.threema if user else None)
 
 
-# Cópias congeladas dos pontos que a F1/C8a migrou (o código deles já não
-# monta a lista: lê o Cadastro).
+# Cópias congeladas dos pontos que a F1 migrou (C8a e C8b: o código deles já
+# não monta a lista, lê o Cadastro).
 _ANTES_DA_F1 = {
     # logistica_track_sync.avisar_graves (o mesmo para o pacote de devolução)
     K.LOGISTICA_CORREIOS_GRAVE: lambda db: P(get_settings().threema_recipients),
@@ -104,6 +103,20 @@ _ANTES_DA_F1 = {
     # devolucao_prazo.avisar_prazos
     K.DEVOLUCOES_PRAZO_CONTESTACAO: lambda db: P(get_settings().threema_recipients),
     K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR: _tuta_antes_da_f1,
+    # F1/C8b — nf_auto_enfileirar._notificar_sem_estoque (18) e
+    # _destinatarios_sem_estoque (19 a 22), prioridade_estoque_movimentos.
+    # avisar_falhas (23): o grupo do sem estoque no .env
+    **dict.fromkeys(
+        (
+            K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO,
+            K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE,
+            K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO,
+            K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING,
+            K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO,
+            K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
+        ),
+        lambda db: P(get_settings().nf_sem_estoque_threema_recipients),
+    ),
 }
 
 
@@ -136,18 +149,6 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
         K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda: chamados_juridico.recipients_juridico(db),
         K.CONTROLE_ESTOQUE_INFORMAR: lambda: _informar(db, "controle_estoque"),
-        K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO: lambda: P(
-            get_settings().nf_sem_estoque_threema_recipients
-        ),
-        K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE: nf_auto_enfileirar._destinatarios_sem_estoque,
-        K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO: nf_auto_enfileirar._destinatarios_sem_estoque,
-        K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING: nf_auto_enfileirar._destinatarios_sem_estoque,
-        K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO: (
-            nf_auto_enfileirar._destinatarios_sem_estoque
-        ),
-        K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA: lambda: P(
-            get_settings().nf_sem_estoque_threema_recipients
-        ),
         K.PRODUTOS_VIGIA_SOMA_FAMILIA: lambda: P(
             getattr(get_settings(), "vigia_estoque_familia_threema_recipients", "")
         ),
@@ -349,13 +350,9 @@ async def test_mac_e_informativos_nao_tem_lista_no_servidor(db):
 # Onde a lista é montada no meio de uma função maior, a cópia acima vale só
 # enquanto a expressão continuar no código.
 _EXPRESSOES: dict[str, tuple[str, ...]] = {
-    "services/prioridade_estoque_movimentos.py": (
-        "threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)",
-    ),
     "services/vigia_estoque_familia.py": (
         'getattr(settings, "vigia_estoque_familia_threema_recipients", "")',
     ),
-    "services/nf_auto_enfileirar.py": ("get_settings().nf_sem_estoque_threema_recipients",),
     "services/logistica_bling.py": ("threema.parse_recipients(rule.threema_recipients) or None",),
     "routers/logistica.py": (
         # botão da linha do pedido
@@ -456,6 +453,9 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         "services/logistica_track_sync.py": "threema_recipients",
         "services/marketplace_shipment_check.py": "threema_recipients",
         "services/tuta_devolucoes.py": "User.name",
+        # F1/C8b: nenhum dos dois monta lista nenhuma
+        "services/nf_auto_enfileirar.py": "parse_recipients",
+        "services/prioridade_estoque_movimentos.py": "parse_recipients",
     }
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo

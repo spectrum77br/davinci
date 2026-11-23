@@ -221,6 +221,10 @@ _USOS_DO_NUCLEO = {
     "services/marketplace_shipment_check.py": {"enviar"},
     "services/devolucao_prazo.py": {"enviar"},
     "services/tuta_devolucoes.py": {"enviar"},
+    # F1/C8b: avisos da NF automática (18 a 22; o liga/desliga de 19 a 22 é
+    # lido antes das marcas de "já avisei") e o kit da prioridade (23)
+    "services/nf_auto_enfileirar.py": {"enviar", "resolver"},
+    "services/prioridade_estoque_movimentos.py": {"enviar"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {

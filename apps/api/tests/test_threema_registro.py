@@ -359,16 +359,18 @@ def test_registro_fica_fora_do_historico_de_alteracoes():
 # Funções que chamam `send_to_all` SEM marca própria, porque servem a mais de
 # um envio: TODA chamada delas tem de estar dentro de uma marca.
 _FUNCOES_DE_ENVIO = {
-    ("services/nf_auto_enfileirar.py", "_enviar_aviso"),
     ("services/conferencia_shopee/threema_aviso.py", "_enviar_um_a_um"),
 }
 # Funções que servem a mais de um envio JÁ MIGRADO: recebem a chave (`chave=`,
-# com padrão) e mandam pelo núcleo do Cadastro (`threema_envios.enviar(chave,
+# só nomeada) e mandam pelo núcleo do Cadastro (`threema_envios.enviar(chave,
 # …)`). Cada CHAMADA delas declara o envio: a chave passada ou o padrão (o
-# valor aqui, conferido contra o código).
+# valor aqui, conferido contra o código; None = sem padrão, toda chamada
+# passa a sua).
 _FUNCOES_COM_CHAVE = {
     # F1/C8a: Correios grave (5, o padrão) e pacote de devolução (8)
     ("services/logistica_track_sync.py", "avisar_graves"): "K.LOGISTICA_CORREIOS_GRAVE",
+    # F1/C8b: os avisos da NF automática com marca de "já avisei" (19 a 22)
+    ("services/nf_auto_enfileirar.py", "_enviar_aviso"): None,
 }
 # Marca (ou envio pelo Cadastro) cuja chave não é uma constante `K.X` escrita
 # ali: (arquivo, expressão). Cada uma tem o seu teste de cobertura logo abaixo.
@@ -380,6 +382,7 @@ _CHAVES_DINAMICAS = {
     ("services/threema_envios.py", "chave"),
     # Dentro das funções com chave: a de quem chama (foto `_CHAMADAS_COM_CHAVE`).
     ("services/logistica_track_sync.py", "chave"),
+    ("services/nf_auto_enfileirar.py", "chave"),
     # O botão "Mandar teste" da tela (C7): a chave da rota, que o núcleo valida.
     ("services/threema_envios_edicao.py", "d.chave"),
 }
@@ -451,7 +454,8 @@ def _declaracoes():
                 yield rel, no, "cadastro", ast.unparse(arg) if arg is not None else ""
             elif isinstance(no, ast.Call) and _nome_chamado(no) in padroes:
                 kw = {k.arg: k.value for k in no.keywords}
-                chave = ast.unparse(kw["chave"]) if "chave" in kw else padroes[_nome_chamado(no)]
+                padrao = padroes[_nome_chamado(no)] or ""  # sem padrão: "(vazio)" é erro
+                chave = ast.unparse(kw["chave"]) if "chave" in kw else padrao
                 yield rel, no, "funcao", chave
 
 
@@ -565,7 +569,9 @@ def test_funcao_com_chave_tem_o_padrao_declarado_e_manda_pelo_cadastro():
         ]
         nomes_kw = [a.arg for a in defn.args.kwonlyargs]
         kwonly = dict(zip(nomes_kw, defn.args.kw_defaults, strict=True))
-        assert "chave" in kwonly and ast.unparse(kwonly["chave"]) == padrao, (rel, fn)
+        assert "chave" in kwonly, (rel, fn)
+        declarado = ast.unparse(kwonly["chave"]) if kwonly["chave"] is not None else None
+        assert declarado == padrao, (rel, fn)
         envios = [n for n in ast.walk(defn) if _e_envio_do_cadastro(n)]
         assert [ast.unparse(n.args[0]) for n in envios] == ["chave"], (rel, fn)
         assert not any(True for _ in _chamadas(defn, "send_to_all")), (rel, fn)
@@ -654,37 +660,6 @@ _MARCAS = {
     ("services/chamados_pendencias.py", "varrer", "K.CHAMADOS_ABERTURAS_PRESAS"): 1,  # 14
     ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
     ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,  # 16
-    # 18 a 22 (NF automática)
-    (
-        "services/nf_auto_enfileirar.py",
-        "_notificar_sem_estoque",
-        "K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO",
-    ): 1,
-    (
-        "services/nf_auto_enfileirar.py",
-        "_avisar_negativo_fora_do_lote",
-        "K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE",
-    ): 1,
-    (
-        "services/nf_auto_enfileirar.py",
-        "avisar_kit_sem_composicao",
-        "K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO",
-    ): 1,
-    (
-        "services/nf_auto_enfileirar.py",
-        "_avisar_sem_leitura",
-        "K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING",
-    ): 1,
-    (
-        "services/nf_auto_enfileirar.py",
-        "_avisar_recusa_83955",
-        "K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO",
-    ): 1,
-    (
-        "services/prioridade_estoque_movimentos.py",
-        "avisar_falhas",
-        "K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA",
-    ): 1,  # 23
     (
         "services/vigia_estoque_familia.py",
         "vigia_estoque_familia_sweep",
@@ -720,6 +695,19 @@ _PELO_CADASTRO = {
     ("services/marketplace_shipment_check.py", "_avisar_threema", "K.LOGISTICA_LOJA_MUDA"): 1,  # 7
     ("services/devolucao_prazo.py", "avisar_prazos", "K.DEVOLUCOES_PRAZO_CONTESTACAO"): 1,  # 9
     ("services/tuta_devolucoes.py", "entregar_resultado", "K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR"): 1,
+    # F1/C8b: movido para Aguardando Cancelamento (18), os avisos com marca de
+    # "já avisei" pela função com chave (19 a 22) e o kit da prioridade (23)
+    (
+        "services/nf_auto_enfileirar.py",
+        "_notificar_sem_estoque",
+        "K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO",
+    ): 1,
+    ("services/nf_auto_enfileirar.py", "_enviar_aviso", "chave"): 1,
+    (
+        "services/prioridade_estoque_movimentos.py",
+        "avisar_falhas",
+        "K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA",
+    ): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }
@@ -732,6 +720,28 @@ _CHAMADAS_COM_CHAVE = {
     ("routers/logistica_track.py", "receive_17track_push", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
     # 8: o mesmo avisar_graves, chamado pelo rastreio das devoluções
     ("services/devolucao_rastreio_sync.py", "run", "K.DEVOLUCOES_PACOTE_VOLTA_GRAVE"): 1,
+    # 19 a 22: o _enviar_aviso da NF automática (sweep; o 20 também pelo
+    # botão Enfileirar, que chama o mesmo avisar_kit_sem_composicao)
+    (
+        "services/nf_auto_enfileirar.py",
+        "_avisar_negativo_fora_do_lote",
+        "K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "avisar_kit_sem_composicao",
+        "K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "_avisar_sem_leitura",
+        "K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING",
+    ): 1,
+    (
+        "services/nf_auto_enfileirar.py",
+        "_avisar_recusa_83955",
+        "K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO",
+    ): 1,
 }
 
 

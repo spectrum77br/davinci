@@ -86,7 +86,7 @@ from app.models import (
     StoreInfo,
 )
 from app.redis_client import redis
-from app.services import nf_emissao_gerar, threema, threema_registro
+from app.services import nf_emissao_gerar, threema, threema_envios
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.prioridade_estoque import aplicar_prioridade_estoque
 from app.services.sku_tags import classify_sku_tag
@@ -685,14 +685,14 @@ async def _notificar_sem_estoque(
 ) -> None:
     """Aviso Threema quando o sweep move pedido pra Aguardando Cancelamento.
 
-    Destinatários = SÓ o grupo `nf_sem_estoque_threema_recipients` (vazio =
-    TUDO desligado); todos recebem a mensagem completa. BEST-EFFORT: falha
-    no envio só loga, nunca quebra o sweep.
+    Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1; a semente
+    copiou o grupo `nf_sem_estoque_threema_recipients`); todos recebem a
+    mensagem completa. Desligado ou ninguém válido = não sai, e não volta: o
+    pedido já foi movido (o núcleo grava o registro e acende o sino quando
+    ninguém é válido). BEST-EFFORT: falha no envio só loga, nunca quebra o
+    sweep.
     """
-    gerais = threema.parse_recipients(
-        get_settings().nf_sem_estoque_threema_recipients
-    )
-    if not gerais or not sem_estoque:
+    if not sem_estoque:
         return
     try:
         texto = await _linhas_pedidos(
@@ -700,13 +700,14 @@ async def _notificar_sem_estoque(
             sem_estoque,
             "Estoque negativo — movido pra Aguardando Cancelamento:",
         )
-        client = threema.ThreemaClient(contexto="estoque")
-        with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO):
-            result = await client.send_to_all(texto, gerais)
+        result = await threema_envios.enviar(
+            K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO, texto, session=session
+        )
         logger.info(
             "nf_auto_enfileirar_threema",
             sent=result.get("sent"),
             failed=result.get("failed"),
+            motivo=result.get("motivo"),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("nf_sem_estoque_threema_falhou", erro=str(exc))
@@ -775,26 +776,36 @@ async def _desfazer_marcas(marcas: list[str], *, evento: str) -> None:
 
 async def _enviar_aviso(
     montar_texto: Callable[[], Awaitable[str]],
-    gerais: list[str],
     marcas: list[str],
     *,
+    chave: str,
     evento: str,
+    session=None,
 ) -> None:
-    """Monta e manda o aviso pro grupo do sem estoque. Falhou → desfaz as
-    marcas (a próxima passada tenta de novo); canal sem config → deixa as
-    marcas (tentar a cada passada não adianta). Erro ao montar o texto (banco)
-    sobe depois de desfazer as marcas — o savepoint de quem chama desfaz a
-    transação. O envio é BEST-EFFORT.
-
-    Registro (tarefa 16): quem chama marca de qual envio é o aviso, com
-    `threema_registro.envio(K....)` em volta da chamada."""
+    """Monta e manda o aviso `chave` pelo núcleo do Cadastro (Cadastros ›
+    Envios Threema, tarefa 16, F1), que põe a marca do registro. Falhou →
+    desfaz as marcas (a próxima passada tenta de novo); canal sem config ou
+    ninguém válido no Cadastro → deixa as marcas (tentar a cada passada não
+    adianta; no ninguém válido o núcleo já gravou o registro `ok=false` e
+    acendeu o sino — é o mesmo caso do `send_to_all` sem destinatário, que
+    sobe `ThreemaConfigError`). Desligado no meio do caminho → desfaz as
+    marcas (como se o portão de quem chama tivesse fechado antes delas). Erro
+    ao montar o texto (banco) sobe depois de desfazer as marcas — o savepoint
+    de quem chama desfaz a transação. O envio é BEST-EFFORT."""
     try:
         texto = await montar_texto()
     except Exception:
         await _desfazer_marcas(marcas, evento=evento)
         raise
     try:
-        result = await threema.ThreemaClient(contexto="estoque").send_to_all(texto, gerais)
+        result = await threema_envios.enviar(chave, texto, session=session)
+        if result.get("motivo") == "sem_destinatarios":
+            logger.warning(f"{evento}_threema_sem_destinatarios", via=result.get("via"))
+            return
+        if result.get("motivo") == "desligado":
+            logger.info(f"{evento}_threema_desligado")
+            await _desfazer_marcas(marcas, evento=evento)
+            return
         if not result.get("sent"):
             raise RuntimeError(f"nenhum envio: {result.get('failed')}")
         logger.info(f"{evento}_threema", sent=result.get("sent"), failed=result.get("failed"))
@@ -805,8 +816,19 @@ async def _enviar_aviso(
         await _desfazer_marcas(marcas, evento=evento)
 
 
-def _destinatarios_sem_estoque() -> list[str]:
-    return threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
+async def _destinatarios_sem_estoque(chave: str, session) -> threema_envios.Resolucao:
+    """Quem recebe o aviso `chave` do grupo do sem estoque AGORA (Cadastros ›
+    Envios Threema, tarefa 16, F1; a semente copiou o
+    `nf_sem_estoque_threema_recipients`). Quem chama usa o `ativo` como o
+    portão que era o `.env` vazio: desligado sai ANTES das marcas de "já
+    avisei" — o aviso daquela passada se perde e o que continuar valendo é
+    apontado de novo numa passada com o envio ligado (o `descarta` do
+    catálogo, igual a hoje com o `.env` vazio). Ninguém válido segue até o
+    `_enviar_aviso`, que grava o registro e acende o sino."""
+    res = await threema_envios.resolver(chave, session=session)
+    if not res.ativo:
+        logger.info("nf_sem_estoque_aviso_desligado", chave=chave, via=res.via)
+    return res
 
 
 async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> None:
@@ -818,9 +840,15 @@ async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> 
     Pedido que o próprio sweep ainda vai conferir (passou do teto do tick,
     adiado pela prioridade) fica de fora — ele vai pra 83955 sozinho. Um aviso
     por pedido/SKU/dia (marca no Redis, a passada é a cada 2 min); Redis fora
-    = não avisa (melhor que repetir a cada passada). BEST-EFFORT."""
-    gerais = _destinatarios_sem_estoque()
-    if not gerais or not fora:
+    = não avisa (melhor que repetir a cada passada). BEST-EFFORT.
+
+    Quem recebe e o liga/desliga vêm de Cadastros › Envios Threema (tarefa 16,
+    F1): desligado sai antes das marcas (`_destinatarios_sem_estoque`)."""
+    if not fora:
+        return
+    if not (
+        await _destinatarios_sem_estoque(K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE, session)
+    ).ativo:
         return
     vai_conferir = set(await _candidatos(session, limite=None, pular_adiados=False))
     pendentes = {n: s for n, s in fora.items() if n not in vai_conferir}
@@ -850,8 +878,13 @@ async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> 
             " NÃO foi movido; confira antes de emitir:",
         )
 
-    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE):
-        await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    await _enviar_aviso(
+        _texto,
+        marcas,
+        chave=K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE,
+        evento=evento,
+        session=session,
+    )
 
 
 async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
@@ -862,9 +895,15 @@ async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
     mandar pra Aguardando Cancelamento pedido que tinha peça. Sem o aviso a
     regra repete isso em silêncio até a sync semanal dos kits. Um aviso por
     kit/dia (marca no Redis). BEST-EFFORT (vale pro sweep e pro botão
-    Enfileirar)."""
-    gerais = _destinatarios_sem_estoque()
-    if not gerais or not kits:
+    Enfileirar).
+
+    Quem recebe e o liga/desliga vêm de Cadastros › Envios Threema (tarefa 16,
+    F1): desligado sai antes das marcas (`_destinatarios_sem_estoque`)."""
+    if not kits:
+        return
+    if not (
+        await _destinatarios_sem_estoque(K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO, session)
+    ).ativo:
         return
     dia = _agora_brt().strftime("%Y%m%d")
     chave_de = {f"{_AVISO_KIT_SEM_COMPOSICAO_PREFIXO}{dia}:{k}": k for k in sorted(set(kits))}
@@ -895,8 +934,13 @@ async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
             + "\n".join(f"Kit {skus.get(k) or 'sem SKU no DaVinci'} (id Bling {k})" for k in novos)
         )
 
-    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO):
-        await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    await _enviar_aviso(
+        _texto,
+        marcas,
+        chave=K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO,
+        evento=evento,
+        session=session,
+    )
 
 
 async def _sem_leitura_longa(
@@ -944,9 +988,15 @@ async def _avisar_sem_leitura(session, longos: dict[str, list[str]]) -> None:
     `_AVISO_SEM_LEITURA_INTERVALO_S` (a marca guarda a hora do último aviso).
     Ninguém precisa enfileirar à mão — quando o Bling volta, eles seguem
     sozinhos. Redis fora = não avisa (melhor que repetir a cada passada).
-    BEST-EFFORT."""
-    gerais = _destinatarios_sem_estoque()
-    if not gerais or not longos:
+    BEST-EFFORT.
+
+    Quem recebe e o liga/desliga vêm de Cadastros › Envios Threema (tarefa 16,
+    F1): desligado sai antes da marca da hora (`_destinatarios_sem_estoque`)."""
+    if not longos:
+        return
+    if not (
+        await _destinatarios_sem_estoque(K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING, session)
+    ).ativo:
         return
     agora = _agora_ts()
     evento = "nf_sem_estoque_sem_leitura"
@@ -984,8 +1034,13 @@ async def _avisar_sem_leitura(session, longos: dict[str, list[str]]) -> None:
             texto += f"\n… e mais {total - len(mostrar)}"
         return texto
 
-    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING):
-        await _enviar_aviso(_texto, gerais, [_AVISO_SEM_LEITURA_CHAVE], evento=evento)
+    await _enviar_aviso(
+        _texto,
+        [_AVISO_SEM_LEITURA_CHAVE],
+        chave=K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING,
+        evento=evento,
+        session=session,
+    )
 
 
 async def _esperando_o_bling(
@@ -1051,9 +1106,18 @@ async def _contar_recusas_83955(numeros: list[str]) -> dict[str, int]:
 async def _avisar_recusa_83955(session, pedidos: dict[str, list[str]]) -> None:
     """Aviso Threema (grupo do sem estoque): o Bling recusou a 83955 até o
     teto do dia e o pedido saiu da fila automática com 'erro' no painel —
-    alguém muda a situação à mão. Um aviso por pedido/dia. BEST-EFFORT."""
-    gerais = _destinatarios_sem_estoque()
-    if not gerais or not pedidos:
+    alguém muda a situação à mão. Um aviso por pedido/dia. BEST-EFFORT.
+
+    Quem recebe e o liga/desliga vêm de Cadastros › Envios Threema (tarefa 16,
+    F1): desligado sai antes das marcas (`_destinatarios_sem_estoque`) — o
+    pedido já saiu da fila com 'erro', então o aviso se perde."""
+    if not pedidos:
+        return
+    if not (
+        await _destinatarios_sem_estoque(
+            K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO, session
+        )
+    ).ativo:
         return
     dia = _agora_brt().strftime("%Y%m%d")
     chave_de = {f"{_AVISO_RECUSA_83955_PREFIXO}{dia}:{n}": n for n in sorted(pedidos)}
@@ -1072,8 +1136,13 @@ async def _avisar_recusa_83955(session, pedidos: dict[str, list[str]]) -> None:
             " situação à mão:",
         )
 
-    with threema_registro.envio(K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO):
-        await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    await _enviar_aviso(
+        _texto,
+        marcas,
+        chave=K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO,
+        evento=evento,
+        session=session,
+    )
 
 
 async def _pedidos_restricao(

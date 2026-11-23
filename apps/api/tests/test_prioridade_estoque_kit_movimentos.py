@@ -396,8 +396,14 @@ async def test_aviso_threema_so_quando_alguem_recebe(db: AsyncSession, monkeypat
             enviados.append(texto)
             return resultado
 
-    monkeypatch.setattr(mov.threema, "ThreemaClient", _Th)
-    monkeypatch.setattr(mov.threema, "parse_recipients", lambda s: ["ABCDEFGH"])
+    # O aviso sai pelo núcleo do Cadastro (threema_envios, tarefa 16, F1): sem
+    # semente no banco de teste, vale a configuração antiga (o .env).
+    from app.config import get_settings
+    from app.services import threema, threema_envios
+
+    threema_envios.limpar_cache()
+    monkeypatch.setattr(threema, "ThreemaClient", _Th)
+    monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", "ABCDEFGH")
     # Ninguém recebeu: não carimba, tenta de novo depois.
     assert await mov.avisar_falhas(db) == 0
     resultado.update(sent=["ABCDEFGH"], failed=[])

@@ -252,6 +252,13 @@ MIGRADOS = [
     K.DEVOLUCOES_PACOTE_VOLTA_GRAVE,
     K.DEVOLUCOES_PRAZO_CONTESTACAO,
     K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR,
+    # F1/C8b: Estoque e NF (itens 18 a 23)
+    K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO,
+    K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE,
+    K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO,
+    K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING,
+    K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO,
+    K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
 ]
 
 
@@ -265,7 +272,8 @@ def test_so_os_envios_das_fatias_publicadas_estao_migrados():
 def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     """O que acontece com os avisos enquanto o envio está desligado é o que
     o ponto JÁ faz (o Cadastro não muda o carimbo de ninguém): cada um tem o
-    seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`."""
+    seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`
+    (C8a) e `test_threema_pontos_estoque_nf` (C8b)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o carimbo da ocorrência grave é gravado antes do aviso
         K.LOGISTICA_CORREIOS_GRAVE: "descarta",
@@ -278,6 +286,17 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
         K.DEVOLUCOES_PRAZO_CONTESTACAO: "acumula",
         # o comando do dia já está feito quando o resultado chega
         K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR: "descarta",
+        # o pedido já foi movido para Aguardando Cancelamento
+        K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO: "descarta",
+        # 19 a 22: desligado sai antes das marcas de "já avisei"; nada fica
+        # guardado (o que continuar valendo é apontado de novo na passada)
+        K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE: "descarta",
+        K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO: "descarta",
+        K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING: "descarta",
+        # o pedido já saiu da fila com 'erro'
+        K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO: "descarta",
+        # `avisado_at` só é carimbado quando o aviso sai
+        K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA: "acumula",
     }
 
 

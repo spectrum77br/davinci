@@ -408,7 +408,7 @@ def _servidor() -> list[EnvioDef]:
             "negativo.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
-            depende_de=(_DEP_NF_AUTO,), fatia="F1",
+            depende_de=(_DEP_NF_AUTO,), fatia="F1", migrado=True,
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE, "Controle de Estoque", None,
@@ -417,7 +417,7 @@ def _servidor() -> list[EnvioDef]:
             "Amazon). Um aviso por pedido, SKU e dia.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
-            depende_de=(_DEP_NF_AUTO,), fatia="F1",
+            depende_de=(_DEP_NF_AUTO,), fatia="F1", migrado=True,
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_KIT_SEM_COMPOSICAO, "Controle de Estoque", None,
@@ -427,6 +427,7 @@ def _servidor() -> list[EnvioDef]:
             "ligada no servidor; pelo botão Enfileirar, sempre.",
             "misto", "passada da NF automática e botão Enfileirar", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF), fatia="F1",
+            migrado=True,
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING, "Controle de Estoque", None,
@@ -435,7 +436,7 @@ def _servidor() -> list[EnvioDef]:
             "aviso por hora.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
-            depende_de=(_DEP_NF_AUTO,), fatia="F1",
+            depende_de=(_DEP_NF_AUTO,), fatia="F1", migrado=True,
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO, "Controle de Estoque", None,
@@ -444,7 +445,7 @@ def _servidor() -> list[EnvioDef]:
             "por pedido por dia.",
             "evento", "na passada da NF automática (2 min)", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
-            depende_de=(_DEP_NF_AUTO,), fatia="F1",
+            depende_de=(_DEP_NF_AUTO,), fatia="F1", migrado=True,
         ),
         E(
             K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA, "Controle de Estoque", None,
@@ -452,7 +453,7 @@ def _servidor() -> list[EnvioDef]:
             "Movimento de prioridade de estoque de kit que falhou e precisa de conferência.",
             "evento", "conferido às :16 e :46", "servidor", "estoque",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF),
-            ao_desligar="acumula", fatia="F1",
+            ao_desligar="acumula", fatia="F1", migrado=True,
         ),
         E(
             K.PRODUTOS_VIGIA_SOMA_FAMILIA, "Produtos", None, "Soma por família atrasada",

@@ -63,7 +63,7 @@ from app.models import (
     PrioridadeEstoqueMovimento,
     StockMovement,
 )
-from app.services import nf_emissao_gerar, threema, threema_registro
+from app.services import nf_emissao_gerar, threema_envios
 from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.marketplaces.bling import BlingCloudflareError
 from app.services.threema_catalogo import K
@@ -481,8 +481,13 @@ async def marcar_pendentes_orfaos(session: AsyncSession, *, minutos: int = ORFAO
 
 
 async def avisar_falhas(session: AsyncSession) -> int:
-    """Threema (grupo nf_sem_estoque) com as linhas `incerto` e as `falhou`
-    esgotadas, em lotes, carimbando só o que alguém recebeu. Best-effort."""
+    """Threema com as linhas `incerto` e as `falhou` esgotadas, em lotes,
+    carimbando só o que alguém recebeu. Best-effort.
+
+    Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1; a semente
+    copiou o grupo `nf_sem_estoque_threema_recipients`). Desligado ou ninguém
+    válido = não carimba: acumula e sai tudo ao religar (o `ao_desligar` do
+    catálogo); no ninguém válido o núcleo grava o registro e acende o sino."""
     linhas = (await session.execute(
         select(
             PrioridadeEstoqueMovimento.id, PrioridadeEstoqueMovimento.pedido_bling,
@@ -500,9 +505,6 @@ async def avisar_falhas(session: AsyncSession) -> int:
     )).all()
     if not linhas:
         return 0
-    destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
-    if not destinos:
-        return 0
     avisados = 0
     for i in range(0, len(linhas), AVISO_LOTE):
         lote = linhas[i : i + AVISO_LOTE]
@@ -514,13 +516,18 @@ async def avisar_falhas(session: AsyncSession) -> int:
             for r in lote
         )
         try:
-            with threema_registro.envio(K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA):
-                res = await threema.ThreemaClient(contexto="estoque").send_to_all(texto, destinos)
+            res = await threema_envios.enviar(
+                K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA, texto, session=session
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("prioridade_estoque_threema_falhou", erro=str(exc)[:200])
             return avisados
         if not res.get("sent"):
-            logger.warning("prioridade_estoque_threema_ninguem_recebeu", failed=res.get("failed"))
+            logger.warning(
+                "prioridade_estoque_threema_ninguem_recebeu",
+                failed=res.get("failed"),
+                motivo=res.get("motivo"),
+            )
             return avisados
         agora = datetime.now(UTC)
         for r in lote:
