@@ -126,12 +126,13 @@ function botoes(html, label) {
   }))
 }
 async function departamentos() {
-  // Celular · Mala · Eletro · Sem departamento: só o nome, sem número.
+  // Celular · Eletro · Mala · Sem departamento (M-23, 23/11/2026: ordem
+  // alfabética das categorias): só o nome, sem número; abre em Celular.
   const p = await page(false)
   let html = await p.html()
   assert.deepEqual(botoes(html, 'Departamentos'), [
-    { texto: 'Celular', ativo: true }, { texto: 'Mala', ativo: false },
-    { texto: 'Eletro', ativo: false }, { texto: 'Sem departamento', ativo: false },
+    { texto: 'Celular', ativo: true }, { texto: 'Eletro', ativo: false },
+    { texto: 'Mala', ativo: false }, { texto: 'Sem departamento', ativo: false },
   ])
   // Abas com o número do departamento escolhido.
   assert.deepEqual(botoes(html, 'Abas de Produtos'), [
@@ -186,7 +187,8 @@ async function departamentos() {
   const vazio = { produtos: { ...DEPARTAMENTOS.produtos, sem: 0 }, anuncios: { ...DEPARTAMENTOS.anuncios, sem: 0 } }
   const semNada = await page(false, { query: { dept: 'sem' }, contagens: vazio })
   html = await semNada.html()
-  assert.deepEqual(botoes(html, 'Departamentos').map((b) => b.texto), ['Celular', 'Mala', 'Eletro'])
+  // M-23 (23/11/2026): ordem alfabética das categorias, como em todas as telas.
+  assert.deepEqual(botoes(html, 'Departamentos').map((b) => b.texto), ['Celular', 'Eletro', 'Mala'])
   assert.equal(semNada.state.departamento, 'celular')
   semNada.state.acertarUrlDoDepartamento() // onMounted (o SSR não roda)
   assert.deepEqual(semNada.navegacoes.at(-1), ['replace', { path: '/produtos', query: { dept: 'celular' } }],

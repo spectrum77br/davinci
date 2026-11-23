@@ -1095,12 +1095,15 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
 // produto, só admin), Garantia (todas as garantias) e Atendimento (só o que
 // está em atendimento agora) — no estilo da Tabela de Preços: as pílulas de
 // departamento em cima e as abas embaixo. Os departamentos são as raízes da
-// Tabela de Preços (services/garantia_resumo.py).
+// Tabela de Preços (services/garantia_resumo.py). A ordem das pílulas é a
+// alfabética de todas as telas desde a M-23 (23/11/2026): Celular, Eletro,
+// Mala (a de lib/categorias.ts — este arquivo não importa nada; o teste
+// tests/categorias-ordem.cjs confere). Continua abrindo em Celular.
 export type Departamento = 'celular' | 'mala' | 'eletro'
 export const DEPARTAMENTOS: { chave: Departamento; nome: string }[] = [
   { chave: 'celular', nome: 'Celular' },
-  { chave: 'mala', nome: 'Mala' },
   { chave: 'eletro', nome: 'Eletro' },
+  { chave: 'mala', nome: 'Mala' },
 ]
 export type Aba = 'resumo' | 'garantia' | 'atendimento'
 

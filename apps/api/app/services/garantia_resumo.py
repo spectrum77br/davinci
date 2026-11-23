@@ -71,9 +71,15 @@ from app.models.product import Product, ProductCategory
 from app.models.refund import Refund
 from app.models.segment import Segment
 from app.services import garantia as svc
+from app.services.categorias_ordem import ordenar_categorias
 from app.services.estoque_familia import lote_de
 
-# As pílulas da tela, nesta ordem (04/11/2026: "celular, mala e eletro").
+# Os departamentos (04/11/2026: "celular, mala e eletro"). A ordem DESTE dict
+# é o desempate da linha que divide as vendas entre dois departamentos (veja
+# `ordem = list(DEPARTAMENTOS)` abaixo): é regra de classificação, não mexer.
+# A ORDEM NA TELA é outra coisa: desde a M-23 (23/11/2026) as pílulas e a lista
+# `departamentos` da resposta saem em ordem alfabética — Celular, Eletro, Mala
+# (services/categorias_ordem.py).
 DEPARTAMENTOS = {
     "celular": "Celular",
     "mala": "Mala",
@@ -1128,7 +1134,8 @@ async def resumo(
         linhas.values(), key=lambda li: (-li.vendidas, _plano(li.nome_na_tela), li.chave)
     )
     departamentos = []
-    for chave, nome in DEPARTAMENTOS.items():
+    # M-23 (23/11/2026): na ordem da tela (Celular, Eletro, Mala).
+    for chave, nome in ordenar_categorias(DEPARTAMENTOS.items(), lambda kv: kv[0]):
         do_dep = [li for li in produtos if li.departamento == chave]
         dep = {
             "chave": chave,

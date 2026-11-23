@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
+import { ORDEM_CATEGORIAS, ordenarCategorias } from '~/lib/categorias'
 import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2, Archive, ArchiveRestore } from 'lucide-vue-next'
 
 definePageMeta({
@@ -130,10 +131,12 @@ function platformLabel(p: string) {
   return PLATFORMS.find((x) => x.value === normPlatform(p))?.label ?? p
 }
 
+// M-23 (23/11/2026): categorias em ordem alfabética (Celular, Eletro, Mala),
+// Catálogo e Shein depois.
 const DEPARTMENTS = [
   { value: 'celular', label: 'Celular' },
-  { value: 'mala', label: 'Mala' },
   { value: 'eletro', label: 'Eletro' },
+  { value: 'mala', label: 'Mala' },
   { value: 'catalogo', label: 'Catálogo' },
   { value: 'shein', label: 'Shein' },
 ]
@@ -671,10 +674,11 @@ function toggleArchivedView() {
 
 // "Catálogo" saiu dos tipos de loja em 06/10/2026: o catálogo do ML agora é
 // ligado por conta em Tabela de Preços › Contas (e a API recusa o tipo).
+// M-23 (23/11/2026): Celular, Eletro, Mala (ordem alfabética de todas as telas).
 const TIPO_OPTIONS: { slug: string; label: string }[] = [
   { slug: 'celular',  label: 'Celular' },
-  { slug: 'mala',     label: 'Mala' },
   { slug: 'eletro',   label: 'Eletro' },
+  { slug: 'mala',     label: 'Mala' },
 ]
 
 // Loja antiga que ainda tenha "Catálogo" marcado continua vendo a caixa,
@@ -706,7 +710,15 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 // select POR TIPO (grava o JSONB nf_faturador_por_tipo) + o select "Padrão"
 // (o nf_faturador_id de sempre, fallback pros tipos sem regra). Conta de
 // tipo único segue no select inline de hoje. "Faturador produto" NÃO muda.
-const DEPT_ORDER = ['celular', 'mala', 'eletro', 'catalogo', 'shein']
+// M-23 (23/11/2026): a ordem é a de lib/categorias.ts (Celular, Eletro, Mala);
+// Catálogo e Shein, que não são categoria, depois.
+const DEPT_ORDER = [...ORDEM_CATEGORIAS, 'catalogo', 'shein']
+
+// Os tipos da loja na tela (etiquetas e cartão), na mesma ordem. A API já
+// manda em ordem alfabética de slug (o Catálogo antigo ficaria na frente).
+function tiposEmOrdem(row: StoreInfo): string[] {
+  return ordenarCategorias(row.departments)
+}
 
 function fatTipos(row: StoreInfo): string[] {
   return DEPT_ORDER.filter((d) => row.departments.includes(d) && DEPT_BADGE[d])
@@ -929,7 +941,7 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
               <div class="min-w-0"><h3 class="break-words text-sm font-semibold">{{ row.account_name || 'Sem nome de conta' }}</h3><p class="mt-1 text-xs text-muted-foreground">{{ platformLabel(row.platform) }} · {{ rotuloEquipeLoja(row.commercial_team) }}</p></div>
               <span v-if="archivedView" class="rounded-md border bg-muted px-2 py-1 text-xs">Arquivada</span>
             </div>
-            <div class="mt-3 flex flex-wrap gap-1.5" aria-label="Tipos da loja"><span v-for="d in row.departments" :key="d" class="rounded-md border bg-muted/40 px-2 py-1 text-xs">{{ DEPARTMENTS.find(x => x.value === d)?.label || d }}</span><span v-if="!row.departments.length" class="text-xs text-muted-foreground">Sem tipo</span></div>
+            <div class="mt-3 flex flex-wrap gap-1.5" aria-label="Tipos da loja"><span v-for="d in tiposEmOrdem(row)" :key="d" class="rounded-md border bg-muted/40 px-2 py-1 text-xs">{{ DEPARTMENTS.find(x => x.value === d)?.label || d }}</span><span v-if="!row.departments.length" class="text-xs text-muted-foreground">Sem tipo</span></div>
             <dl class="store-card-data mt-3 grid grid-cols-2 gap-3 text-xs">
               <div><dt>Responsável</dt><dd>{{ row.cpf_name || '—' }}</dd></div>
               <div><dt>Servidor</dt><dd>{{ row.server || '—' }}</dd></div>
@@ -1511,7 +1523,7 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
                 class="flex flex-wrap gap-0.5 justify-center" :class="canEdit ? 'cursor-pointer' : 'select-text'"
               >
                 <span
-                  v-for="d in row.departments.filter((x) => DEPT_BADGE[x])"
+                  v-for="d in tiposEmOrdem(row).filter((x) => DEPT_BADGE[x])"
                   :key="d"
                   class="px-1.5 py-0.5 rounded border text-[10px] font-semibold"
                   :class="DEPT_BADGE[d].cls"

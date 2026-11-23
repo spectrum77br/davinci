@@ -8,7 +8,7 @@
 // as permissões do §6 (sem "Registrar atendimento" o botão não aparece; a trava de só leitura do
 // Atendimento não bloqueia quem tem a permissão da garantia). O contrato é conferido contra
 // apps/api/app/schemas/garantia.py e as regras contra apps/api/app/services/garantia.py.
-// As 3 partes (04/11/2026): as pílulas Celular/Mala/Eletro e as abas Resumo (só admin) · Garantia ·
+// As 3 partes (04/11/2026): as pílulas Celular/Eletro/Mala (ordem da M-23) e as abas Resumo (só admin) · Garantia ·
 // Atendimento (?aba=, ?dept=), o Resumo com Saldo e a % = gasto ÷ saldo × 100, a coluna Loja, o selo
 // do Atendimento e o cartão do pedido que a busca achou sem garantia.
 // Garantia × SAC (06/11/2026, "Painel de Garantia: alterações" v3): o prazo único por produto (sem
@@ -383,7 +383,8 @@ const mesmoPy = (a, b, msg) => {
   assert.deepEqual(L.corpoDaLista({ ...f0, departamento: null, produto: null, em_atendimento: false }), { limite: 100, offset: 0 })
   // Os departamentos (a ordem fixa da SPEC) e a aba/departamento da URL: o
   // Resumo é só do admin.
-  assert.deepEqual(L.DEPARTAMENTOS.map((d) => [d.chave, d.nome]), [['celular', 'Celular'], ['mala', 'Mala'], ['eletro', 'Eletro']])
+  // M-23 (23/11/2026): as pílulas em ordem alfabética, como em todas as telas.
+  assert.deepEqual(L.DEPARTAMENTOS.map((d) => [d.chave, d.nome]), [['celular', 'Celular'], ['eletro', 'Eletro'], ['mala', 'Mala']])
   assert.equal(L.abaDaUrl(undefined, true), 'resumo', 'o admin abre no Resumo')
   assert.equal(L.abaDaUrl(undefined, false), 'garantia', 'os outros, na Garantia')
   assert.equal(L.abaDaUrl('resumo', false), 'garantia', 'quem não é admin nunca cai no Resumo')
@@ -1222,7 +1223,7 @@ async function testarPagina() {
     assert.match(h, /Painel de Garantia — Uranyx/)
     assert.match(h, /data-nova-garantia/)
     const pilulas = [...h.matchAll(/<button\b[^>]*data-departamento="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])])
-    assert.deepEqual(pilulas, [['celular', 'Celular'], ['mala', 'Mala'], ['eletro', 'Eletro']])
+    assert.deepEqual(pilulas, [['celular', 'Celular'], ['eletro', 'Eletro'], ['mala', 'Mala']], 'M-23: Celular, Eletro, Mala')
     const [celular, mala] = abertura(h, 'data-departamento=')
     assert.match(classe(celular), /\bbg-primary text-primary-foreground border-primary\b/, 'a pílula escolhida')
     assert.match(classe(mala), /\bborder-border hover:bg-muted\b/)
@@ -1443,9 +1444,9 @@ async function testarPagina() {
     await t.cx.estado.carregar({ trocouFiltro: true })
     const h3 = await t.h()
     assert.ok(!/data-pedido-sem-garantia/.test(h3))
-    assert.match(texto(h3), /Nenhuma garantia com esses filtros em Celular A busca procura só em Celular: se a garantia for de Mala ou Eletro, procure na pílula dela\. Ou mude a busca, o status ou o período\./)
+    assert.match(texto(h3), /Nenhuma garantia com esses filtros em Celular A busca procura só em Celular: se a garantia for de Eletro ou Mala, procure na pílula dela\. Ou mude a busca, o status ou o período\./)
     assert.deepEqual([...h3.matchAll(/<button\b[^>]*data-buscar-em="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])]),
-      [['mala', 'procurar em Mala'], ['eletro', 'procurar em Eletro']])
+      [['eletro', 'procurar em Eletro'], ['mala', 'procurar em Mala']])
     assert.match(sfc('../pages/garantias.vue').descriptor.template.content, /:data-buscar-em="d\.chave" @click="trocarDepartamento\(d\.chave\)"/)
     const n = t.listas().length
     t.cx.estado.trocarDepartamento('eletro')

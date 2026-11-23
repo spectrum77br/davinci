@@ -61,6 +61,7 @@ def _mapa_novo():
 def test_departamento_pela_categoria_e_pela_familia():
     # 04/11/2026: Celular, Mala e Eletro (o acessório do celular é Celular).
     assert resumo.DEPARTAMENTOS == {"celular": "Celular", "mala": "Mala", "eletro": "Eletro"}
+    # A ordem do dict é o desempate da classificação (a M-23 não mexe nela).
     assert list(resumo.DEPARTAMENTOS) == ["celular", "mala", "eletro"]
     assert resumo.departamento_da_categoria("Celular Kit") == "celular"
     assert resumo.departamento_da_categoria("Celular Usado") == "celular"
@@ -268,16 +269,17 @@ async def test_resumo_por_produto(client, db, make_user, auth_as):
     )
     assert (u777["na_tabela"], u777["departamento"], u777["vendidas"]) == (False, "mala", 3)
     # As pílulas: os três departamentos sempre, nesta ordem (a soma das linhas).
+    # M-23 (23/11/2026): a ordem alfabética da tela — Celular, Eletro, Mala.
     assert [(d["chave"], d["nome"], d["vendidas"], d["pediram"]) for d in h["departamentos"]] == [
         ("celular", "Celular", 4, 2),
-        ("mala", "Mala", 4, 1),
         ("eletro", "Eletro", 1, 1),
+        ("mala", "Mala", 4, 1),
     ]
     # O SALDO de todas as vendas: base − comissão − frete (o A17: 800 + 900);
     # o pedido cancelado (12) não tem saldo.
     assert (a17["saldo"], u777["saldo"], ar["saldo"]) == (1700.0, 2000.0, 1000.0)
     # A pílula soma as linhas do departamento (o A17, o T8 e o fone).
-    assert [d["saldo"] for d in h["departamentos"]] == [3700.0, 3000.0, 1000.0]
+    assert [d["saldo"] for d in h["departamentos"]] == [3700.0, 1000.0, 3000.0]
     assert [d["gasto"] for d in h["departamentos"]] == [0.0, 0.0, 0.0]
     assert (a17["vendidas"], a17["pediram"], a17["origens"]) == (
         2,
@@ -320,7 +322,8 @@ async def test_resumo_por_produto(client, db, make_user, auth_as):
     r = await client.post("/api/garantias/resumo", json={"status": "aguardando_entrega"})
     assert (r.json()["vendidas"], r.json()["pediram"]) == (1, 1)
     assert [p["skus"] for p in r.json()["produtos"]] == [["dg101"]]
-    assert [d["chave"] for d in r.json()["departamentos"]] == ["celular", "mala", "eletro"]
+    # M-23 (23/11/2026): na resposta, a ordem da tela (alfabética).
+    assert [d["chave"] for d in r.json()["departamentos"]] == ["celular", "eletro", "mala"]
     # A linha abre os pedidos dela na lista.
     itens = (await client.post("/api/garantias/lista", json={"ids": a17["pedidos"]})).json()[
         "itens"
@@ -355,8 +358,8 @@ async def test_resumo_sem_as_descartadas_e_sem_o_nao_e_pedido(client, db, make_u
     assert len(h["produtos"]) == 1 and h["produtos"][0]["departamento"] == "eletro"
     assert [(d["chave"], d["vendidas"]) for d in h["departamentos"]] == [
         ("celular", 0),
-        ("mala", 0),
         ("eletro", 1),
+        ("mala", 0),
     ]
 
 

@@ -123,8 +123,9 @@ const canDelete = useCan('produtos', 'delete')
 const isAdmin = useIsAdmin()
 
 // ── Departamento + aba (Organização do DaVinci, 13/11/2026, item 2) ─────────
-// Mesmo padrão da Tabela de Preços: primeiro o departamento (Celular · Mala ·
-// Eletro · Sem departamento), depois a aba (Produtos · Anúncios). Os dois
+// Mesmo padrão da Tabela de Preços: primeiro o departamento (Celular · Eletro ·
+// Mala · Sem departamento — a ordem alfabética da M-23, 23/11/2026, a de
+// lib/categorias.ts), depois a aba (Produtos · Anúncios). Os dois
 // ficam na URL (?dept= e ?aba=), como o ?dept= da Tabela; /anuncios redireciona
 // para ?aba=anuncios. O departamento sai da raiz do segmento do produto
 // (Catálogo entra em Celular); sem segmento, a API deduz pela categoria do
@@ -141,8 +142,8 @@ type Departamento = 'celular' | 'mala' | 'eletro' | 'sem'
 type Aba = 'produtos' | 'anuncios'
 const DEPARTAMENTOS: { value: Departamento; label: string; icon: any }[] = [
   { value: 'celular', label: 'Celular', icon: Smartphone },
-  { value: 'mala', label: 'Mala', icon: Briefcase },
   { value: 'eletro', label: 'Eletro', icon: Zap },
+  { value: 'mala', label: 'Mala', icon: Briefcase },
   { value: 'sem', label: 'Sem departamento', icon: CircleDashed },
 ]
 // Raiz do segmento → departamento (o mesmo mapa de apps/api/app/services/departamento.py).

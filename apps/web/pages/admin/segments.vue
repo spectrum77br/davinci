@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
+import { ordenarCategorias } from '~/lib/categorias'
 import { AlertCircle, Check, ChevronDown, ChevronRight, Loader2, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
 definePageMeta({
@@ -60,7 +61,10 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    tree.value = await api<TreeNode[]>('/api/segments/tree')
+    // M-23 (23/11/2026): as raízes na ordem alfabética de todas as telas
+    // (Celular, Eletro, Mala; Catálogo e o que não for categoria depois). Só a
+    // tela: o sort_order do banco e a ordem dos tipos de cada raiz não mudam.
+    tree.value = ordenarCategorias(await api<TreeNode[]>('/api/segments/tree'), (n) => n.slug)
     // expand roots by default on first load
     if (expanded.value.size === 0) {
       for (const n of tree.value) expanded.value.add(n.id)

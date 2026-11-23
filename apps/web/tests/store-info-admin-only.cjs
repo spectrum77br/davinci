@@ -48,9 +48,13 @@ async function mount(admin = false, { clipboardError = null } = {}) {
     document: { addEventListener: () => {}, removeEventListener: () => {}, getElementById: () => null },
     setTimeout: () => 1,
   }
+  // M-23 (23/11/2026): a ordem das categorias (Celular, Eletro, Mala), a lib de verdade.
+  const libCategorias = {}
+  new Function('exports', transpile(fs.readFileSync(path.resolve(__dirname, '../lib/categorias.ts'), 'utf8')))(libCategorias)
   const requireMock = (name) => {
     if (name === 'vue') return { ...Vue, withAsyncContext: (fn) => [fn(), () => {}] }
     if (name === '~/lib/navGroups') return { TABS_CADASTROS: [] }
+    if (name === '~/lib/categorias') return libCategorias
     if (name === 'lucide-vue-next') return new Proxy({}, { get: () => ({ render: () => Vue.h('i') }) })
     return require(name)
   }
@@ -86,6 +90,12 @@ async function mount(admin = false, { clipboardError = null } = {}) {
 async function run() {
   const user = await mount(false)
   const s = user.state, row = s.items[0]
+  // M-23 (23/11/2026): os tipos da loja e as caixinhas do Tipo em ordem
+  // alfabética (Celular, Eletro, Mala); Catálogo/Shein, que não são categoria, depois.
+  assert.deepEqual(s.tiposEmOrdem({ departments: ['catalogo', 'mala', 'celular', 'eletro', 'shein'] }),
+    ['celular', 'eletro', 'mala', 'catalogo', 'shein'])
+  assert.deepEqual(s.tipoOpcoes({ departments: [] }).map((o) => o.label), ['Celular', 'Eletro', 'Mala'])
+  assert.deepEqual(s.fatTipos({ departments: ['mala', 'eletro', 'celular'] }), ['celular', 'eletro', 'mala'])
   assert.equal(s.canEdit, false)
   assert.equal(s.canDelete, false)
   await s.startEdit(row, 'password')

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Produtos › Anúncios (Organização do DaVinci, 13/11/2026, item 2): a aba
 // "anúncios importados" que era a tela /anuncios, agora dentro de Produtos e só
-// do departamento escolhido (Celular · Mala · Eletro · Sem departamento). Os
+// do departamento escolhido (Celular · Eletro · Mala · Sem departamento). Os
 // cartões contam o departamento inteiro (vêm da API em `resumo` — antes eram
 // contados só na página de 50). "Solicitações de anúncio" saiu e não veio
 // (a tabela e a API continuam). O "recarregar" fica no cabeçalho da página:
