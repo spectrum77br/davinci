@@ -7,8 +7,8 @@ o banco (`threema_envio`, quem recebe, grupos, contatos) e o registro de cada
 envio (`threema_envio_registro`):
 
 * quem recebe AGORA, com nomes e sem ID: para envio do servidor ainda não
-  migrado (todos, nesta fase) é a configuração antiga (o legado), exatamente
-  a lista que o ponto de envio usa hoje — `threema_envios.resolver`;
+  migrado é a configuração antiga (o legado), exatamente a lista que o ponto
+  de envio usa hoje; para o migrado, o Cadastro — `threema_envios.resolver`;
 * do que ele depende fora do Cadastro (modo do robô, chave do .env, canal),
   o que acontece com os avisos se for desligado e o último lote enviado;
 * a SITUAÇÃO e as faixas da tela (âmbar "usa a configuração antiga",

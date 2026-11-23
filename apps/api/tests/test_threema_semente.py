@@ -31,7 +31,7 @@ from app.models import (
 )
 from app.services import threema_envios
 from app.services.threema_catalogo import ENVIOS, G_AVISOS_GERAIS, G_ESTOQUE_NF, K
-from tests.test_threema_resolver import migrar
+from tests.test_threema_resolver import desmigrar, migrar
 from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
     ID,
     limpar_ouvidoria,
@@ -39,6 +39,12 @@ from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
 )
 
 pytestmark = pytest.mark.usefixtures("limpar_ouvidoria")
+
+
+def _codigo_antes_da(monkeypatch, fatia: str) -> None:
+    """A semente roda com o código de ANTES da fatia (§3.4 do desenho): as
+    chaves dela ainda `migrado=False` — é o que deixa o `--sobrescrever`."""
+    desmigrar(monkeypatch, *(d.chave for d in ENVIOS if d.fatia == fatia and d.migrado))
 
 
 async def _semear(db, fatia, **kw):
@@ -259,6 +265,7 @@ async def test_sobrescrever_recusado_em_chave_migrada(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_sobrescrever_refaz_a_semente_velha(db, monkeypatch):
     await montar(db, monkeypatch)
+    _codigo_antes_da(monkeypatch, "F1")
     await _semear(db, "F1", aplicar=True)
     # o .env mudou depois da semente: a semente envelheceu
     monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", ID["joana"])
@@ -276,6 +283,7 @@ async def test_sobrescrever_refaz_a_semente_velha(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_sobrescrever_nao_refaz_grupo_usado_por_outra_fatia(db, monkeypatch):
     await montar(db, monkeypatch)
+    _codigo_antes_da(monkeypatch, "F1")
     await _semear(db, "F1", aplicar=True)
     await _semear(db, "F4", aplicar=True)  # item 1 usa "Avisos gerais" também
     monkeypatch.setattr(get_settings(), "threema_recipients", ID["joana"])

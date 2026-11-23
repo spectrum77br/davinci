@@ -1,10 +1,10 @@
 """Cadastros › Envios Threema — edição (tarefa 16, C7).
 
 Só admin. A edição de quem recebe vale só para o envio que lê o Cadastro: o
-do servidor migrado (aqui, com `migrado=True` só no catálogo do teste) e o do
-Mac. Nesta fase nenhum envio do servidor está migrado — e a REGRA DE OURO é
-conferida no fim: depois de editar tudo o que a tela deixa, nenhum envio do
-servidor muda de destinatário nem de liga/desliga.
+do servidor migrado (aqui, com `migrado=True` só no catálogo do teste, ou o
+das fatias já publicadas, ainda sem semente no banco) e o do Mac. A REGRA DE
+OURO é conferida no fim: depois de editar tudo o que a tela deixa, nenhum
+envio do servidor sem semente muda de destinatário nem de liga/desliga.
 
 * PATCH /envios/{chave}: 422 `envio_nao_migrado` (com onde mudar),
   `envio_informativo`, `nao_desligavel` (item 1), `sem_destinatarios_ativo`,
@@ -45,7 +45,7 @@ from app.models import (
 )
 from app.services import threema, threema_envios
 from app.services.threema_catalogo import CATALOGO, ENVIOS, K
-from tests.test_threema_resolver import migrar, semeado
+from tests.test_threema_resolver import desmigrar, migrar, semeado
 from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
     ID,
     limpar_ouvidoria,
@@ -145,6 +145,8 @@ async def test_envio_do_servidor_nao_migrado_nao_se_edita(
 ):
     c = await montar(db, monkeypatch)
     await _admin(make_user, auth_as)
+    # o vigia da automação antes da F1 (o teste não depende da fatia publicada)
+    desmigrar(monkeypatch, K.LOGISTICA_VIGIA_AUTOMACAO)
     antes = await _legado_de_todos(db)
     for corpo in (
         {"destinatarios": [_ref(c.usuarios["joana"])]},
@@ -630,7 +632,8 @@ async def test_emergencia(db, monkeypatch, client, make_user, auth_as):
 async def test_editar_tudo_nao_muda_quem_recebe_nenhum_envio_do_servidor(
     db, monkeypatch, client, make_user, auth_as
 ):
-    """Nesta fase nenhum envio do servidor está migrado: grupos, contatos,
+    """Sem semente no banco, nenhum envio do servidor lê o Cadastro (o não
+    migrado nunca; o migrado cai no legado `sem_semente`): grupos, contatos,
     listas do Mac, regras e emergência não mudam quem recebe nem o liga."""
     c = await montar(db, monkeypatch)
     await _admin(make_user, auth_as)

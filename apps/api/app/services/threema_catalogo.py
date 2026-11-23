@@ -25,8 +25,9 @@ NUNCA muda depois de publicada: o registro de cada envio e o cadastro de
 quem recebe guardam a chave como texto. Renomear exige migração com UPDATE e
 uma entrada em `RENOMEADAS` (o teste congela a lista).
 
-Este módulo não envia nem lê o banco: é só dado. Nesta fase (C1a/C1b) nenhum
-envio está `migrado` — todos seguem a configuração de hoje.
+Este módulo não envia nem lê o banco: é só dado. Cada fatia (F1 a F4) liga
+`migrado=True` nos envios cujo ponto passou a ler o Cadastro, no mesmo commit
+que troca o ponto; os demais seguem a configuração de hoje.
 """
 
 from __future__ import annotations
@@ -291,6 +292,7 @@ def _servidor() -> list[EnvioDef]:
             "manter.",
             "evento", "na leitura do rastreio (:05/:20/:35/:50, webhook, botão ⟳)", "servidor",
             "logistica", L(envs=("threema_recipients",), grupo=G_AVISOS_GERAIS), fatia="F1",
+            migrado=True,
         ),
         E(
             K.LOGISTICA_VIGIA_AUTOMACAO, "Logística", None, "Automação parada",
@@ -298,6 +300,7 @@ def _servidor() -> list[EnvioDef]:
             "enquanto estiver parada (sem dedupe no Threema).",
             "evento", "conferido às :13 e :43", "servidor", "logistica",
             L(envs=("nf_sem_estoque_threema_recipients",), grupo=G_ESTOQUE_NF), fatia="F1",
+            migrado=True,
         ),
         E(
             K.LOGISTICA_LOJA_MUDA, "Logística", None, "Loja sem responder sobre o envio",
@@ -305,6 +308,7 @@ def _servidor() -> list[EnvioDef]:
             "conferências seguidas sem resposta). Aviso técnico.",
             "evento", "no 30º minuto seguido sem resposta", "servidor", "logistica",
             L(envs=("shipment_muda_threema_recipients", "threema_recipients")), fatia="F1",
+            migrado=True,
         ),
         # ── Devoluções ─────────────────────────────────────────────────────
         E(
@@ -313,14 +317,14 @@ def _servidor() -> list[EnvioDef]:
             "O pacote que volta do comprador teve ocorrência grave no rastreio. Sai pelo "
             "mesmo remetente dos Correios da Logística.",
             "evento", "no rastreio das devoluções (:10/:40)", "servidor", "logistica",
-            L(envs=("threema_recipients",), grupo=G_AVISOS_GERAIS), fatia="F1",
+            L(envs=("threema_recipients",), grupo=G_AVISOS_GERAIS), fatia="F1", migrado=True,
         ),
         E(
             K.DEVOLUCOES_PRAZO_CONTESTACAO, "Devoluções", None, "Prazo de contestação",
             "Devolução com menos de 24 h para contestar na plataforma.",
             "evento", "conferido às :20 e :50", "servidor", "devolucoes",
             L(envs=("threema_recipients",), grupo=G_AVISOS_GERAIS), ao_desligar="acumula",
-            fatia="F1",
+            fatia="F1", migrado=True,
         ),
         E(
             K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, "Devoluções", None, "Prazo de resposta da loja",
@@ -344,7 +348,10 @@ def _servidor() -> list[EnvioDef]:
             "servidor. Parado: nenhum executor puxa o comando (quem entrega é o Mac, "
             "item 53).",
             "horario", "07:00 (comando para o executor)", "servidor", "devolucoes",
-            L(usuario_nome="thatcher"), ao_desligar="acumula", fatia="F1",
+            # Desligado, o resumo do dia se perde: o comando já foi marcado como
+            # feito quando o resultado chega (logistica_robo.registrar_resultado)
+            # e o do dia seguinte só lê as últimas 24 h.
+            L(usuario_nome="thatcher"), ao_desligar="descarta", fatia="F1", migrado=True,
         ),
         # ── Chamados ───────────────────────────────────────────────────────
         E(

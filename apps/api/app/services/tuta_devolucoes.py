@@ -17,7 +17,9 @@ uma mudança de uma linha no Python, sem mexer no robô nem reiniciar o executor
 
 Ciclo: cron 10:00 UTC (07:00 BRT) → `enfileirar` grava o comando `pending` →
 executor puxa no lease → lê a caixa → `registrar_resultado` chama
-`entregar_resultado`, que manda no Threema do thatcher.
+`entregar_resultado`, que manda no Threema de quem está no envio
+"Códigos de devolução do Tuta (servidor)" em Cadastros › Envios Threema
+(tarefa 16, F1; a semente copiou o Threema do usuário "thatcher").
 """
 
 from __future__ import annotations
@@ -32,17 +34,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import LogisticaRoboComando
-from app.models.user import User
-from app.services import threema, threema_registro
+from app.services import threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
 ACAO = "tuta_devolucoes"
-
-# Quem recebe o resumo. É o nome do usuário no DaVinci; o ID do Threema sai da
-# ficha dele, então trocar de pessoa é mudar o cadastro, não o código.
-DESTINATARIO = "thatcher"
 
 # O que conta como e-mail de devolução. Proposital ser largo: é melhor o
 # thatcher receber um e-mail a mais no primeiro dia do que perder um código.
@@ -134,26 +131,20 @@ def montar_mensagem(result: str | None) -> str:
 
 
 async def entregar_resultado(session: AsyncSession, result: str | None) -> dict[str, Any]:
-    """Manda o resumo no Threema do destinatário. Best-effort: falha de envio
-    não derruba o registro do comando."""
-    user = (
-        await session.execute(
-            select(User)
-            .where(func.lower(User.name) == DESTINATARIO)
-            .where(User.threema.is_not(None))
-        )
-    ).scalars().first()
-    destinos = threema.parse_recipients(user.threema if user else None)
-    if not destinos:
-        logger.warning("tuta_devolucoes_sem_destinatario", usuario=DESTINATARIO)
-        return {"enviado": False, "motivo": "destinatario_sem_threema"}
-
+    """Manda o resumo para quem recebe o envio no Cadastro. Best-effort: falha
+    de envio não derruba o registro do comando. Desligado ou ninguém válido =
+    não sai e o resumo do dia se perde (o comando já está feito)."""
     texto = montar_mensagem(result)
     try:
-        with threema_registro.envio(K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR):
-            res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(texto, destinos)
+        res = await threema_envios.enviar(
+            K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR, texto, session=session
+        )
     except Exception as e:  # noqa: BLE001 — Threema fora não pode quebrar o ciclo
         logger.warning("tuta_devolucoes_threema_falhou", err=str(e)[:200])
         return {"enviado": False, "motivo": str(e)[:200]}
-    logger.info("tuta_devolucoes_avisado", destinos=len(destinos))
-    return {"enviado": True, "destinos": len(destinos), "resultado": res}
+    if res.get("motivo"):
+        logger.warning("tuta_devolucoes_sem_destinatario", motivo=res["motivo"])
+        return {"enviado": False, "motivo": res["motivo"]}
+    destinos = len(res["sent"]) + len(res["failed"])
+    logger.info("tuta_devolucoes_avisado", destinos=destinos)
+    return {"enviado": True, "destinos": destinos, "resultado": res}

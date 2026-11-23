@@ -10,7 +10,7 @@ módulo é o NÚCLEO que junta os dois:
   liga/desliga de hoje. É a mesma função na hora do envio, na semente e na
   conferência (testes de paridade: `tests/test_threema_paridade.py`).
 * `resolver(chave)` — quem recebe AGORA. Envio não migrado (`migrado=False`
-  no catálogo — todos, nesta fase) devolve o legado exato, sem ler o banco.
+  no catálogo) devolve o legado exato, sem ler o banco.
   Migrado: o Cadastro é a única fonte (ninguém válido = ninguém, sem cair no
   legado). O legado só volta na emergência (linha `usar_legado` ou
   THREEMA_CADASTRO_ATIVO=false), com o banco fora sem cópia boa recente
@@ -22,9 +22,9 @@ módulo é o NÚCLEO que junta os dois:
   registro `ok=false` e acende o sino dos admins (dedupe diário).
 * `semear`, `conferir`, `sincronizar` — os comandos de cada fatia.
 
-NENHUM ponto de envio chama este núcleo nesta fase (C5): cada fatia (F1–F4)
-troca o seu portão `if not <env>: return` por `resolver(K.X)` no mesmo commit
-que vira `migrado=True`.
+Cada fatia (F1–F4) troca o portão `if not <env>: return` do ponto de envio
+por `enviar(K.X, …)` (ou `resolver(K.X)`) no mesmo commit que vira
+`migrado=True`.
 
 Linha de comando (no container da API):
 

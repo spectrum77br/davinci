@@ -190,29 +190,19 @@ async def _registrar_resposta_da_loja(
         )
 
 
-def _destinos_do_aviso() -> list[str]:
-    """Quem recebe o aviso de loja muda: lista própria (é aviso TÉCNICO de
-    credencial, Eduardo 15/09 — não vai pra lista geral da operação) com a
-    lista geral como reserva pra quem não configurar."""
-    from app.config import get_settings
-    from app.services import threema
-
-    s = get_settings()
-    return threema.parse_recipients(
-        s.shipment_muda_threema_recipients or s.threema_recipients
-    )
-
-
 async def _avisar_threema(texto: str) -> None:
-    """Melhor esforço: aviso não pode derrubar a varredura."""
+    """Melhor esforço: aviso não pode derrubar a varredura.
+
+    Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1). É aviso
+    TÉCNICO de credencial (Eduardo 15/09: não vai pra lista geral da
+    operação); a semente copiou a lista própria do .env, com a geral de
+    reserva. Desligado ou ninguém válido = não sai — e não volta: o aviso
+    só sai no 30º minuto mudo."""
     try:
-        from app.services import threema, threema_registro
+        from app.services import threema_envios
         from app.services.threema_catalogo import K
 
-        destinos = _destinos_do_aviso()
-        if destinos:
-            with threema_registro.envio(K.LOGISTICA_LOJA_MUDA):
-                await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
+        await threema_envios.enviar(K.LOGISTICA_LOJA_MUDA, texto)
     except Exception as e:  # noqa: BLE001
         logger.warning("shipment_check_aviso_falhou", err=str(e)[:200])
 

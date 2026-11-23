@@ -206,12 +206,21 @@ async def test_sino_quebrado_nao_derruba_o_envio(db, monkeypatch):
     assert await _alertas(db) == []
 
 
-# Quem usa o núcleo nesta fase, e com quais funções. Nenhum é ponto de envio:
-# o startup do worker sincroniza o catálogo, a tela de Cadastros › Envios
-# Threema (C6) só LÊ (quem recebe, o legado, do que depende) e a edição (C7)
-# só manda o "[TESTE]" do botão (conferido abaixo).
+# Quem usa o núcleo, e com quais funções. O startup do worker sincroniza o
+# catálogo, a tela de Cadastros › Envios Threema (C6) só LÊ (quem recebe, o
+# legado, do que depende) e a edição (C7) só manda o "[TESTE]" do botão
+# (conferido abaixo). Os PONTOS DE ENVIO entram fatia a fatia, no commit em que
+# o envio vira `migrado=True` (a chave de cada um é conferida na foto das
+# marcas, `test_threema_registro.py`).
 _USOS_DO_NUCLEO = {
-    "worker.py": {"sincronizar"},
+    # sincronizar no startup; enviar: vigia da automação (F1/C8a, item 6)
+    "worker.py": {"sincronizar", "enviar"},
+    # F1/C8a: Correios grave e pacote de devolução (5 e 8), loja muda (7),
+    # prazo de contestação (9) e códigos do Tuta no servidor (12)
+    "services/logistica_track_sync.py": {"enviar"},
+    "services/marketplace_shipment_check.py": {"enviar"},
+    "services/devolucao_prazo.py": {"enviar"},
+    "services/tuta_devolucoes.py": {"enviar"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {
@@ -235,10 +244,10 @@ _USOS_DO_NUCLEO = {
 }
 
 
-def test_nenhum_ponto_de_envio_chama_o_nucleo_nesta_fase():
-    """C5: o núcleo existe, mas nenhum ponto de envio o usa ainda (cada fatia
-    troca o seu portão no commit em que vira `migrado=True`). Só o startup
-    do worker e a tela do Cadastro o chamam, com as funções listadas."""
+def test_quem_chama_o_nucleo_e_com_quais_funcoes():
+    """Só o startup do worker, a tela do Cadastro e os pontos de envio já
+    migrados (cada fatia troca o seu portão no commit em que vira
+    `migrado=True`) chamam o núcleo, com as funções listadas."""
     import re
 
     app = Path(__file__).resolve().parent.parent / "app"

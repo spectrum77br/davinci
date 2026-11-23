@@ -44,7 +44,6 @@ from app.services import (
     logistica_rules,
     logistica_track,
     logistica_track_sync,
-    threema_registro,
 )
 from app.services.devolucao_returns import ReturnInfo, epoch_to_dt
 from app.services.threema_catalogo import K
@@ -727,12 +726,14 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         except Exception as e:  # noqa: BLE001 — extra, não derruba o sync
             logger.warning("devolucao_rastreio_volta_fora_da_aba_falhou", err=str(e)[:300])
 
-    # Pacote de volta apreendido/extraviado: aviso no mesmo canal dos Correios.
+    # Pacote de volta apreendido/extraviado: aviso no mesmo canal dos Correios,
+    # com quem recebe do envio próprio no Cadastro (item 8 da tarefa 16).
     if graves:
-        with threema_registro.envio(K.DEVOLUCOES_PACOTE_VOLTA_GRAVE):
-            await logistica_track_sync.avisar_graves(
-                graves, titulo="Pacote de DEVOLUÇÃO com ocorrência GRAVE"
-            )
+        await logistica_track_sync.avisar_graves(
+            graves,
+            titulo="Pacote de DEVOLUÇÃO com ocorrência GRAVE",
+            chave=K.DEVOLUCOES_PACOTE_VOLTA_GRAVE,
+        )
         logger.warning("devolucao_rastreio_volta_grave", pedidos=[g[0] for g in graves][:20])
 
     # Registra no 17track os códigos novos desta rodada + os que ele disse não

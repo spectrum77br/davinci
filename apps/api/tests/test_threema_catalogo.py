@@ -242,8 +242,43 @@ def test_mac_tem_reserva_do_env_do_mac_e_nenhum_remetente_do_servidor():
     assert CATALOGO[K.DEVOLUCOES_CODIGOS_ML_TUTA].legado.env_mac == "DEVOL_CODIGOS_THREEMA_TO"
 
 
-def test_nada_esta_migrado_nesta_fase():
-    assert [d.chave for d in ENVIOS if d.migrado] == []
+# Os envios que já leem o Cadastro, fatia a fatia (cada commit de fatia
+# acrescenta os seus aqui, junto com o `migrado=True` e os testes por ponto).
+MIGRADOS = [
+    # F1/C8a: Logística e Devoluções do .env (itens 5, 6, 7, 8, 9 e 12)
+    K.LOGISTICA_CORREIOS_GRAVE,
+    K.LOGISTICA_VIGIA_AUTOMACAO,
+    K.LOGISTICA_LOJA_MUDA,
+    K.DEVOLUCOES_PACOTE_VOLTA_GRAVE,
+    K.DEVOLUCOES_PRAZO_CONTESTACAO,
+    K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR,
+]
+
+
+def test_so_os_envios_das_fatias_publicadas_estao_migrados():
+    assert [d.chave for d in ENVIOS if d.migrado] == MIGRADOS
+    for chave in MIGRADOS:
+        d = CATALOGO[chave]
+        assert d.onde_roda == "servidor" and d.gerenciado, chave
+
+
+def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
+    """O que acontece com os avisos enquanto o envio está desligado é o que
+    o ponto JÁ faz (o Cadastro não muda o carimbo de ninguém): cada um tem o
+    seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`."""
+    assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
+        # o carimbo da ocorrência grave é gravado antes do aviso
+        K.LOGISTICA_CORREIOS_GRAVE: "descarta",
+        # sem carimbo: repete a cada rodada enquanto a automação estiver parada
+        K.LOGISTICA_VIGIA_AUTOMACAO: "descarta",
+        # só no 30º minuto mudo
+        K.LOGISTICA_LOJA_MUDA: "descarta",
+        K.DEVOLUCOES_PACOTE_VOLTA_GRAVE: "descarta",
+        # `aviso_prazo_at` só é carimbado quando o aviso sai
+        K.DEVOLUCOES_PRAZO_CONTESTACAO: "acumula",
+        # o comando do dia já está feito quando o resultado chega
+        K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR: "descarta",
+    }
 
 
 def test_fontes_do_legado_existem():

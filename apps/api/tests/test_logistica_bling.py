@@ -1620,8 +1620,14 @@ async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user
         alertas.append(kw)
         return None
 
-    monkeypatch.setattr(w.threema, "ThreemaClient", _Th)
-    monkeypatch.setattr(w.threema, "parse_recipients", lambda s: ["ABCDEFGH"])
+    # O aviso sai pelo núcleo do Cadastro (tarefa 16, F1); sem semente no banco
+    # de teste vale a configuração antiga (o .env).
+    from app.config import get_settings
+    from app.services import threema, threema_envios
+
+    threema_envios.limpar_cache()
+    monkeypatch.setattr(threema, "ThreemaClient", _Th)
+    monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", "ABCDEFGH")
     monkeypatch.setattr(w, "emit_alert", _emit)
 
     ctx = {"redis": _FakeRedis()}

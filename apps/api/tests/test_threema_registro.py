@@ -9,7 +9,9 @@ estiver ativa. Aqui:
   marcas aninhadas e sem marca;
 * o teste ESTÁTICO: todo `send_to_all(` do servidor está dentro de uma marca
   (ou numa função de envio marcada por TODOS os que a chamam), a chave de cada
-  marca existe no catálogo e todo envio gerenciado do servidor tem marca;
+  marca existe no catálogo e todo envio gerenciado do servidor tem marca —
+  ou, se já foi migrado (fatias F1 a F4), sai SÓ pelo núcleo do Cadastro
+  (`threema_envios.enviar(K.X, …)`, que marca por dentro);
 * a migration 0505 cria a tabela igual ao modelo e desce;
 * a limpeza de 180 dias.
 """
@@ -357,18 +359,29 @@ def test_registro_fica_fora_do_historico_de_alteracoes():
 # Funções que chamam `send_to_all` SEM marca própria, porque servem a mais de
 # um envio: TODA chamada delas tem de estar dentro de uma marca.
 _FUNCOES_DE_ENVIO = {
-    ("services/logistica_track_sync.py", "avisar_graves"),
     ("services/nf_auto_enfileirar.py", "_enviar_aviso"),
     ("services/conferencia_shopee/threema_aviso.py", "_enviar_um_a_um"),
 }
-# Marca cuja chave não é uma constante `K.X` escrita ali: (arquivo, expressão).
-# Cada uma tem o seu teste de cobertura logo abaixo.
+# Funções que servem a mais de um envio JÁ MIGRADO: recebem a chave (`chave=`,
+# com padrão) e mandam pelo núcleo do Cadastro (`threema_envios.enviar(chave,
+# …)`). Cada CHAMADA delas declara o envio: a chave passada ou o padrão (o
+# valor aqui, conferido contra o código).
+_FUNCOES_COM_CHAVE = {
+    # F1/C8a: Correios grave (5, o padrão) e pacote de devolução (8)
+    ("services/logistica_track_sync.py", "avisar_graves"): "K.LOGISTICA_CORREIOS_GRAVE",
+}
+# Marca (ou envio pelo Cadastro) cuja chave não é uma constante `K.X` escrita
+# ali: (arquivo, expressão). Cada uma tem o seu teste de cobertura logo abaixo.
 _CHAVES_DINAMICAS = {
     ("routers/informar.py", "_CHAVE_ENVIO[contexto]"),
     ("services/ouvidoria.py", "chave_ouvidoria(robo_chave)"),
     ("services/conferencia_shopee/threema_aviso.py", "chave"),
     # O núcleo do Cadastro (C5): `enviar(chave, …)` valida a chave no catálogo.
     ("services/threema_envios.py", "chave"),
+    # Dentro das funções com chave: a de quem chama (foto `_CHAMADAS_COM_CHAVE`).
+    ("services/logistica_track_sync.py", "chave"),
+    # O botão "Mandar teste" da tela (C7): a chave da rota, que o núcleo valida.
+    ("services/threema_envios_edicao.py", "d.chave"),
 }
 _FORA = {"services/threema.py", "services/threema_registro.py"}
 
@@ -399,6 +412,47 @@ def _e_marca(expr: ast.AST) -> bool:
         and isinstance(f.value, ast.Name)
         and f.value.id == "threema_registro"
     )
+
+
+def _e_envio_do_cadastro(expr: ast.AST) -> bool:
+    """`threema_envios.enviar(K.X, …)`: o ponto manda pelo núcleo do Cadastro
+    (que põe a marca do registro por dentro)."""
+    if not isinstance(expr, ast.Call):
+        return False
+    f = expr.func
+    return (
+        isinstance(f, ast.Attribute)
+        and f.attr == "enviar"
+        and isinstance(f.value, ast.Name)
+        and f.value.id == "threema_envios"
+    )
+
+
+def _nome_chamado(no: ast.Call) -> str | None:
+    f = no.func
+    return f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+
+
+def _declaracoes():
+    """(arquivo, nó, tipo, chave) de cada lugar do servidor que diz de qual
+    envio é a mensagem: a marca do registro (`marca`), o envio pelo núcleo do
+    Cadastro (`cadastro`) e a chamada de uma função com chave (`funcao`, com o
+    padrão quando quem chama não passa)."""
+    padroes = {fn: padrao for (_rel, fn), padrao in _FUNCOES_COM_CHAVE.items()}
+    for rel, arvore in _arvores().items():
+        for no in ast.walk(arvore):
+            if _e_marca(no):
+                arg = no.args[0] if no.args else None
+                yield rel, no, "marca", ast.unparse(arg) if arg is not None else ""
+            elif _e_envio_do_cadastro(no):
+                arg = no.args[0] if no.args else None
+                kw = {k.arg: k.value for k in no.keywords}
+                arg = arg if arg is not None else kw.get("chave")
+                yield rel, no, "cadastro", ast.unparse(arg) if arg is not None else ""
+            elif isinstance(no, ast.Call) and _nome_chamado(no) in padroes:
+                kw = {k.arg: k.value for k in no.keywords}
+                chave = ast.unparse(kw["chave"]) if "chave" in kw else padroes[_nome_chamado(no)]
+                yield rel, no, "funcao", chave
 
 
 def _marcada(no: ast.AST, pais: dict) -> bool:
@@ -480,31 +534,64 @@ def test_quem_cria_um_threema_client_envia_por_send_to_all():
 
 
 def _chaves_das_marcas() -> tuple[set[str], list[str]]:
+    """As chaves que o servidor declara (marca, envio pelo Cadastro ou
+    chamada de função com chave) e as declarações com chave errada."""
     usadas: set[str] = set()
     erradas: list[str] = []
     nomes = constantes()
-    for rel, arvore in _arvores().items():
-        for no in ast.walk(arvore):
-            if not _e_marca(no):
-                continue
-            arg = no.args[0] if no.args else None
-            if (
-                isinstance(arg, ast.Attribute)
-                and isinstance(arg.value, ast.Name)
-                and arg.value.id == "K"
-            ):
-                if arg.attr in nomes:
-                    usadas.add(nomes[arg.attr])
-                else:
-                    erradas.append(f"{rel}:{no.lineno} K.{arg.attr}")
-            elif (rel, ast.unparse(arg) if arg is not None else "") not in _CHAVES_DINAMICAS:
-                erradas.append(f"{rel}:{no.lineno} {ast.unparse(arg) if arg else '(vazio)'}")
+    for rel, no, _tipo, chave in _declaracoes():
+        if chave.startswith("K."):
+            if chave[2:] in nomes:
+                usadas.add(nomes[chave[2:]])
+            else:
+                erradas.append(f"{rel}:{no.lineno} {chave}")
+        elif (rel, chave) not in _CHAVES_DINAMICAS:
+            erradas.append(f"{rel}:{no.lineno} {chave or '(vazio)'}")
     return usadas, erradas
 
 
 def test_chave_de_toda_marca_existe_no_catalogo():
     _usadas, erradas = _chaves_das_marcas()
     assert erradas == []
+
+
+def test_funcao_com_chave_tem_o_padrao_declarado_e_manda_pelo_cadastro():
+    arvores = _arvores()
+    for (rel, fn), padrao in _FUNCOES_COM_CHAVE.items():
+        (defn,) = [
+            n
+            for n in ast.walk(arvores[rel])
+            if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef) and n.name == fn
+        ]
+        nomes_kw = [a.arg for a in defn.args.kwonlyargs]
+        kwonly = dict(zip(nomes_kw, defn.args.kw_defaults, strict=True))
+        assert "chave" in kwonly and ast.unparse(kwonly["chave"]) == padrao, (rel, fn)
+        envios = [n for n in ast.walk(defn) if _e_envio_do_cadastro(n)]
+        assert [ast.unparse(n.args[0]) for n in envios] == ["chave"], (rel, fn)
+        assert not any(True for _ in _chamadas(defn, "send_to_all")), (rel, fn)
+        assert not any(_e_marca(n) for n in ast.walk(defn)), (rel, fn)
+
+
+def test_envio_migrado_so_sai_pelo_cadastro():
+    """Envio com `migrado=True` (o ponto lê o Cadastro) não pode ter marca
+    solta com `send_to_all` de lista própria: um ponto que voltasse a montar
+    a lista pelo .env mandaria para quem saiu da lista. E só envio migrado
+    passa pelo `threema_envios.enviar` com chave fixa: o resto troca o portão
+    no commit da sua fatia, junto com o `migrado=True`."""
+    nomes = constantes()
+    migrados = {d.chave for d in CATALOGO.values() if d.migrado}
+    pelo_cadastro: set[str] = set()
+    soltas = []
+    for rel, no, tipo, chave in _declaracoes():
+        if not chave.startswith("K."):
+            continue
+        valor = nomes[chave[2:]]
+        if tipo == "marca" and valor in migrados:
+            soltas.append(f"{rel}:{no.lineno} {chave}")
+        elif tipo in ("cadastro", "funcao"):
+            pelo_cadastro.add(valor)
+    assert soltas == []
+    assert pelo_cadastro == migrados
 
 
 def test_chaves_dinamicas_cobrem_o_que_existe():
@@ -551,7 +638,9 @@ def test_todo_envio_gerenciado_do_servidor_tem_marca():
 # toda chave existe e todo envio é usado, mas não que cada ponto usa a chave
 # CERTA — trocar as duas marcas da Margem (25 × 26), ou as do item 1 e do 43,
 # passaria calado e a linha de base por chave sairia trocada. Mudou um ponto
-# de envio de propósito? Atualize aqui junto.
+# de envio de propósito? Atualize aqui junto. O ponto que MIGROU sai daqui e
+# vai para `_PELO_CADASTRO` (e, se manda por uma função com chave, para
+# `_CHAMADAS_COM_CHAVE`).
 _MARCAS = {
     # item 1: motor (5 min), botão da regra, botão da linha do pedido
     ("services/logistica_bling.py", "enviar_threema_em_lote", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
@@ -560,17 +649,7 @@ _MARCAS = {
     # itens 2, 3, 11, 17 e 28 (o mapa contexto → chave tem teste próprio)
     ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
     ("services/logistica_amazon_avisos.py", "run", "K.LOGISTICA_AMAZON_PRAZOS"): 1,  # 4
-    # 5: cron, botão ⟳ e webhook do 17track (pelo avisar_graves)
-    ("services/logistica_track_sync.py", "_aplicar_localizacoes", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
-    ("services/logistica_track_sync.py", "atualizar_linha", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
-    ("routers/logistica_track.py", "receive_17track_push", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
-    ("worker.py", "logistica_vigia", "K.LOGISTICA_VIGIA_AUTOMACAO"): 1,  # 6
-    ("services/marketplace_shipment_check.py", "_avisar_threema", "K.LOGISTICA_LOJA_MUDA"): 1,
-    # 8: o mesmo avisar_graves, chamado pelo rastreio das devoluções
-    ("services/devolucao_rastreio_sync.py", "run", "K.DEVOLUCOES_PACOTE_VOLTA_GRAVE"): 1,
-    ("services/devolucao_prazo.py", "avisar_prazos", "K.DEVOLUCOES_PRAZO_CONTESTACAO"): 1,  # 9
     ("services/devolucao_acao_avisos.py", "run", "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA"): 1,  # 10
-    ("services/tuta_devolucoes.py", "entregar_resultado", "K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR"): 1,
     ("services/chamados_tiktok_reembolso.py", "_avisar", "K.CHAMADOS_TIKTOK_SO_REEMBOLSO"): 1,
     ("services/chamados_pendencias.py", "varrer", "K.CHAMADOS_ABERTURAS_PRESAS"): 1,  # 14
     ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
@@ -632,18 +711,45 @@ _MARCAS = {
 }
 
 
+# Cada envio pelo núcleo do Cadastro, (arquivo, função, chave) → quantas: os
+# pontos já migrados (fatia a fatia) e o botão "Mandar teste" da tela.
+_PELO_CADASTRO = {
+    # F1/C8a
+    ("worker.py", "logistica_vigia", "K.LOGISTICA_VIGIA_AUTOMACAO"): 1,  # 6
+    ("services/logistica_track_sync.py", "avisar_graves", "chave"): 1,  # 5 e 8
+    ("services/marketplace_shipment_check.py", "_avisar_threema", "K.LOGISTICA_LOJA_MUDA"): 1,  # 7
+    ("services/devolucao_prazo.py", "avisar_prazos", "K.DEVOLUCOES_PRAZO_CONTESTACAO"): 1,  # 9
+    ("services/tuta_devolucoes.py", "entregar_resultado", "K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR"): 1,
+    # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
+    ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
+}
+# Cada chamada de uma função com chave (`_FUNCOES_COM_CHAVE`), com a chave
+# que ela leva (a passada ou o padrão).
+_CHAMADAS_COM_CHAVE = {
+    # 5: cron, botão ⟳ e webhook do 17track
+    ("services/logistica_track_sync.py", "_aplicar_localizacoes", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
+    ("services/logistica_track_sync.py", "atualizar_linha", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
+    ("routers/logistica_track.py", "receive_17track_push", "K.LOGISTICA_CORREIOS_GRAVE"): 1,
+    # 8: o mesmo avisar_graves, chamado pelo rastreio das devoluções
+    ("services/devolucao_rastreio_sync.py", "run", "K.DEVOLUCOES_PACOTE_VOLTA_GRAVE"): 1,
+}
+
+
 def test_cada_marca_usa_a_chave_certa():
-    achadas: dict[tuple[str, str | None, str], int] = {}
-    for rel, arvore in _arvores().items():
-        pais = _pais_de(rel)
-        for no in ast.walk(arvore):
-            if _e_marca(no):
-                arg = ast.unparse(no.args[0]) if no.args else ""
-                k = (rel, _funcao(no, pais), arg)
-                achadas[k] = achadas.get(k, 0) + 1
-    faltam = {k: v for k, v in _MARCAS.items() if achadas.get(k) != v}
-    sobram = {k: v for k, v in achadas.items() if _MARCAS.get(k) != v}
-    assert (faltam, sobram) == ({}, {})
+    achadas: dict[str, dict[tuple[str, str | None, str], int]] = {}
+    for rel, no, tipo, chave in _declaracoes():
+        k = (rel, _funcao(no, _pais_de(rel)), chave)
+        por_tipo = achadas.setdefault(tipo, {})
+        por_tipo[k] = por_tipo.get(k, 0) + 1
+    for tipo, foto in (
+        ("marca", _MARCAS),
+        ("cadastro", _PELO_CADASTRO),
+        ("funcao", _CHAMADAS_COM_CHAVE),
+    ):
+        vistas = achadas.get(tipo, {})
+        faltam = {k: v for k, v in foto.items() if vistas.get(k) != v}
+        sobram = {k: v for k, v in vistas.items() if foto.get(k) != v}
+        assert (faltam, sobram) == ({}, {}), tipo
 
 
 # ─────────────────────────────────────────────────────────── migration 0504

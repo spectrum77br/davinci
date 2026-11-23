@@ -86,25 +86,26 @@ async def test_loja_que_responde_nao_gera_ruido(_limpa_estado):
     assert svc._lojas_mudas == {}
 
 
-def test_aviso_vai_pra_lista_propria_quando_configurada(monkeypatch):
+async def test_aviso_vai_pra_lista_propria_quando_configurada(db, monkeypatch):
     """Eduardo (15/09): o aviso de "loja parou de responder" é técnico — ele
     quer receber sozinho, sem ir pra lista geral da operação. Com a lista
     própria preenchida, só ela recebe; vazia, cai na geral (nada muda pra
-    quem não configurar)."""
-    from dataclasses import dataclass
+    quem não configurar).
 
-    from app import config as config_mod
+    Desde a tarefa 16 (F1) quem recebe vem de Cadastros › Envios Threema; esta
+    regra continua valendo na configuração antiga (o `legado`), que é de onde
+    a semente copia a lista e a reserva de emergência."""
+    from app.config import get_settings
+    from app.services import threema_envios
+    from app.services.threema_catalogo import K
 
-    @dataclass
-    class _Cfg:
-        threema_recipients: str = "AAAAAAAA,BBBBBBBB"
-        shipment_muda_threema_recipients: str = ""
+    s = get_settings()
+    monkeypatch.setattr(s, "threema_recipients", "TSTA0001,TSTB0002")
 
-    cfg = _Cfg()
-    monkeypatch.setattr(config_mod, "get_settings", lambda: cfg)
+    monkeypatch.setattr(s, "shipment_muda_threema_recipients", "TSTC0003")
+    leg = await threema_envios.legado(K.LOGISTICA_LOJA_MUDA, session=db)
+    assert leg.ids == ("TSTC0003",)
 
-    cfg.shipment_muda_threema_recipients = "CDSA84BZ"
-    assert svc._destinos_do_aviso() == ["CDSA84BZ"]
-
-    cfg.shipment_muda_threema_recipients = ""
-    assert svc._destinos_do_aviso() == ["AAAAAAAA", "BBBBBBBB"]
+    monkeypatch.setattr(s, "shipment_muda_threema_recipients", "")
+    leg = await threema_envios.legado(K.LOGISTICA_LOJA_MUDA, session=db)
+    assert leg.ids == ("TSTA0001", "TSTB0002")

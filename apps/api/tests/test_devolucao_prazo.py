@@ -279,10 +279,17 @@ class _FakeThreema:
 
 @pytest.fixture
 def threema(monkeypatch):
+    # O aviso sai pelo núcleo do Cadastro (threema_envios, tarefa 16): sem
+    # semente no banco de teste, vale a configuração antiga (o .env).
+    from app.config import get_settings
+    from app.services import threema as threema_mod
+    from app.services import threema_envios
+
+    threema_envios.limpar_cache()
     _FakeThreema.enviados = []
     _FakeThreema.falhar = False
-    monkeypatch.setattr(svc.threema, "ThreemaClient", _FakeThreema)
-    monkeypatch.setattr(svc.threema, "parse_recipients", lambda raw: ["ABCDEFGH"])
+    monkeypatch.setattr(threema_mod, "ThreemaClient", _FakeThreema)
+    monkeypatch.setattr(get_settings(), "threema_recipients", "ABCDEFGH")
     return _FakeThreema
 
 

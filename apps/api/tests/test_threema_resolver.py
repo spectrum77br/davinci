@@ -1,6 +1,6 @@
 """`threema_envios.resolver` (tarefa 16, C5): quem recebe AGORA.
 
-* não migrado (todos, nesta fase) = o legado exato, sem ler o Cadastro;
+* não migrado = o legado exato, sem ler o Cadastro;
 * migrado: o Cadastro é a fonte; o legado só volta na emergência (linha ou
   env), com o banco fora sem cópia boa recente, ou sem semente;
 * teto de 2 s, sessão própria (a de quem chama não fica envenenada) e a cópia
@@ -48,6 +48,15 @@ def migrar(monkeypatch, *chaves: str) -> None:
     for chave in chaves:
         monkeypatch.setitem(
             threema_catalogo.CATALOGO, chave, replace(CATALOGO[chave], migrado=True)
+        )
+
+
+def desmigrar(monkeypatch, *chaves: str) -> None:
+    """O código de ANTES da fatia (a semente roda com ele, e os testes do
+    envio não migrado não dependem de qual fatia já foi publicada)."""
+    for chave in chaves:
+        monkeypatch.setitem(
+            threema_catalogo.CATALOGO, chave, replace(CATALOGO[chave], migrado=False)
         )
 
 
@@ -122,8 +131,7 @@ async def test_nao_migrado_e_o_legado_exato_sem_ler_o_cadastro(db, monkeypatch):
     db.add(roma)
     await db.commit()
     await semeado(db, K.LOGISTICA_CORREIOS_GRAVE, roma)
-    for d in threema_catalogo.ENVIOS:
-        assert not d.migrado, d.chave  # nesta fase NENHUM envio está migrado
+    desmigrar(monkeypatch, K.LOGISTICA_CORREIOS_GRAVE)  # o código antes da F1
     r = await threema_envios.resolver(K.LOGISTICA_CORREIOS_GRAVE, session=db)
     assert (r.via, r.motivo, r.ativo) == ("legado", threema_envios.NAO_MIGRADO, True)
     assert r.ids == ("TSTL0001", "TSTM0005")

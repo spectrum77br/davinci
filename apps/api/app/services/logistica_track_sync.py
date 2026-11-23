@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica
 from app.redis_client import redis
-from app.services import logistica_rules, logistica_track, threema_registro
+from app.services import logistica_rules, logistica_track, threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
@@ -362,22 +362,21 @@ async def avisar_graves(
     graves: list[tuple[str, str, str]],
     *,
     titulo: str = "Rastreio dos Correios com ocorrência GRAVE",
+    chave: str = K.LOGISTICA_CORREIOS_GRAVE,
 ) -> None:
     """Melhor esforço: aviso não pode derrubar a varredura. `titulo` muda pro
     pacote de devolução (devolucao_rastreio_sync), que usa o mesmo canal.
 
-    Registro (tarefa 16): quem chama marca o envio — Correios grave
-    (`K.LOGISTICA_CORREIOS_GRAVE`) ou pacote de devolução
-    (`K.DEVOLUCOES_PACOTE_VOLTA_GRAVE`) — com `threema_registro.envio`."""
+    Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1) pela `chave`:
+    Correios grave (`K.LOGISTICA_CORREIOS_GRAVE`, o padrão: rastreio, webhook e
+    botão ⟳) ou pacote de devolução (`K.DEVOLUCOES_PACOTE_VOLTA_GRAVE`, que o
+    rastreio das devoluções passa). Desligado ou ninguém válido = não sai (o
+    carimbo da ocorrência já foi gravado: o aviso se perde, como o catálogo
+    declara)."""
     linhas = [f"• Pedido {p} ({conta}) — {loc}" for p, conta, loc in graves[:15]]
     texto = f"⚠️ {titulo} ({len(graves)} pedido(s)):\n" + "\n".join(linhas)
     try:
-        from app.config import get_settings
-        from app.services import threema
-
-        destinos = threema.parse_recipients(get_settings().threema_recipients)
-        if destinos:
-            await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
+        await threema_envios.enviar(chave, texto)
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_track_aviso_grave_falhou", err=str(e)[:200])
 
@@ -495,10 +494,9 @@ async def atualizar_linha(
             row.rastreio_lido_em = agora2
             await session.commit()
             if row.problema_correios_em is not None and row.problema_correios_em != grave_antes:
-                with threema_registro.envio(K.LOGISTICA_CORREIOS_GRAVE):
-                    await avisar_graves(
-                        [(row.pedido_bling or "?", row.conta or "?", row.localizacao or "")]
-                    )
+                await avisar_graves(
+                    [(row.pedido_bling or "?", row.conta or "?", row.localizacao or "")]
+                )
             logger.info(
                 "logistica_track_botao_atualizado",
                 pedido=row.pedido_bling,
@@ -560,8 +558,7 @@ async def _aplicar_localizacoes(
     if atualizados or carimbou_entrega:
         await session.commit()
     if graves:
-        with threema_registro.envio(K.LOGISTICA_CORREIOS_GRAVE):
-            await avisar_graves(graves)
+        await avisar_graves(graves)
     return atualizados
 
 

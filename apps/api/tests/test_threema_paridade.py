@@ -6,12 +6,17 @@ gerenciados — quem recebe e se está ligado.
 (`ouvidoria.destinatarios`, `_recipients_margem_auto`, `_destinatarios` do
 TikTok, `recipients_auto` da Amazon e das Devoluções, `denuncia_robo_aviso.
 destinatarios` com a reserva `chamados_ia`, `_destinatarios_sem_estoque`,
-`avisar_graves`, `entregar_resultado` do Tuta, o `send_to_all` que cai no
-THREEMA_RECIPIENTS...). Onde a lista é montada no meio de uma função maior,
-a expressão é copiada aqui E um teste confere que ela continua no código —
-se alguém mudar o ponto de envio, este arquivo reprova. Os botões que
-montam a lista dentro da rota (os 5 Informar e o botão da regra do item 1)
-são conferidos também pela ROTA de verdade, com o envio capturado.
+o `send_to_all` que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
+meio de uma função maior, a expressão é copiada aqui E um teste confere que
+ela continua no código — se alguém mudar o ponto de envio, este arquivo
+reprova. Os botões que montam a lista dentro da rota (os 5 Informar e o
+botão da regra do item 1) são conferidos também pela ROTA de verdade, com o
+envio capturado.
+
+Envio MIGRADO (o ponto passou a ler o Cadastro): a montagem antiga saiu do
+código e fica aqui como CÓPIA CONGELADA do ponto antes do commit da fatia
+(`_ANTES_DA_F1`). É ela que o `legado` tem de continuar reproduzindo — é a
+reserva de emergência e a fonte da semente.
 
 Três cenários (`threema_cadastro_apoio`): o "cheio", parecido com produção,
 o "reservas", com as fontes principais vazias, e o "vazias", com toda linha
@@ -25,9 +30,10 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from sqlalchemy import func, select
 
 from app.config import get_settings
-from app.models import OuvidoriaRobo, UserRole
+from app.models import OuvidoriaRobo, User, UserRole
 from app.routers import informar as informar_router
 from app.services import (
     chamados_ia_aviso,
@@ -38,14 +44,11 @@ from app.services import (
     denuncia_robo_aviso,
     devolucao_acao_avisos,
     logistica_amazon_avisos,
-    logistica_track_sync,
     margem_auto_hold,
-    marketplace_shipment_check,
     nf_auto_enfileirar,
     ouvidoria,
     threema,
     threema_envios,
-    tuta_devolucoes,
 )
 from app.services.conferencia_shopee import threema_aviso
 from app.services.threema_catalogo import CATALOGO, ENVIOS, K, chave_ouvidoria
@@ -69,19 +72,39 @@ class _Captura:
         return {"sent": list(destinos or []), "failed": []}
 
 
-_CLIENTE_REAL = threema.ThreemaClient
+async def _tuta_antes_da_f1(db) -> list[str]:
+    """tuta_devolucoes.entregar_resultado antes da F1/C8a: o usuário
+    "thatcher" pelo nome, com Threema."""
+    user = (
+        (
+            await db.execute(
+                select(User)
+                .where(func.lower(User.name) == "thatcher")
+                .where(User.threema.is_not(None))
+            )
+        )
+        .scalars()
+        .first()
+    )
+    return P(user.threema if user else None)
 
 
-async def _pela_captura(monkeypatch, corrotina) -> list[str]:
-    """Roda o ponto de envio de verdade com o client falso e devolve para
-    quem ele mandaria (vazio = nem chamou o `send_to_all`)."""
-    _Captura.chamadas = []
-    monkeypatch.setattr(threema, "ThreemaClient", _Captura)
-    try:
-        await corrotina
-    finally:
-        monkeypatch.setattr(threema, "ThreemaClient", _CLIENTE_REAL)
-    return _Captura.chamadas[0] if _Captura.chamadas else []
+# Cópias congeladas dos pontos que a F1/C8a migrou (o código deles já não
+# monta a lista: lê o Cadastro).
+_ANTES_DA_F1 = {
+    # logistica_track_sync.avisar_graves (o mesmo para o pacote de devolução)
+    K.LOGISTICA_CORREIOS_GRAVE: lambda db: P(get_settings().threema_recipients),
+    K.DEVOLUCOES_PACOTE_VOLTA_GRAVE: lambda db: P(get_settings().threema_recipients),
+    # worker.logistica_vigia
+    K.LOGISTICA_VIGIA_AUTOMACAO: lambda db: P(get_settings().nf_sem_estoque_threema_recipients),
+    # marketplace_shipment_check._destinos_do_aviso
+    K.LOGISTICA_LOJA_MUDA: lambda db: P(
+        get_settings().shipment_muda_threema_recipients or get_settings().threema_recipients
+    ),
+    # devolucao_prazo.avisar_prazos
+    K.DEVOLUCOES_PRAZO_CONTESTACAO: lambda db: P(get_settings().threema_recipients),
+    K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR: _tuta_antes_da_f1,
+}
 
 
 async def _informar(db, ctx: str) -> list[str]:
@@ -93,6 +116,9 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
     """Quem recebe HOJE o envio `chave`, pelo código de hoje."""
     s = get_settings()
     robo = chave.removeprefix("ouvidoria.")
+    if chave in _ANTES_DA_F1:
+        r = _ANTES_DA_F1[chave](db)
+        return list(await r if hasattr(r, "__await__") else r)
     if chave.startswith("ouvidoria."):
         # ouvidoria.avisar_pendentes → ouvidoria.destinatarios(robo, chave)
         return ouvidoria.destinatarios(await db.get(OuvidoriaRobo, robo), robo)[0]
@@ -103,23 +129,8 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         K.LOGISTICA_INFORMAR: lambda: _informar(db, "logistica"),
         K.LOGISTICA_AMAZON_INFORMAR: lambda: _informar(db, "logistica_amazon"),
         K.LOGISTICA_AMAZON_PRAZOS: lambda: logistica_amazon_avisos.recipients_auto(db),
-        K.LOGISTICA_CORREIOS_GRAVE: lambda: _pela_captura(
-            monkeypatch, logistica_track_sync.avisar_graves([("1", "conta", "Extraviado")])
-        ),
-        K.LOGISTICA_VIGIA_AUTOMACAO: lambda: P(get_settings().nf_sem_estoque_threema_recipients),
-        K.LOGISTICA_LOJA_MUDA: marketplace_shipment_check._destinos_do_aviso,
-        K.DEVOLUCOES_PACOTE_VOLTA_GRAVE: lambda: _pela_captura(
-            monkeypatch,
-            logistica_track_sync.avisar_graves(
-                [("1", "conta", "Extraviado")], titulo="Pacote de devolução"
-            ),
-        ),
-        K.DEVOLUCOES_PRAZO_CONTESTACAO: lambda: P(get_settings().threema_recipients),
         K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: lambda: devolucao_acao_avisos.recipients_auto(db),
         K.DEVOLUCOES_INFORMAR: lambda: _informar(db, "devolucoes"),
-        K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR: lambda: _pela_captura(
-            monkeypatch, tuta_devolucoes.entregar_resultado(db, None)
-        ),
         K.CHAMADOS_TIKTOK_SO_REEMBOLSO: chamados_tiktok_reembolso._destinatarios,
         K.CHAMADOS_ABERTURAS_PRESAS: chamados_pendencias._destinatarios,
         K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
@@ -338,8 +349,6 @@ async def test_mac_e_informativos_nao_tem_lista_no_servidor(db):
 # Onde a lista é montada no meio de uma função maior, a cópia acima vale só
 # enquanto a expressão continuar no código.
 _EXPRESSOES: dict[str, tuple[str, ...]] = {
-    "worker.py": ("threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)",),
-    "services/devolucao_prazo.py": ("threema.parse_recipients(get_settings().threema_recipients)",),
     "services/prioridade_estoque_movimentos.py": (
         "threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)",
     ),
@@ -435,8 +444,18 @@ async def test_botao_da_regra_pela_rota_de_verdade(
         assert r.status_code == (200 if leg else 422), r.text
 
 
-def test_tuta_continua_buscando_o_usuario_pelo_nome():
-    assert (
-        tuta_devolucoes.DESTINATARIO
-        == CATALOGO[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR].legado.usuario_nome
-    )
+def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
+    """Todo envio migrado tem a cópia do ponto de antes (`_ANTES_DA_F1`), e o
+    ponto não monta mais a lista: a expressão antiga saiu do código."""
+    migrados = {d.chave for d in ENVIOS if d.migrado}
+    assert migrados == set(_ANTES_DA_F1)
+    assert CATALOGO[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR].legado.usuario_nome == "thatcher"
+    fora = {
+        "worker.py": "get_settings().nf_sem_estoque_threema_recipients",
+        "services/devolucao_prazo.py": "get_settings().threema_recipients",
+        "services/logistica_track_sync.py": "threema_recipients",
+        "services/marketplace_shipment_check.py": "threema_recipients",
+        "services/tuta_devolucoes.py": "User.name",
+    }
+    for arquivo, expressao in fora.items():
+        assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo

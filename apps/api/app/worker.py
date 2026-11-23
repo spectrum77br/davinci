@@ -44,7 +44,7 @@ from app.services import (
     estoque_familia,
     flex_config,
     flex_motor,
-    threema,
+    threema_envios,
     threema_registro,
 )
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
@@ -3369,13 +3369,13 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
         return {"ok": len(_LOGISTICA_VIGIA_LIMITES_MIN)}
     texto = "Logística — automação parada:\n" + "\n".join(atrasados)
     logger.warning("logistica_vigia_atrasado", atrasados=atrasados)
-    destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
-    if destinos:
-        try:
-            with threema_registro.envio(K.LOGISTICA_VIGIA_AUTOMACAO):
-                await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
-        except Exception as exc:  # noqa: BLE001 — aviso é best-effort
-            logger.warning("logistica_vigia_threema_falhou", erro=str(exc)[:200])
+    # Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1). Desligado
+    # ou ninguém válido = não sai (o núcleo grava o registro e acende o sino);
+    # o sino da automação parada, logo abaixo, sai de qualquer jeito.
+    try:
+        await threema_envios.enviar(K.LOGISTICA_VIGIA_AUTOMACAO, texto)
+    except Exception as exc:  # noqa: BLE001 — aviso é best-effort
+        logger.warning("logistica_vigia_threema_falhou", erro=str(exc)[:200])
     async with session_scope() as s:
         # Sino dos admins, com dedupe por HORA: um aviso por hora, não a cada
         # tick (o vigia roda 2×/hora). M-19 (23/11/2026): UM alerta ADM, que

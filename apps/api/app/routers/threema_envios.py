@@ -13,8 +13,9 @@ capturaria o caminho). Tudo é só de admin, menos:
   mesmo do executor de NF). Leem a lista de cada envio do Mac e gravam no
   registro o que mandaram.
 
-Nenhum envio do servidor está migrado nesta fase: quem recebe cada um é a
-configuração antiga, que a tela mostra com o lugar onde ela é editada hoje.
+Envio do servidor ainda não migrado (o catálogo diz quais; as fatias F1 a
+F4 migram aos poucos): quem recebe é a configuração antiga, que a tela mostra
+com o lugar onde ela é editada hoje.
 A edição (C7, só admin) vale só para o envio que lê o Cadastro — o do
 servidor migrado e o do Mac; o do servidor não migrado responde 422
 `envio_nao_migrado` (editar aqui não mudaria nada). Grupos, contatos

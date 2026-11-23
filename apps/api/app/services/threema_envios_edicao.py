@@ -2,10 +2,11 @@
 tarefa 16, C7). Só admin (a rota exige).
 
 A edição de quem recebe vale só para o envio que lê (ou vai ler) o
-Cadastro: o do servidor já migrado (`migrado=True` no código — nenhum nesta
-fase) e o do Mac (que só passa a ler daqui na C13). Envio do servidor ainda
-não migrado responde 422 `envio_nao_migrado`, com o lugar onde ele é
-configurado hoje: editar aqui não pode mudar quem recebe aviso nenhum.
+Cadastro: o do servidor já migrado (`migrado=True` no código, fatia a fatia
+a partir da F1) e o do Mac (que só passa a ler daqui na C13). Envio do
+servidor ainda não migrado responde 422 `envio_nao_migrado`, com o lugar
+onde ele é configurado hoje: editar aqui não pode mudar quem recebe aviso
+nenhum.
 
 * `editar_envio` (PATCH): ligado, observação, quem recebe e o re-aviso dos
   robôs da Ouvidoria. O liga/desliga do item 43 grava direto no modo do robô

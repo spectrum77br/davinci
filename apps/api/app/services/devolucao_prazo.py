@@ -26,10 +26,9 @@ import structlog
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.models import Devolution
 from app.services import chamados_devolucao as cd
-from app.services import threema, threema_registro
+from app.services import threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
@@ -240,19 +239,22 @@ async def avisar_prazos(session: AsyncSession) -> int:
     if not avisar:
         return 0
     devs = [d for linhas in avisar for d in linhas]
-    destinos = threema.parse_recipients(get_settings().threema_recipients)
-    if not destinos:
-        logger.warning("devolucao_prazo_aviso_sem_threema", devolucoes=len(devs))
-        return 0
+    # Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1).
     try:
-        with threema_registro.envio(K.DEVOLUCOES_PRAZO_CONTESTACAO):
-            res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(
-                _texto_aviso(avisar), destinos
-            )
+        res = await threema_envios.enviar(
+            K.DEVOLUCOES_PRAZO_CONTESTACAO, _texto_aviso(avisar), session=session
+        )
     except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima rodada
         logger.warning("devolucao_prazo_aviso_falhou", err=str(e)[:200])
         return 0
     if not res.get("sent"):
+        # Desligado ou ninguém para receber: NÃO carimba. Acumula e sai tudo
+        # de uma vez ao religar (o `ao_desligar` do catálogo), enquanto o
+        # prazo não vencer.
+        if res.get("motivo"):
+            logger.warning(
+                "devolucao_prazo_aviso_nao_saiu", motivo=res["motivo"], devolucoes=len(devs)
+            )
         return 0
     for d in devs:
         d.aviso_prazo_at = agora

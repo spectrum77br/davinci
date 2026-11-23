@@ -231,7 +231,9 @@ async def test_erro_na_reversa_nao_derruba_o_caso(shopee_client):
 def avisos(monkeypatch):
     enviados: list[tuple[list, str]] = []
 
-    async def _avisar(graves, *, titulo="Rastreio dos Correios com ocorrência GRAVE"):
+    async def _avisar(graves, *, titulo="Rastreio dos Correios com ocorrência GRAVE", chave=None):
+        # `chave` (tarefa 16, F1): o rastreio das devoluções passa o envio do
+        # pacote de devolução; o caminho até o Threema tem teste próprio.
         enviados.append((list(graves), titulo))
 
     monkeypatch.setattr(logistica_track_sync, "avisar_graves", _avisar)
