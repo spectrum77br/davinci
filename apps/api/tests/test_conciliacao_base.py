@@ -4805,3 +4805,234 @@ async def test_resumo_cobrancas_por_mes(db, make_user, auth_as, client, monkeypa
     assert outubro["mes"] == "2026-10"
     assert outubro["empresa"]["publicidade"] == 15.0
     assert list(outubro["por_plataforma"]) == ["shopee"]
+
+
+# --- 23/11: segurado pra dívida de conta bloqueada e a gêmea de outro código -----------
+
+_CAB_RELATORIO_MP = CSV_JLAS2.split("\n")[0].split(",")
+
+
+def _linha_relatorio_mp(**campos: str) -> str:
+    """Uma linha do relatório do MP com só os campos dados (o resto vazio)."""
+    return ",".join(campos.get(c, "") for c in _CAB_RELATORIO_MP)
+
+
+def _segurado_mp(
+    hora: str, source: str, *, credito: str = "0.00", debito: str = "0.00", saldo: str
+) -> str:
+    bruto = f"-{debito}" if debito != "0.00" else credito
+    return _linha_relatorio_mp(
+        DATE=f"2026-11-{hora}.000-03:00",
+        SOURCE_ID=source,
+        RECORD_TYPE="release",
+        DESCRIPTION="reserve_for_debt_payment",
+        NET_CREDIT_AMOUNT=credito,
+        NET_DEBIT_AMOUNT=debito,
+        GROSS_AMOUNT=bruto,
+        BALANCE_AMOUNT=saldo,
+        PAYMENT_METHOD="available_money",
+    )
+
+
+# jlas2 20/11 21:51 BRT: o MP solta 77.354,06, segura de novo 76.388,33 + 965,73 e solta
+# os 965,73 três minutos depois — mas o "segura de novo" veio DUAS vezes, com códigos
+# diferentes e o mesmo saldo depois (8.631,16). A véspera ancora o saldo em 7.665,43.
+CSV_GEMEAS = "\n".join(
+    [
+        ",".join(_CAB_RELATORIO_MP),
+        _linha_relatorio_mp(
+            DATE="2026-11-19T18:00:00.000-03:00",
+            SOURCE_ID="186000000001",
+            RECORD_TYPE="release",
+            DESCRIPTION="payment",
+            NET_CREDIT_AMOUNT="7665.43",
+            NET_DEBIT_AMOUNT="0.00",
+            GROSS_AMOUNT="7665.43",
+            ORDER_ID=SEM_BLING,
+            BALANCE_AMOUNT="7665.43",
+        ),
+        _segurado_mp("20T21:51:00", "2363933120", credito="77354.06", saldo="85019.49"),
+        _segurado_mp("20T21:51:00", "190821608938", debito="76388.33", saldo="8631.16"),
+        _segurado_mp("20T21:51:00", "2363933120", debito="965.73", saldo="7665.43"),
+        _segurado_mp("20T21:51:00", "2363933120", debito="76388.33", saldo="8631.16"),
+        _segurado_mp("20T21:53:48", "2363933120", credito="965.73", saldo="8631.16"),
+    ]
+)
+
+
+async def _totais_dia(db, loja, dia):
+    from app.routers.conciliacao import _movimentos_do_dia, _saldo_anterior, _totais_do_dia
+
+    saldo_ant = await _saldo_anterior(db, loja, dia)
+    return _totais_do_dia(await _movimentos_do_dia(db, loja, dia, saldo_ant), saldo_ant)
+
+
+async def test_recalculo_apaga_gemea_de_outro_codigo_e_a_releitura_nao_grava_de_novo(db, make_user):
+    """23/11 (jlas2 20/11): a mesma linha do MP com dois SOURCE_IDs deixava o saldo do
+    dia +76.388,33 errado. O recálculo apaga uma (o saldo passa a bater), guarda a
+    identidade dela na que ficou, e a releitura do mesmo arquivo não grava de novo."""
+    from sqlalchemy import select
+
+    from app.models import ConciliacaoDia
+
+    loja, _integ = await _loja(db, make_user)
+    stats = await ext.ingerir_csv(db, loja, CSV_GEMEAS)
+    await db.commit()
+    assert stats["inseridos"] == 6 and stats["gemeas_ja_apagadas"] == 0
+    assert (await _totais_dia(db, loja, date(2026, 11, 20)))["diferenca"] == 76388.33
+    # uma pessoa fechou o dia com o saldo errado, informando o motivo
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=date(2026, 11, 20),
+            fechado_em=datetime(2026, 11, 21, 12, tzinfo=UTC),
+            fechado_por="cairo sa",
+            fechado_motivo="linha duplicada no relatório do MP",
+        )
+    )
+    await db.commit()
+
+    # no dia seguinte a leitura ainda relê a janela (linha atrasada pode chegar): espera
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 21, 12, tzinfo=UTC))
+    await db.commit()
+    assert "gemea_de_outro_codigo_apagada" not in res
+
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 23, 9, tzinfo=UTC))
+    await db.commit()
+    assert res["gemea_de_outro_codigo_apagada"] == 1
+    gemeas = (
+        (
+            await db.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.debito == Decimal("76388.33")
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(gemeas) == 1
+    (guardada,) = gemeas[0].raw[ext.CHAVE_GEMEAS_APAGADAS]
+    # a que saiu fica guardada inteira (dá pra devolver), com o outro código
+    assert guardada["linha"]["NET_DEBIT_AMOUNT"] == "76388.33"
+    assert {guardada["pagamento_id"], gemeas[0].pagamento_id} == {"190821608938", "2363933120"}
+    assert (await _totais_dia(db, loja, date(2026, 11, 20)))["diferenca"] == 0
+    dia = (
+        await db.execute(select(ConciliacaoDia).where(ConciliacaoDia.dia == date(2026, 11, 20)))
+    ).scalar_one()
+    assert dia.fechado_em is None and "outro código" in (dia.reaberto_motivo or "")
+
+    # a releitura da janela traz as duas de novo: a apagada não volta
+    de_novo = await ext.ingerir_csv(db, loja, CSV_GEMEAS)
+    await db.commit()
+    assert de_novo["gemeas_ja_apagadas"] == 1 and de_novo["inseridos"] == 0
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 23, 10, tzinfo=UTC))
+    assert "gemea_de_outro_codigo_apagada" not in res
+    assert (await _totais_dia(db, loja, date(2026, 11, 20)))["diferenca"] == 0
+
+
+async def test_gemea_de_outro_codigo_fica_quando_o_saldo_do_dia_bate(db, make_user):
+    """Segura, solta e segura de novo o mesmo valor no mesmo segundo: as duas "seguras"
+    têm o mesmo saldo depois, de códigos diferentes, e são linhas de verdade — o saldo do
+    dia bate com as duas, então nenhuma some."""
+    loja, _integ = await _loja(db, make_user)
+    venda = _mov(loja, "venda_liberada", datetime(2026, 11, 21, 9, tzinfo=UTC), credito="100.00")
+    venda.saldo_apos = Decimal("100.00")
+    quando = datetime(2026, 11, 21, 12, tzinfo=UTC)
+    segura = _mov(loja, "cobranca_divida", quando, debito="50.00", pagamento="C")
+    segura.saldo_apos = Decimal("50.00")
+    solta = _mov(loja, "cobranca_divida", quando, credito="50.00", pagamento="C")
+    solta.saldo_apos = Decimal("100.00")
+    de_novo = _mov(loja, "cobranca_divida", quando, debito="50.00", pagamento="D")
+    de_novo.saldo_apos = Decimal("50.00")
+    db.add_all([venda, segura, solta, de_novo])
+    await db.commit()
+    assert (await _totais_dia(db, loja, date(2026, 11, 21)))["diferenca"] == 0
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 22, 9, tzinfo=UTC))
+    await db.commit()
+    assert "gemea_de_outro_codigo_apagada" not in res
+    for m in (segura, de_novo):
+        await db.refresh(m)  # ainda existem
+
+
+async def test_recalculo_marca_reserva_na_conta_bloqueada(db, make_user):
+    """23/11 (jlas2): depois que uma pessoa classificou o segurado pra dívida "Reserva"
+    (conta bloqueada, 08/11), todo segurado e soltura seguintes que o robô classificou
+    "Fatura do ML" ou deixou sem dono viram "Reserva" — o "reservado" passa a ser o que o
+    MP ainda segura. Antes do marco e o que a pessoa mexeu ficam como estão; e o "segura
+    de novo" grande não volta a sem dono pela regra da fatura."""
+    from app.routers.conciliacao import _dinheiro_da_loja
+
+    loja, _integ = await _loja(db, make_user)
+
+    def resumo(chave: str, de: str, ate: str, pago: float, divida: float) -> ConciliacaoSync:
+        return ConciliacaoSync(
+            integration_id=loja.integration_id,
+            origem="ml_fatura",
+            chave=f"{chave}|resumo",
+            status="lido",
+            lido_em=datetime(2026, 11, 9, 9, tzinfo=UTC),
+            detalhe={
+                "resumo": {
+                    "period": {"key": chave, "date_from": de, "date_to": ate},
+                    "payment_collected": {"total_payment": -pago, "total_debt": divida},
+                }
+            },
+        )
+
+    def segurado(quando, *, credito="0", debito="0", cls="fatura_ml", pessoa=None):
+        m = _mov(loja, "cobranca_divida", quando, credito=credito, debito=debito)
+        m.classificacao, m.vinculado_por = cls, pessoa
+        return m
+
+    antes = segurado(datetime(2026, 11, 5, 12, tzinfo=UTC), debito="100.00")
+    marco = segurado(
+        datetime(2026, 11, 8, 10, 32, tzinfo=UTC),
+        debito="17353.77",
+        cls="reserva",
+        pessoa="cairo sa",
+    )
+    venda_segurada = segurado(datetime(2026, 11, 11, 12, tzinfo=UTC), debito="715.05")
+    solta = segurado(datetime(2026, 11, 20, 19, tzinfo=UTC), credito="18068.82")
+    segura_de_novo = segurado(datetime(2026, 11, 20, 19, tzinfo=UTC), debito="17500.00", cls=None)
+    da_pessoa = segurado(datetime(2026, 11, 21, 12, tzinfo=UTC), debito="10.00", pessoa="cairo sa")
+    db.add_all(
+        [
+            resumo("2026-11-01", "2026-10-23", "2026-11-22", 0.0, 1136.40),
+            resumo("2026-12-01", "2026-11-23", "2026-12-22", 0.0, 0.0),
+            resumo("2026-10-01", "2026-09-23", "2026-10-22", 1800.43, 0.0),
+            antes,
+            marco,
+            venda_segurada,
+            solta,
+            segura_de_novo,
+            da_pessoa,
+        ]
+    )
+    await db.commit()
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 23, 9, tzinfo=UTC))
+    await db.commit()
+    assert res["reserva_conta_bloqueada"] == 3
+    assert "reserva_maior_que_a_fatura" not in res
+    for m in (antes, marco, venda_segurada, solta, segura_de_novo, da_pessoa):
+        await db.refresh(m)
+    assert antes.classificacao == "fatura_ml"
+    assert da_pessoa.classificacao == "fatura_ml"
+    assert {venda_segurada.classificacao, solta.classificacao, segura_de_novo.classificacao} == {
+        "reserva"
+    }
+    # 17.353,77 + 715,05 − 18.068,82 + 17.500,00: o que o MP segura agora
+    assert (await _dinheiro_da_loja(db, loja))["reservado"] == 17500.00
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 23, 10, tzinfo=UTC))
+    assert "reserva_conta_bloqueada" not in res
+
+    # a pessoa tira o "Reserva" do marco: o robô devolve as dele pra "Fatura do ML"
+    marco.classificacao = "fatura_ml"
+    await db.commit()
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 23, 11, tzinfo=UTC))
+    await db.commit()
+    assert res["reserva_conta_bloqueada"] == 3
+    for m in (venda_segurada, solta, segura_de_novo):
+        await db.refresh(m)
+        assert calc.CHAVE_RESERVA_POR_BLOQUEIO not in m.raw
+    assert venda_segurada.classificacao == "fatura_ml" and solta.classificacao == "fatura_ml"

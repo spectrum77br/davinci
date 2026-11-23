@@ -27,8 +27,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models import (
     BlingOrder,
@@ -53,6 +54,7 @@ from app.models.conciliacao import (
 )
 from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_extrato import (
+    CHAVE_GEMEAS_APAGADAS,
     TIPOS_RESERVA,
     apagar_duplicatas_pobres,
     bling_store_ids_da_loja,
@@ -1372,6 +1374,236 @@ def _devido_da_fatura(resumo: dict[str, Any]) -> tuple[date, date, Decimal] | No
     return de, ate, devido
 
 
+# a gêmea só some em dia "assentado": a leitura relê a véspera (linha atrasada chega no
+# relatório seguinte) e uma linha que falta faz o dia parecer ter uma a mais
+GEMEA_DIAS_ASSENTAR = 2
+# marca da linha de segurado que o robô passou pra "Reserva" por causa da conta bloqueada
+# (o robô desfaz sozinho se o marco sumir)
+CHAVE_RESERVA_POR_BLOQUEIO = "_reserva_por_bloqueio"
+
+
+def _ids_guardados(lista: Any) -> list[dict[str, Any]]:
+    """Itens de `CHAVE_GEMEAS_APAGADAS` como dicionários (aceita só a identidade)."""
+    out: list[dict[str, Any]] = []
+    for x in lista or []:
+        if isinstance(x, dict) and x.get("id_externo"):
+            out.append(x)
+        elif isinstance(x, str) and x:
+            out.append({"id_externo": x})
+    return out
+
+
+def _qual_gemea_fica(
+    x: ConciliacaoMovimento, y: ConciliacaoMovimento
+) -> tuple[ConciliacaoMovimento, ConciliacaoMovimento]:
+    """(fica, sai): fica a que uma pessoa mexeu, senão a que já guarda outra gêmea apagada,
+    senão a que tem pedido, senão a gravada primeiro."""
+
+    def guarda(m: ConciliacaoMovimento) -> bool:
+        return isinstance(m.raw, dict) and bool(m.raw.get(CHAVE_GEMEAS_APAGADAS))
+
+    for criterio in (
+        lambda m: bool(m.vinculado_por),
+        guarda,
+        lambda m: bool(m.pedido_bling),
+    ):
+        for a, b in ((x, y), (y, x)):
+            if criterio(a) and not criterio(b):
+                return a, b
+    antes = datetime.min.replace(tzinfo=UTC)
+    ordem = sorted((x, y), key=lambda m: (m.created_at or antes, str(m.id)))
+    return ordem[0], ordem[1]
+
+
+async def _apagar_gemeas_de_outro_codigo(
+    session: AsyncSession, loja: ConciliacaoLoja, agora: datetime
+) -> int:
+    """A mesma linha do Mercado Pago gravada duas vezes com SOURCE_ID diferente (23/11,
+    jlas2 20/11 21:51: o segurado pra dívida de −76.388,33 veio como 190821608938/
+    available_money e como 2363933120/visa — mesmo segundo, mesmo valor e o mesmo saldo
+    depois, 8.631,16). A identidade da linha inclui o SOURCE_ID, então a leitura guardou
+    as duas e o saldo do dia ficou +76.388,33 errado.
+
+    Só no segurado pra dívida (o único caso visto) e só em dia assentado: duas linhas com
+    hora, descrição, valores e saldo depois iguais, de códigos diferentes, e uma some só
+    quando o saldo do dia NÃO bate com as duas e, refeita a conta sem ela, bate (o valor
+    acha o erro, como manda o painel; segura/solta/segura o mesmo valor no mesmo segundo
+    são linhas de verdade e o saldo bate com elas). Fica a que uma pessoa mexeu, senão a
+    que já guarda outra gêmea, senão a que tem pedido, senão a gravada primeiro; linha com
+    pedido nunca sai, e as duas mexidas por pessoa ficam. A que saiu fica guardada inteira
+    na que ficou (`CHAVE_GEMEAS_APAGADAS`: identidade, código e a linha do relatório) — a
+    releitura não grava de novo e dá pra devolver. Dia fechado reabre (revisão cética 23/11)."""
+    from app.routers.conciliacao import (
+        _movimentos_do_dia,
+        _ordena_dia,
+        _saldo_anterior,
+        _totais_do_dia,
+    )
+
+    a = aliased(ConciliacaoMovimento)
+    b = aliased(ConciliacaoMovimento)
+    assentado = agora.astimezone(BRT).date() - timedelta(days=GEMEA_DIAS_ASSENTAR)
+    pares = (
+        await session.execute(
+            select(a, b)
+            .join(
+                b,
+                and_(
+                    b.integration_id == a.integration_id,
+                    b.origem == ORIGEM_EXTRATO,
+                    b.tipo == "cobranca_divida",
+                    b.id > a.id,
+                    b.data == a.data,
+                    func.coalesce(b.descricao, "") == func.coalesce(a.descricao, ""),
+                    b.credito == a.credito,
+                    b.debito == a.debito,
+                    b.saldo_apos == a.saldo_apos,
+                    func.coalesce(b.pagamento_id, "") != func.coalesce(a.pagamento_id, ""),
+                ),
+            )
+            .where(
+                a.integration_id == loja.integration_id,
+                a.origem == ORIGEM_EXTRATO,
+                a.tipo == "cobranca_divida",
+                a.saldo_apos.isnot(None),
+                (a.credito + a.debito) > 0,
+                a.data < datetime.combine(assentado + timedelta(days=1), datetime.min.time(), BRT),
+            )
+            .order_by(a.data, a.id, b.id)
+        )
+    ).all()
+    apagadas: set[Any] = set()
+    dias: set[date] = set()
+    # o dia é lido uma vez; dia que já bate não tem gêmea a tirar
+    lidos: dict[date, tuple[Decimal | None, list[ConciliacaoMovimento], Decimal | None]] = {}
+    for x, y in pares:
+        if x.id in apagadas or y.id in apagadas:
+            continue
+        if x.vinculado_por and y.vinculado_por:
+            continue
+        fica, sai = _qual_gemea_fica(x, y)
+        if sai.pedido_bling:
+            continue
+        dia = sai.data.astimezone(BRT).date()
+        if dia not in lidos:
+            saldo_ant = await _saldo_anterior(session, loja, dia)
+            movs = await _movimentos_do_dia(session, loja, dia, saldo_ant)
+            dif = _totais_do_dia(movs, saldo_ant).get("diferenca")
+            lidos[dia] = (saldo_ant, movs, None if dif is None else Decimal(str(dif)))
+        saldo_ant, movs, dif = lidos[dia]
+        if dif is None or abs(dif) <= TOLERANCIA:
+            continue
+        sem = _totais_do_dia(_ordena_dia([m for m in movs if m.id != sai.id], saldo_ant), saldo_ant)
+        if sem.get("diferenca") is None or abs(Decimal(str(sem["diferenca"]))) > TOLERANCIA:
+            continue
+        raw = fica.raw if isinstance(fica.raw, dict) else {}
+        guardadas = _ids_guardados(raw.get(CHAVE_GEMEAS_APAGADAS))
+        guardadas += _ids_guardados((sai.raw or {}).get(CHAVE_GEMEAS_APAGADAS))
+        guardadas.append(
+            {
+                "id_externo": sai.id_externo,
+                "pagamento_id": sai.pagamento_id,
+                "apagada_em": agora.isoformat(),
+                "linha": {k: v for k, v in (sai.raw or {}).items() if not k.startswith("_")},
+            }
+        )
+        fica.raw = {**raw, CHAVE_GEMEAS_APAGADAS: guardadas}
+        logger.warning(
+            "conciliacao_gemea_de_outro_codigo_apagada",
+            loja=loja.conta,
+            dia=dia.isoformat(),
+            valor=str((sai.credito or ZERO) - (sai.debito or ZERO)),
+            fica=fica.pagamento_id,
+            sai=sai.pagamento_id,
+        )
+        await session.delete(sai)
+        await session.flush()
+        apagadas.add(sai.id)
+        dias.add(dia)
+        lidos.pop(dia, None)  # a conta do dia mudou
+    if dias:
+        await reabrir_dias(
+            session, loja, dias, motivo="linha repetida do Mercado Pago (outro código) apagada"
+        )
+    return len(apagadas)
+
+
+async def _reserva_da_conta_bloqueada(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Conta do ML bloqueada: o segurado pra dívida é dinheiro retido, segurado e solto
+    (23/11, Vinicius: "Sim, corrige"). Em 08/11 o MP segurou o saldo inteiro de 11 contas
+    e a pessoa classificou "Reserva"; dali em diante o robô seguia dando "Fatura do ML" a
+    cada venda segurada e a cada soltura — e o que passava da fatura voltava a sem dono.
+    Desde 20/11 o MP solta o segurado inteiro e segura de novo quase tudo, várias vezes
+    por dia (jlas2: ~R$ 80 mil a cada vez): cada "segura de novo" virava linha sem dono
+    e o quadro de cobranças somava o mesmo dinheiro 16 vezes (−1,17 milhão), enquanto o
+    "reservado" mostrava 19.883,12 de 71.024,22 de verdade.
+
+    Marco = a 1ª linha de segurado pra dívida que uma PESSOA classificou "Reserva". Dali
+    em diante, toda linha de segurado (segura e solta) que o robô classificou ou deixou
+    sem dono vira "Reserva" — a soma delas é o que o MP ainda segura. O que uma pessoa
+    mexeu fica como ela deixou. Antes do marco, nada muda. A linha que o robô passou
+    leva a marca `CHAVE_RESERVA_POR_BLOQUEIO`: se a pessoa tirar o "Reserva" do marco (ou
+    ele mudar de dia), o robô devolve as dele pra "Fatura do ML". Devolve quantas mudaram."""
+    mov = ConciliacaoMovimento
+    marco = (
+        await session.execute(
+            select(func.min(mov.data)).where(
+                mov.integration_id == loja.integration_id,
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.tipo == "cobranca_divida",
+                mov.classificacao == "reserva",
+                mov.vinculado_por.isnot(None),
+            )
+        )
+    ).scalar_one_or_none()
+    # as que o robô passou e o marco não cobre mais voltam pra "Fatura do ML"
+    desfazer = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem.in_(ORIGENS_EXTRATO),
+                    mov.tipo == "cobranca_divida",
+                    mov.vinculado_por.is_(None),
+                    mov.classificacao == "reserva",
+                    mov.raw.has_key(CHAVE_RESERVA_POR_BLOQUEIO),
+                    *([mov.data < marco] if marco is not None else []),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in desfazer:
+        m.classificacao = "fatura_ml"
+        m.raw = {k: v for k, v in (m.raw or {}).items() if k != CHAVE_RESERVA_POR_BLOQUEIO}
+    linhas: list[ConciliacaoMovimento] = []
+    if marco is not None:
+        linhas = list(
+            (
+                await session.execute(
+                    select(mov).where(
+                        mov.integration_id == loja.integration_id,
+                        mov.origem.in_(ORIGENS_EXTRATO),
+                        mov.tipo == "cobranca_divida",
+                        mov.data >= marco,
+                        mov.vinculado_por.is_(None),
+                        mov.pedido_bling.is_(None),
+                        or_(mov.classificacao.is_(None), mov.classificacao == "fatura_ml"),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for m in linhas:
+        m.classificacao = "reserva"
+        m.raw = {**(m.raw or {}), CHAVE_RESERVA_POR_BLOQUEIO: True}
+    if linhas or desfazer:
+        await session.flush()
+    return len(linhas) + len(desfazer)
+
+
 async def _soltar_reserva_maior_que_a_fatura(session: AsyncSession, loja: ConciliacaoLoja) -> int:
     """Dinheiro segurado pra dívida (`reserve_for_debt_payment`) maior do que a fatura do
     ML cobra do saldo não é a fatura: volta a sem dono e o dia reabre (09/11, jlas2
@@ -1499,6 +1731,9 @@ async def recalcular_loja(
     # 0. Linha do relatório pobre que tem gêmea completa (16/10, aguiar): some antes de
     # qualquer conta, senão o pedido recebe em dobro.
     duplicatas_pobres = await apagar_duplicatas_pobres(session, loja)
+    # 0a. (23/11) A mesma linha do MP com dois códigos (SOURCE_ID) — só some quando o
+    # saldo do dia está errado exatamente pelo valor dela.
+    gemeas = await _apagar_gemeas_de_outro_codigo(session, loja, agora)
     # 0b. Liberação gravada como "outro" antes da regra (19/10, marquezini 301744):
     # linha `release` com crédito, bruto e nº da venda é liberação — renomeia pra que
     # o pedido compare o valor em vez de dizer "nada liberou e entrou X"
@@ -1673,6 +1908,8 @@ async def recalcular_loja(
     contagem: dict[str, int] = defaultdict(int)
     if duplicatas_pobres:
         contagem["duplicata_pobre_apagada"] = duplicatas_pobres
+    if gemeas:
+        contagem["gemea_de_outro_codigo_apagada"] = gemeas
     if liberacoes_renomeadas:
         contagem["liberacao_renomeada"] = liberacoes_renomeadas
     for numero, itens in por_numero.items():
@@ -2261,6 +2498,11 @@ async def recalcular_loja(
         gravadas = await _gravar_pago_com_reserva(session, loja)
         if gravadas:
             contagem["pago_com_reserva_gravado"] = gravadas
+        # 23/11: conta bloqueada (pessoa classificou o segurado "Reserva") — segura e solta
+        # viram "Reserva" ANTES da regra abaixo, senão cada "segura de novo" reabria o dia
+        bloqueada = await _reserva_da_conta_bloqueada(session, loja)
+        if bloqueada:
+            contagem["reserva_conta_bloqueada"] = bloqueada
         soltas_reserva = await _soltar_reserva_maior_que_a_fatura(session, loja)
         if soltas_reserva:
             contagem["reserva_maior_que_a_fatura"] = soltas_reserva

@@ -57,6 +57,11 @@ PRAZO_RELATORIO = timedelta(hours=6)
 # Campos de criação que a lista de relatórios do Mercado Pago pode trazer (o primeiro
 # que existir e for data vale).
 CAMPOS_CRIACAO = ("date_created", "created_at", "created", "generation_date", "last_modified")
+# 23/11 (jlas2 20/11 21:51): o MP mandou o MESMO segurado pra dívida (−76.388,33) com dois
+# SOURCE_IDs; o recálculo apaga a gêmea e guarda a identidade dela aqui, na linha que
+# ficou — a leitura seguinte não grava de novo
+# (`conciliacao_calculo._apagar_gemeas_de_outro_codigo`).
+CHAVE_GEMEAS_APAGADAS = "_gemeas_apagadas"
 
 COLUNAS = [
     "DATE",
@@ -790,6 +795,37 @@ async def apagar_duplicatas_pobres(session: AsyncSession, loja: ConciliacaoLoja)
     return len(apagadas)
 
 
+async def _gemeas_ja_apagadas(
+    session: AsyncSession, loja: ConciliacaoLoja, movimentos: list[dict[str, Any]]
+) -> set[str]:
+    """Identidades das linhas do arquivo que o recálculo já apagou como gêmea de outro
+    código (`CHAVE_GEMEAS_APAGADAS` na linha que ficou). Sem isto a releitura da janela
+    gravava a gêmea de novo e o recálculo apagava de novo, reabrindo o dia a cada rodada."""
+    if not movimentos:
+        return set()
+    datas = [m["data"] for m in movimentos]
+    guardadas = (
+        await session.execute(
+            select(ConciliacaoMovimento.raw[CHAVE_GEMEAS_APAGADAS]).where(
+                ConciliacaoMovimento.integration_id == loja.integration_id,
+                ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                ConciliacaoMovimento.data >= min(datas),
+                ConciliacaoMovimento.data <= max(datas),
+                ConciliacaoMovimento.raw.has_key(CHAVE_GEMEAS_APAGADAS),
+            )
+        )
+    ).scalars()
+    ids: set[str] = set()
+    for lista in guardadas:
+        for x in lista if isinstance(lista, list) else []:
+            # cada item: {"id_externo", "pagamento_id", "apagada_em", "linha"} (ou só o id)
+            ident = x.get("id_externo") if isinstance(x, dict) else x
+            if ident:
+                ids.add(str(ident))
+    no_arquivo = {m["id_externo"] for m in movimentos}
+    return ids & no_arquivo
+
+
 async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) -> dict[str, Any]:
     cab, rows, _sep = ler_csv_mp(texto)
     integration = await session.get(Integration, loja.integration_id)
@@ -808,6 +844,9 @@ async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) 
         if m:
             movimentos.append(m)
     repetidas = numerar_repetidas(movimentos)
+    ja_apagadas = await _gemeas_ja_apagadas(session, loja, movimentos)
+    if ja_apagadas:
+        movimentos = [m for m in movimentos if m["id_externo"] not in ja_apagadas]
     ids = {m["pedido_marketplace"] for m in movimentos if m["pedido_marketplace"]} | {
         m["pack_id"] for m in movimentos if m["pack_id"]
     }
@@ -855,6 +894,7 @@ async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) 
         "linhas": len(rows),
         "movimentos": len(movimentos),
         "repetidas_no_arquivo": repetidas,
+        "gemeas_ja_apagadas": len(ja_apagadas),
         "inseridos": inseridos,
         "ja_existiam": len(movimentos) - inseridos,
         "atualizados": atualizados,
