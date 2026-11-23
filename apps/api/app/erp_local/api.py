@@ -341,7 +341,9 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             **base,
             **operations,
             "reference": reference.info(),
-            "channels": channels.snapshot(),
+            # Eventos e lojas is hidden in consulta, and its snapshot searched the whole events
+            # table (1,2 s of the 2,3 s of this route on 23/11).
+            "channels": None if operations["consulta"]["active"] else channels.snapshot(),
             "parity": parity_status(),
         }
         if access.enforced():

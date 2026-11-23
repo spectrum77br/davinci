@@ -340,3 +340,11 @@ def test_screen_state_sends_light_products_and_the_editor_asks_for_the_whole_one
         assert len(full["details"]) > len(product["details"]) and "history" not in product
         assert full["balances"] == product["balances"]
         assert c.get("/api/erp-local/products/nao.existe/full").status_code == 404
+
+
+def test_consulta_state_skips_the_hidden_events_page(tmp_path, monkeypatch):
+    with client(tmp_path) as c:
+        assert c.get("/api/erp-local/state").json()["channels"] is not None
+        monkeypatch.setenv("ERP_CONSULTA", "1")
+        state = c.get("/api/erp-local/state").json()
+        assert state["consulta"]["active"] is True and state["channels"] is None
