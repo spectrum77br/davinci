@@ -9,7 +9,8 @@
 //  - lê as contas de Ads do marketplace (/horarios/contas?platform=), em ordem
 //    A–Z, e abre no ?horario= do link, senão na última vista nesse marketplace,
 //    senão na primeira do segmento;
-//  - 13/10/2026: os botões Mala | Celular | Eletro e a lista das contas do
+//  - 13/10/2026: os botões de segmento (M-23, 23/11/2026: Celular | Eletro |
+//    Mala, em ordem alfabética, abrindo em Celular) e a lista das contas do
 //    segmento (clique abre o mapa), com o saldo de Ads só na Shopee (R$ pt-BR,
 //    0 em vermelho, "sem leitura") e o rodapé "saldo lido em…"; Eletro com o
 //    aviso de que as contas também estão em Celular e os vazios (sem relatório /
@@ -261,13 +262,37 @@ function renderizar(t) {
 }
 
 async function run() {
-  // Shopee: contas A–Z, abre em Mala na primeira, lê janelas e heatmap dela.
+  // M-23 (23/11/2026): sem link nem lembrança, abre no primeiro botão —
+  // Celular (antes era Mala) — na primeira conta A–Z dele; os botões em ordem
+  // alfabética. Abrir não escreve na URL.
   {
     const t = await montar()
     const { s } = t
+    assert.deepEqual(s.SEGMENTOS.map((x) => x.rotulo), ['Celular', 'Eletro', 'Mala'], 'M-23: ordem alfabética')
+    assert.equal(s.segmento.value, 'celular', 'sem link nem lembrança: Celular')
+    assert.equal(s.contaId.value, 'beta', 'a primeira de Celular (A–Z)')
+    assert.deepEqual(urls(t.calls), [
+      'GET /api/marketing/horarios/contas?platform=shopee',
+      'GET /api/marketing/schedules/beta',
+      'GET /api/marketing/schedules/beta/heatmap',
+    ])
+    assert.deepEqual(t.routerCalls, [], 'abrir não escreve na URL')
+    assert.equal(t.nuxt.get('marketing:horarios-segmento').value.shopee, 'celular', 'lembra o segmento visto')
+    const html = await renderizar(t)
+    const botoes = [...html.matchAll(/<button type="button" role="tab" aria-selected="(true|false)"[^>]*>\s*([^<]*?)\s*<\/button>/g)]
+      .map((m) => [m[2], m[1] === 'true'])
+    assert.deepEqual(botoes, [['Celular', true], ['Eletro', false], ['Mala', false]], 'os botões na tela, Celular marcado')
+    assert.ok(html.includes('Contas de Celular (2)'))
+  }
+
+  // Shopee: contas A–Z; aberta em Mala pelo link (?seg=mala), na primeira, lê
+  // janelas e heatmap dela.
+  {
+    const t = await montar({ query: { seg: 'mala' } })
+    const { s } = t
     assert.deepEqual(s.contas.value.map((c) => c.id), ['alfa', 'beta', 'zeta'], 'contas em ordem A–Z (sem ligar pra maiúscula)')
     assert.equal(s.contas.value[2].name, 'Zeta Celulares', 'nome limpo (espaço e invisível)')
-    assert.equal(s.segmento.value, 'mala', 'sem link nem lembrança: Mala')
+    assert.equal(s.segmento.value, 'mala', 'o ?seg= do link: Mala')
     assert.equal(s.contaId.value, 'alfa', 'abre na primeira do segmento')
     assert.deepEqual(urls(t.calls), [
       'GET /api/marketing/horarios/contas?platform=shopee',
@@ -378,7 +403,7 @@ async function run() {
     const t2 = await montar({ query: { horario: 'ml1' }, nuxt })
     assert.equal(t2.s.contaId.value, 'beta', 'id do outro marketplace no link: vale a lembrada')
     const t3 = await montar({ query: { horario: 'lixo' } })
-    assert.equal(t3.s.contaId.value, 'alfa')
+    assert.equal(t3.s.contaId.value, 'beta', 'a primeira de Celular, o botão padrão (M-23)')
   }
 
   // Shopee → Mercado Livre → Shopee: cada marketplace com as suas contas e a sua
@@ -415,7 +440,7 @@ async function run() {
 
   // Só quem edita clica: sem marketing:edit, nada de PUT e a tela diz por quê.
   {
-    const t = await montar({ canEdit: false })
+    const t = await montar({ canEdit: false, query: { seg: 'mala' } })
     await t.s.toggleScheduleCell(2, 10)
     assert.equal(puts(t.calls).length, 0, 'sem PUT')
     assert.ok(!t.s.scheduleSet.value.has('2-10'))
@@ -427,10 +452,11 @@ async function run() {
   }
 
   // Cliques rápidos: o 2º PUT só sai depois do 1º e leva as duas horas; só a
-  // resposta do último entra na tela.
+  // resposta do último entra na tela. (Os cenários com a alfa abrem em Mala
+  // pelo link: desde a M-23 o padrão é Celular.)
   {
     const fila = []
-    const t = await montar({ put: (id, body, salvar) => { const h = segurada(); fila.push({ h, salvar }); return h.p } })
+    const t = await montar({ query: { seg: 'mala' }, put: (id, body, salvar) => { const h = segurada(); fila.push({ h, salvar }); return h.p } })
     const a = t.s.toggleScheduleCell(2, 10)
     const b = t.s.toggleScheduleCell(2, 11)
     await esperarTudo()
@@ -452,7 +478,7 @@ async function run() {
 
   // PUT falhou: avisa e a tela volta ao que está salvo.
   {
-    const t = await montar({ put: () => Promise.reject({ statusCode: 403, data: { detail: { code: 'forbidden' } } }) })
+    const t = await montar({ query: { seg: 'mala' }, put: () => Promise.reject({ statusCode: 403, data: { detail: { code: 'forbidden' } } }) })
     await t.s.toggleScheduleCell(2, 10)
     await esperarTudo()
     assert.deepEqual(t.toastLog, [['error', 'Não consegui salvar o horário', 'forbidden']])
@@ -467,7 +493,7 @@ async function run() {
   // releitura, correndo junto com ele, podia pintar desligado o que estava ligado).
   {
     const fila = []
-    const t = await montar({ put: (id, body, salvar) => { const h = segurada(); fila.push({ h, salvar }); return h.p } })
+    const t = await montar({ query: { seg: 'mala' }, put: (id, body, salvar) => { const h = segurada(); fila.push({ h, salvar }); return h.p } })
     const servidorAntes = JSON.stringify(t.servidor.alfa)
     const getsJanelas = () => urls(t.calls).filter((u) => u === 'GET /api/marketing/schedules/alfa').length
     const a = t.s.toggleScheduleCell(2, 10)
@@ -504,7 +530,7 @@ async function run() {
   // servidor de antes do clique) e, enquanto espera, a grade não aceita clique.
   {
     const fila = []
-    const t = await montar({ put: (id, body, salvar) => { const h = segurada(); fila.push({ h, salvar }); return h.p } })
+    const t = await montar({ query: { seg: 'mala' }, put: (id, body, salvar) => { const h = segurada(); fila.push({ h, salvar }); return h.p } })
     const gets = () => urls(t.calls).filter((u) => u.startsWith('GET /api/marketing/schedules/')).length
     const p = t.s.toggleScheduleCell(2, 10)
     await esperarTudo()
@@ -530,7 +556,7 @@ async function run() {
   // Trocou de conta com o mapa da outra ainda vindo: a resposta velha não escreve.
   {
     const lenta = segurada()
-    const t = await montar({ schedules: { ...SCHEDULES, alfa: () => lenta.p } })
+    const t = await montar({ query: { seg: 'mala' }, schedules: { ...SCHEDULES, alfa: () => lenta.p } })
     assert.equal(t.s.mapaPronto.value, false)
     const html = await renderizar(t)
     assert.ok(html.includes('aria-busy="true"'), 'esqueleto enquanto carrega')
@@ -543,7 +569,7 @@ async function run() {
     assert.deepEqual([...t.s.scheduleSet.value], ['1-9'], 'mapa da beta')
     // Clique antes do mapa chegar não manda nada (não sabe o que já está ligado).
     const lenta2 = segurada()
-    const t2 = await montar({ schedules: { alfa: () => lenta2.p } })
+    const t2 = await montar({ query: { seg: 'mala' }, schedules: { alfa: () => lenta2.p } })
     await t2.s.toggleScheduleCell(0, 1)
     assert.equal(puts(t2.calls).length, 0)
   }
@@ -557,7 +583,7 @@ async function run() {
     lenta.resolve(CONTAS.shopee)
     await esperarTudo()
     assert.deepEqual(t.s.contas.value.map((c) => c.id), ['ml2', 'ml1'])
-    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['mala', 'ml1'], 'o ML abre em Mala (sem link nem lembrança)')
+    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['celular', 'ml2'], 'o ML abre em Celular (sem link nem lembrança; M-23)')
   }
 
   // Nenhuma conta: diz isso, não pede mapa; o aviso da Shopee continua.
@@ -587,7 +613,7 @@ async function run() {
     await t.s.carregarContas()
     await esperarTudo()
     assert.equal(t.s.erroContas.value, null)
-    assert.equal(t.s.contaId.value, 'alfa')
+    assert.equal(t.s.contaId.value, 'beta', 'a primeira de Celular')
     html = await renderizar(t)
     assert.ok(html.includes('size-6 rounded'), 'grade depois do "Tentar de novo"')
   }
@@ -596,6 +622,7 @@ async function run() {
   {
     let falhar = true
     const t = await montar({
+      query: { seg: 'mala' },
       mapaErro: (id, qual) => (falhar
         ? Promise.reject({ statusCode: 404, data: { detail: { code: 'account_not_found' } } })
         : Promise.resolve(qual === 'heatmap' ? HEATMAPS[id] : SCHEDULES[id])),
@@ -612,13 +639,13 @@ async function run() {
   }
 
 
-  // Segmentos: Mala → Celular → Eletro. Trocar mantém a conta aberta se ela é do
-  // segmento, senão abre a primeira; o link e a lembrança acompanham.
+  // Segmentos: Celular → Eletro → Mala (M-23). Trocar mantém a conta aberta se
+  // ela é do segmento, senão abre a primeira; o link e a lembrança acompanham.
   {
     const nuxt = new Map()
-    const t = await montar({ nuxt })
+    const t = await montar({ nuxt, query: { seg: 'mala' } })
     const { s } = t
-    assert.deepEqual(s.SEGMENTOS.map((x) => x.rotulo), ['Mala', 'Celular', 'Eletro'])
+    assert.deepEqual(s.SEGMENTOS.map((x) => x.rotulo), ['Celular', 'Eletro', 'Mala'])
     s.escolherSegmento('celular')
     await esperarTudo()
     assert.deepEqual(s.lista.value.map((c) => c.id), ['beta', 'zeta'], 'Celular A–Z')
@@ -686,15 +713,15 @@ async function run() {
       { id: 'b', name: 'B', segmento: 'mala', eletro: false, acos_target: 7, saldo: 2, saldo_em: '2026-10-06T18:40:00Z' },
       { id: 'c', name: 'C', segmento: 'mala', eletro: false, acos_target: 7, saldo: null, saldo_em: null },
     ]
-    const t2 = await montar({ contas: { shopee: mesmoDia } })
+    const t2 = await montar({ contas: { shopee: mesmoDia }, query: { seg: 'mala' } })
     assert.equal(t2.s.saldoLido.value, 'saldo lido em 06/10 às 15:05–15:40')
-    const t3 = await montar({ contas: { shopee: [...mesmoDia, { ...mesmoDia[0], id: 'd', name: 'D', saldo_em: '2026-10-03T13:00:00Z' }] } })
+    const t3 = await montar({ contas: { shopee: [...mesmoDia, { ...mesmoDia[0], id: 'd', name: 'D', saldo_em: '2026-10-03T13:00:00Z' }] }, query: { seg: 'mala' } })
     assert.equal(t3.s.saldoLido.value, 'saldo lido em 03/10–06/10')
     // 02:30 UTC de 07/10 ainda é 06/10 em Brasília.
-    const t4 = await montar({ contas: { shopee: [{ ...mesmoDia[0], saldo_em: '2026-10-07T02:30:00Z' }] } })
+    const t4 = await montar({ contas: { shopee: [{ ...mesmoDia[0], saldo_em: '2026-10-07T02:30:00Z' }] }, query: { seg: 'mala' } })
     assert.equal(t4.s.saldoLido.value, 'saldo lido em 06/10 às 23:30')
     // Ninguém com leitura: sem rodapé.
-    const t5 = await montar({ contas: { shopee: [mesmoDia[2]] } })
+    const t5 = await montar({ contas: { shopee: [mesmoDia[2]] }, query: { seg: 'mala' } })
     assert.equal(t5.s.saldoLido.value, null)
     assert.ok(!(await renderizar(t5)).includes('saldo lido'))
   }
@@ -731,8 +758,9 @@ async function run() {
       [{ horario: 'beta', seg: 'eletro' }, 'eletro', 'beta'],
       [{ horario: 'beta', seg: 'mala' }, 'celular', 'beta'],
       [{ horario: 'zeta', seg: 'eletro' }, 'celular', 'zeta'],
-      [{ seg: 'lixo' }, 'mala', 'alfa'],
-      [{ seg: ['celular', 'mala'] }, 'mala', 'alfa'],
+      // ?seg= inválido: o padrão, Celular (M-23), na primeira.
+      [{ seg: 'lixo' }, 'celular', 'beta'],
+      [{ seg: ['celular', 'mala'] }, 'celular', 'beta'],
     ]
     for (const [query, seg, id] of casos) {
       const t = await montar({ query })
@@ -755,7 +783,8 @@ async function run() {
   // o link abre o mesmo; F5 (sessão nova) abre igual.
   {
     // (a) Como na Conferência de verdade: a troca tira ?horario/?seg do outro.
-    // Shopee em Celular/zeta → ML (abre no dele, Mala) → Celular → volta.
+    // Shopee em Celular/zeta → ML (abre no dele, Celular — o padrão desde a
+    // M-23) → Mala → volta.
     const nuxt = new Map()
     const t = await montar({ nuxt })
     t.s.escolherConta('zeta')
@@ -764,11 +793,11 @@ async function run() {
     t.route.query = { conf: 'ml' }
     t.props.plataforma = 'ml'
     await esperarTudo()
-    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['mala', 'ml1'], 'o ML abre no dele (Mala), não no ?seg da Shopee')
+    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['celular', 'ml2'], 'o ML abre no dele (Celular, o padrão), não no ?seg da Shopee')
     assert.deepEqual(t.route.query, { conf: 'ml' }, 'sem lembrança no ML: nada a escrever')
-    t.s.escolherSegmento('celular')
+    t.s.escolherSegmento('mala')
     await esperarTudo()
-    assert.deepEqual(t.route.query, { conf: 'ml', seg: 'celular', horario: 'ml2' })
+    assert.deepEqual(t.route.query, { conf: 'ml', seg: 'mala', horario: 'ml1' })
     t.route.query = {}
     t.props.plataforma = 'shopee'
     await esperarTudo()
@@ -777,7 +806,7 @@ async function run() {
     const f5 = await montar({ query: t.route.query })
     assert.deepEqual([f5.s.segmento.value, f5.s.contaId.value], ['celular', 'zeta'], 'F5 abre o mesmo')
     assert.deepEqual(f5.routerCalls, [])
-    // Lembrada = o que o link limpo já abre (Mala/alfa): nada a escrever.
+    // Lembrada = o que o link limpo já abre (Celular/beta desde a M-23): nada a escrever.
     const nuxtA = new Map()
     const ta = await montar({ nuxt: nuxtA })
     ta.props.plataforma = 'ml'
@@ -785,7 +814,7 @@ async function run() {
     ta.route.query = {}
     ta.props.plataforma = 'shopee'
     await esperarTudo()
-    assert.deepEqual([ta.s.segmento.value, ta.s.contaId.value], ['mala', 'alfa'])
+    assert.deepEqual([ta.s.segmento.value, ta.s.contaId.value], ['celular', 'beta'])
     assert.deepEqual(ta.routerCalls, [])
 
     // (b) Link que ficou com a conta e o segmento do ML: corrigido do mesmo jeito.

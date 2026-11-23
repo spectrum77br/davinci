@@ -17,15 +17,16 @@
  * agenda própria do DaVinci não age mais na Shopee (reconcile.py) — seria um
  * segundo robô brigando com ele.
  *
- * 13/10/2026 (pedido do dono): o seletor "Conta" virou os botões Mala |
- * Celular | Eletro e a lista de TODAS as contas do segmento, uma embaixo da
- * outra (à esquerda; no celular, em cima do mapa). Clicar numa conta abre o
- * mapa dela. Na Shopee cada linha traz o último saldo de Ads lido pela
- * Conferência (0 em vermelho; sem leitura = "sem leitura"); no Mercado Livre
- * não há saldo (o ML cobra depois). Eletro = as contas que venderam ou
- * anunciaram eletro na última Conferência (as mesmas aparecem em Celular: o
- * horário é um só por conta). O link guarda a conta (?horario=) e o segmento
- * (?seg=).
+ * 13/10/2026 (pedido do dono): o seletor "Conta" virou os botões de segmento
+ * (desde a M-23, 23/11/2026: Celular | Eletro | Mala, em ordem alfabética
+ * como em todas as telas, abrindo em Celular) e a lista de TODAS as contas
+ * do segmento, uma embaixo da outra (à esquerda; no celular, em cima do
+ * mapa). Clicar numa conta abre o mapa dela. Na Shopee cada linha traz o
+ * último saldo de Ads lido pela Conferência (0 em vermelho; sem leitura =
+ * "sem leitura"); no Mercado Livre não há saldo (o ML cobra depois).
+ * Eletro = as contas que venderam ou anunciaram eletro na última Conferência
+ * (as mesmas aparecem em Celular: o horário é um só por conta). O link
+ * guarda a conta (?horario=) e o segmento (?seg=).
  *
  * Rotas: as contas em /horarios/contas?platform= (segmento, eletro e saldo —
  * services/marketing/horarios_contas.py), as janelas em /schedules/{id} (GET;
@@ -86,12 +87,16 @@ const router = useRouter()
 
 const DIAS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
 const DO_MARKETPLACE: Record<PlataformaHorario, string> = { shopee: 'da Shopee', ml: 'do Mercado Livre' }
+// M-23 (23/11/2026): Celular | Eletro | Mala, a ordem alfabética de todas as
+// telas (lib/categorias.ts; tests/categorias-ordem.cjs confere). Sem link nem
+// lembrança, abre na primeira opção (Celular) — antes abria em Mala.
 const SEGMENTOS: { chave: Segmento; rotulo: string }[] = [
-  { chave: 'mala', rotulo: 'Mala' },
   { chave: 'celular', rotulo: 'Celular' },
   { chave: 'eletro', rotulo: 'Eletro' },
+  { chave: 'mala', rotulo: 'Mala' },
 ]
-const ROTULO_SEGMENTO: Record<Segmento, string> = { mala: 'Mala', celular: 'Celular', eletro: 'Eletro' }
+const SEGMENTO_PADRAO: Segmento = SEGMENTOS[0].chave
+const ROTULO_SEGMENTO: Record<Segmento, string> = { celular: 'Celular', eletro: 'Eletro', mala: 'Mala' }
 
 // A última conta (e o último segmento) vista em cada marketplace, enquanto a
 // sessão durar: Shopee → Mercado Livre → Shopee volta no mesmo lugar. useState
@@ -110,7 +115,7 @@ const contasCarregadas = ref(false)
 const carregandoContas = ref(false)
 const erroContas = ref<string | null>(null)
 const eletroExecucao = ref<ContasHorarios['eletro_execucao']>(null)
-const segmento = ref<Segmento>('mala')
+const segmento = ref<Segmento>(SEGMENTO_PADRAO)
 const contaId = ref<string | null>(null)
 const conta = computed(() => contas.value.find((c) => c.id === contaId.value) ?? null)
 
@@ -128,9 +133,9 @@ const lista = computed(() => contas.value.filter((c) => noSegmento(c, segmento.v
 /**
  * Onde abrir: a conta do link (?horario=, F5) no segmento do link (?seg=) se
  * ela estiver nele, senão no dela → a última vista neste marketplace (no
- * último segmento visto) → o último segmento visto, o do link ou Mala, na
- * primeira conta (A–Z). `comLembranca` false = o que o link sozinho abre (F5
- * numa sessão nova, link copiado).
+ * último segmento visto) → o último segmento visto, o do link ou o primeiro
+ * botão (Celular, M-23), na primeira conta (A–Z). `comLembranca` false = o
+ * que o link sozinho abre (F5 numa sessão nova, link copiado).
  */
 function escolhaInicial(
   todas: Conta[],
@@ -148,7 +153,7 @@ function escolhaInicial(
     if (segLembrado && !noSegmento(lembrada, segLembrado)) return { seg: segLembrado, id: primeira(segLembrado) }
     return { seg: segLembrado ?? lembrada.segmento, id: lembrada.id }
   }
-  const seg = segLembrado ?? segUrl ?? 'mala'
+  const seg = segLembrado ?? segUrl ?? SEGMENTO_PADRAO
   return { seg, id: primeira(seg) }
 }
 
