@@ -16,7 +16,7 @@ Regras:
     só admin cria) — e nem fica sabendo quem mais existe.
   * data de início = hoje (Brasília). A tabela não tem coluna de prazo — o
     prazo falado vai pra Observação ("Prazo: dd/mm/aaaa").
-  * o responsável recebe o mesmo aviso da tela (alerta + Telegram) —
+  * o responsável recebe o mesmo aviso da tela (o alerta no sino; M-20) —
     SEMPRE, inclusive quando é a própria pessoa (confirmação). Tudo numa
     transação só: se o aviso falhar, a tarefa ainda é
     gravada e o texto diz que o aviso não saiu — nunca "tente de novo" com a
@@ -302,7 +302,6 @@ async def criar_tarefa(session: AsyncSession, *, dono: User, args: dict[str, Any
                         "data_inicio": hoje.isoformat(),
                         "origem": "claude",
                     },
-                    notify_telegram=True,
                 )
             avisou = True
         except Exception as e:  # noqa: BLE001 — aviso é acessório

@@ -43,9 +43,7 @@ def _defaults_for(user: User) -> UserSettings:
         sync_interval_minutes=None,
         low_stock_threshold=None,
         notify_email=True,
-        notify_telegram=False,
         notify_daily_sync=True,
-        telegram_chat_id=None,
     )
 
 

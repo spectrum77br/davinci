@@ -10,16 +10,13 @@ Quem vê (M-19, 23/11/2026): `escopo` = "adm" | "equipe" | "pessoal" (ver
 (`classificar`): tarefa → pessoal; Falha sync / Revisão / Banido com
 `link_id` → equipe; o resto → ADM. Na dúvida é ADM (só administrador vê).
 
-By default, every emitted alert is also pushed to Telegram when the user has
-`user_settings.notify_telegram` on. Callers that already format their own
-Telegram message (richer body / custom header) should pass
-`notify_telegram=False` to avoid double-send. Fora do alerta pessoal e do ADM
-dirigido, o `user_id` passado só diz a quem vai o Telegram (o sino é do escopo).
+M-20 (23/11/2026): o alerta fica só no sino — o DaVinci não manda mais nada
+ao Telegram (saiu o `notify_telegram`). Fora do alerta pessoal e do ADM
+dirigido, o `user_id` passado não muda quem vê (o sino é do escopo).
 """
 
 from __future__ import annotations
 
-import html
 from typing import Any
 from uuid import UUID
 
@@ -37,18 +34,10 @@ from app.models import (
     StoreInfo,
     User,
     UserRole,
-    UserSettings,
 )
 from app.models.alert import ESCOPO_ADM, ESCOPO_EQUIPE, ESCOPO_PESSOAL, ESCOPOS
 
 logger = structlog.get_logger()
-
-_SEVERITY_PREFIX = {
-    AlertSeverity.ERROR: "🔴",
-    AlertSeverity.WARNING: "🟠",
-    AlertSeverity.SUCCESS: "🟢",
-    AlertSeverity.INFO: "🔵",
-}
 
 # Alerta de anúncio (M-19): vai para a equipe da loja quando tem o vínculo.
 TIPOS_DE_ANUNCIO = frozenset(
@@ -113,7 +102,6 @@ async def emit_alert(
     message: str | None = None,
     payload: dict[str, Any] | None = None,
     dedupe_key: str | None = None,
-    notify_telegram: bool = True,
     escopo: str | None = None,
     integration_id: UUID | None = None,
     plataforma: str | None = None,
@@ -130,7 +118,8 @@ async def emit_alert(
       (se ele for administrador — senão ninguém veria, e vai para todos);
     - "equipe": a equipe da loja da `integration_id` (ou do `link_id` do
       payload) e os administradores; sem a loja, vira "adm".
-    Fora do pessoal e do ADM dirigido, `user_id` só diz a quem vai o Telegram.
+    Fora do pessoal e do ADM dirigido, `user_id` não muda quem vê (M-20:
+    não há mais Telegram).
     """
     payload = payload or {}
     escopo = escopo or classificar(type, payload)
@@ -198,30 +187,7 @@ async def emit_alert(
         if a is None:
             return None
 
-    if notify_telegram and user_id is not None:
-        await _push_telegram(session, user_id=user_id, alert=a)
     return a
-
-
-async def _push_telegram(session: AsyncSession, *, user_id: UUID, alert: Alert) -> None:
-    """Best-effort Telegram dispatch. Honors `user_settings.notify_telegram`."""
-    try:
-        us = await session.get(UserSettings, user_id)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("alert_telegram_lookup_failed", err=str(e))
-        return
-    if us is None or not us.notify_telegram:
-        return
-
-    from app.services.telegram import TelegramClient
-
-    prefix = _SEVERITY_PREFIX.get(alert.severity, "")
-    # O texto pode vir do usuário (tarefa ditada: "caixas < 10 kg"): sem
-    # escapar, o Telegram recusa a mensagem inteira (parse_mode=HTML).
-    head = f"{prefix} <b>{html.escape(alert.title)}</b>".strip()
-    body = head if not alert.message else f"{head}\n{html.escape(alert.message)}"
-    tg = TelegramClient()
-    await tg.safe_send(body, chat_id=us.telegram_chat_id)
 
 
 async def avisar_administradores(

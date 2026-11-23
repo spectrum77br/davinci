@@ -1,4 +1,9 @@
-"""GET/PATCH /api/settings tests (Fase 7)."""
+"""GET/PATCH /api/settings tests (Fase 7).
+
+M-20 (23/11/2026): o Telegram saiu — `notify_telegram` e `telegram_chat_id`
+não aparecem na API e o PATCH de uma tela antiga com eles é ignorado (as
+colunas ficam sem uso).
+"""
 
 from __future__ import annotations
 
@@ -39,9 +44,8 @@ async def test_get_settings_returns_defaults_when_missing(
     assert body["daily_sync_enabled"] is False
     assert body["daily_sync_time"] is None
     assert body["notify_email"] is True
-    assert body["notify_telegram"] is False
     assert body["notify_daily_sync"] is True
-    assert body["telegram_chat_id"] is None
+    assert "notify_telegram" not in body and "telegram_chat_id" not in body
     assert body["low_stock_threshold"] is None
 
 
@@ -59,6 +63,7 @@ async def test_patch_creates_row_and_updates(
             "daily_sync_enabled": True,
             "daily_sync_time": "08:30:00",
             "low_stock_threshold": 5,
+            # Tela antiga (antes da M-20): os campos do Telegram são ignorados.
             "notify_telegram": True,
             "telegram_chat_id": "-100111",
         },
@@ -68,13 +73,13 @@ async def test_patch_creates_row_and_updates(
     assert body["daily_sync_enabled"] is True
     assert body["daily_sync_time"] == "08:30:00"
     assert body["low_stock_threshold"] == 5
-    assert body["notify_telegram"] is True
-    assert body["telegram_chat_id"] == "-100111"
+    assert "notify_telegram" not in body and "telegram_chat_id" not in body
 
     us = await db.get(UserSettings, user.id)
     assert us is not None
     assert us.daily_sync_enabled is True
     assert us.low_stock_threshold == 5
+    assert us.notify_telegram is False and us.telegram_chat_id is None
 
 
 @pytest.mark.asyncio
@@ -83,11 +88,11 @@ async def test_patch_partial_keeps_other_fields(
 ) -> None:
     auth_as(user)
     await client.patch("/api/settings", json={"notify_email": False})
-    r = await client.patch("/api/settings", json={"notify_telegram": True})
+    r = await client.patch("/api/settings", json={"notify_daily_sync": False})
     assert r.status_code == 200
     body = r.json()
     assert body["notify_email"] is False
-    assert body["notify_telegram"] is True
+    assert body["notify_daily_sync"] is False
 
 
 @pytest.mark.asyncio

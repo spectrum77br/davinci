@@ -5,7 +5,7 @@
 * transição direta rejeitada faz DESVIO por Aguardando Devolução (83957) e
   reaplica o alvo (erros 1 e 2 — Extraviado e Manutenção a partir de
   Resolvido);
-* se até o desvio for recusado (4xx), alerta o operador (sino/Telegram);
+* se até o desvio for recusado (4xx), alerta o operador (sino);
 * "mesma situação" (400 código 50) é sucesso idempotente, sem desvio.
 """
 
@@ -216,7 +216,7 @@ async def test_apply_mesma_situacao_e_sucesso_idempotente(monkeypatch, patched):
 
 
 async def test_apply_desvio_rejeitado_alerta_manual(monkeypatch, patched):
-    # Direto E desvio recusados (4xx) → alerta sino/Telegram p/ ajuste manual.
+    # Direto E desvio recusados (4xx) → alerta no sino p/ ajuste manual.
     audits, alerts = patched
     client = _FakeClient([
         _http_error(400, "transição de situação inválida"),

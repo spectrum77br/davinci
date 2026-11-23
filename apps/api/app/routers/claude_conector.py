@@ -194,7 +194,6 @@ async def criar(
                         "Claude. Se não foi você que pediu, avise um administrador para revogar."
                     ),
                     payload={"conector_id": str(c.id), "origem": "claude_conector"},
-                    notify_telegram=True,
                 )
         except Exception as e:  # noqa: BLE001 — aviso é acessório
             logger.warning("claude_conector_aviso_falhou", conector=str(c.id), err=str(e)[:200])

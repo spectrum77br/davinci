@@ -206,7 +206,7 @@ async def _avisar(
     m: SistemaMudanca,
     evento: str,
 ) -> None:
-    """Pop-up no sino + Telegram para cada pessoa. Falha no aviso nunca
+    """Pop-up no sino para cada pessoa (M-20: sem Telegram). Falha no aviso nunca
     desfaz a mudança de situação (savepoint por pessoa). Para quem aprova, o
     texto diz onde abrir (e o link vai junto); para quem pediu, não — a tela
     não existe para ele (acompanha pelo Claude: listar_mudancas)."""
@@ -248,7 +248,6 @@ async def _avisar(
                     message=texto,
                     payload=payload,
                     dedupe_key=f"mudanca:{m.id}:{evento}:{m.tentativas}:{m.adiamentos}",
-                    notify_telegram=True,
                     escopo=ESCOPO_ADM if uid in admins else ESCOPO_PESSOAL,
                     dirigido=True,
                 )

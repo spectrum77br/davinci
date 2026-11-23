@@ -280,7 +280,6 @@ async def _avisar(
             message=texto,
             payload={"push_key": push.key, "enviado": enviado, "divergentes": divergentes},
             dedupe_key=dedupe,
-            notify_telegram=False,
             # M-19 (23/11/2026): é da equipe da loja (e do ADM), não só de
             # quem fez o envio.
             escopo=ESCOPO_EQUIPE,

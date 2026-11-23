@@ -25,10 +25,14 @@ class UserSettings(Base, TimestampMixin):
     notify_email: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE")
     )
+    # M-20 (23/11/2026): SEM USO — o Telegram saiu do DaVinci. A coluna fica
+    # (apagar é migration e o downgrade não teria como voltar o valor); a tela
+    # e a API não a mostram nem gravam.
     notify_telegram: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE")
     )
     notify_daily_sync: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE")
     )
+    # M-20 (23/11/2026): SEM USO, como `notify_telegram`.
     telegram_chat_id: Mapped[str | None] = mapped_column(Text, nullable=True)

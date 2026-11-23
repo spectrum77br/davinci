@@ -11,7 +11,7 @@ aberto. Caso anterior idêntico: 298822 (Perdimento tirou o pedido da busca).
 Eduardo: "se mudou para Problemas errado e ele excluiu, volta a mudança de
 situação" — e o que o DaVinci criou sozinho, ele mesmo apaga. A regra geral é
 "só desfaz o que ninguém mexeu depois": o que uma pessoa (ou a plataforma)
-tocou fica, e o DaVinci avisa no sino/Telegram.
+tocou fica, e o DaVinci avisa no sino.
 
 Três partes, cada uma usada por quem precisa:
 * prejuízo automático (Refund) — as DUAS lixeiras (aba Devoluções e chamado),
@@ -93,7 +93,7 @@ async def _alerta(
     dedupe_key: str,
     payload: dict,
 ) -> None:
-    """Sino + Telegram de quem excluiu. Best-effort e num savepoint: um erro
+    """Sino de quem excluiu. Best-effort e num savepoint: um erro
     aqui nunca derruba a exclusão (nem envenena a transação dela)."""
     if actor_id is None:
         return
@@ -355,7 +355,7 @@ async def desfazer_refund_auto(
     avisar_duvida: bool = True,
 ) -> dict | None:
     """Apaga o prejuízo automático da linha se ninguém mexeu nele; se mexeram
-    (ou não dá pra ter certeza de qual é), mantém e avisa (sino/Telegram) pra
+    (ou não dá pra ter certeza de qual é), mantém e avisa (sino) pra
     revisar. `exclusao` = a linha está sendo excluída (senão: o PATCH tirou a
     linha de Extraviado/Sucata — o produto apareceu, Eduardo 15/09, caso
     293843). `avisar_duvida=False`: a dúvida sem refund certo vira None (busca

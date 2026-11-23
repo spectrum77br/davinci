@@ -155,7 +155,7 @@ _OPENAPI_TAGS = [
     {"name": "audit", "description": "Audit by spreadsheet — runs, items, fixes."},
     {"name": "discrepancies", "description": "Cross-platform stock divergences."},
     {"name": "dashboard", "description": "Onboarding + KPIs do dashboard."},
-    {"name": "settings", "description": "User preferences (Telegram, daily sync, etc)."},
+    {"name": "settings", "description": "User preferences (daily sync, notificações, etc)."},
     {"name": "metrics", "description": "Observability — counts, latency, error codes."},
     {
         "name": "tarefas",

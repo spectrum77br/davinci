@@ -13,9 +13,7 @@ type SettingsOut = {
   sync_interval_minutes: number | null
   low_stock_threshold: number | null
   notify_email: boolean
-  notify_telegram: boolean
   notify_daily_sync: boolean
-  telegram_chat_id: string | null
 }
 
 type WebhookUrl = { url: string; secret_hint: string; events: string[] }
@@ -39,9 +37,7 @@ const form = reactive<SettingsOut>({
   sync_interval_minutes: null,
   low_stock_threshold: null,
   notify_email: true,
-  notify_telegram: false,
   notify_daily_sync: true,
-  telegram_chat_id: null,
 })
 const saving = ref(false)
 const message = ref<string | null>(null)
@@ -202,30 +198,12 @@ onMounted(() => {
             </li>
             <li class="flex items-center py-3">
               <div>
-                <div class="text-sm font-medium">Telegram</div>
-                <div class="text-xs text-muted-foreground">mensagem ao terminar o sync diário</div>
-              </div>
-              <input v-model="form.notify_telegram" type="checkbox" class="ml-auto size-4 accent-primary">
-            </li>
-            <li class="flex items-center py-3">
-              <div>
                 <div class="text-sm font-medium">Resumo do sync diário</div>
                 <div class="text-xs text-muted-foreground">cria alerta <code>daily_sync_completed</code></div>
               </div>
               <input v-model="form.notify_daily_sync" type="checkbox" class="ml-auto size-4 accent-primary">
             </li>
           </ul>
-          <div>
-            <Label>Telegram chat_id pessoal (opcional)</Label>
-            <Input
-              v-model="form.telegram_chat_id"
-              placeholder="ex.: -100123456789"
-              :disabled="!form.notify_telegram"
-            />
-            <div class="text-[11px] text-muted-foreground mt-1">
-              Vazio = usa <code>TELEGRAM_CHAT_ID</code> global do bot.
-            </div>
-          </div>
           <div class="flex justify-end">
             <Button size="sm" :disabled="saving" @click="save">
               <Save class="size-4 mr-1.5" /> {{ saving ? 'salvando…' : 'salvar' }}

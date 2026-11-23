@@ -445,7 +445,7 @@ async def sync_all_run(
 
 
 async def _notify_daily_sync_completed(s, user_id: UUID, job, report) -> None:
-    """Emit `daily_sync_completed` alert + optional Telegram message."""
+    """Emit `daily_sync_completed` alert (M-20, 23/11/2026: só no sino, sem Telegram)."""
     us = await s.get(UserSettings, user_id)
     if us is None or not us.notify_daily_sync:
         return
@@ -474,17 +474,8 @@ async def _notify_daily_sync_completed(s, user_id: UUID, job, report) -> None:
             "requires_review": report.requires_review,
         },
         dedupe_key=f"daily_sync:{user_id}:{datetime.now(SP_TZ).date().isoformat()}",
-        notify_telegram=False,
         escopo=ESCOPO_ADM,  # M-19: sync diário é aviso de administrador
     )
-    if us.notify_telegram:
-        from app.services.telegram import TelegramClient
-
-        tg = TelegramClient()
-        await tg.safe_send(
-            f"<b>DaVinci — Sync diário</b>\n{msg}",
-            chat_id=us.telegram_chat_id,
-        )
 
 
 async def sync_product_run(
@@ -3328,7 +3319,6 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
             title="Logística: automação parada",
             message=texto,
             dedupe_key=f"logistica_vigia:{agora:%Y%m%d%H}",
-            notify_telegram=False,  # o aviso já foi pelo Threema
             escopo=ESCOPO_ADM,
         )
     return {"atrasados": len(atrasados), "admins": len(admin_ids)}
@@ -3560,7 +3550,6 @@ async def meta_token_refresh(ctx: dict) -> None:
                     "expira_em": tok.token_expires_at.isoformat(),
                 },
                 dedupe_key=f"rede_social_token:{tok.id}:{agora:%Y%m%d}",
-                notify_telegram=False,
                 escopo=ESCOPO_ADM,
             )
             if a is not None:
@@ -5041,7 +5030,7 @@ async def nf_recuperar_tick(ctx: dict) -> None:
 async def failed_jobs_alert_scan(ctx: dict) -> None:
     """Emit `sync_failure` alert per BackgroundJob that finished failed in
     the last 10 minutes. Dedupe key per job id keeps it idempotent across
-    runs. Telegrams the user when `user_settings.notify_telegram` is on."""
+    runs. M-20 (23/11/2026): só o alerta no sino (o Telegram saiu)."""
     cutoff = datetime.now(UTC) - timedelta(minutes=10)
     async with session_scope() as s:
         rows = (
@@ -5086,20 +5075,10 @@ async def failed_jobs_alert_scan(ctx: dict) -> None:
                     "product_id": payload.get("product_id"),
                 },
                 dedupe_key=dedupe,
-                notify_telegram=False,
             )
             if a is None:
                 continue
             emitted += 1
-            us = await s.get(UserSettings, job.created_by)
-            if us is not None and us.notify_telegram:
-                from app.services.telegram import TelegramClient
-
-                tg = TelegramClient()
-                await tg.safe_send(
-                    f"<b>DaVinci — Sync failure</b>\n{msg}",
-                    chat_id=us.telegram_chat_id,
-                )
         logger.info("failed_jobs_alert_scan_done", scanned=len(rows), emitted=emitted)
 
 
@@ -5173,8 +5152,8 @@ async def _assinatura_zap() -> None:
 async def _assinatura_bling() -> None:
     """If webhook signature failures pile up, the inline stock-update path is
     silently broken (wrong header alias, rotated secret, etc). Read the
-    rolling 1h Redis counter populated by the webhook router; alert+telegram
-    once per hour while the counter stays elevated."""
+    rolling 1h Redis counter populated by the webhook router; alert (no sino;
+    M-20: sem Telegram) once per hour while the counter stays elevated."""
     import json as _json
 
     try:
@@ -5224,31 +5203,23 @@ async def _assinatura_bling() -> None:
                 diag_lines.append("headers: " + ", ".join(sorted(bh.keys())))
             else:
                 diag_lines.append("headers: (none x-bling-*)")
-        # M-19 (23/11/2026): aviso de ADM (todo administrador vê); o dono da
-        # integração Bling continua só como destino do Telegram.
-        a = await emit_alert(
+        # M-19 (23/11/2026): aviso de ADM (todo administrador vê). M-20: o
+        # diagnóstico da última falha vai na mensagem (antes só no Telegram).
+        await emit_alert(
             s,
             user_id=owner,
             escopo=ESCOPO_ADM,
             type=AlertType.GENERIC,
             severity=AlertSeverity.ERROR,
             title="Webhook Bling: assinatura inválida",
-            message=msg,
+            message=(
+                f"{msg}\n\nDiagnóstico da última falha:\n" + "\n".join(diag_lines)
+                if diag_lines
+                else msg
+            ),
             payload={"sig_fail_count": count, "hour_bucket": hour_bucket},
             dedupe_key=f"webhook_bling_sig_fail:{hour_bucket}",
-            notify_telegram=False,
         )
-        if a is None:
-            return
-        us = await s.get(UserSettings, owner)
-        if us is not None and us.notify_telegram:
-            from app.services.telegram import TelegramClient
-
-            tg = TelegramClient()
-            tg_msg = f"<b>DaVinci — Webhook Bling</b>\n{msg}"
-            if diag_lines:
-                tg_msg += "\n\n<b>Diag última falha:</b>\n<pre>" + "\n".join(diag_lines) + "</pre>"
-            await tg.safe_send(tg_msg, chat_id=us.telegram_chat_id)
 
 
 async def low_stock_polling(ctx: dict) -> None:
@@ -5271,7 +5242,7 @@ async def low_stock_polling(ctx: dict) -> None:
         emitted = 0
         for p in rows:
             # M-19 (23/11/2026): estoque baixo é aviso de ADM (o produto é de
-            # todas as lojas); o dono do produto fica só para o Telegram.
+            # todas as lojas). M-20: sem Telegram.
             a = await emit_alert(
                 s,
                 user_id=p.user_id,
@@ -5296,7 +5267,7 @@ async def low_stock_polling(ctx: dict) -> None:
 async def faturas_vencimento_scan(ctx: dict) -> None:
     """Avisa 1 dia antes do vencimento de cada fatura (assinatura recorrente).
     Também pega o próprio dia do vencimento como rede de segurança, caso o
-    aviso da véspera tenha sido perdido. Alerta só na tela (sem Telegram).
+    aviso da véspera tenha sido perdido. Alerta só na tela.
 
     O dedupe_key inclui a `data_vencimento` (não a data de hoje): garante um
     único aviso por ciclo. Ao renovar, o admin move a data → a chave muda e o
@@ -5338,7 +5309,6 @@ async def faturas_vencimento_scan(ctx: dict) -> None:
                     "data_vencimento": venc.isoformat(),
                 },
                 dedupe_key=f"fatura_venc:{f.id}:{venc.isoformat()}",
-                notify_telegram=False,
                 escopo=ESCOPO_ADM,
             )
             if a is not None:

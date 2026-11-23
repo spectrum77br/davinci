@@ -234,8 +234,9 @@ class Settings(BaseSettings):
     temu_app_secret: str = ""
     temu_access_token: str = ""
 
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
+    # M-20 (23/11/2026): saíram `telegram_bot_token` e `telegram_chat_id` — o
+    # DaVinci não fala mais com o Telegram. TELEGRAM_* velho no .env é
+    # ignorado (extra="ignore").
 
     # Threema Gateway (Basic mode) — notifica as pessoas de um caso de
     # logística. `threema_gateway_id`: o *ID de 8 chars (ex. "*3MAGW01").

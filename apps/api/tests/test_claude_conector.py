@@ -20,7 +20,7 @@ from app.services.rate_limit import RateLimitError
 
 @pytest.fixture
 def sem_alerta(monkeypatch):
-    """Captura os avisos (alerta + Telegram) em vez de mandar."""
+    """Captura os avisos (o alerta no sino; M-20: sem Telegram) em vez de gravar."""
     avisos: list[dict] = []
 
     async def _emit(session, **kw):
@@ -249,13 +249,13 @@ async def test_usuario_sistema_nao_e_responsavel(
 async def test_aviso_falhando_nao_duplica_tarefa(
     client: AsyncClient, db: AsyncSession, make_user, auth_as, monkeypatch, sem_alerta
 ):
-    """Se o aviso (alerta/Telegram) estourar, a tarefa fica gravada e o texto
+    """Se o aviso (o alerta no sino) estourar, a tarefa fica gravada e o texto
     diz que não avisou — sem 'tente de novo' (duplicaria)."""
     _admin, _dono, token, _ = await _conector(client, db, make_user, auth_as)
     await _usuario(db, make_user, "ed@davinci-test.com", "Eduardo")
 
     async def _boom(session, **kw):
-        raise RuntimeError("telegram caiu")
+        raise RuntimeError("o aviso caiu")
 
     monkeypatch.setattr(claude_tarefas, "emit_alert", _boom)
     r = await client.post(

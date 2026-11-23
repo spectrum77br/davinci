@@ -34,7 +34,7 @@ Resolvido→Extraviado, Resolvido→Manutenção). Na recusa o patch faz um DESV
 validado (caso real 291700): passa por "Aguardando Devolução" (83957) e
 reaplica o alvo. "Mesma situação" (400 cód. 50) conta como sucesso
 idempotente, sem desvio. Se até o desvio for recusado (4xx), o operador
-recebe um alerta (sino/Telegram) para ajustar a situação manualmente.
+recebe um alerta (sino) para ajustar a situação manualmente.
 
 Todas as funções públicas de estoque retornam um dict:
   ok: bool, action: str, sku: str|None, bling_product_id: int|None, message: str
@@ -499,7 +499,7 @@ async def mudar_situacao_com_desvio(
 async def _alert_manual_situacao(
     session: AsyncSession, actor_id: UUID | None, pedido: str, target: int
 ) -> None:
-    """Alerta (sino + Telegram) pedindo ajuste manual da situação no Bling —
+    """Alerta (sino) pedindo ajuste manual da situação no Bling —
     usado quando a API rejeita a transição (grafo de mão única). Best-effort."""
     if actor_id is None:
         return

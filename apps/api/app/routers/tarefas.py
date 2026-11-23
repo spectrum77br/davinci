@@ -116,8 +116,8 @@ async def create_tarefa(
     logger.info("tarefa_created", id=str(t.id), responsavel_id=str(t.responsavel_id))
 
     # Drop the modal-style notification on the responsável's screen via
-    # the alerts pipeline. emit_alert writes an Alert row + (optionally)
-    # pings Telegram; the TarefaNotification.vue component polls
+    # the alerts pipeline. emit_alert writes an Alert row (M-20: sem
+    # Telegram); the TarefaNotification.vue component polls
     # /api/alerts and pops the dialog. Admin self-assigning their own
     # tarefa skips the notification (avoid surprising the creator).
     if t.responsavel_id != admin.id:
@@ -134,7 +134,6 @@ async def create_tarefa(
                 "atribuida_por": admin.name or admin.email,
                 "data_inicio": t.data_inicio.isoformat() if t.data_inicio else None,
             },
-            notify_telegram=True,
         )
         await session.commit()
     return _to_out(t, resp)
@@ -215,7 +214,6 @@ async def patch_tarefa(
                 "atribuida_por": user.name or user.email,
                 "data_inicio": t.data_inicio.isoformat() if t.data_inicio else None,
             },
-            notify_telegram=True,
         )
         await session.commit()
 

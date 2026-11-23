@@ -760,8 +760,8 @@ class SyncOrchestrator:
 
         M-19 (23/11/2026): alerta de anúncio é da EQUIPE da loja do vínculo
         (integração → loja), não de quem rodou o sync: vê a equipe e o
-        administrador, um alerta por vínculo. O `user_id` fica só para o
-        Telegram de quem rodou (como antes)."""
+        administrador, um alerta por vínculo. O `user_id` não muda quem vê
+        (M-20: o Telegram de quem rodou saiu)."""
         loja = {
             "escopo": ESCOPO_EQUIPE,
             "integration_id": link.integration_id,

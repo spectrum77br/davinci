@@ -1169,7 +1169,7 @@ async def _flex_avisar_pessoas(
     faltas: list[str],
     na_fila_da_nf: bool = False,
 ) -> int:
-    """Sino dos admins (o mesmo dos outros robôs; sem Threema e sem Telegram).
+    """Sino dos admins (o mesmo dos outros robôs; sem Threema).
     Um aviso por pedido: o dedupe segura a repetição a cada rodada. M-19
     (23/11/2026): UM alerta ADM, que todo administrador vê (antes, uma cópia
     por administrador). Devolve 1 se avisou agora, 0 se já tinha avisado."""
@@ -1204,7 +1204,6 @@ async def _flex_avisar_pessoas(
             "faltas": faltas,
         },
         dedupe_key=f"flex_sem_sp:{pf.bling_id}",
-        notify_telegram=False,
         escopo=ESCOPO_ADM,
     )
     return int(criado is not None)

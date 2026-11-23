@@ -173,7 +173,7 @@ async def _desfazer_refund_auto(
     Extraviado, o pacote chegou e virou Novo) o reembolso automático daquela
     condição — prejuízo = custo do produto — perde o sentido: apaga se ninguém
     mexeu nele (reembolso 0, não conferido); se mexeram, mantém e avisa no
-    sino/Telegram pra revisar. A regra é a MESMA da exclusão do lançamento
+    sino pra revisar. A regra é a MESMA da exclusão do lançamento
     (services/devolucao_exclusao, caso 300978). Devolve "apagado" | "mantido" |
     None (não achou). NÃO commita."""
     r = await devolucao_exclusao.desfazer_refund_auto(

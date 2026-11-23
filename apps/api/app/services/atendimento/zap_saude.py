@@ -30,8 +30,8 @@ Três partes:
    leitura do Zap ligada): renova da Meta o que só ela sabe (`renovar_da_meta`
    — só GET: a inspeção do token uma vez por dia, os apps inscritos e a saúde
    de cada número com o `webhook_configuration`), calcula os alarmes e AVISA
-   os administradores (`avisar`: o Alerta do DaVinci, que vai ao Telegram de
-   quem ligou; um por alarme por dia). O alarme de assinatura também roda no
+   os administradores (`avisar`: o Alerta ADM do DaVinci, no sino; M-20:
+   sem Telegram; um por alarme por dia). O alarme de assinatura também roda no
    `webhook_signature_alert_scan` do worker (sem a chave: falha de
    assinatura importa antes de ligar a leitura) — com a MESMA chave de
    dedupe, nunca em dobro.
@@ -76,9 +76,6 @@ from app.models import (
     AtendimentoZapEvento,
     AtendimentoZapMidia,
     AtendimentoZapNumero,
-    User,
-    UserRole,
-    UserStatus,
 )
 from app.services.atendimento import (
     zap,
@@ -969,25 +966,16 @@ async def avisar(
     vê (M-19, 23/11/2026: um alerta só; antes, uma cópia por administrador).
 
     Um por alarme por dia (a `dedupe_key`): a tela continua mostrando enquanto
-    durar. O Alerta vai ao Telegram dos administradores ativos que ligaram o
-    aviso. Devolve quantos alarmes foram avisados agora. Não commita.
+    durar (M-20, 23/11/2026: só no sino, sem Telegram). Devolve quantos
+    alarmes foram avisados agora. Não commita.
     """
     if not alertas:
         return 0
     from app.models.alert import ESCOPO_ADM
-    from app.services.alerts import _push_telegram, emit_alert
+    from app.services.alerts import emit_alert
 
     agora = agora or _agora()
     dia = agora.astimezone(_SP).date().isoformat()
-    admins = list(
-        (
-            await session.execute(
-                select(User.id).where(User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE)
-            )
-        )
-        .scalars()
-        .all()
-    )
     novos = 0
     for a in alertas:
         feito = await emit_alert(
@@ -1006,8 +994,6 @@ async def avisar(
             escopo=ESCOPO_ADM,
         )
         if feito is not None:
-            for user_id in admins:
-                await _push_telegram(session, user_id=user_id, alert=feito)
             novos += 1
             logger.error("zap_alerta", codigo=a.codigo, alvo=a.chave.split(":", 1)[1])
     return novos
