@@ -337,9 +337,6 @@ def main():
                     "nomes e custos do cadastro %s",
                     catalog_follow.follow_names(erp, store.all_rows("products")),
                 )
-                from app.erp_local import bling_payables
-
-                log.info("contas a pagar do Bling %s", bling_payables.run(erp))
                 log.info(
                     "composição dos kits %s",
                     catalog_follow.follow_structures(
@@ -367,6 +364,16 @@ def main():
                         log.warning("sombra da API compatível não feita: %s", type(error).__name__)
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
+        if os.environ.get("ERP_READ_TRANSPORT") == "local":
+            # Every full round (5 min) while the copy fills; complete, it rests half an hour.
+            from app.erp_local import bling_payables
+
+            try:
+                report = bling_payables.run(erp)
+                if report.get("state") != "recent":
+                    log.info("contas a pagar do Bling %s", report)
+            except (ERPError, OSError, ValueError, sqlite3.Error) as error:
+                log.warning("contas a pagar do Bling não lidas: %s", type(error).__name__)
         rounds += 1
         today = time.strftime("%Y-%m-%d")
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and today != checked_on:

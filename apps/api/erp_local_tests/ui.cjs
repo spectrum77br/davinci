@@ -1562,7 +1562,7 @@ test('consulta: menus keep only what the tasks asked for, the rest stays reachab
   const {dom,document:d}=await setup({consulta});
   assert.ok(d.body.classList.contains('consulta'));
   const shown=[...d.querySelectorAll('nav [data-page]')].filter(b=>!b.classList.contains('extra')).map(b=>b.dataset.page);
-  assert.deepEqual(shown,['inicio','overview','products','stock','orders','accounts']);
+  assert.deepEqual(shown,['inicio','overview','products','stock','orders','accounts','integrations','history']);
   const menu=[...d.querySelectorAll('.top-menu-popover [data-menu-target]')].filter(b=>!b.classList.contains('extra')).map(b=>b.dataset.menuTarget+'|'+b.dataset.menuContext);
   assert.deepEqual(menu.sort(),['accounts|payable','orders|','products|','stock|']);
   assert.equal([...d.querySelectorAll('.top-menu-popover h3')].filter(h=>!h.classList.contains('extra')).length>0,true);
@@ -1570,5 +1570,35 @@ test('consulta: menus keep only what the tasks asked for, the rest stays reachab
   assert.doesNotMatch(d.querySelector('main').textContent,/cenário local|Teste a disputa/);
   d.querySelector('nav [data-page=parity]').click();
   assert.ok(d.querySelector('main').textContent.length>0);
+  dom.window.close();
+});
+
+test('consulta: Financeiro lists the bills copied from Bling, with search and the overdue filter',async()=>{
+  const consulta={active:true,reason:'automático',message:'Modo consulta.',read_posts:[]};
+  const {dom,document:d}=await setup({consulta});
+  const fetcher=dom.window.fetch;
+  const row=(id,supplier,due,overdue)=>({id,supplier,history:'Conta '+id,document:'D'+id,due_date:due,competence:'',amount:100,balance:100,situation:'Em aberto',category_id:null,payments:0,repeats:false,overdue,detailed:true});
+  const copy={taken_at:'2026-11-23T12:00:00+00:00',totals:{count:2,amount:200,balance:200,overdue:1},rows:[row('1','Fornecedor A','2026-11-01',true),row('2','Fornecedor B','2026-12-01',false)]};
+  dom.window.fetch=async(url,options)=>url==='/api/erp-local/bling-payables'?{ok:true,status:200,json:async()=>copy}:fetcher(url,options);
+  d.querySelector('nav [data-page=accounts]').click();
+  for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
+  const main=d.querySelector('main');
+  assert.match(main.textContent,/Contas a pagar do Bling/);
+  assert.equal(main.querySelectorAll('[data-payable-row]').length,2);
+  assert.equal(d.querySelector('#entry-form'),null);
+  const due=d.getElementById('payables-due');due.value='1';due.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  assert.deepEqual([...d.querySelectorAll('[data-payable-row]')].filter(r=>!r.hidden).map(r=>r.children[1].textContent),['Fornecedor A']);
+  dom.window.close();
+});
+
+test('consulta: Integrações says store by store whether the ERP has every sale Bling has',async()=>{
+  const consulta={active:true,reason:'automático',message:'Modo consulta.',read_posts:[]};
+  const bling_coverage={taken_at:'2026-11-23T10:00:00+00:00',from:'2026-11-17',to:'2026-11-23',totals:{},stores:[
+    {bling_store:'1',channel:'shopee',store:'s1',name:'Mega',reading:'complete',bling:10,cancelled:0,found:10,missing:0,equal:9,different:1,missing_list:[],different_list:[]},
+    {bling_store:'2',channel:null,store:null,name:'loja sem cadastro no DaVinci',reading:null,bling:3,cancelled:0,found:0,missing:3,equal:0,different:0,missing_list:[],different_list:[]}]};
+  const {dom,document:d}=await setup({consulta,bling_coverage});
+  d.querySelector('nav [data-page=integrations]').click();
+  const text=d.querySelector('main').textContent;
+  assert.match(text,/Lojas: igual ao Bling\?/);assert.match(text,/Igual ao Bling/);assert.match(text,/Não lida pelo ERP/);assert.match(text,/1 de 1 lojas lidas/);
   dom.window.close();
 });

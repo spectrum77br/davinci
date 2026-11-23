@@ -74,6 +74,12 @@ function stockPriorityPanel(){
 }
 document.addEventListener('submit',e=>{if(e.target.getAttribute('id')==='priority-rule'){e.preventDefault();const f=Object.fromEntries(new FormData(e.target));command('stock.priority.rule',{base:f.base,lot:f.lot});}});
 document.addEventListener('click',e=>{const remove=e.target.closest('[data-priority-remove]');if(remove)command('stock.priority.rule',{base:remove.dataset.priorityRemove,lot:null});});
+// Consulta: Bling has no lot priority (DaVinci's robot chooses, from the Tabela de Preços), so here
+// it is only shown, folded, with no form.
+function stockPriorityReadOnly(){
+  const rows=(state.stock_priority||[]).map(r=>`<tr><td>${esc(r.base)}</td><td>.${esc(r.lot)}</td></tr>`).join('');
+  return rows?`<details class="priority-read"><summary>Prioridade de lote (${(state.stock_priority||[]).length}), vinda do DaVinci</summary>${table(['Produto base','Lote prioritário'],rows)}</details>`:'';
+}
 function ownStockPage(){
   const product=state.products.find(p=>p.sku===selectedStockSku);
   let body='';

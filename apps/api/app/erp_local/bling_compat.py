@@ -1507,8 +1507,27 @@ def _free_stock(db, skus):
     return free
 
 
+def _physical_stock(db, skus):
+    from app.erp_local.deposits import snapshot as depot_snapshot
+
+    counted = {d["id"] for d in depot_snapshot(db) if not d["exclude_from_total"]}
+    physical = defaultdict(Decimal)
+    marks = ",".join("?" * len(skus))
+    for row in db.execute(
+        f"SELECT sku,depot,physical FROM balances WHERE sku IN ({marks})",  # noqa: S608
+        tuple(skus),
+    ):
+        if row["depot"] in counted:
+            physical[row["sku"]] += Decimal(row["physical"])
+    return physical
+
+
 def capture_stock_events(erp, db, operation_key):
     """Tell DaVinci the same stock news Bling would, including every kit using a moved part.
+
+    A product that really moved goes with Bling's movement fields (operacao E or S, quantidade,
+    saldoFisicoTotal, observacao): DaVinci's Controle de Estoque writes its day's entries and
+    exits from them, so after the switch the sheet the team follows keeps filling the same way.
 
     A balance only copied from Bling (`mirror-…`, while Bling owns the stores) is news DaVinci
     already got from Bling itself: it is not queued (48.994 such notices had piled up by 12/11)."""
@@ -1536,6 +1555,14 @@ def capture_stock_events(erp, db, operation_key):
     }
     needed = (affected | {p["sku"] for parts in parts_of.values() for p in parts}) - {""}
     free = _free_stock(db, sorted(needed))
+    physical = _physical_stock(db, sorted(moved))
+    deltas, notes = defaultdict(Decimal), {}
+    for row in db.execute(
+        "SELECT sku,physical_delta,reason FROM movements WHERE operation_key=? ORDER BY id",
+        (operation_key,),
+    ):
+        deltas[row["sku"]] += Decimal(row["physical_delta"])
+        notes.setdefault(row["sku"], str(row["reason"] or "").strip())
     for sku in sorted(affected):
         product = products.get(sku)
         if not product or product["kind"] == "service":
@@ -1548,14 +1575,24 @@ def capture_stock_events(erp, db, operation_key):
             if sku in parts_of
             else free[sku]
         )
-        body = {
-            "event": "estoque.alteracao",
-            "dados": {
-                "id": numeric_id(db, "product", sku),
-                "codigo": sku,
-                "estoque": {"saldoVirtualTotal": float(value)},
-            },
+        identifier = numeric_id(db, "product", sku)
+        dados = {
+            "id": identifier,
+            "codigo": sku,
+            "estoque": {"saldoVirtualTotal": float(value)},
         }
+        if sku not in parts_of and deltas.get(sku):
+            dados.update(
+                {
+                    "produto": {"id": identifier, "codigo": sku},
+                    "operacao": "E" if deltas[sku] > 0 else "S",
+                    "quantidade": float(abs(deltas[sku])),
+                    "saldoFisicoTotal": float(physical[sku]),
+                    "saldoVirtualTotal": float(value),
+                    "observacao": notes.get(sku, "")[:255],
+                }
+            )
+        body = {"event": "estoque.alteracao", "dados": dados}
         db.execute(
             "INSERT INTO compat_outbox(event,body,created_at) VALUES (?,?,?)",
             ("estoque.alteracao", json.dumps(body, sort_keys=True), erp.now()),

@@ -12,6 +12,7 @@ Suppliers come by id, only the ones these bills point to, and only the name is k
 
 import json
 import sqlite3
+import time
 from datetime import UTC, datetime
 
 from app.erp_local import compat_shadow
@@ -39,16 +40,36 @@ class UnavailableError(Exception):
     pass
 
 
+# Bling answers 429 when DaVinci and this copy ask at the same second: wait and ask again only
+# what was refused.
+RETRY_WAITS = (3, 8, 20)
+_wait = time.sleep
+
+
 def _read(reader, calls):
-    read = reader({"calls": [{"path": path, "params": params} for path, params in calls]})
-    if not compat_shadow._valid(read, len(calls)) or read.get("state") != "read_ok":
-        raise UnavailableError(
-            read.get("state") if isinstance(read, dict) else "provider_unavailable"
-        )
-    for result in read["results"]:
-        if result["status"] not in {200, 404}:
-            raise UnavailableError(f"http_{result['status']}")
-    return read["results"]
+    results = [None] * len(calls)
+    pending = list(range(len(calls)))
+    for attempt in range(len(RETRY_WAITS) + 1):
+        asked = [calls[i] for i in pending]
+        read = reader({"calls": [{"path": path, "params": params} for path, params in asked]})
+        if not compat_shadow._valid(read, len(asked)) or read.get("state") != "read_ok":
+            state = read.get("state") if isinstance(read, dict) else None
+            raise UnavailableError(state or "provider_unavailable")
+        refused = []
+        for index, result in zip(pending, read["results"], strict=True):
+            if result["status"] == 429:
+                refused.append(index)
+            elif result["status"] not in {200, 404}:
+                raise UnavailableError(f"http_{result['status']}")
+            else:
+                results[index] = result
+        if not refused:
+            return results
+        if attempt == len(RETRY_WAITS):
+            raise UnavailableError("http_429")
+        _wait(RETRY_WAITS[attempt])
+        pending = refused
+    return results
 
 
 def _data(result):

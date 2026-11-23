@@ -79,8 +79,16 @@ document.addEventListener('submit',e=>{
   if(id==='integration-query'){e.preventDefault();integrationQuery=String(new FormData(e.target).get('query'));render();}
   if(id==='policy-form'){e.preventDefault();command('channel.policy.override',Object.fromEntries(new FormData(e.target)));}
 });
+function blingEqualityPanel(){
+  const c=state.bling_coverage;if(!c||!Array.isArray(c.stores))return '';
+  const day=d=>d?String(d).split('-').reverse().slice(0,2).join('/'):'';
+  const read=c.stores.filter(s=>s.channel),equal=read.filter(s=>!s.missing).length;
+  const rows=c.stores.map(s=>{const [label,tone]=!s.channel?['Não lida pelo ERP','warn']:s.missing?[`Faltam ${s.missing}`,'warn']:['Igual ao Bling','good'];return `<tr><td>${esc(s.name||'—')}<small>${esc(platformNames[s.channel]||('Loja '+(s.bling_store||'')+' no Bling'))}</small></td><td><span class="badge ${tone}">${esc(label)}</span></td><td class="num">${esc(s.bling)}</td><td class="num">${esc(s.found)}</td><td class="num">${esc(s.missing)}</td><td>${esc(s.equal)} iguais${s.different?` · ${esc(s.different)} com total diferente`:''}</td></tr>`;}).join('');
+  return panel('Lojas: igual ao Bling?',`${equal} de ${read.length} lojas lidas pelo ERP têm todas as vendas que o Bling tem de ${day(c.from)} a ${day(c.to)}. "Total diferente" é o valor da Shopee (D5); as lojas sem cadastro no DaVinci o ERP não lê.`,table(['Loja','Situação','No Bling','No ERP','Faltando','Valor'],rows));
+}
 function ingestPanel(){
   const v=state.ingest||{accounts:[],runs:[]},on=v.accounts.filter(a=>a.enabled);
-  return panel('Recepção contínua de pedidos',on.length?`${on.length} contas ligadas.`:'Desligada em todas as contas. O motor está pronto e testado, mas nada lê as lojas nem cria pedidos até a troca de autoridade autorizada.',table(['Conta','Situação','Cursor','Última leitura completa','Falhas'],v.accounts.map(a=>`<tr><td>${esc(a.channel)}<small>${esc(a.store)}</small></td><td>${a.enabled?'Ligada':'Desligada'}<small>${esc(a.last_state||'—')}</small></td><td>${a.cursor?when(a.cursor):'—'}</td><td>${a.last_ok_at?when(a.last_ok_at):'—'}</td><td>${esc(a.failures)}</td></tr>`).join('')||empty(5,'Nenhuma conta configurada para recepção.')));
+  const names=Object.fromEntries((state.bling_coverage?.stores||[]).filter(s=>s.store).map(s=>[s.store,s.name]));
+  return panel('Recepção contínua de pedidos',on.length?`${on.length} contas ligadas.`:'Desligada em todas as contas. O motor está pronto e testado, mas nada lê as lojas nem cria pedidos até a troca de autoridade autorizada.',table(['Conta','Situação','Cursor','Última leitura completa','Falhas'],v.accounts.map(a=>`<tr><td>${esc(names[a.store]||a.channel)}<small>${esc(platformNames[a.channel]||a.channel)}${names[a.store]?'':' · '+esc(a.store)}</small></td><td>${a.enabled?'Ligada':'Desligada'}<small>${esc(a.last_state||'—')}</small></td><td>${a.cursor?when(a.cursor):'—'}</td><td>${a.last_ok_at?when(a.last_ok_at):'—'}</td><td>${esc(a.failures)}</td></tr>`).join('')||empty(5,'Nenhuma conta configurada para recepção.')));
 }
-function integrationsWithIngest(){return integrationPage()+ingestPanel();}
+function integrationsWithIngest(){return (window.erpConsulta?.active?blingEqualityPanel():'')+integrationPage()+ingestPanel();}

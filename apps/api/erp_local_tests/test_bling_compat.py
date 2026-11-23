@@ -462,6 +462,11 @@ def test_stock_moves_announce_parts_and_kits_with_the_available_balance(erp):
     kit = next(p for p in erp.snapshot()["products"] if p["sku"] == "demo.kit")
     capacity = next(b for b in kit["balances"] if b["depot"] == "geral")["available"]
     assert seen["demo.kit"] == float(capacity)
+    # As Bling's estoque notice: DaVinci's Controle de Estoque writes the day's entry from it.
+    part = [b for b in bodies if b["codigo"] == "demo.aparelho"][-1]
+    assert (part["operacao"], part["quantidade"], part["observacao"]) == ("E", 2.0, "x")
+    assert part["saldoVirtualTotal"] == 10.0 and part["saldoFisicoTotal"] >= 10.0
+    assert "operacao" not in [b for b in bodies if b["codigo"] == "demo.kit"][-1]
 
 
 def test_real_catalog_shape_is_covered_by_the_compat_detail(erp, client):

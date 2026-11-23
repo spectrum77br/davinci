@@ -132,3 +132,20 @@ def test_a_complete_copy_rests_half_an_hour_between_reads(erp):
     }
     assert seen == []
     assert bling_payables.run(erp, reader, now=start + timedelta(minutes=31))["state"] == "read_ok"
+
+
+def test_a_429_is_asked_again_after_a_wait(erp, monkeypatch):
+    waits = []
+    monkeypatch.setattr(bling_payables, "_wait", waits.append)
+    inner = reader_for([bill(1)], {"7": "A"}, [])
+    refused = {"left": 2}
+
+    def busy(request):
+        answer = inner(request)
+        if refused["left"]:
+            refused["left"] -= 1
+            answer["results"][0] = {"status": 429, "body": None}
+        return answer
+
+    assert bling_payables.run(erp, busy)["state"] == "read_ok"
+    assert waits == [3, 8]

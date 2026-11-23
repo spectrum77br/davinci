@@ -122,6 +122,8 @@ function products() {
 }
 
 function stock() {
+  // Consulta: Bling's Lançamentos de estoque as it is (pick a product, see entries and exits).
+  if(window.erpConsulta?.active)return ownStockPage()+stockPriorityReadOnly();
   return ownStockPage()+stockPriorityPanel()+panel('Novo lançamento','O balanço informa o saldo físico final; entrada e saída informam a quantidade movimentada.',`<form id="stock-form"><div class="forms"><label>Produto físico<select name="sku">${options(state.products.filter(p=>p.kind==='simple'))}</select></label>${depotField()}<label>Tipo<select name="type" id="stock-type"><option value="E">Entrada</option><option value="S">Saída</option><option value="B">Balanço</option><option value="T">Transferência</option></select></label><label>Quantidade / saldo final<input name="quantity" type="number" min="0" max="9999999" step="0.001" required value="1"></label><div id="destination-block" hidden>${depotField('destination','Depósito de destino','retornos')}</div><label>Preço de compra<input name="purchase_price" type="number" min="0" step="0.01" placeholder="opcional"></label><label>Preço de custo<input name="unit_cost" type="number" min="0" step="0.01" placeholder="opcional"></label><label>Observação<input name="reason" required maxlength="300" placeholder="ex.: conferência de teste"></label></div><div class="form-footer"><span>Peças reservadas ficam protegidas.</span><button>Registrar localmente</button></div></form>`)+panel('Novo depósito','',`<form id="depot-form"><div class="forms"><label>Código<input name="id" required maxlength="120"></label><label>Nome<input name="name" required maxlength="120"></label></div><div class="form-footer"><button>Cadastrar depósito</button></div></form>`);
 }
 
@@ -192,6 +194,7 @@ function render() {
   document.querySelectorAll('nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
   content.innerHTML=({inicio:inicioPage,overview,access:accessPage,inbound:inboundPage,guides:guidesPage,companies:companiesPage,products,contacts:contactsPage,cash_register:cashRegisterPage,pos:posPage,proposals:proposalsPage,returns:returnsPage,deposits:depositsPage,sellers:sellersPage,commissions:commissionsPage,price_lists:priceListsPage,categories:categoriesPage,production:productionPage,payment_methods:paymentMethodsPage,inventory:inventoryPage,stock,orders,purchases,accounts,history:historyPage,connections,reference,channels,parity,costs:costsPage,fiscal:fiscalPage,logistics:logisticsPage,release:releasePage,integrations:integrationsWithIngest}[page])();
   applyBlingLayout();
+  if(page==='accounts')applyPayablesFilter();
 }
 
 function message(value,error=false) {
