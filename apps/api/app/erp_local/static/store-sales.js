@@ -177,7 +177,36 @@ function objectsPage(){
   const pager=`<div class="form-footer"><span>${v.total?`${v.offset+1}–${Math.min(v.offset+100,v.total)} de ${v.total}`:'Nenhum objeto'}</span><button type="button" class="secondary" data-objects-page="-100" ${v.offset?'':'disabled'}>Anterior</button><button type="button" class="secondary" data-objects-page="100" ${v.offset+100<v.total?'':'disabled'}>Próxima</button></div>`;
   return logisticsTabs()+panel('Objetos de postagem','Vendas das lojas na fase de envio e as que já têm etiqueta ou rastreio lidos. Só consulta: nada é enviado às lojas.',`${search}${table([`<input type="checkbox" id="objects-all" ${all?'checked':''} aria-label="Selecionar objetos visíveis">`,'Número','Remessa','Cliente','Serviço','Etiqueta','Situação',''],rows)}${pager}`);
 }
+let blingObjects=null,blingLogistics='',blingObjectsQuery='',blingObjectsOffset=0,blingFrom='',blingTo='';
+const blingTone={'Entregue':'done','Em andamento':'progress','Postada':'progress','Aguardando retirada':'progress','Agendamento programado':'progress','Disponível para envio':'progress','Etiqueta paga':'progress','Vinculado':'progress','Não postado':'warn','Aguardando disponibilidade':'warn','Não entregue':'cancel','Atrasado':'cancel','Suspenso':'cancel'};
+function blingObjectsDays(){if(blingFrom)return;const day=d=>d.toISOString().slice(0,10),to=new Date(),from=new Date(to);from.setDate(from.getDate()-30);blingFrom=day(from);blingTo=day(to);}
+async function loadBlingObjects(){
+  blingObjectsDays();
+  try{const r=await fetch(`/api/erp-local/bling-objects?logistics=${encodeURIComponent(blingLogistics)}&q=${encodeURIComponent(blingObjectsQuery)}&from=${blingFrom}&to=${blingTo}&offset=${blingObjectsOffset}&limit=100`);const reply=await r.json();if(!r.ok){message(reply.message||'Objetos indisponíveis.',true);return;}blingObjects=reply;if(page==='logistics')render();}catch{message('Objetos indisponíveis.',true);}
+}
+function blingObjectsPage(){
+  if(!blingObjects){loadBlingObjects();return panel('Objetos de postagem','Carregando os objetos do Bling…','');}
+  const v=blingObjects,c=v.copy;
+  const select=`<label>Logística<select id="bling-objects-logistics"><option value="">Todas as logísticas</option>${v.logistics.map(l=>`<option value="${esc(l.id)}" ${blingLogistics===l.id?'selected':''}>${esc(l.name)} (${l.objects})</option>`).join('')}</select></label>`;
+  const search=`<form id="bling-objects-search"><div class="forms">${select}<label>Pesquisar<input name="q" value="${esc(blingObjectsQuery)}" placeholder="Número, cliente ou etiqueta"></label><label>De<input type="date" name="from" value="${esc(blingFrom)}"></label><label>Até<input type="date" name="to" value="${esc(blingTo)}"></label><button>Filtrar</button></div></form>`;
+  const rows=rowsHtml(v.items.map(o=>[`${esc(o.number)} <span class="dim">(Venda)</span>`,esc(o.remessa)||'<span class="dim">—</span>',o.client?esc(o.client):'<span class="dim">—</span>',esc(o.service),o.tracking?esc(o.tracking):'<span class="dim">—</span>',`<span class="situation-badge" title="${esc(o.description)}"><span class="situation-dot tone-${blingTone[o.situation]||'other'}"></span>${esc(o.situation)}</span>`]));
+  const pager=`<div class="form-footer"><span>${v.total?`${v.offset+1}–${Math.min(v.offset+100,v.total)} de ${v.total}`:'Nenhum objeto'}</span><button type="button" class="secondary" data-bling-objects-page="-100" ${v.offset?'':'disabled'}>Anterior</button><button type="button" class="secondary" data-bling-objects-page="100" ${v.offset+100<v.total?'':'disabled'}>Próxima</button></div>`;
+  const when=c?.taken_at?new Date(c.taken_at).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}):'';
+  const note=c?`Os mesmos objetos do Bling, lidos dele (só consulta; nada vai às lojas). Última leitura ${esc(when)}${c.orders_missing?`; ainda faltam ${c.orders_missing} pedidos dos últimos 30 dias, lidos aos poucos para não atrasar o DaVinci`:''}. Na troca a tela passa a mostrar os objetos do próprio ERP.`:'A cópia dos objetos do Bling ainda não foi lida.';
+  return panel('Objetos de postagem',note,`${search}${table(['Número','Remessa','Cliente','Serviço','Etiqueta','Situação'],rows||empty(6,'Nenhum objeto no período.'))}${pager}`);
+}
+function blingObjectsRail(){
+  const own=blingObjects?.own_tracking||{},same=Object.values(own).reduce((n,x)=>n+x.same,0),all=Object.values(own).reduce((n,x)=>n+x.bling,0);
+  return `<div class="rail-actions">${railButton('printer','Imprimir etiquetas','disabled title="Em consulta as etiquetas continuam saindo pelo DaVinci e pelo UpSeller"')}${railButton('file','DANFE Simplificado + Etiqueta de transporte','disabled title="As notas são do UpSeller e dos faturadores"')}${railButton('reload','Atualizar listagem','id="bling-objects-refresh"')}</div><div class="rail-info"><h3>Informações</h3><p>Quantidade de objeto</p><strong>${blingObjects?blingObjects.total:'…'}</strong>${all?`<p>Rastreio lido das lojas igual ao do Bling</p><strong>${same} de ${all}</strong>`:''}</div>`;
+}
+document.addEventListener('change',e=>{if(e.target.id==='bling-objects-logistics'){blingLogistics=e.target.value;blingObjectsOffset=0;blingObjects=null;render();}});
+document.addEventListener('submit',e=>{if(e.target.getAttribute('id')==='bling-objects-search'){e.preventDefault();const f=new FormData(e.target);blingObjectsQuery=String(f.get('q')||'');blingFrom=String(f.get('from')||'');blingTo=String(f.get('to')||'');blingObjectsOffset=0;blingObjects=null;render();}});
+document.addEventListener('click',e=>{
+  const step=e.target.closest('[data-bling-objects-page]');if(step){blingObjectsOffset=Math.max(0,blingObjectsOffset+Number(step.dataset.blingObjectsPage));blingObjects=null;render();}
+  if(e.target.closest('#bling-objects-refresh')){blingObjects=null;render();}
+});
 function objectsRail(){
+  if(state.consulta?.active)return blingObjectsRail();
   const n=objectPicks.size,off=n?'':'disabled';
   return `<div class="rail-actions">${railButton('printer','Imprimir etiquetas',`${off} id="objects-labels"`)}${railButton('file','DANFE Simplificado + Etiqueta de transporte','disabled title="Depende da NF-e própria, ainda em homologação"')}${railButton('truck','Sincronizar rastreamento em lote',`${off} id="objects-sync"`)}</div><div class="rail-info"><h3>Informações</h3><p>Quantidade de objeto</p><strong>${storeObjects?storeObjects.total:'…'}</strong><p>Não postados</p><strong>${storeObjects?storeObjects.pending:'…'}</strong><small>${n} selecionados</small></div>`;
 }

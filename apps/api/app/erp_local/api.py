@@ -756,6 +756,22 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         with erp.connection() as db:
             return store_objects.listing(db, channel, store, q, offset, limit, lot)
 
+    @app.get("/api/erp-local/bling-objects")
+    def bling_objects_list(
+        logistics: str = Query("", max_length=20),
+        q: str = Query("", max_length=120),
+        date_from: str = Query("", alias="from", max_length=10),
+        date_to: str = Query("", alias="to", max_length=10),
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=200),
+    ):
+        from app.erp_local import bling_objects
+
+        with erp.connection() as db:
+            reply = bling_objects.listing(db, logistics, q, date_from, date_to, offset, limit)
+            reply["own_tracking"] = bling_objects.compare(db)
+        return reply
+
     @app.get("/api/erp-local/store-sales/detail")
     def store_sale_detail(channel: str, store: str, number: str):
         from app.erp_local import store_sales_docs

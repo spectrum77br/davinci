@@ -80,6 +80,7 @@ ROUTE_AREAS = {
     "/api/erp-local/finance": "financeiro",
     "/api/erp-local/store-sales": "expedicao",
     "/api/erp-local/store-objects": "expedicao",
+    "/api/erp-local/bling-objects": "expedicao",
     "/api/erp-local/invoices": "fiscal",
     "/api/erp-local/catalog": "cadastros",
     "/api/erp-local/contacts": "cadastros",

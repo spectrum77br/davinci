@@ -33,6 +33,9 @@ ALLOWED = tuple(
         r"/contas/pagar",
         r"/contas/pagar/\d{1,15}",
         r"/contatos/\d{1,15}",
+        r"/logisticas",
+        r"/logisticas/objetos/\d{1,15}",
+        r"/pedidos/vendas/\d{1,15}",
     )
 )
 PARAMS = {"pagina", "limite", "codigo", "idsProdutos[]", "situacoes[]"}

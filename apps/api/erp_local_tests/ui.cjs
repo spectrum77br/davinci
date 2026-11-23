@@ -1541,6 +1541,24 @@ test('the product code is changed from the editor, as in Bling, and the editor f
   assert.equal(d.getElementById('product-rename-dialog'),null);
 });
 
+test('consulta: Objetos de postagem shows Bling\'s own objects, as Bling lists them, and the menu shows it',async()=>{
+  const {dom,document:d}=await setup({consulta:{active:true,reason:'automático',message:'Modo consulta.',read_posts:[]}});
+  const plain=dom.window.fetch,asked=[];
+  dom.window.fetch=async (url,options)=>{if(String(url).includes('/bling-objects')){asked.push(String(url));return {ok:true,status:200,json:async()=>({items:[{object:'1',number:'307578',store_number:'2000015884543969',remessa:'',client:'Cliente Teste (apelido1)',service:'Expresso (511948)',tracking:'AE117561356BR',situation:'Entregue',description:'Chegou',departure:'2026-11-05',logistics:'ML - 33'}],total:1,offset:0,logistics:[{id:'583444',name:'ML - 33',objects:1}],copy:{taken_at:'2026-11-23T15:00:00+00:00',orders_missing:0},own_tracking:{ml:{bling:1,same:1,different:0,unread:0}}})};}return plain(url,options);};
+  const nav=d.querySelector('nav [data-page=logistics]');
+  assert.ok(nav&&!nav.classList.contains('extra'));
+  nav.click();
+  await new Promise(r=>setTimeout(r,10));
+  const main=d.querySelector('main').textContent;
+  for(const text of ['Objetos de postagem','307578','Cliente Teste (apelido1)','Expresso (511948)','AE117561356BR','Entregue','ML - 33 (1)'])assert.ok(main.includes(text),text);
+  assert.doesNotMatch(main,/Envios próprios/);
+  assert.match(asked[0],/from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}/);
+  const rail=d.querySelector('.rail-info').textContent;
+  assert.match(rail,/Quantidade de objeto\s*1/);assert.match(rail,/1 de 1/);
+  const item=[...d.querySelectorAll('[data-menu-target="logistics"]')].find(b=>/Objetos de postagem/.test(b.textContent));
+  assert.ok(item&&!item.classList.contains('extra'));
+});
+
 test('outside consulta a change is sent as before',async()=>{
   const {dom,document:d,requests}=await setup({consulta:{active:false,read_posts:[]}});
   assert.ok(!d.getElementById('environment').classList.contains('consulta'));
@@ -1622,9 +1640,9 @@ test('consulta: menus keep only what the tasks asked for, the rest stays reachab
   const {dom,document:d}=await setup({consulta});
   assert.ok(d.body.classList.contains('consulta'));
   const shown=[...d.querySelectorAll('nav [data-page]')].filter(b=>!b.classList.contains('extra')).map(b=>b.dataset.page);
-  assert.deepEqual(shown,['inicio','overview','products','stock','orders','accounts','integrations','history']);
+  assert.deepEqual(shown,['inicio','overview','products','stock','orders','logistics','accounts','integrations','history']);
   const menu=[...d.querySelectorAll('.top-menu-popover [data-menu-target]')].filter(b=>!b.classList.contains('extra')).map(b=>b.dataset.menuTarget+'|'+b.dataset.menuContext);
-  assert.deepEqual(menu.sort(),['accounts|payable','orders|','products|','stock|']);
+  assert.deepEqual(menu.sort(),['accounts|payable','logistics|objects','orders|','products|','stock|']);
   assert.equal([...d.querySelectorAll('.top-menu-popover h3')].filter(h=>!h.classList.contains('extra')).length>0,true);
   d.querySelector('nav [data-page=overview]').click();
   assert.doesNotMatch(d.querySelector('main').textContent,/cenário local|Teste a disputa/);

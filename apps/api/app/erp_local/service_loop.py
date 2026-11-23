@@ -384,6 +384,15 @@ def main():
                     log.info("contas a pagar do Bling %s", report)
             except (ERPError, OSError, ValueError, sqlite3.Error) as error:
                 log.warning("contas a pagar do Bling não lidas: %s", type(error).__name__)
+            # Bling's postage objects, while Bling still ships (Objetos de postagem in consulta).
+            from app.erp_local import bling_objects
+
+            try:
+                report = bling_objects.run(erp)
+                if report.get("orders") or report.get("objects") or report["state"] != "read_ok":
+                    log.info("objetos de postagem do Bling %s", report)
+            except (ERPError, OSError, ValueError, sqlite3.Error) as error:
+                log.warning("objetos de postagem do Bling não lidos: %s", type(error).__name__)
         rounds += 1
         today = time.strftime("%Y-%m-%d")
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and today != checked_on:

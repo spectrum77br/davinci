@@ -62,7 +62,7 @@ function railContent(){
   }else if(page==='orders'){
     const disabled=salesSelection.size?'':'disabled';
     actions+=`<div class="rail-actions">${railButton('file','Gerar NF-e dos pedidos selecionados','disabled title="Emissão própria de NF-e ainda em homologação"')}${railButton('status','Mudar situação dos pedidos selecionados',`${disabled} id="sales-state-toggle"`)}<div id="sales-state-menu" hidden><label>Situação<select id="batch-bling-situation">${Object.entries((state.situations||{}).names||{}).map(([id,n])=>`<option value="${esc(id)}">${esc(n)}</option>`).join('')}</select></label><button type="button" id="batch-situation-apply" ${disabled}>Aplicar situação</button><button type="button" id="batch-stock" ${disabled}>Lançar estoque dos selecionados</button><button type="button" id="batch-accounts" ${disabled}>Lançar contas dos selecionados</button><label>Serviço<input id="batch-service" value="Entrega local de teste" maxlength="120"></label><button data-sales-batch="prepare" ${disabled}>Preparar selecionados</button><button data-sales-batch="cancel" class="secondary" ${disabled}>Cancelar selecionados localmente</button></div>${railButton('check','Imprimir selecionados',`${disabled} id="sales-print"`)}${(state.homolog?railButton('cart','Enviar dados para loja virtual',`${disabled} id="sales-store-data" title="Homologação: mostra o que mandaria à loja, sem mandar"`):railButton('cart','Enviar dados para loja virtual','disabled title="Publicação externa ainda não ativada"'))}${railButton('truck','Imprimir etiquetas de transporte',`${disabled} id="sales-transport-labels"`)}${railButton('plus','Mais ações','id="sales-more-toggle"')}<div id="sales-more-menu" class="rail-more" hidden>${salesMoreMenu()}</div></div>${salesView==='store'?`<div class="rail-info"><h3>Informações</h3><p>Quantidade de Vendas</p><strong>${storeSales?storeSales.total:'…'}</strong><small>${storeLabelPicks.size} selecionadas</small></div>`:`<div class="rail-info"><h3>Informações</h3><p>Quantidade de Vendas</p><strong>${salesMatches().length}</strong><small>${salesSelection.size} selecionados</small><p>Total dos pedidos</p><strong class="rail-total">${brl(salesMatches().reduce((sum,o)=>sum+Number(o.data.total),0))}</strong></div>`}`;
-  }else if(page==='logistics'&&logisticsView==='objects'){
+  }else if(page==='logistics'&&(logisticsView==='objects'||state.consulta?.active)){
     actions+=objectsRail();
   }else{
     actions+=`<div class="rail-actions">${railButton('reload','Atualizar listagem','id="rail-refresh"')}${railButton('printer','Imprimir esta tela','id="print-page"')}${page==='logistics'?railButton('cart','Abrir pedidos','data-page="orders"'):''}${page==='fiscal'?railButton('file','Abrir arquivo de notas','data-page="fiscal"'):''}${window.erpConsulta?.active?'':railButton('info','Conferir equivalência','data-page="parity"')}</div><div class="rail-info"><h3>Informações</h3><p>${esc(titles[page][0])}</p>${window.erpConsulta?.active?'<small>O Bling manda até a troca</small><small>Aqui só se consulta</small>':'<small>Operação própria local</small><small>Envios externos desligados</small>'}</div>`;
@@ -116,7 +116,7 @@ function applyBlingLayout(){
 
 const topMenuEntries={
   cadastros:[['Cadastros'],['Usuários e perfis','access'],['Produtos','products'],['Clientes e fornecedores','contacts'],['Vendedores','sellers'],['Formas de pagamento','payment_methods'],['Ferramentas'],['Categorias de produtos','categories'],['Listas de preços','price_lists']],
-  vendas:[['Gestão'],['Pedidos de venda','orders'],['Notas fiscais de saída','fiscal'],['NFC-e'],['Frente de caixa','pos'],['Importar pedidos manualmente','channels'],['Propostas comerciais','proposals'],['Logística'],['Objetos de postagem','logistics'],['Logística reversa','returns'],['Checkout de pedidos','logistics']],
+  vendas:[['Gestão'],['Pedidos de venda','orders'],['Notas fiscais de saída','fiscal'],['NFC-e'],['Frente de caixa','pos'],['Importar pedidos manualmente','channels'],['Propostas comerciais','proposals'],['Logística'],['Objetos de postagem','logistics','objects'],['Logística reversa','returns'],['Checkout de pedidos','logistics']],
   estoque:[['Compras'],['Pedidos de compra','purchases'],['Notas fiscais de entrada','inbound'],['Fornecedores','contacts','supplier'],['Estoque'],['Lançamentos de estoque','stock'],['Conferência de estoque','inventory'],['Ordens de produção','production'],['Depósitos','deposits'],['Multiempresa','companies']],
   financeiro:[['Gestão financeira'],['Contas a pagar','accounts','payable'],['Contas a receber','accounts','receivable'],['Contas financeiras','accounts','bank-form'],['Conciliação de extrato','accounts','reconcile-form'],['Comissões','commissions'],['Controle de caixa','cash_register'],['Tributos e contabilidade'],['GNRE e DARE-SP','guides']],
 };
@@ -124,7 +124,7 @@ const topMenuHeadings=new Set(['Cadastros','Ferramentas','Gestão','Logística',
 // In consulta (production while Bling owns the stores) the team sees only what the tasks asked
 // for and the switch uses: products, stock, orders and payables. The rest stays in the page,
 // hidden (class extra), and still opens by its address.
-const teamMenuTargets=new Set(['products|','orders|','stock|','accounts|payable']);
+const teamMenuTargets=new Set(['products|','orders|','stock|','accounts|payable','logistics|objects']);
 function topMenuExtra(entries,i){
   const [label,target,context]=entries[i];
   if(target)return !teamMenuTargets.has(target+'|'+(context||''));
@@ -147,6 +147,7 @@ document.addEventListener('click',e=>{
     closeTopMenus();const target=menuTarget.dataset.menuTarget,context=menuTarget.dataset.menuContext;
     if(target==='accounts'&&['payable','receivable'].includes(context)){financeLedgerKind=context;financeSelection.clear();}
     if(target==='contacts'){contactRole=context==='supplier'?'supplier':'';contactOffset=0;}
+    if(target==='logistics')logisticsView=context==='objects'?'objects':'own';
     page=target;render();if(context.endsWith('-form'))document.querySelector(`[data-open-form="${context}"]`)?.click();
     if(context==='depot-form'){const form=document.getElementById(context);form?.closest('.panel').classList.add('form-open');form?.scrollIntoView({behavior:'smooth'});}
   }else if(!e.target.closest('.top-menu-popover'))closeTopMenus();

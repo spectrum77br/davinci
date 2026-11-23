@@ -34,6 +34,8 @@ function salesPage(){
 }
 
 function logisticsPage(){
+  // Consulta: Bling still ships, so the page is Bling's own objects (bling_objects), read only.
+  if(state.consulta?.active)return blingObjectsPage();
   if(logisticsView==='objects')return objectsPage();
   const l=shipping();
   manifestSelection=new Set([...manifestSelection].filter(id=>l.shipments.some(s=>s.id===id&&s.stage==='packed'&&!s.data.manifest_id)));
