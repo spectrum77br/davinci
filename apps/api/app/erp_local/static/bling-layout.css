@@ -205,4 +205,4 @@ body.consulta .extra{display:none!important}
 #product-edit-form.read-only input,#product-edit-form.read-only select,#product-edit-form.read-only textarea{pointer-events:none;background:#f6f7f9;color:#4a5568}
 #product-edit-form .consulta-note{color:#0f5132;font-weight:600;margin-right:auto}
 /* Inside DaVinci ("Produtos 2", "Pedidos 2"): the screen without the ERP's own menus. */
-body.embedded .sidebar,body.embedded .erp-topbar,body.embedded footer,body.embedded #back{display:none!important}body.embedded .workspace{margin-left:0;width:100%}body.embedded #action-rail{top:79px}
+body.embedded .sidebar,body.embedded .erp-topbar,body.embedded footer,body.embedded #back{display:none!important}body.embedded .workspace{margin-left:0;width:100%}body.embedded #action-rail{top:79px}body.embedded .abertura{display:none!important}
