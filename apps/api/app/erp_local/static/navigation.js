@@ -40,4 +40,7 @@ window.addEventListener('popstate',e=>{
 });
 document.addEventListener('click',e=>{if(e.target.closest('#back')&&navigationIndex>0)history.back();});
 // F5 on a page reopens it: the first draw reads the page from the address.
-(function(){const asked=decodeURIComponent(location.hash.slice(1));if(asked&&titles[asked])page=asked;})();
+// "#orders/store" opens a page on one of its views (DaVinci's "Pedidos 2" opens the sales read from the stores).
+(function(){const [asked,view]=decodeURIComponent(location.hash.slice(1)).split('/');if(asked&&titles[asked])page=asked;if(page==='orders'&&view==='store')salesView='store';})();
+// Inside DaVinci (?embed=1, or framed): only the screen itself, without the ERP's own menus.
+(function(){if(new URLSearchParams(location.search).get('embed')==='1'||window.self!==window.top)document.body.classList.add('embedded');})();

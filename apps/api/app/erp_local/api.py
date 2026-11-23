@@ -254,9 +254,11 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
+        # frame-ancestors 'self': only DaVinci itself, same site behind the same gate, shows these
+        # screens inside its own pages ("Produtos 2", "Pedidos 2"; ?embed=1).
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'"
+            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'self'; form-action 'self'"
         )
         return response
 

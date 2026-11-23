@@ -1559,6 +1559,19 @@ test('consulta: Objetos de postagem shows Bling\'s own objects, as Bling lists t
   assert.ok(item&&!item.classList.contains('extra'));
 });
 
+test('inside DaVinci (embed=1) only the screen shows, and #orders/store opens the sales read from the stores',async()=>{
+  const consulta={active:true,reason:'automático',message:'Modo consulta.',read_posts:[]};
+  const {document:d}=await setup({consulta},'http://127.0.0.1:8765/erp?embed=1#products');
+  assert.ok(d.body.classList.contains('embedded'));
+  assert.equal(d.querySelector('nav [data-page=products].active')?.dataset.page||d.getElementById('title').textContent.includes('Produto')?'products':'',  'products');
+  const plain=await setup({consulta},'http://127.0.0.1:8765/erp#products');
+  assert.ok(!plain.document.body.classList.contains('embedded'));
+  const orders=await setup({consulta},'http://127.0.0.1:8765/erp?embed=1#orders/store');
+  assert.match(orders.document.querySelector('main').textContent,/Lidos das lojas/);
+  const css=fs.readFileSync(path.join(assets,'bling-layout.css'),'utf8');
+  assert.match(css,/body\.embedded \.sidebar,body\.embedded \.erp-topbar/);
+});
+
 test('outside consulta a change is sent as before',async()=>{
   const {dom,document:d,requests}=await setup({consulta:{active:false,read_posts:[]}});
   assert.ok(!d.getElementById('environment').classList.contains('consulta'));

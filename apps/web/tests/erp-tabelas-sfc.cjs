@@ -1,19 +1,19 @@
 // Run from apps/web: node tests/erp-tabelas-sfc.cjs
-// Produtos 2 e Pedidos 2 (23/11/2026): as tabelas do DaVinci ERP dentro do DaVinci.
+// Produtos 2 e Pedidos 2 (23/11/2026): as telas do próprio DaVinci ERP dentro do DaVinci.
 // O que este teste trava:
-//  · as duas páginas compilam (parse + compileScript + compileTemplate);
+//  · as duas páginas compilam e mostram a tela do ERP (iframe em /erp?embed=1, mesmo site e mesmo
+//    portão), Produtos e Lidos das lojas;
 //  · só quem entra no ERP vê e abre: middleware `admin` + `erp` (u.erp === true) e itens do
-//    menu com erpOnly, logo abaixo de Produtos, fora de /erp/* (que o Caddy manda ao ERP);
-//  · os dados vêm do próprio ERP, só GET: /api/erp-local/products/list e /store-sales.
+//    menu com erpOnly, logo abaixo de Produtos, fora de /erp/* (que o Caddy manda ao ERP).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { parse, compileScript, compileTemplate } = require('vue/compiler-sfc')
 
 const root = path.join(__dirname, '..')
-for (const [file, endpoint] of [
-  ['pages/erp-produtos.vue', '/api/erp-local/products/list'],
-  ['pages/erp-pedidos.vue', '/api/erp-local/store-sales'],
+for (const [file, src] of [
+  ['pages/erp-produtos.vue', '/erp?embed=1#products'],
+  ['pages/erp-pedidos.vue', '/erp?embed=1#orders/store'],
 ]) {
   const source = fs.readFileSync(path.join(root, file), 'utf8')
   const { descriptor, errors } = parse(source, { filename: file })
@@ -22,8 +22,7 @@ for (const [file, endpoint] of [
   const template = compileTemplate({ source: descriptor.template.content, filename: file, id: file, compilerOptions: { bindingMetadata: script.bindings } })
   assert.deepEqual(template.errors, [], file)
   assert.match(source, /definePageMeta\(\{ middleware: \['admin', 'erp'\] \}\)/, file)
-  assert.ok(source.includes(`'${endpoint}'`), `${file} lê ${endpoint}`)
-  assert.doesNotMatch(source, /method:\s*'(POST|PUT|PATCH|DELETE)'/, `${file} só lê`)
+  assert.ok(source.includes(`<iframe src="${src}"`), `${file} mostra ${src}`)
 }
 const middleware = fs.readFileSync(path.join(root, 'middleware/erp.ts'), 'utf8')
 assert.match(middleware, /u\.erp !== true\) return navigateTo\('\/403'\)/)
