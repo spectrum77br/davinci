@@ -292,6 +292,7 @@ async def criar_tarefa(session: AsyncSession, *, dono: User, args: dict[str, Any
                     session,
                     user_id=responsavel.id,
                     type=AlertType.TAREFA_ATRIBUIDA,
+                    escopo="pessoal",  # M-19: só a pessoa vê
                     title="📋 Nova tarefa atribuída a você",
                     severity=AlertSeverity.INFO,
                     message=t.tarefa,

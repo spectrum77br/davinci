@@ -31,8 +31,8 @@ from app.models import (
     User,
     UserRole,
     UserSettings,
-    UserStatus,
 )
+from app.models.alert import ESCOPO_ADM
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import (
@@ -475,6 +475,7 @@ async def _notify_daily_sync_completed(s, user_id: UUID, job, report) -> None:
         },
         dedupe_key=f"daily_sync:{user_id}:{datetime.now(SP_TZ).date().isoformat()}",
         notify_telegram=False,
+        escopo=ESCOPO_ADM,  # M-19: sync diário é aviso de administrador
     )
     if us.notify_telegram:
         from app.services.telegram import TelegramClient
@@ -3312,22 +3313,22 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
         except Exception as exc:  # noqa: BLE001 — aviso é best-effort
             logger.warning("logistica_vigia_threema_falhou", erro=str(exc)[:200])
     async with session_scope() as s:
-        # Sino pros admins, com dedupe por HORA: um aviso por hora, não a cada
-        # tick (o vigia roda 2×/hora).
+        # Sino dos admins, com dedupe por HORA: um aviso por hora, não a cada
+        # tick (o vigia roda 2×/hora). M-19 (23/11/2026): UM alerta ADM, que
+        # todo administrador vê (antes, uma cópia por administrador).
         admin_ids = (
             (await s.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
         )
-        for uid in admin_ids:
-            await emit_alert(
-                s,
-                user_id=uid,
-                type=AlertType.SYNC_FAILURE,
-                severity=AlertSeverity.WARNING,
-                title="Logística: automação parada",
-                message=texto,
-                dedupe_key=f"logistica_vigia:{uid}:{agora:%Y%m%d%H}",
-                notify_telegram=False,  # o aviso já foi pelo Threema
-            )
+        await emit_alert(
+            s,
+            type=AlertType.SYNC_FAILURE,
+            severity=AlertSeverity.WARNING,
+            title="Logística: automação parada",
+            message=texto,
+            dedupe_key=f"logistica_vigia:{agora:%Y%m%d%H}",
+            notify_telegram=False,  # o aviso já foi pelo Threema
+            escopo=ESCOPO_ADM,
+        )
     return {"atrasados": len(atrasados), "admins": len(admin_ids)}
 
 
@@ -3528,9 +3529,6 @@ async def meta_token_refresh(ctx: dict) -> None:
         ).all()
         if not linhas:
             return
-        admin_ids = (
-            (await s.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
-        )
         avisados = 0
         for tok, rede in linhas:
             vencido = tok.token_expires_at <= agora
@@ -3545,26 +3543,26 @@ async def meta_token_refresh(ctx: dict) -> None:
                 + ". Enquanto isso o robô não consegue publicar nessa conta: "
                 "reconecte em Cadastros › Redes Sociais."
             )
-            for uid in admin_ids:
-                # Dedupe por DIA: um aviso por conta por dia até alguém
-                # reconectar (o cron roda 1×/dia, mas um restart não duplica).
-                a = await emit_alert(
-                    s,
-                    user_id=uid,
-                    type=AlertType.GENERIC,
-                    severity=AlertSeverity.ERROR if vencido else AlertSeverity.WARNING,
-                    title=f"Rede social: token {'vencido' if vencido else 'vencendo'} ({conta})",
-                    message=texto,
-                    payload={
-                        "rede_social_id": str(rede.id),
-                        "plataforma": rede.plataforma,
-                        "expira_em": tok.token_expires_at.isoformat(),
-                    },
-                    dedupe_key=f"rede_social_token:{tok.id}:{agora:%Y%m%d}",
-                    notify_telegram=False,
-                )
-                if a is not None:
-                    avisados += 1
+            # Dedupe por DIA: um aviso por conta por dia até alguém
+            # reconectar (o cron roda 1×/dia, mas um restart não duplica).
+            # M-19 (23/11/2026): UM alerta ADM para todos os administradores.
+            a = await emit_alert(
+                s,
+                type=AlertType.GENERIC,
+                severity=AlertSeverity.ERROR if vencido else AlertSeverity.WARNING,
+                title=f"Rede social: token {'vencido' if vencido else 'vencendo'} ({conta})",
+                message=texto,
+                payload={
+                    "rede_social_id": str(rede.id),
+                    "plataforma": rede.plataforma,
+                    "expira_em": tok.token_expires_at.isoformat(),
+                },
+                dedupe_key=f"rede_social_token:{tok.id}:{agora:%Y%m%d}",
+                notify_telegram=False,
+                escopo=ESCOPO_ADM,
+            )
+            if a is not None:
+                avisados += 1
         await s.commit()
     logger.info("meta_token_refresh_done", contas=len(linhas), avisados=avisados)
 
@@ -5068,9 +5066,11 @@ async def failed_jobs_alert_scan(ctx: dict) -> None:
                 f"Job {job.type.value} terminou em failed após retries. "
                 f"Trigger: {trigger}. Erro: {err}."
             )
+            # M-19 (23/11/2026): sync que falhou sem anúncio = aviso de ADM.
             a = await emit_alert(
                 s,
                 user_id=job.created_by,
+                escopo=ESCOPO_ADM,
                 type=AlertType.SYNC_FAILURE,
                 severity=AlertSeverity.ERROR,
                 title=title,
@@ -5140,32 +5140,22 @@ async def _assinatura_instagram() -> None:
         return
     hour_bucket = datetime.now(UTC).strftime("%Y%m%d%H")
     async with session_scope() as s:
-        admins = (
-            (
-                await s.execute(
-                    select(User.id).where(
-                        User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        # M-19 (23/11/2026): UM alerta ADM, que todo administrador vê (antes,
+        # uma cópia por administrador ativo).
+        await emit_alert(
+            s,
+            type=AlertType.GENERIC,
+            severity=AlertSeverity.WARNING,
+            title="Webhook do Instagram/Facebook: assinatura inválida",
+            message=(
+                f"{count} avisos do Instagram/Facebook recusados por assinatura na última "
+                "hora. Se o Direct ou os comentários pararam de chegar, confira a chave "
+                "secreta do app da Meta no servidor."
+            ),
+            payload={"sig_fail_count": count, "hour_bucket": hour_bucket},
+            dedupe_key=f"webhook_meta_sig_fail:{hour_bucket}",
+            escopo=ESCOPO_ADM,
         )
-        for uid in admins:
-            await emit_alert(
-                s,
-                user_id=uid,
-                type=AlertType.GENERIC,
-                severity=AlertSeverity.WARNING,
-                title="Webhook do Instagram/Facebook: assinatura inválida",
-                message=(
-                    f"{count} avisos do Instagram/Facebook recusados por assinatura na última "
-                    "hora. Se o Direct ou os comentários pararam de chegar, confira a chave "
-                    "secreta do app da Meta no servidor."
-                ),
-                payload={"sig_fail_count": count, "hour_bucket": hour_bucket},
-                dedupe_key=f"webhook_meta_sig_fail:{hour_bucket}",
-            )
 
 
 async def _assinatura_zap() -> None:
@@ -5232,9 +5222,12 @@ async def _assinatura_bling() -> None:
                 diag_lines.append("headers: " + ", ".join(sorted(bh.keys())))
             else:
                 diag_lines.append("headers: (none x-bling-*)")
+        # M-19 (23/11/2026): aviso de ADM (todo administrador vê); o dono da
+        # integração Bling continua só como destino do Telegram.
         a = await emit_alert(
             s,
             user_id=owner,
+            escopo=ESCOPO_ADM,
             type=AlertType.GENERIC,
             severity=AlertSeverity.ERROR,
             title="Webhook Bling: assinatura inválida",
@@ -5275,9 +5268,12 @@ async def low_stock_polling(ctx: dict) -> None:
         )
         emitted = 0
         for p in rows:
+            # M-19 (23/11/2026): estoque baixo é aviso de ADM (o produto é de
+            # todas as lojas); o dono do produto fica só para o Telegram.
             a = await emit_alert(
                 s,
                 user_id=p.user_id,
+                escopo=ESCOPO_ADM,
                 type=AlertType.LOW_STOCK,
                 severity=AlertSeverity.WARNING,
                 title=f"Estoque baixo: {p.sku}",
@@ -5321,36 +5317,33 @@ async def faturas_vencimento_scan(ctx: dict) -> None:
         if not faturas:
             logger.debug("faturas_vencimento_scan_noop")
             return
-        admin_ids = (
-            (await s.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
-        )
         emitted = 0
         for f in faturas:
             venc = f.data_vencimento
             quando = "vence amanhã" if venc == tomorrow else "vence hoje"
             plano = f" ({f.plano})" if f.plano else ""
-            for uid in admin_ids:
-                a = await emit_alert(
-                    s,
-                    user_id=uid,
-                    type=AlertType.GENERIC,
-                    severity=AlertSeverity.WARNING,
-                    title=f"Fatura {quando}: {f.servico}",
-                    message=f"{f.servico}{plano} {quando} ({venc.isoformat()}).",
-                    payload={
-                        "fatura_id": str(f.id),
-                        "servico": f.servico,
-                        "data_vencimento": venc.isoformat(),
-                    },
-                    dedupe_key=f"fatura_venc:{f.id}:{venc.isoformat()}",
-                    notify_telegram=False,
-                )
-                if a is not None:
-                    emitted += 1
+            # M-19 (23/11/2026): UM alerta ADM por fatura, que todo
+            # administrador vê (antes, uma cópia por administrador).
+            a = await emit_alert(
+                s,
+                type=AlertType.GENERIC,
+                severity=AlertSeverity.WARNING,
+                title=f"Fatura {quando}: {f.servico}",
+                message=f"{f.servico}{plano} {quando} ({venc.isoformat()}).",
+                payload={
+                    "fatura_id": str(f.id),
+                    "servico": f.servico,
+                    "data_vencimento": venc.isoformat(),
+                },
+                dedupe_key=f"fatura_venc:{f.id}:{venc.isoformat()}",
+                notify_telegram=False,
+                escopo=ESCOPO_ADM,
+            )
+            if a is not None:
+                emitted += 1
         logger.info(
             "faturas_vencimento_scan_done",
             faturas=len(faturas),
-            admins=len(admin_ids),
             emitted=emitted,
         )
 

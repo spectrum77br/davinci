@@ -559,6 +559,7 @@ _CLEANUP_TABLES = (
     "import_lotes",
     "import_products",
     "import_cotacao_params",
+    "alerta_leituras",  # 0505 (M-19): FK -> alerts/users
     "alerts",
     "listing_requests",
     "listings",

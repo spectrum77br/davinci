@@ -52,6 +52,7 @@ from app.models import (
     UserRole,
     UserStatus,
 )
+from app.models.alert import ESCOPO_ADM, ESCOPO_PESSOAL
 from app.models.enums import AlertSeverity, AlertType
 from app.services.alerts import emit_alert
 
@@ -210,9 +211,21 @@ async def _avisar(
     texto diz onde abrir (e o link vai junto); para quem pediu, não — a tela
     não existe para ele (acompanha pelo Claude: listar_mudancas)."""
     aprovadores_ids = {u.id for u in await aprovadores(session)}
+    # M-19 (23/11/2026): aviso de mudança é ADM, dirigido a cada pessoa (o
+    # texto é dela). Quem não é administrador não vê ADM: recebe como pessoal.
+    ids = [uid for uid in user_ids if uid is not None]
+    admins = set(
+        (
+            await session.execute(
+                select(User.id).where(User.id.in_(ids), User.role == UserRole.ADMIN)
+            )
+        )
+        .scalars()
+        .all()
+    )
     vistos: set[UUID] = set()
-    for uid in user_ids:
-        if uid is None or uid in vistos:
+    for uid in ids:
+        if uid in vistos:
             continue
         vistos.add(uid)
         aprova = uid in aprovadores_ids
@@ -236,6 +249,8 @@ async def _avisar(
                     payload=payload,
                     dedupe_key=f"mudanca:{m.id}:{evento}:{m.tentativas}:{m.adiamentos}",
                     notify_telegram=True,
+                    escopo=ESCOPO_ADM if uid in admins else ESCOPO_PESSOAL,
+                    dirigido=True,
                 )
         except Exception:  # noqa: BLE001
             logger.warning("mudanca_aviso_falhou", mudanca=codigo(m), evento=evento)

@@ -848,6 +848,7 @@ async def _avisar(
                 session,
                 user_id=t.criado_por,
                 type=AlertType.GENERIC,
+                escopo="pessoal",  # M-19: só a pessoa vê
                 severity=AlertSeverity.WARNING,
                 title=titulo,
                 message=msg,

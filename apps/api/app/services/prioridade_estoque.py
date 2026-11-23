@@ -107,9 +107,8 @@ from app.models import (
     PricingProduct,
     Product,
     StoreInfo,
-    User,
-    UserRole,
 )
+from app.models.alert import ESCOPO_ADM
 from app.services import (
     estoque_familia,
     flex_config,
@@ -1171,10 +1170,9 @@ async def _flex_avisar_pessoas(
     na_fila_da_nf: bool = False,
 ) -> int:
     """Sino dos admins (o mesmo dos outros robôs; sem Threema e sem Telegram).
-    Um aviso por pedido: o dedupe segura a repetição a cada rodada."""
-    admins = (
-        (await session.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
-    )
+    Um aviso por pedido: o dedupe segura a repetição a cada rodada. M-19
+    (23/11/2026): UM alerta ADM, que todo administrador vê (antes, uma cópia
+    por administrador). Devolve 1 se avisou agora, 0 se já tinha avisado."""
     rotulo = _ROTULO_PLATAFORMA.get(pf.plataforma, pf.plataforma)
     loja = f"{rotulo} {pf.numeroloja}" if pf.numeroloja else rotulo
     local = flex_local.atual()
@@ -1192,27 +1190,24 @@ async def _flex_avisar_pessoas(
             f"separar em {local.cidade}, transferir a peça para o .{local.lote} ou cancelar o "
             "pedido."
         )
-    avisados = 0
-    for uid in admins:
-        criado = await emit_alert(
-            session,
-            user_id=uid,
-            type=AlertType.GENERIC,
-            severity=AlertSeverity.ERROR,
-            title=f"Pedido Flex {numero} sem peça no .{_lote_flex()}",
-            message=mensagem,
-            payload={
-                "pedido_bling": numero,
-                "bling_id": pf.bling_id,
-                "plataforma": pf.plataforma,
-                "numeroloja": pf.numeroloja,
-                "faltas": faltas,
-            },
-            dedupe_key=f"flex_sem_sp:{pf.bling_id}",
-            notify_telegram=False,
-        )
-        avisados += criado is not None
-    return avisados
+    criado = await emit_alert(
+        session,
+        type=AlertType.GENERIC,
+        severity=AlertSeverity.ERROR,
+        title=f"Pedido Flex {numero} sem peça no .{_lote_flex()}",
+        message=mensagem,
+        payload={
+            "pedido_bling": numero,
+            "bling_id": pf.bling_id,
+            "plataforma": pf.plataforma,
+            "numeroloja": pf.numeroloja,
+            "faltas": faltas,
+        },
+        dedupe_key=f"flex_sem_sp:{pf.bling_id}",
+        notify_telegram=False,
+        escopo=ESCOPO_ADM,
+    )
+    return int(criado is not None)
 
 
 async def _flex_registrar(

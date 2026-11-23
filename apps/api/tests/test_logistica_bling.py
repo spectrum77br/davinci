@@ -1579,7 +1579,7 @@ async def test_trava_com_heartbeat_solta_no_fim_e_barra_concorrente():
 async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user, monkeypatch):
     """O vigia compara o carimbo do último sucesso com o limite; carimbo
     ausente ganha carência (marca a hora e não alerta). O sino vai pros
-    admins (o Threema já saiu antes)."""
+    admins num alerta ADM só (o Threema já saiu antes)."""
     from datetime import UTC, datetime, timedelta
 
     from app import worker as w
@@ -1653,7 +1653,8 @@ async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user
     assert out["atrasados"] == 1
     assert enviados and "recarregar" in enviados[0] and "Logística" in enviados[0]
     assert alertas and alertas[0]["dedupe_key"].startswith("logistica_vigia:")
-    assert all(a["user_id"] is not None for a in alertas)
+    # M-19 (23/11/2026): UM alerta ADM, que todo administrador vê.
+    assert [(a["escopo"], a.get("user_id")) for a in alertas] == [("adm", None)]
 
 
 @pytest.mark.asyncio

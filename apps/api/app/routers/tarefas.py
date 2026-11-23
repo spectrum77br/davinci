@@ -125,6 +125,7 @@ async def create_tarefa(
             session,
             user_id=t.responsavel_id,
             type=AlertType.TAREFA_ATRIBUIDA,
+            escopo="pessoal",  # M-19: só a pessoa vê
             title="📋 Nova tarefa atribuída a você",
             severity=AlertSeverity.INFO,
             message=t.tarefa,
@@ -205,6 +206,7 @@ async def patch_tarefa(
             session,
             user_id=reassigned_to,
             type=AlertType.TAREFA_ATRIBUIDA,
+            escopo="pessoal",  # M-19: só a pessoa vê
             title="📋 Tarefa reatribuída a você",
             severity=AlertSeverity.INFO,
             message=t.tarefa,

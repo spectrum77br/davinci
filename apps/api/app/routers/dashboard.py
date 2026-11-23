@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_active_user, user_scope
 from app.models import (
-    Alert,
     BackgroundJob,
     Company,
     Integration,
@@ -31,6 +30,7 @@ from app.models import (
     ProductLink,
     User,
 )
+from app.services import alertas_cerca
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -123,13 +123,8 @@ async def get_dashboard(
         )
     ).scalar_one()
 
-    alerts_unread = (
-        await session.execute(
-            select(func.count())
-            .select_from(Alert)
-            .where(user_scope(Alert, user), Alert.read_at.is_(None))
-        )
-    ).scalar_one()
+    # M-19 (23/11/2026): o mesmo número do sino (só o que a pessoa vê).
+    alerts_unread = await alertas_cerca.contar_nao_lidos(session, user)
 
     listing_rows = (
         await session.execute(

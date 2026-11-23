@@ -121,6 +121,9 @@ EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$|pricing_conferencia$"
     r"|marketing_agent_heartbeat$|alerts$|verificar_margem$|perfis$"
+    # O "lido" por pessoa dos alertas (M-19, 0505): um "marcar todos lidos"
+    # viraria milhares de linhas aqui; os alertas já ficam fora.
+    r"|alerta_leituras$"
     # trilhas que o próprio sistema já grava junto com a mudança da pessoa
     r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"

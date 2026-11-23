@@ -64,13 +64,15 @@ async def test_low_stock_polling_emits_alert_below_threshold(
 
     await low_stock_polling({})
 
+    # M-19 (23/11/2026): estoque baixo é ADM de todos (sem destinatário).
     rows = (
-        await db.execute(select(Alert).where(Alert.user_id == user.id))
+        await db.execute(select(Alert).where(Alert.type == AlertType.LOW_STOCK))
     ).scalars().all()
     titles = [a.title for a in rows]
     assert any("SKU-LOW" in t for t in titles)
     assert all("SKU-OK" not in t for t in titles)
     assert all("SKU-NOMIN" not in t for t in titles)
+    assert {(a.escopo, a.user_id) for a in rows} == {("adm", None)}
 
 
 @pytest.mark.asyncio
@@ -92,7 +94,7 @@ async def test_low_stock_polling_dedupes_same_day(
         await db.execute(
             select(func.count())
             .select_from(Alert)
-            .where(Alert.user_id == user.id)
+            .where(Alert.type == AlertType.LOW_STOCK)
         )
     ).scalar_one()
     assert n == 1

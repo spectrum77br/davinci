@@ -185,6 +185,7 @@ async def criar(
                     session,
                     user_id=usr.id,
                     type=AlertType.TAREFA_ATRIBUIDA,
+                    escopo="pessoal",  # M-19: só a pessoa vê
                     title="🔗 Conector do Claude criado para você",
                     severity=AlertSeverity.INFO,
                     message=(

@@ -1,4 +1,4 @@
-from app.models.alert import Alert
+from app.models.alert import Alert, AlertaLeitura
 from app.models.atendimento import (
     AtendimentoAgenteReplay,
     AtendimentoAutomacaoRegistro,
@@ -363,6 +363,7 @@ __all__ = [
     "NfseModelo",
     "NfseTomador",
     "Alert",
+    "AlertaLeitura",
     "AtendimentoAgenteReplay",
     "AtendimentoAutomacaoRegistro",
     "AtendimentoAutomacaoRegra",

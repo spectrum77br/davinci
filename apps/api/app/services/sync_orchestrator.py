@@ -48,6 +48,7 @@ from app.models import (
     SyncLog,
     SyncLogAction,
 )
+from app.models.alert import ESCOPO_EQUIPE
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import estoque_familia, vinculo_saude
 from app.services.alerts import emit_alert
@@ -755,7 +756,17 @@ class SyncOrchestrator:
         self, product: Product, link: ProductLink, result: SyncResult
     ) -> None:
         """B5/B3: surface banned (REQUIRES_REVIEW) and FATAL outcomes as alerts.
-        Dedupe per (product, link) so re-runs collapse."""
+        Dedupe per (product, link) so re-runs collapse.
+
+        M-19 (23/11/2026): alerta de anúncio é da EQUIPE da loja do vínculo
+        (integração → loja), não de quem rodou o sync: vê a equipe e o
+        administrador, um alerta por vínculo. O `user_id` fica só para o
+        Telegram de quem rodou (como antes)."""
+        loja = {
+            "escopo": ESCOPO_EQUIPE,
+            "integration_id": link.integration_id,
+            "plataforma": link.platform.value,
+        }
         if result.status == SyncStatus.REQUIRES_REVIEW:
             classification = (result.payload or {}).get("shopee_classification")
             if classification == "banned" or link.platform == IntegrationPlatform.SHOPEE:
@@ -773,6 +784,7 @@ class SyncOrchestrator:
                         "error_code": result.error_code,
                     },
                     dedupe_key=f"listing_banned:{link.id}",
+                    **loja,
                 )
             else:
                 await emit_alert(
@@ -789,6 +801,7 @@ class SyncOrchestrator:
                         "error_code": result.error_code,
                     },
                     dedupe_key=f"requires_review:{link.id}",
+                    **loja,
                 )
         elif result.status == SyncStatus.FATAL:
             await emit_alert(
@@ -805,6 +818,7 @@ class SyncOrchestrator:
                     "error_code": result.error_code,
                 },
                 dedupe_key=f"sync_failure:{link.id}",
+                **loja,
             )
 
     def _tally(self, s: SyncStatus) -> None:

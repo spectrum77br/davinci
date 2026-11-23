@@ -103,6 +103,7 @@ async def _alerta(
                 session,
                 user_id=actor_id,
                 type=AlertType.GENERIC,
+                escopo="pessoal",  # M-19: só a pessoa vê
                 severity=AlertSeverity.WARNING,
                 title=titulo,
                 message=mensagem,

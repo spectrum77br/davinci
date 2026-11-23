@@ -33,6 +33,7 @@ from app.models import (
     PricingPushIdempotency,
     ProductLink,
 )
+from app.models.alert import ESCOPO_EQUIPE
 from app.models.enums import AlertSeverity, AlertType
 from app.security.cipher import decrypt_json
 from app.services.alerts import emit_alert
@@ -280,6 +281,10 @@ async def _avisar(
             payload={"push_key": push.key, "enviado": enviado, "divergentes": divergentes},
             dedupe_key=dedupe,
             notify_telegram=False,
+            # M-19 (23/11/2026): é da equipe da loja (e do ADM), não só de
+            # quem fez o envio.
+            escopo=ESCOPO_EQUIPE,
+            integration_id=integ.id,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("pricing_confirmacao_alert_falhou", err=str(e)[:200])
@@ -290,5 +295,5 @@ async def _avisar(
         return
     # Só o sino do DaVinci. Eduardo (16/09): "pode remover essa mensagem no
     # Threema do preço" — antes ia pro grupo, depois só pro heisenberg, agora
-    # não vai. O sino continua para quem fez o envio.
+    # não vai. O sino é da equipe da loja (M-19).
     logger.info("pricing_confirmacao_avisado_no_sino", dedupe=dedupe)

@@ -664,9 +664,11 @@ async def test_todos_os_numeros_calados_acusam_uma_linha_geral(db, zap):
 # ═══════════════════════ avisar ══════════════════════════════════════════
 
 
-async def test_avisar_um_alerta_por_alarme_por_dia_para_cada_admin(db, zap, make_user):
-    a1 = await make_user(role=UserRole.ADMIN)
-    a2 = await make_user(role=UserRole.ADMIN)
+async def test_avisar_um_alerta_adm_por_alarme_por_dia(db, zap, make_user):
+    # M-19 (23/11/2026): UM alerta ADM (todo administrador vê), não uma cópia
+    # por administrador.
+    await make_user(role=UserRole.ADMIN)
+    await make_user(role=UserRole.ADMIN)
     await make_user(role=UserRole.USER)
     alerta = zap_saude.Alerta(zap_saude.A_FILA, zap_saude.ERRO, "A fila do WhatsApp está parada")
     async with _db.SessionLocal() as s:
@@ -676,7 +678,7 @@ async def test_avisar_um_alerta_por_alarme_por_dia_para_cada_admin(db, zap, make
         assert await zap_saude.avisar(s, [alerta], agora=QUARTA_14H) == 0
         await s.commit()
     linhas = (await db.execute(select(Alert))).scalars().all()
-    assert sorted(a.user_id for a in linhas) == sorted([a1.id, a2.id])
+    assert [(a.escopo, a.user_id) for a in linhas] == [("adm", None)]
     assert all(a.title.startswith("WhatsApp:") for a in linhas)
     # No dia seguinte avisa de novo.
     async with _db.SessionLocal() as s:

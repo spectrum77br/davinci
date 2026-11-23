@@ -965,15 +965,17 @@ _TITULOS = {
 async def avisar(
     session: AsyncSession, alertas: list[Alerta], *, agora: datetime | None = None
 ) -> int:
-    """Cada alarme NOVO vira um Alerta do DaVinci para cada administrador ativo.
+    """Cada alarme NOVO vira um Alerta ADM do DaVinci, que todo administrador
+    vê (M-19, 23/11/2026: um alerta só; antes, uma cópia por administrador).
 
     Um por alarme por dia (a `dedupe_key`): a tela continua mostrando enquanto
-    durar. O Alerta vai ao Telegram de quem ligou o aviso (o `emit_alert` de
-    sempre). Devolve quantos alarmes foram avisados agora. Não commita.
+    durar. O Alerta vai ao Telegram dos administradores ativos que ligaram o
+    aviso. Devolve quantos alarmes foram avisados agora. Não commita.
     """
     if not alertas:
         return 0
-    from app.services.alerts import emit_alert
+    from app.models.alert import ESCOPO_ADM
+    from app.services.alerts import _push_telegram, emit_alert
 
     agora = agora or _agora()
     dia = agora.astimezone(_SP).date().isoformat()
@@ -988,25 +990,24 @@ async def avisar(
     )
     novos = 0
     for a in alertas:
-        algum = False
-        for user_id in admins:
-            feito = await emit_alert(
-                session,
-                user_id=user_id,
-                type=AlertType.GENERIC,
-                severity=AlertSeverity.ERROR if a.nivel == ERRO else AlertSeverity.WARNING,
-                title=f"WhatsApp: {_TITULOS.get(a.codigo, a.codigo)}",
-                message=a.frase,
-                payload={
-                    "zap": a.codigo,
-                    "app_ref": str(a.app_ref) if a.app_ref else None,
-                    "conta_ref": str(a.conta_ref) if a.conta_ref else None,
-                    "numero_ref": str(a.numero_ref) if a.numero_ref else None,
-                },
-                dedupe_key=f"zap:{a.chave}:{dia}",
-            )
-            algum = algum or feito is not None
-        if algum:
+        feito = await emit_alert(
+            session,
+            type=AlertType.GENERIC,
+            severity=AlertSeverity.ERROR if a.nivel == ERRO else AlertSeverity.WARNING,
+            title=f"WhatsApp: {_TITULOS.get(a.codigo, a.codigo)}",
+            message=a.frase,
+            payload={
+                "zap": a.codigo,
+                "app_ref": str(a.app_ref) if a.app_ref else None,
+                "conta_ref": str(a.conta_ref) if a.conta_ref else None,
+                "numero_ref": str(a.numero_ref) if a.numero_ref else None,
+            },
+            dedupe_key=f"zap:{a.chave}:{dia}",
+            escopo=ESCOPO_ADM,
+        )
+        if feito is not None:
+            for user_id in admins:
+                await _push_telegram(session, user_id=user_id, alert=feito)
             novos += 1
             logger.error("zap_alerta", codigo=a.codigo, alvo=a.chave.split(":", 1)[1])
     return novos

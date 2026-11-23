@@ -1,10 +1,13 @@
-"""Alerts router tests (Fase 6)."""
+"""Alerts router tests (Fase 6; M-19 em 23/11/2026: o lido é por pessoa).
+
+A cerca por equipe (ADM / equipe / pessoal) está em test_alertas_equipe.py.
+"""
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Callable
 
 import pytest
 import pytest_asyncio
@@ -13,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     Alert,
+    AlertaLeitura,
     AlertSeverity,
     AlertType,
     BackgroundJob,
@@ -54,17 +58,24 @@ async def other(db: AsyncSession) -> User:
     return u
 
 
-def _alert(user_id, *, title="t", read=False, hours_ago=0) -> Alert:
+def _alert(user_id, *, title="t", hours_ago=0) -> Alert:
+    """Alerta pessoal de `user_id` (M-19: só a pessoa vê)."""
     return Alert(
         user_id=user_id,
-        type=AlertType.LOW_STOCK,
+        escopo="pessoal",
+        type=AlertType.TAREFA_ATRIBUIDA,
         severity=AlertSeverity.WARNING,
         title=title,
         message="m",
         payload={},
-        read_at=datetime.now(UTC) if read else None,
         created_at=datetime.now(UTC) - timedelta(hours=hours_ago),
     )
+
+
+async def _lido(db: AsyncSession, a: Alert, user: User) -> None:
+    """O lido é por pessoa desde a M-19 (`alerta_leituras`)."""
+    db.add(AlertaLeitura(alert_id=a.id, user_id=user.id))
+    await db.commit()
 
 
 @pytest.mark.asyncio
@@ -75,10 +86,10 @@ async def test_list_alerts_paginated_only_user_scope(
     user: User,
     other: User,
 ) -> None:
-    db.add(_alert(user.id, title="a1"))
-    db.add(_alert(user.id, title="a2", read=True, hours_ago=1))
-    db.add(_alert(other.id, title="not-mine"))
+    a2 = _alert(user.id, title="a2", hours_ago=1)
+    db.add_all([_alert(user.id, title="a1"), a2, _alert(other.id, title="not-mine")])
     await db.commit()
+    await _lido(db, a2, user)
 
     auth_as(user)
     r = await client.get("/api/alerts")
@@ -86,7 +97,7 @@ async def test_list_alerts_paginated_only_user_scope(
     body = r.json()
     titles = [i["title"] for i in body["items"]]
     assert "not-mine" not in titles
-    assert set(titles) == {"a1", "a2"}
+    assert titles == ["a1", "a2"]
     assert body["total"] == 2
     assert body["unread"] == 1
 
@@ -98,9 +109,10 @@ async def test_unread_only_filter(
     db: AsyncSession,
     user: User,
 ) -> None:
-    db.add(_alert(user.id, title="u1"))
-    db.add(_alert(user.id, title="r1", read=True))
+    r1 = _alert(user.id, title="r1")
+    db.add_all([_alert(user.id, title="u1"), r1])
     await db.commit()
+    await _lido(db, r1, user)
 
     auth_as(user)
     r = await client.get("/api/alerts?unread_only=true")
@@ -116,10 +128,10 @@ async def test_unread_count(
     db: AsyncSession,
     user: User,
 ) -> None:
-    db.add(_alert(user.id))
-    db.add(_alert(user.id))
-    db.add(_alert(user.id, read=True))
+    lido = _alert(user.id)
+    db.add_all([_alert(user.id), _alert(user.id), lido])
     await db.commit()
+    await _lido(db, lido, user)
 
     auth_as(user)
     r = await client.get("/api/alerts/unread-count")
@@ -143,6 +155,10 @@ async def test_mark_read_single(
     r = await client.post(f"/api/alerts/{a.id}/read")
     assert r.status_code == 200
     assert r.json()["read_at"] is not None
+    # Duas vezes não dá erro (o lido fica o primeiro).
+    r2 = await client.post(f"/api/alerts/{a.id}/read")
+    assert r2.status_code == 200
+    assert r2.json()["read_at"] == r.json()["read_at"]
 
 
 @pytest.mark.asyncio
@@ -171,11 +187,11 @@ async def test_mark_all_read(
     user: User,
     other: User,
 ) -> None:
-    db.add(_alert(user.id))
-    db.add(_alert(user.id))
-    db.add(_alert(user.id, read=True))
+    lido = _alert(user.id)
+    db.add_all([_alert(user.id), _alert(user.id), lido])
     db.add(_alert(other.id))  # untouched
     await db.commit()
+    await _lido(db, lido, user)
 
     auth_as(user)
     r = await client.post("/api/alerts/read-all")
@@ -184,6 +200,9 @@ async def test_mark_all_read(
 
     r2 = await client.get("/api/alerts/unread-count")
     assert r2.json() == {"unread": 0}
+    auth_as(other)
+    r3 = await client.get("/api/alerts/unread-count")
+    assert r3.json() == {"unread": 1}
 
 
 @pytest.mark.asyncio

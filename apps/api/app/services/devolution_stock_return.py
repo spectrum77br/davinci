@@ -509,6 +509,7 @@ async def _alert_manual_situacao(
             session,
             user_id=actor_id,
             type=AlertType.GENERIC,
+            escopo="pessoal",  # M-19: só a pessoa vê
             severity=AlertSeverity.WARNING,
             title=f"Pedido {pedido}: mude a situação no Bling para {nome} (manual)",
             message=(

@@ -68,7 +68,7 @@ async def test_recent_failure_emits_alert(db: AsyncSession, user: User) -> None:
 
     alerts = (
         await db.execute(
-            select(Alert).where(Alert.user_id == user.id)
+            select(Alert).where(Alert.type == AlertType.SYNC_FAILURE)
         )
     ).scalars().all()
     assert len(alerts) == 1
@@ -78,6 +78,8 @@ async def test_recent_failure_emits_alert(db: AsyncSession, user: User) -> None:
     assert "boom" in a.message
     assert a.payload["job_id"] == str(job.id)
     assert a.dedupe_key == f"sync_failure:job:{job.id}"
+    # M-19 (23/11/2026): sync que falhou sem anúncio é ADM de todos.
+    assert (a.escopo, a.user_id) == ("adm", None)
 
 
 @pytest.mark.asyncio
@@ -93,7 +95,7 @@ async def test_old_failure_skipped(db: AsyncSession, user: User) -> None:
 
     n = (
         await db.execute(
-            select(Alert).where(Alert.user_id == user.id)
+            select(Alert).where(Alert.type == AlertType.SYNC_FAILURE)
         )
     ).scalars().all()
     assert n == []
@@ -113,7 +115,7 @@ async def test_dedupe_across_runs(db: AsyncSession, user: User) -> None:
 
     alerts = (
         await db.execute(
-            select(Alert).where(Alert.user_id == user.id)
+            select(Alert).where(Alert.type == AlertType.SYNC_FAILURE)
         )
     ).scalars().all()
     assert len(alerts) == 1
@@ -134,7 +136,7 @@ async def test_succeeded_job_not_alerted(db: AsyncSession, user: User) -> None:
 
     alerts = (
         await db.execute(
-            select(Alert).where(Alert.user_id == user.id)
+            select(Alert).where(Alert.type == AlertType.SYNC_FAILURE)
         )
     ).scalars().all()
     assert alerts == []
