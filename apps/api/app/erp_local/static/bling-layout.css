@@ -199,3 +199,6 @@ body[data-screen=products] #subtitle{display:none}
 @media print{.abertura{display:none!important}}
 
 .header-actions{display:flex;gap:8px;align-items:center;flex:none}header #back{padding:7px 10px;font-size:11px;border-color:#c9d6e7;background:white;color:#4c66a1}header #back:disabled{opacity:.45;cursor:default}
+
+/* Consulta: só o que as tarefas pedem e a troca usa (o resto continua na página, escondido). */
+body.consulta .extra{display:none!important}

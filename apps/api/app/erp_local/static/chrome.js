@@ -114,10 +114,21 @@ const topMenuEntries={
   financeiro:[['Gestão financeira'],['Contas a pagar','accounts','payable'],['Contas a receber','accounts','receivable'],['Contas financeiras','accounts','bank-form'],['Conciliação de extrato','accounts','reconcile-form'],['Comissões','commissions'],['Controle de caixa','cash_register'],['Tributos e contabilidade'],['GNRE e DARE-SP','guides']],
 };
 const topMenuHeadings=new Set(['Cadastros','Ferramentas','Gestão','Logística','Compras','Estoque','Gestão financeira','Tributos e contabilidade']);
+// In consulta (production while Bling owns the stores) the team sees only what the tasks asked
+// for and the switch uses: products, stock, orders and payables. The rest stays in the page,
+// hidden (class extra), and still opens by its address.
+const teamMenuTargets=new Set(['products|','orders|','stock|','accounts|payable']);
+function topMenuExtra(entries,i){
+  const [label,target,context]=entries[i];
+  if(target)return !teamMenuTargets.has(target+'|'+(context||''));
+  if(!topMenuHeadings.has(label))return true;
+  for(let j=i+1;j<entries.length&&!(entries[j][1]===undefined&&topMenuHeadings.has(entries[j][0]));j++)if(!topMenuExtra(entries,j))return false;
+  return true;
+}
 function ensureTopMenus(){
   if(document.getElementById('erp-menus'))return;
   const host=document.createElement('div');host.id='erp-menus';
-  host.innerHTML=Object.entries(topMenuEntries).map(([key,entries])=>`<div class="top-menu-popover" id="top-menu-${key}" role="menu" aria-label="Menu ${key}" hidden>${entries.map(([label,target,context])=>target?`<button type="button" role="menuitem" data-menu-target="${target}" data-menu-context="${context||''}">${label}</button>`:topMenuHeadings.has(label)?`<h3>${label}</h3>`:`<button type="button" role="menuitem" disabled title="Funcionalidade ainda em implementação">${label}<small>Em implementação</small></button>`).join('')}</div>`).join('');
+  host.innerHTML=Object.entries(topMenuEntries).map(([key,entries])=>`<div class="top-menu-popover" id="top-menu-${key}" role="menu" aria-label="Menu ${key}" hidden>${entries.map(([label,target,context],i)=>{const extra=topMenuExtra(entries,i)?' class="extra"':'';return target?`<button type="button" role="menuitem" data-menu-target="${target}" data-menu-context="${context||''}"${extra}>${label}</button>`:topMenuHeadings.has(label)?`<h3${extra}>${label}</h3>`:`<button type="button" role="menuitem" disabled title="Funcionalidade ainda em implementação"${extra}>${label}<small>Em implementação</small></button>`;}).join('')}</div>`).join('');
   document.querySelector('.erp-topbar').append(host);
 }
 function closeTopMenus(){document.querySelectorAll('.top-menu-popover').forEach(m=>m.hidden=true);document.querySelectorAll('[data-top-menu]').forEach(b=>b.setAttribute('aria-expanded','false'));}

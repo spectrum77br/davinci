@@ -1556,3 +1556,19 @@ test('F5 on a page reopens that page',async()=>{
  const {document:d}=await setup({},'http://127.0.0.1:8765/#stock');
  assert.equal(d.querySelector('nav [data-page].active').dataset.page,'stock');
 });
+
+test('consulta: menus keep only what the tasks asked for, the rest stays reachable',async()=>{
+  const consulta={active:true,reason:'automático',message:'Modo consulta.',read_posts:[]};
+  const {dom,document:d}=await setup({consulta});
+  assert.ok(d.body.classList.contains('consulta'));
+  const shown=[...d.querySelectorAll('nav [data-page]')].filter(b=>!b.classList.contains('extra')).map(b=>b.dataset.page);
+  assert.deepEqual(shown,['inicio','overview','products','stock','orders','accounts']);
+  const menu=[...d.querySelectorAll('.top-menu-popover [data-menu-target]')].filter(b=>!b.classList.contains('extra')).map(b=>b.dataset.menuTarget+'|'+b.dataset.menuContext);
+  assert.deepEqual(menu.sort(),['accounts|payable','orders|','products|','stock|']);
+  assert.equal([...d.querySelectorAll('.top-menu-popover h3')].filter(h=>!h.classList.contains('extra')).length>0,true);
+  d.querySelector('nav [data-page=overview]').click();
+  assert.doesNotMatch(d.querySelector('main').textContent,/cenário local|Teste a disputa/);
+  d.querySelector('nav [data-page=parity]').click();
+  assert.ok(d.querySelector('main').textContent.length>0);
+  dom.window.close();
+});
