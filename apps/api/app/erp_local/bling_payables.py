@@ -30,6 +30,9 @@ PAGES_PER_READ = 4
 MAX_PAGES = 30
 BATCH = 20  # under the read script's 40 calls, short so DaVinci keeps its turn
 MAX_DETAILS = 140  # per round: a first copy of a few hundred bills spreads over a few rounds
+# Once complete, the list is read again every half hour: bills change slowly and each read takes
+# DaVinci's Bling turn. While details are missing, every worker round goes on.
+REST_MINUTES = 30
 
 
 class UnavailableError(Exception):
@@ -88,7 +91,19 @@ def _batches(items, size=BATCH):
 def run(erp, reader=None, *, now=None, max_details=MAX_DETAILS):
     """One round: the open list, the detail of what is new or changed, the suppliers' names."""
     reader = reader or compat_shadow.host_reader
-    taken_at = (now or datetime.now(UTC)).isoformat()
+    moment = now or datetime.now(UTC)
+    taken_at = moment.isoformat()
+    with erp.connection() as db:
+        db.executescript(SCHEMA)
+        last = db.execute(
+            "SELECT data FROM bling_payables_runs WHERE json_extract(data,'$.state')='read_ok' "
+            "ORDER BY taken_at DESC LIMIT 1"
+        ).fetchone()
+    if last:
+        previous = json.loads(last[0])
+        age = moment - datetime.fromisoformat(previous["taken_at"])
+        if not previous.get("details_missing") and age.total_seconds() < REST_MINUTES * 60:
+            return {"taken_at": taken_at, "state": "recent"}
     try:
         listed = _list(reader)
         with erp.connection() as db:
