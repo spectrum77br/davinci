@@ -4,7 +4,8 @@
 O que estes testes seguram:
 
 - o e-mail vira SÓ a mensagem do comprador (marcadores do modelo da Amazon,
-  HTML, multipart, histórico citado cortado, anexo só pelo nome);
+  HTML, multipart, histórico citado cortado; o anexo foto/PDF com a cópia
+  a guardar desde 23/11/2026 — `test_atendimento_anexo_amazon`);
 - só remetente de retransmissão da Amazon conta; o resto da caixa é ignorado;
 - cada e-mail cai na conta certa: "+conta" do destinatário → pedido no
   espelho do Bling → thread anterior → "conta não identificada";
@@ -51,6 +52,7 @@ links são inventados (só o formato é o de verdade).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import imaplib
 import smtplib
 from datetime import UTC, datetime, timedelta
@@ -525,7 +527,7 @@ def test_html_sem_texto_puro_vira_texto_sem_estilo_nem_citacao():
     assert "color" not in em.texto and "antiga" not in em.texto
 
 
-def test_multipart_prefere_texto_puro_e_guarda_so_o_nome_do_anexo():
+def test_multipart_prefere_texto_puro_e_o_anexo_vem_com_a_copia():
     bruto = _email(
         texto="Segue a foto do defeito.",
         html="<p>VERSÃO HTML</p>",
@@ -534,7 +536,17 @@ def test_multipart_prefere_texto_puro_e_guarda_so_o_nome_do_anexo():
     em = amazon_email.interpretar_email(bruto)
     assert em.texto == "Segue a foto do defeito."
     assert "HTML" not in em.texto
-    assert em.anexos == [{"tipo": "arquivo", "nome": "foto do defeito.pdf"}]
+    # Até 23/11/2026 ficava só o nome; agora o PDF vem com a cópia a guardar.
+    dados = b"%PDF-1.4 falso"
+    assert em.anexos == [
+        {
+            "tipo": "application/pdf",
+            "nome": "foto do defeito.pdf",
+            "arquivo": f"{hashlib.sha256(dados).hexdigest()}.pdf",
+            "tamanho": len(dados),
+        }
+    ]
+    assert [c.dados for c in em.copias] == [dados]
 
 
 @pytest.mark.parametrize(

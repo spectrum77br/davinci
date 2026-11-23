@@ -1230,6 +1230,18 @@ function urlDoAnexoMl(a: Anexo, ctx?: ContextoAnexo | null): string | null {
   if (!RE_ARQUIVO_ML.test(arquivo) || arquivo.includes('..')) return null
   return `/api/atendimento/conversas/${encodeURIComponent(ctx.conversaId)}/anexos/${encodeURIComponent(arquivo)}`
 }
+// A foto/PDF que o comprador manda na AMAZON (23/11/2026): vem DENTRO do e-mail
+// do Seller Central e a leitura guarda a nossa cópia no disco (`anexo_amazon`).
+// O `arquivo` é "<sha256>.<ext>" (o mesmo regex do servidor) e a MESMA rota da
+// conversa entrega; foto vira miniatura que abre grande, PDF o link de baixar.
+// Sem a cópia (os que entraram antes, tipo fora da lista), fica o nome.
+const RE_ARQUIVO_AMAZON = /^[0-9a-f]{64}\.(?:jpg|png|gif|webp|pdf)$/
+function urlDoAnexoAmazon(a: Anexo, ctx?: ContextoAnexo | null): string | null {
+  if (!ctx || ctx.plataforma !== 'amazon' || ctx.canal !== 'email' || !ctx.conversaId) return null
+  const arquivo = typeof a.arquivo === 'string' ? a.arquivo : ''
+  if (!RE_ARQUIVO_AMAZON.test(arquivo)) return null
+  return `/api/atendimento/conversas/${encodeURIComponent(ctx.conversaId)}/anexos/${encodeURIComponent(arquivo)}`
+}
 function pecasDe(m: Mensagem, ctx?: ContextoAnexo | null): Peca[] {
   return (m.anexos || []).filter((a): a is Anexo => !!a && typeof a === 'object').map((a, i): Peca => {
     const chave = `${m.id}-${i}`
@@ -1260,8 +1272,8 @@ function pecasDe(m: Mensagem, ctx?: ContextoAnexo | null): Peca[] {
       if (tipo === 'arquivo') return { chave, tipo: 'documento', url, nome: s('nome') || rotulo, tamanho: tamanhoLegivel(a.tamanho) }
       if (tipo === 'imagem' || tipo === 'figurinha') return { chave, tipo: 'imagem', url, nome: s('nome') || rotulo }
     }
-    // ML (pós-venda e reclamação): o arquivo pela rota da conversa.
-    const urlMl = url ? null : urlDoAnexoMl(a, ctx)
+    // ML (pós-venda e reclamação) e Amazon (e-mail): o arquivo pela rota da conversa.
+    const urlMl = url ? null : urlDoAnexoMl(a, ctx) || urlDoAnexoAmazon(a, ctx)
     if (urlMl) {
       const nomeMl = s('nome') || s('arquivo') || 'anexo'
       const foto = RE_IMAGEM_ML.test(tipo) || (!tipo.includes('/') && RE_EXT_IMAGEM_ML.test(s('arquivo')))

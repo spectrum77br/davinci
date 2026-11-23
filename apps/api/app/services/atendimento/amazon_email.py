@@ -77,6 +77,11 @@ Três coisas desenham este arquivo:
    valem os do RODAPÉ (depois do marcador de fim): link que o comprador
    escreve na mensagem não vira botão, e o caso sai primeiro do "+caso" do From.
 
+8. A FOTO (ou o PDF) do comprador vem DENTRO do e-mail, como parte MIME
+   `attachment` — não há link para baixar depois. Até 23/11/2026 ficava só o
+   nome ("image.jpg" na tela); agora a cópia vai para o disco antes da
+   mensagem e a tela mostra a miniatura (`anexo_amazon`).
+
 O IMAP e o SMTP da stdlib são bloqueantes: rodam em `asyncio.to_thread`. O
 que dá para testar sem rede (interpretar e-mail, extrair texto, montar a
 resposta) são funções PURAS, separadas da conversa com o servidor.
@@ -124,7 +129,7 @@ from app.models import (
     StoreInfo,
 )
 from app.redis_client import redis
-from app.services.atendimento import canais_externos, gravar, lojas, separa_email
+from app.services.atendimento import anexo_amazon, canais_externos, gravar, lojas, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -621,29 +626,48 @@ def _nome_do_arquivo(parte: Message) -> str | None:
     return " ".join(str(nome).split()) or None
 
 
-def _partes_de_texto(msg: Message) -> tuple[str | None, str | None, list[dict]]:
-    """(text/plain, text/html, anexos) — a primeira de cada, sem converter.
+def _bytes_do_anexo(parte: Message) -> bytes | None:
+    """Os bytes de um anexo (base64/quoted-printable desfeitos); None se não dá."""
+    try:
+        dados = parte.get_payload(decode=True)
+    except (ValueError, TypeError, LookupError, AssertionError):
+        return None
+    return bytes(dados) if isinstance(dados, bytes | bytearray) else None
+
+
+def _partes_de_texto(
+    msg: Message,
+) -> tuple[str | None, str | None, list[dict], list[anexo_amazon.Copia]]:
+    """(text/plain, text/html, anexos, cópias) — a primeira de cada, sem converter.
 
     Parte com nome de arquivo é anexo (mesmo um .txt "inline"): o corpo é a
-    parte sem nome. Do anexo fica SÓ o nome — baixar arquivo de comprador é
-    escopo perdido em v1 (e é dado pessoal parado no banco).
+    parte sem nome. Até 23/11/2026 do anexo ficava SÓ o nome ("image.jpg" na
+    tela); agora a foto e o PDF vêm com a cópia a guardar (`anexo_amazon`:
+    o tipo pela assinatura, o teto, até `MAX_POR_EMAIL`); o resto, só o nome.
     """
     plain: str | None = None
     html: str | None = None
     anexos: list[dict] = []
+    copias: list[anexo_amazon.Copia] = []
     for parte in msg.walk():
         if parte.is_multipart():
             continue
         nome = _nome_do_arquivo(parte)
         if nome or parte.get_content_disposition() == "attachment":
-            anexos.append({"tipo": "arquivo", "nome": nome or "anexo"})
+            if len(copias) < anexo_amazon.MAX_POR_EMAIL:
+                anexo, copia = anexo_amazon.preparar(nome, _bytes_do_anexo(parte))
+            else:
+                anexo, copia = anexo_amazon.so_o_nome(nome), None
+            anexos.append(anexo)
+            if copia is not None:
+                copias.append(copia)
             continue
         tipo = parte.get_content_type()
         if tipo == "text/plain" and plain is None:
             plain = _decodificar(parte)
         elif tipo == "text/html" and html is None:
             html = _decodificar(parte)
-    return plain, html, anexos
+    return plain, html, anexos, copias
 
 
 def _corpo(plain: str | None, html: str | None, *, manter_citacao: bool = False) -> str:
@@ -767,6 +791,9 @@ class EmailAmazon:
     enviada_em: datetime | None
     texto: str
     anexos: list[dict] = field(default_factory=list)
+    # Os bytes da foto/PDF a guardar (23/11/2026, `anexo_amazon`): só na memória,
+    # fora do `repr` — o anexo com `arquivo` só fica quando a cópia gravou.
+    copias: list[anexo_amazon.Copia] = field(default_factory=list, repr=False)
     uid: int | None = None
     # Message-IDs de In-Reply-To/References: é por eles que o e-mail seguinte
     # (sem o nº do pedido) acha a conversa de que faz parte.
@@ -870,7 +897,7 @@ def interpretar_email(bruto: bytes, *, uid: int | None = None) -> EmailAmazon | 
         return None
 
     assunto = " ".join(str(msg.get("Subject", "") or "").split())
-    plain, html, anexos = _partes_de_texto(msg)
+    plain, html, anexos, copias = _partes_de_texto(msg)
     corpo = _corpo(plain, html)
     link_sem_resposta, caso_id = _links_do_rodape(plain, html, endereco)
     pedido, pedido_do_texto = _pedido_do_email(assunto, corpo)
@@ -887,6 +914,7 @@ def interpretar_email(bruto: bytes, *, uid: int | None = None) -> EmailAmazon | 
         enviada_em=_data(msg),
         texto=extrair_mensagem(corpo),
         anexos=anexos,
+        copias=copias,
         uid=uid,
         referencias=_referencias(msg),
     )
@@ -1107,7 +1135,7 @@ def interpretar_confirmacao(bruto: bytes, *, uid: int | None = None) -> Confirma
         logger.warning("atendimento_amazon_email_confirmacao_reprovada", uid=uid)
         return None
 
-    plain, html, _anexos = _partes_de_texto(msg)
+    plain, html, _anexos, _copias = _partes_de_texto(msg)
     # A cópia é da Amazon, não resposta de gente: um `blockquote` ali pode ser
     # o próprio texto da loja.
     fatias = _fatiar(_corpo(plain, html, manter_citacao=True))
@@ -2804,6 +2832,9 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
         )
         anterior = _utc(conversa.ultima_do_cliente_em)
         mais_nova = anterior is None or em.enviada_em is None or em.enviada_em >= anterior
+        # A foto/PDF do comprador (23/11/2026): a cópia vai para o disco ANTES da
+        # mensagem — o balão já nasce com a miniatura. Sem disco, só o nome.
+        anexos = await anexo_amazon.guardar(em.anexos, em.copias)
         _mensagem, nova = await gravar.gravar_mensagem(
             session,
             conversa,
@@ -2811,8 +2842,8 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
             autor=AUTOR_CLIENTE,
             texto=em.texto or None,
             enviada_em=em.enviada_em,
-            tipo="arquivo" if em.anexos and not em.texto else "texto",
-            anexos=em.anexos,
+            tipo="arquivo" if anexos and not em.texto else "texto",
+            anexos=anexos,
             payload={"imap_uid": em.uid, "conta_por": achado_por},
         )
         if not nova:

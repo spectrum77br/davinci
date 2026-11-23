@@ -95,7 +95,10 @@ ANEXO DO COMPRADOR NO ML (28/10/2026, `services/atendimento/anexo_ml.py`):
 GET /conversas/{id}/anexos/{arquivo} entrega a foto/arquivo que o comprador
 mandou no pós-venda ou na reclamação do ML — buscado na hora pela API
 oficial, com o token da loja da conversa, e só o `arquivo` que está numa
-mensagem daquela conversa. Só leitura, no escopo da equipe.
+mensagem daquela conversa. Só leitura, no escopo da equipe. A MESMA rota
+entrega a foto/PDF do comprador da AMAZON (23/11/2026,
+`services/atendimento/anexo_amazon.py`): ela vem dentro do e-mail e a nossa
+cópia fica no disco — a rota lê de lá, com as mesmas travas.
 """
 
 from __future__ import annotations
@@ -225,6 +228,7 @@ from app.services.atendimento import (
     acesso,
     agente_config,
     amazon_email,
+    anexo_amazon,
     anexo_ml,
     apagar,
     canais_externos,
@@ -3730,19 +3734,35 @@ async def anexo_da_conversa(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_view)],
 ) -> Response:
-    """A foto/arquivo que o comprador mandou no ML, para o `<img>` e o link do balão.
+    """A foto/arquivo que o comprador mandou no ML ou na Amazon, para o `<img>` e o link do balão.
 
     28/10/2026 (`services/atendimento/anexo_ml.py`): pós-venda e reclamação do
     ML. Quem lê a conversa vê o anexo dela (`_view` + o escopo da equipe em
     `_conversa_ou_404`); o `arquivo` tem de estar numa mensagem DESTA conversa
     — senão 404, sem ir ao ML. Os bytes vêm na hora, com o token da loja da
     conversa; `inline` só a imagem que o navegador mostra, o resto baixa.
+    Amazon por e-mail (23/11/2026, `anexo_amazon`): as mesmas travas, e os
+    bytes vêm da nossa cópia no disco (o e-mail é o único lugar do arquivo).
     """
     nao_encontrado = HTTPException(404, detail={"code": anexo_ml.NAO_ENCONTRADO})
     if instagram.e_instagram(conversa_id):
         raise nao_encontrado
     scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
+    if anexo_amazon.conversa_aceita(c):
+        # Amazon (23/11/2026): a nossa cópia do anexo do e-mail, do disco.
+        anexo = await anexo_amazon.anexo_da_conversa(session, c, arquivo)
+        if anexo is None:
+            raise nao_encontrado
+        await session.commit()
+        lido = await asyncio.to_thread(anexo_amazon.ler, arquivo)
+        if lido is None:
+            raise nao_encontrado
+        return Response(
+            content=lido.conteudo,
+            media_type=lido.mime,
+            headers=anexo_ml.cabecalhos(lido, anexo, arquivo),
+        )
     if not anexo_ml.conversa_aceita(c) or c.integration_id is None:
         raise nao_encontrado
     anexo = await anexo_ml.anexo_da_conversa(session, c, arquivo)
