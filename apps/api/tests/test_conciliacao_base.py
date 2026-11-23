@@ -4931,6 +4931,43 @@ async def test_recalculo_apaga_gemea_de_outro_codigo_e_a_releitura_nao_grava_de_
     assert (await _totais_dia(db, loja, date(2026, 11, 20)))["diferenca"] == 0
 
 
+# jlas2 21/11 22:20: no relatório seguinte a cópia veio com OUTRO saldo depois (a ordem
+# das linhas do mesmo segundo mudou): −60.092,45 na cópia × 14.431,24 na que já estava.
+CSV_GEMEAS_SALDO_DIFERENTE = "\n".join(
+    [
+        ",".join(_CAB_RELATORIO_MP),
+        _linha_relatorio_mp(
+            DATE="2026-11-20T18:00:00.000-03:00",
+            SOURCE_ID="186000000002",
+            RECORD_TYPE="release",
+            DESCRIPTION="payment",
+            NET_CREDIT_AMOUNT="10931.77",
+            NET_DEBIT_AMOUNT="0.00",
+            GROSS_AMOUNT="10931.77",
+            ORDER_ID=SEM_BLING,
+            BALANCE_AMOUNT="10931.77",
+        ),
+        _segurado_mp("21T22:20:22", "2363933120", debito="71024.22", saldo="-60092.45"),
+        _segurado_mp("21T22:20:22", "2363933120", credito="74523.69", saldo="14431.24"),
+        _segurado_mp("21T22:20:22", "2363933120", debito="3499.47", saldo="10931.77"),
+        _segurado_mp("21T22:20:22", "190998255960", debito="71024.22", saldo="14431.24"),
+        _segurado_mp("21T22:23:10", "2363933120", credito="3499.47", saldo="14431.24"),
+    ]
+)
+
+
+async def test_gemea_de_outro_codigo_com_outro_saldo_depois(db, make_user):
+    """A cópia com outro saldo depois também sai — a conta refeita do dia é a prova."""
+    loja, _integ = await _loja(db, make_user)
+    await ext.ingerir_csv(db, loja, CSV_GEMEAS_SALDO_DIFERENTE)
+    await db.commit()
+    assert (await _totais_dia(db, loja, date(2026, 11, 21)))["diferenca"] == 71024.22
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 23, 12, tzinfo=UTC))
+    await db.commit()
+    assert res["gemea_de_outro_codigo_apagada"] == 1
+    assert (await _totais_dia(db, loja, date(2026, 11, 21)))["diferenca"] == 0
+
+
 async def test_gemea_de_outro_codigo_fica_quando_o_saldo_do_dia_bate(db, make_user):
     """Segura, solta e segura de novo o mesmo valor no mesmo segundo: as duas "seguras"
     têm o mesmo saldo depois, de códigos diferentes, e são linhas de verdade — o saldo do

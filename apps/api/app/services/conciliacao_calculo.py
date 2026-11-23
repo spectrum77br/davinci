@@ -1425,7 +1425,8 @@ async def _apagar_gemeas_de_outro_codigo(
     as duas e o saldo do dia ficou +76.388,33 errado.
 
     Só no segurado pra dívida (o único caso visto) e só em dia assentado: duas linhas com
-    hora, descrição, valores e saldo depois iguais, de códigos diferentes, e uma some só
+    hora, descrição e valores iguais, de códigos diferentes (o saldo depois pode vir
+    diferente: a cópia chega noutra ordem no relatório seguinte), e uma some só
     quando o saldo do dia NÃO bate com as duas e, refeita a conta sem ela, bate (o valor
     acha o erro, como manda o painel; segura/solta/segura o mesmo valor no mesmo segundo
     são linhas de verdade e o saldo bate com elas). Fica a que uma pessoa mexeu, senão a
@@ -1457,7 +1458,9 @@ async def _apagar_gemeas_de_outro_codigo(
                     func.coalesce(b.descricao, "") == func.coalesce(a.descricao, ""),
                     b.credito == a.credito,
                     b.debito == a.debito,
-                    b.saldo_apos == a.saldo_apos,
+                    # o saldo depois NÃO precisa bater (23/11, jlas2 21/11 22:20): no
+                    # relatório novo a cópia veio noutra ordem, com outro saldo depois
+                    # (−60.092,45 × 14.431,24) — quem prova é a conta do dia refeita
                     func.coalesce(b.pagamento_id, "") != func.coalesce(a.pagamento_id, ""),
                 ),
             )
