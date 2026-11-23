@@ -1,5 +1,6 @@
 """Bling's postage objects copied read only, shown as Bling's screen shows them."""
 
+import re
 from datetime import UTC, datetime, timedelta
 
 from app.erp_local import bling_objects, bling_shadow_probe
@@ -246,3 +247,10 @@ def test_the_read_script_allows_order_detail_and_objects_only_by_id():
         except ValueError:
             continue
         raise AssertionError(path)
+
+
+def test_the_order_list_is_one_json_value_as_the_davinci_reader_reads_it():
+    sql = bling_objects.ORDERS_SQL
+    assert sql.startswith("SELECT coalesce(json_agg(t),'[]') FROM (") and sql.endswith(") t")
+    assert "current_date - 31" in sql
+    assert not re.search(r"\b(INSERT|UPDATE|DELETE|DROP)\b", sql.upper())

@@ -55,13 +55,15 @@ LOGISTICS_EVERY = timedelta(hours=24)
 # A moving object is read again every 6 h; one Bling does not track (8) or still waits, daily.
 MOVING = {0, 1, 4, 7, 11, 12, 13}
 REREAD_MOVING, REREAD_OTHER = timedelta(hours=6), timedelta(hours=24)
+# One JSON value, as bling_mirror.read_local reads it.
 ORDERS_SQL = (
+    "SELECT coalesce(json_agg(t),'[]') FROM ("
     "SELECT DISTINCT ON (o.bling_id) o.bling_id::text AS id, o.numero::text AS number,"
     " o.loja::text AS store, coalesce(o.numeroloja::text,'') AS store_number,"
     " o.data::text AS day, s.marketplace AS channel"
     " FROM davinci.bling_orders o LEFT JOIN davinci.stores s ON s.bling_store_id::text = o.loja"
     " WHERE o.data >= current_date - 31 AND o.bling_id IS NOT NULL"  # DAYS
-    " ORDER BY o.bling_id, o.updated_at DESC"
+    " ORDER BY o.bling_id, o.updated_at DESC) t"
 )
 
 
