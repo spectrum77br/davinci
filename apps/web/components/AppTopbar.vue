@@ -1,11 +1,19 @@
 <script setup lang="ts">
-import { Bell, LogOut, Sun, Moon, Menu } from 'lucide-vue-next'
+import { Bell, HelpCircle, LogOut, Sun, Moon, Menu } from 'lucide-vue-next'
 
 defineProps<{ mobileMenuOpen?: boolean }>()
 const emit = defineEmits<{ (e: 'toggle-menu'): void }>()
 
 const auth = useAuthStore()
 const colorMode = useState<'light' | 'dark'>('color-mode', () => 'light')
+// Ajuda da tela (M-18, 23/11/2026): o "?" só aparece quando a página aberta
+// registrou a ajuda dela (useAjuda); abre e fecha o painel (AppAjudaPainel).
+const ajuda = useAjudaAtual()
+const ajudaAberta = useAjudaAberta()
+
+function alternarAjuda() {
+  ajudaAberta.value = !ajudaAberta.value
+}
 const { unread, refreshUnreadCount } = useAlerts()
 
 if (import.meta.client && auth.user) {
@@ -58,6 +66,21 @@ async function logout() {
       <span>DaVinci</span>
     </NuxtLink>
     <div class="ml-auto flex items-center gap-0 lg:gap-1">
+      <button
+        v-if="ajuda"
+        type="button"
+        class="rounded-lg h-11 w-11 lg:h-9 lg:w-9 grid place-items-center hover:text-foreground hover:bg-muted"
+        :class="ajudaAberta ? 'text-foreground bg-muted' : 'text-muted-foreground'"
+        aria-label="Ajuda"
+        title="Ajuda"
+        aria-controls="davinci-ajuda"
+        :aria-expanded="ajudaAberta"
+        data-ajuda-botao
+        @click="alternarAjuda"
+      >
+        <HelpCircle class="size-[18px]" />
+      </button>
+
       <button
         type="button"
         class="rounded-lg h-11 w-11 lg:h-9 lg:w-9 grid place-items-center text-muted-foreground hover:text-foreground hover:bg-muted"

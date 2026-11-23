@@ -90,6 +90,8 @@ onBeforeUnmount(() => {
     />
     <div :inert="mobileMenuOpen || undefined" class="flex-1 min-w-0 flex flex-col">
       <AppTopbar v-show="!telaCheia" :mobile-menu-open="mobileMenuOpen" @toggle-menu="mobileMenuOpen = !mobileMenuOpen" />
+      <!-- Ajuda da tela (M-18): o painel que o "?" da barra do topo abre. -->
+      <AppAjudaPainel v-if="!telaCheia" />
       <main class="app-main flex-1 min-w-0" :class="telaCheia ? 'app-main--tela-cheia' : 'px-3 py-4 sm:px-4 lg:px-6 lg:py-6'">
         <slot />
         <ClientOnly><ErpTelas /></ClientOnly>

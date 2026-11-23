@@ -73,6 +73,62 @@ function setTab(t: Tab) {
   router.push({ path: `/pricing/${t}`, query: { ...route.query } })
 }
 
+// Ajuda da tela (M-18, 23/11/2026): o "?" da barra do topo abre este texto num
+// painel à direita. Por enquanto só a aba Tabela de Preços (Celular/Mala/Eletro);
+// nas abas Contas, Produtos e no Faturamento o "?" some.
+const AJUDA_TABELA = {
+  titulo: 'Tabela de Preços',
+  conteudo: [
+    {
+      titulo: 'Para que serve',
+      itens: [
+        'Mostra o preço de venda de cada produto (linhas) em cada conta (colunas), calculado a partir do custo do kit, da comissão, da margem e do frete.',
+        'Os custos ficam na aba Produtos; a comissão, a margem e o frete ficam na aba Contas.',
+      ],
+    },
+    {
+      titulo: 'Como ler uma célula',
+      itens: [
+        { termo: 'Número', texto: 'é o preço da Tabela.' },
+        { termo: '"—"', texto: 'não dá para calcular: falta o custo do produto ou a comissão/margem da conta.' },
+        { termo: 'Aviãozinho', texto: 'envia o preço para o anúncio.' },
+        { termo: 'Cartão vermelho', texto: 'passe o mouse para ver o motivo; clique para conferir só aquela célula. Motivos: conta sem integração, sem anúncio vinculado, anúncio pausado/encerrado, último envio com erro ou preço do anúncio fora da margem.' },
+        { termo: '"(!) anúncio 3863 +2"', texto: 'o preço desse anúncio e de mais 2 anúncios está fora da margem.' },
+        { termo: 'Olho', texto: 'aparece ao passar o mouse no nome do produto e mostra o preço real no ar (ML, Shopee, Amazon, TikTok). Não grava nada.' },
+        { termo: 'Cor de fundo', texto: 'mostra só a plataforma.' },
+      ],
+    },
+    {
+      titulo: 'Barra de botões',
+      itens: [
+        { termo: 'Buscar', texto: 'procura o produto por SKU ou nome.' },
+        { termo: 'Plataforma e Contas', texto: 'escolhem quais colunas aparecem.' },
+        { termo: 'Layout', texto: 'mostra ou esconde as colunas de Kit e de Estoque.' },
+        { termo: 'Excel', texto: 'baixa todas as colunas e contas (só a busca filtra).' },
+        { termo: 'Atualizar', texto: 'planilha, conferir ou atualizar anúncio — Geral ou Por conta.' },
+        { termo: 'Reposição (ADM)', texto: 'dias de reposição; muda também a tela Importação.' },
+        { termo: 'Margem (ADM)', texto: 'a diferença aceita entre o preço do anúncio e o da Tabela.' },
+      ],
+    },
+    {
+      titulo: 'Passo a passo',
+      numerada: true,
+      itens: [
+        'Cadastre o custo na aba Produtos.',
+        'Confira a comissão, a margem e o frete na aba Contas.',
+        'Escolha a plataforma e as contas.',
+        'Clique em Atualizar › Conferir.',
+        'Resolva os cartões vermelhos e use Atualizar anúncio.',
+      ],
+    },
+    {
+      titulo: 'Observação',
+      itens: ['Enviar preço exige a permissão de editar a Tabela de Preços.'],
+    },
+  ],
+}
+useAjuda(() => (tab.value === 'tabela' ? AJUDA_TABELA : null))
+
 // Quem vê o quê na linha dos botões: os departamentos (e as sub-abas) são da
 // Tabela de Preços; o botão Faturamento, da permissão Faturamento.
 const podePrecos = useCan('tabela_precos', 'view')
