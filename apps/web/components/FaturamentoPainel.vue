@@ -86,11 +86,13 @@ const mobileFiltersOpen = ref(false)
 // em Celular, Mala nem Eletro; os quatro somam o total sem filtro. Shein saiu
 // (não é departamento de produto). "Catálogo" saiu em 06/10/2026 (virou grupo
 // dentro de cada tipo, na Tabela de Preços). Os rótulos antigos ficam só para
-// a etiqueta de tipo da loja.
+// a etiqueta de tipo da loja. M-23 (23/11/2026): as categorias em ordem
+// alfabética (Celular, Eletro, Mala — lib/categorias.ts) e "Sem categoria" por
+// último; os tipos de cada loja já vêm da API em ordem alfabética.
 const departmentOptions = [
   { value: 'celular', label: 'Celular' },
-  { value: 'mala', label: 'Mala' },
   { value: 'eletro', label: 'Eletro' },
+  { value: 'mala', label: 'Mala' },
   { value: 'sem', label: 'Sem categoria' },
 ]
 const ROTULOS_TIPO_ANTIGO: Record<string, string> = { catalogo: 'Catálogo', shein: 'Shein' }
@@ -100,7 +102,7 @@ function departmentLabel(slug: string): string {
     ?? slug
 }
 const avisoDepartamento = computed(() => department.value === 'sem'
-  ? 'Mostrando só o que cada loja vendeu sem categoria (fora de Celular, Mala e Eletro).'
+  ? 'Mostrando só o que cada loja vendeu sem categoria (fora de Celular, Eletro e Mala).'
   : `Mostrando só o que cada loja vendeu de ${departmentLabel(department.value)}.`)
 function platformLabel(value: string | null): string {
   if (!value) return '—'

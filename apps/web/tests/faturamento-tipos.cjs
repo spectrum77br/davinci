@@ -4,7 +4,7 @@
 // opens as the "Faturamento" button of the Tabela de Preços; /faturamento is a
 // redirect page (checked at the end).
 // The type filter is admin-only; mobile cards retain the desktop rows and totals.
-// Type filter (17/11/2026, Novos procedimentos 7): Celular · Mala · Eletro ·
+// Type filter (17/11/2026, Novos procedimentos 7): Celular · Eletro · Mala (M-23) ·
 // Sem categoria (no Shein) = what each store SOLD of that department (the API
 // splits each order among its items); an error clears the previous table.
 // Equipe (30/10/2026): the select lists the sales teams by name (Londres,
@@ -185,9 +185,9 @@ async function run() {
   assert.match(html, /id="faturamento-tipo"/, 'admin can select a type')
   assert.match(html, /Todos os tipos/)
   assert.deepEqual(typeOptions(html), [
-    [null, 'Todos os tipos'], ['celular', 'Celular'], ['mala', 'Mala'], ['eletro', 'Eletro'],
+    [null, 'Todos os tipos'], ['celular', 'Celular'], ['eletro', 'Eletro'], ['mala', 'Mala'],
     ['sem', 'Sem categoria'],
-  ], 'the product departments; Shein is not one')
+  ], 'the product departments in alphabetical order (M-23, 23/11/2026); Shein is not one')
   assert.doesNotMatch(html, /Shein/)
   assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]),
     ['Loja', 'Plataforma', 'Tipo', 'Pedidos', 'Faturamento', 'Ticket médio'])
@@ -315,5 +315,5 @@ async function run() {
 }
 
 run().then(() => {
-  console.log('PASS: real Faturamento SFC renders types for readers; type filter/query admin-only (Celular/Mala/Eletro/Sem categoria, what each store sold); error clears the table; period/team preserved; Equipe select by name (Londres/Israel/Marrocos), hidden with one team, "Equipe N" without names; mobile cards/desktop values and totals agree after refresh; empty/loading states')
+  console.log('PASS: real Faturamento SFC renders types for readers; type filter/query admin-only (Celular/Eletro/Mala/Sem categoria, what each store sold); error clears the table; period/team preserved; Equipe select by name (Londres/Israel/Marrocos), hidden with one team, "Equipe N" without names; mobile cards/desktop values and totals agree after refresh; empty/loading states')
 }).catch((error) => { console.error(error); process.exitCode = 1 })

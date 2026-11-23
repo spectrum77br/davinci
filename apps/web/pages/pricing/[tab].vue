@@ -7,6 +7,7 @@ import {
 } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { isoToday } from '~/lib/date'
+import { ordenarCategorias } from '~/lib/categorias'
 import {
   calcularReposicao, explicarReposicao, prazoDias, reposicaoPorPeca, textoFormulaReposicao,
 } from '~/utils/reposicao'
@@ -21,9 +22,9 @@ definePageMeta({
       return navigateTo({ path: '/pricing/tabela', query: to.query, hash: to.hash }, { replace: true })
     },
     'permission',
-    // Faturamento (13/11/2026, item 6) é o botão ao lado de Celular · Mala ·
-    // Eletro, em /pricing/faturamento. Quem só tem a permissão Faturamento
-    // entra direto nele (sem os departamentos); quem não tem Faturamento e
+    // Faturamento (13/11/2026, item 6) é o botão ao lado de Celular · Eletro ·
+    // Mala (ordem da M-23), em /pricing/faturamento. Quem só tem a permissão
+    // Faturamento entra direto nele (sem os departamentos); quem não tem Faturamento e
     // abre o link dele cai na Tabela de Preços.
     (to) => {
       const u = useAuthStore().user
@@ -166,10 +167,12 @@ const DEPT_ICONS: Record<string, any> = {
 // daqui — vale para a lista da API e para a lista fixa abaixo.
 const DEPTS_FORA_DA_BARRA = new Set(['catalogo'])
 
+// M-23 (23/11/2026): os botões em ordem alfabética — Celular, Eletro, Mala —
+// e o Faturamento depois deles (lib/categorias.ts, a lista de todas as telas).
 const DEPARTMENTS_FALLBACK = [
   { value: 'celular', label: 'Celular', icon: Smartphone },
-  { value: 'mala', label: 'Mala', icon: Briefcase },
   { value: 'eletro', label: 'Eletro', icon: Zap },
+  { value: 'mala', label: 'Mala', icon: Briefcase },
 ]
 
 const DEPARTMENTS = ref<{ value: string; label: string; icon: any }[]>([...DEPARTMENTS_FALLBACK])
@@ -202,9 +205,17 @@ async function loadSegments() {
   try {
     const rows = await api<SegmentRow[]>('/api/segments')
     allSegments.value = rows
-    const roots = rows
-      .filter((r) => r.parent_id === null && r.active && !DEPTS_FORA_DA_BARRA.has(r.slug))
-      .sort((a, b) => a.sort_order - b.sort_order)
+    // M-23 (23/11/2026): a barra segue a ordem alfabética das categorias
+    // (Celular, Eletro, Mala), não o sort_order do banco (Celular, Mala,
+    // Eletro); um segmento-raiz que não seja categoria vem depois, no
+    // sort_order. Os TIPOS de cada categoria (as colunas/slots) continuam no
+    // sort_order — isso é dado, não muda.
+    const roots = ordenarCategorias(
+      rows
+        .filter((r) => r.parent_id === null && r.active && !DEPTS_FORA_DA_BARRA.has(r.slug))
+        .sort((a, b) => a.sort_order - b.sort_order),
+      (r) => r.slug,
+    )
     if (roots.length === 0) return
 
     DEPARTMENTS.value = roots.map((r) => ({
@@ -5184,8 +5195,9 @@ watch(department, async () => {
           {{ d.label }} ({{ accountsByDept[d.value]?.length ?? 0 }} contas)
         </button>
       </template>
-      <!-- Faturamento (13/11/2026): saiu do menu e virou este botão, depois de
-           Eletro. Sem número, como era o item do menu. -->
+      <!-- Faturamento (13/11/2026): saiu do menu e virou este botão, depois das
+           categorias (desde a M-23, 23/11/2026: Celular, Eletro, Mala). Sem
+           número, como era o item do menu. -->
       <button
         v-if="podeFaturamento"
         type="button"
