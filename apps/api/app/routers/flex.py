@@ -1197,6 +1197,8 @@ def _saiu_sem_sp():
     return and_(
         FlexPedido.no_sp.is_(False),
         FlexPedido.acertado_em.is_(None),
+        # Com o aviso "o .sp não cobre", a peça foi de outro estoque (23/11/2026).
+        flex_motor.sql_espera_acerto(),
         exists().where(
             BlingOrder.bling_id == FlexPedido.bling_id,
             BlingOrder.situacao.in_(flex_motor.SITUACOES_SAIU),
@@ -1282,6 +1284,7 @@ async def pedidos(
             skus,
             fp.lote,
             do_local=fp.integration_id not in fora,
+            alerta=fp.alerta,
         )
         # O banco trouxe largo (`_saiu_sem_sp`); aqui só fica o que espera
         # mesmo o acerto — o resto segue as réguas de sempre.
@@ -1337,7 +1340,13 @@ async def acertado(bling_id: int, session: Sessao, user: Agir) -> FlexAcertoOut:
     situacao = itens[0][0] if itens else None
     do_local = fp.integration_id not in await flex_local.contas_fora_do_local(session)
     if not flex_motor.acerto_pendente(
-        situacao, fp.no_sp, fp.acertado_em, [c for _, c in itens], fp.lote, do_local=do_local
+        situacao,
+        fp.no_sp,
+        fp.acertado_em,
+        [c for _, c in itens],
+        fp.lote,
+        do_local=do_local,
+        alerta=fp.alerta,
     ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,

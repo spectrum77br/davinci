@@ -138,10 +138,11 @@ from app.services.bling_situacoes import (
     SITUACAO_ATENDIDO,
     SITUACAO_CANCELADO,
     SITUACAO_EM_ANDAMENTO,
+    SITUACOES_DEPOIS_DO_ENVIO_STR,
 )
 from app.services.estoque_familia import LOTES_DE_VENDA, chave_familia, lote_de
 from app.services.marketplaces import flex_api
-from app.services.prioridade_estoque import analisa_codigo, sku_alvo
+from app.services.prioridade_estoque import ALERTA_FLEX_NA_FILA_DA_NF, analisa_codigo, sku_alvo
 from app.services.vinculo_saude import eh_duplicado
 
 logger = structlog.get_logger()
@@ -221,6 +222,9 @@ _SITUACOES_FECHADAS = (
     str(SITUACAO_ATENDIDO),
     str(SITUACAO_CANCELADO),
     str(SITUACAO_EM_ANDAMENTO),
+    # Entregue e o caminho da devolução (23/11/2026): antes o pedido entregue
+    # voltava a contar como em aberto — aviso de novo na tela e no saldo.
+    *SITUACOES_DEPOIS_DO_ENVIO_STR,
     "excluido",
 )
 # A tela usa a mesma régua na lista "Pedidos Flex sem peça em SP"
@@ -232,7 +236,11 @@ SITUACOES_FECHADAS = _SITUACOES_FECHADAS
 # ido ao .sp, o Bling baixou o outro lote (.ci/.ra/.pi) mas a peça saiu de
 # São Bernardo: o .sp do Bling fica com peça a mais até alguém transferir.
 # O desconto continua até a pessoa marcar `flex_pedido.acertado_em`.
-SITUACOES_SAIU = (str(SITUACAO_EM_ANDAMENTO), str(SITUACAO_ATENDIDO))
+SITUACOES_SAIU = (
+    str(SITUACAO_EM_ANDAMENTO),
+    str(SITUACAO_ATENDIDO),
+    *SITUACOES_DEPOIS_DO_ENVIO_STR,
+)
 # Recusa da plataforma ao DESLIGAR (403 "item down"/404 — o anúncio pausado
 # pode responder assim): tenta de novo em 1 h. Antes eram 24 h, e o anúncio
 # que o DaVinci reativava (estoque republicado) voltava a vender pelo Flex sem
@@ -1130,19 +1138,40 @@ def acerto_pendente(
     lote: str | None = None,
     *,
     do_local: bool = True,
+    alerta: str | None = None,
 ) -> bool:
-    """O pedido Flex SAIU (em andamento/atendido) sem ter ido ao .sp e ainda
-    espera alguém acertar o estoque no Bling? Só conta quem tem peça com lote
-    de venda fora do .sp (é o que o saldo Flex desconta). `do_local=False`:
-    a conta tem a saída do Flex em outra cidade (12/11/2026) — a peça saiu de
-    lá, não há o que acertar no .sp."""
-    if not do_local:
+    """O pedido Flex SAIU (em andamento/atendido/entregue…) sem ter ido ao .sp
+    e ainda espera alguém acertar o estoque no Bling? Só conta quem tem peça
+    com lote de venda fora do .sp (é o que o saldo Flex desconta).
+    `do_local=False`: a conta tem a saída do Flex em outra cidade (12/11/2026)
+    — a peça saiu de lá, não há o que acertar no .sp. `alerta` (o
+    `flex_pedido.alerta`): com o aviso "o .sp não cobre", a peça foi de outro
+    estoque (23/11/2026, 309723: "enviamos de Piracicaba mesmo") e o Bling já
+    baixou o lote certo — nada a acertar."""
+    if not do_local or sp_nao_cobria(alerta):
         return False
     if no_sp or acertado_em is not None or str(situacao or "") not in SITUACOES_SAIU:
         return False
     # `lote`: o do PEDIDO (flex_pedido.lote) — trocar o local depois que ele
     # saiu não muda o que falta acertar.
     return bool(_demanda_por_peca(((s, 1) for s in skus), lote))
+
+
+def sp_nao_cobria(alerta: str | None) -> bool:
+    """O pedido ficou com o aviso "o .sp não cobre" (o robô de prioridade não
+    o trocou de lote porque o .sp não tinha a peça): quando sai, sai de outro
+    estoque. O aviso de "virou Flex depois da fila da NF" não conta — aí a
+    peça pode ter saído de São Bernardo."""
+    return bool(alerta) and not str(alerta).startswith(ALERTA_FLEX_NA_FILA_DA_NF)
+
+
+def sql_espera_acerto():
+    """`sp_nao_cobria` ao contrário, no banco: o pedido que saiu sem o .sp só
+    espera o acerto sem aviso ou com o aviso da fila da NF."""
+    return or_(
+        FlexPedido.alerta.is_(None),
+        FlexPedido.alerta.startswith(ALERTA_FLEX_NA_FILA_DA_NF, autoescape=True),
+    )
 
 
 def _pendentes(sku_sp: str, demanda: Mapping[str, int]) -> int:
@@ -1229,7 +1258,11 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
             else true(),
             or_(
                 and_(FlexPedido.detectado_em >= corte, situacao.notin_(_SITUACOES_FECHADAS)),
-                and_(situacao.in_(SITUACOES_SAIU), FlexPedido.acertado_em.is_(None)),
+                and_(
+                    situacao.in_(SITUACOES_SAIU),
+                    FlexPedido.acertado_em.is_(None),
+                    sql_espera_acerto(),
+                ),
             ),
         )
     )

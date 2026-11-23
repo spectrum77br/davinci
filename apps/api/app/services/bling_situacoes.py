@@ -75,3 +75,26 @@ SITUACAO_AGUARDANDO_CANCELAMENTO_STR = str(SITUACAO_AGUARDANDO_CANCELAMENTO)
 SITUACAO_AGUARDANDO_DEVOLUCAO_STR = str(SITUACAO_AGUARDANDO_DEVOLUCAO)
 NOME_AGUARDANDO_CANCELAMENTO = "Aguardando Cancelamento"
 NOME_AGUARDANDO_DEVOLUCAO = "Aguardando Devolução"
+
+# --- depois do envio (customizadas do Bling) ----------------------------------
+# Situações que o pedido só alcança DEPOIS que a peça saiu do estoque: a
+# entrega e o caminho da devolução (Aguardando Devolução → Devolvido Estoque /
+# Manutenção / Sucata / Resolvido; Perdimento). Flex, 23/11/2026: o pedido
+# 309723 foi entregue (83953) e o aviso "sem peça em São Bernardo" voltou,
+# porque a régua do Flex só conhecia Em andamento/Atendido como "já saiu".
+SITUACAO_ENTREGUE = 83953
+SITUACAO_PERDIMENTO = 83956
+SITUACAO_DEVOLVIDO_ESTOQUE = 83963
+SITUACAO_MANUTENCAO = 84677
+SITUACAO_SUCATA = 545901
+SITUACAO_RESOLVIDO = 545902
+SITUACOES_DEPOIS_DO_ENVIO: tuple[int, ...] = (
+    SITUACAO_ENTREGUE,
+    SITUACAO_PERDIMENTO,
+    SITUACAO_AGUARDANDO_DEVOLUCAO,
+    SITUACAO_DEVOLVIDO_ESTOQUE,
+    SITUACAO_MANUTENCAO,
+    SITUACAO_SUCATA,
+    SITUACAO_RESOLVIDO,
+)
+SITUACOES_DEPOIS_DO_ENVIO_STR: tuple[str, ...] = tuple(str(s) for s in SITUACOES_DEPOIS_DO_ENVIO)

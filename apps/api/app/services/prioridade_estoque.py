@@ -797,6 +797,16 @@ def _falta_na_fila_da_nf() -> str:
         "a planilha da NF já saiu com o lote antigo — troque o item para o "
         f".{_lote_flex()} à mão e refaça a NF"
     )
+
+
+# Começo do aviso (`flex_pedido.alerta`) do pedido que virou Flex DEPOIS de
+# entrar na fila da NF: a peça pode ter saído de São Bernardo com o lote
+# antigo — quando ele sai, o acerto do estoque continua valendo. O outro aviso
+# ("o .sp não cobre") quer dizer que a peça foi de outro estoque: nada a
+# acertar (flex_motor.acerto_pendente, 23/11/2026).
+ALERTA_FLEX_NA_FILA_DA_NF = "Pedido Flex reconhecido depois de entrar na fila da NF"
+
+
 _ROTULO_PLATAFORMA = {
     flex_envio.PLATAFORMA_ML: "Mercado Livre",
     flex_envio.PLATAFORMA_SHOPEE: "Shopee",
@@ -1460,7 +1470,7 @@ async def _aplicar_prioridade_estoque(
                     numero=numero,
                     no_sp=no_sp,
                     alerta=(
-                        "Pedido Flex reconhecido depois de entrar na fila da NF e ele NÃO foi "
+                        f"{ALERTA_FLEX_NA_FILA_DA_NF} e ele NÃO foi "
                         "trocado de lote: " + _falta_na_fila_da_nf()
                         if na_fila
                         else f"O .{_lote_flex()} não cobre este pedido Flex e ele NÃO foi trocado "

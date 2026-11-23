@@ -33,6 +33,7 @@ from app.models import (
 from app.security.cipher import encrypt_json
 from app.services import flex_config, flex_motor
 from app.services.marketplaces import flex_api
+from app.services.prioridade_estoque import ALERTA_FLEX_NA_FILA_DA_NF
 
 
 @pytest.fixture(autouse=True)
@@ -575,8 +576,13 @@ async def test_pedido_que_saiu_sem_sp_espera_o_acerto(
 ):
     """Achado da revisão: o pedido Flex que saiu (15) sem passar pelo .sp
     continua na lista (e no desconto do saldo Flex) até alguém marcar que
-    acertou o estoque no Bling."""
+    acertou o estoque no Bling. 23/11/2026: só o que pode ter saído de São
+    Bernardo — o aviso da fila da NF (o .sp tinha, a NF saiu com o lote velho)."""
     await db.execute(text("UPDATE bling_orders SET situacao = '15' WHERE bling_id = 5001"))
+    await db.execute(
+        text("UPDATE flex_pedido SET alerta = :a WHERE bling_id = 5001"),
+        {"a": f"{ALERTA_FLEX_NA_FILA_DA_NF} e ele NÃO foi trocado de lote: refaça a NF"},
+    )
     await db.commit()
     auth_as(cena["admin"])
     r = (await client.get("/api/flex/pedidos?so_alerta=true&abertos=true")).json()
@@ -590,6 +596,48 @@ async def test_pedido_que_saiu_sem_sp_espera_o_acerto(
     assert [(x["bling_id"], x["por"]) for x in linhas] == [(5001, str(cena["admin"].id))]
     r = await client.post("/api/flex/pedidos/5001/acertado")
     assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_pedido_entregue_sem_peca_no_sp_sai_da_lista(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+):
+    """23/11/2026, pedido 309723 (atlas ML, dg1018.pi): o .sp não tinha a
+    peça, a equipe mandou de Piracicaba e o pedido foi entregue (83953) — o
+    aviso "sem peça em São Bernardo" continuava, porque "Entregue" não contava
+    como pedido que já saiu. Agora some: nem aberto, nem acerto (o Bling já
+    baixou o lote certo)."""
+    auth_as(cena["admin"])
+    url = "/api/flex/pedidos?so_alerta=true&abertos=true"
+    assert [p["bling_id"] for p in (await client.get(url)).json()] == [5001]
+    for situacao in ("15", "83953", "83957"):
+        await db.execute(
+            text("UPDATE bling_orders SET situacao = :s WHERE bling_id = 5001"), {"s": situacao}
+        )
+        await db.commit()
+        assert (await client.get(url)).json() == [], situacao
+    r = await client.post("/api/flex/pedidos/5001/acertado")
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "sem_acerto_pendente")
+
+
+@pytest.mark.asyncio
+async def test_pedido_entregue_que_pode_ter_saido_de_sao_bernardo_espera_o_acerto(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+):
+    """"Entregue" (83953) conta como pedido que saiu: o que pode ter saído de
+    São Bernardo sem passar pelo .sp (aviso da fila da NF) continua esperando
+    o acerto — antes voltava a contar como em aberto."""
+    await db.execute(text("UPDATE bling_orders SET situacao = '83953' WHERE bling_id = 5001"))
+    await db.execute(
+        text("UPDATE flex_pedido SET alerta = :a WHERE bling_id = 5001"),
+        {"a": f"{ALERTA_FLEX_NA_FILA_DA_NF} e ele NÃO foi trocado de lote: refaça a NF"},
+    )
+    await db.commit()
+    auth_as(cena["admin"])
+    r = (await client.get("/api/flex/pedidos?so_alerta=true&abertos=true")).json()
+    assert [(p["bling_id"], p["acerto_pendente"]) for p in r] == [(5001, True)]
+    assert (await client.post("/api/flex/pedidos/5001/acertado")).status_code == 200
+    assert (await client.get("/api/flex/pedidos?so_alerta=true&abertos=true")).json() == []
 
 
 @pytest.mark.asyncio

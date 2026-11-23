@@ -572,6 +572,44 @@ async def test_pedido_flex_que_saiu_sem_sp_desconta_ate_o_acerto(db, mundo):
 
 
 @pytest.mark.asyncio
+async def test_pedido_flex_entregue_e_o_que_saiu_sem_peca_no_sp(db, mundo):
+    """23/11/2026 (pedido 309723): "Entregue" (83953) é pedido que saiu — antes
+    voltava a contar como em aberto. E o pedido com o aviso "o .sp não cobre"
+    saiu de outro estoque (a equipe mandou de Piracicaba): o Bling já baixou o
+    lote certo, não desconta do .sp nem espera acerto."""
+    await _pedido_flex(db, 907001, "dg053.ci", 3)
+    assert (await _saldo(db)).saldo == 2
+    await db.execute(text("UPDATE bling_orders SET situacao = '83953' WHERE bling_id = 907001"))
+    # Velho: o entregue não desconta como "aberto" — só como saiu sem acerto.
+    await db.execute(
+        text("UPDATE flex_pedido SET detectado_em = now() - interval '60 days'"
+             " WHERE bling_id = 907001")
+    )
+    await db.commit()
+    assert (await _saldo(db)).saldo == 2
+    assert flex_motor.acerto_pendente("83953", False, None, ["dg053.ci"], "sp")
+    # O .sp não cobria quando o robô olhou: a peça foi de outro estoque.
+    alerta = "O .sp não cobre este pedido Flex e ele NÃO foi trocado de lote: dg053.sp: 0"
+    await db.execute(
+        text("UPDATE flex_pedido SET alerta = :a WHERE bling_id = 907001"), {"a": alerta}
+    )
+    await db.commit()
+    assert (await _saldo(db)).saldo == 5
+    assert not flex_motor.acerto_pendente(
+        "83953", False, None, ["dg053.ci"], "sp", alerta=alerta
+    )
+    # O aviso da fila da NF (o .sp tinha; a NF saiu com o lote velho): a peça
+    # pode ter saído de São Bernardo — continua descontando até o acerto.
+    alerta = f"{flex_motor.ALERTA_FLEX_NA_FILA_DA_NF} e ele NÃO foi trocado de lote: refaça"
+    await db.execute(
+        text("UPDATE flex_pedido SET alerta = :a WHERE bling_id = 907001"), {"a": alerta}
+    )
+    await db.commit()
+    assert (await _saldo(db)).saldo == 2
+    assert flex_motor.acerto_pendente("83953", False, None, ["dg053.ci"], "sp", alerta=alerta)
+
+
+@pytest.mark.asyncio
 async def test_pedido_levado_ao_sp_desconta_ate_o_produto_ser_atualizado(db, mundo):
     """Achado da revisão: o robô leva o pedido Flex ao .sp e grava `no_sp`; o
     `products.stock` do .sp só cai quando o webhook do Bling chega (e o da
