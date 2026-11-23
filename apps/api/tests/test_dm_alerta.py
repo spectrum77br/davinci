@@ -1,10 +1,11 @@
 """O aviso de que o robô desistiu.
 
+M-20 (23/11/2026): o aviso é um alerta ADM no sino (antes o Telegram).
+
 Duas coisas se testam aqui, e a segunda é a que evita vergonha:
 
-  1. O texto do CLIENTE é escapado. O envio vai em `parse_mode=HTML`, então
-     uma DM com "<" faz o Telegram devolver 400 — e o aviso sumiria justo na
-     mensagem mais esquisita, que é a que mais precisa de gente.
+  1. O texto do CLIENTE vai como texto simples, mascarado: o sino escapa na
+     tela, então uma DM com "<" não vira marcação nem derruba o aviso.
   2. A enxurrada. O cron roda a cada minuto pegando até 10 conversas: uma
      queda do provedor vira 600 avisos por hora, e o único que importava
      ("pediu atendente") afoga no meio.
@@ -40,14 +41,18 @@ def _conversa(conta: str = "charlots_br") -> DmConversa:
 
 @pytest.fixture
 def enviado():
-    with patch.object(
-        dm_alerta.TelegramClient, "safe_send", new=AsyncMock(return_value=True)
-    ) as m:
+    with patch.object(dm_alerta, "avisar_administradores", new=AsyncMock(return_value=True)) as m:
         yield m
 
 
 def _textos(mock) -> list[str]:
-    return [c.args[0] if c.args else c.kwargs["text"] for c in mock.call_args_list]
+    """Título + mensagem de cada alerta (M-20: o alerta ADM no sino)."""
+    saida = []
+    for c in mock.call_args_list:
+        titulo = c.args[0]
+        mensagem = c.args[1] if len(c.args) > 1 else c.kwargs.get("mensagem")
+        saida.append(f"{titulo}\n{mensagem or ''}")
+    return saida
 
 
 # ─────────────── o que vai no aviso ───────────────
@@ -66,8 +71,9 @@ async def test_avisa_com_a_conta_e_o_trecho(enviado):
     assert "quero falar com uma pessoa" in texto
 
 
-async def test_escapa_html_do_cliente(enviado):
-    """O "<" numa DM não pode derrubar o aviso nem virar marcação."""
+async def test_texto_do_cliente_vai_como_texto_simples(enviado):
+    """O "<" numa DM não derruba o aviso: vai como texto, sem escapar duas
+    vezes (o sino escapa na tela; antes o Telegram exigia `html.escape`)."""
     await dm_alerta.avisar(
         _conversa(),
         chave="pediu_humano",
@@ -75,13 +81,11 @@ async def test_escapa_html_do_cliente(enviado):
         texto="a mala <b>grande</b> & a de 24 <script>",
     )
     (texto,) = _textos(enviado)
-    assert "<b>grande</b>" not in texto
-    assert "<script>" not in texto
-    assert "&lt;b&gt;grande&lt;/b&gt;" in texto
-    assert "&amp;" in texto
+    assert "a mala <b>grande</b> & a de 24 <script>" in texto
+    assert "&lt;" not in texto and "&amp;" not in texto
 
 
-async def test_mascara_dado_pessoal_antes_do_telegram(enviado):
+async def test_mascara_dado_pessoal_antes_do_sino(enviado):
     await dm_alerta.avisar(
         _conversa(),
         chave="sem_resposta",
@@ -95,9 +99,7 @@ async def test_mascara_dado_pessoal_antes_do_telegram(enviado):
 
 
 async def test_motivo_aparece_quando_nao_e_caso_conhecido(enviado):
-    await dm_alerta.avisar(
-        _conversa(), chave="sem_resposta", motivo="provedor devolveu 429"
-    )
+    await dm_alerta.avisar(_conversa(), chave="sem_resposta", motivo="provedor devolveu 429")
     (texto,) = _textos(enviado)
     assert "provedor devolveu 429" in texto
 
@@ -136,17 +138,17 @@ async def test_teto_por_hora_silencia_e_avisa_que_silenciou(enviado):
     textos = _textos(enviado)
     assert len(textos) == dm_alerta.TETO_POR_HORA + 1
     assert "Silenciando" in textos[-1]
-    assert "🔇" in textos[-1]
+    assert "silenciados" in textos[-1]
 
 
 # ─────────────── nunca derruba o envio de DM ───────────────
 
 
-async def test_telegram_fora_do_ar_nao_levanta():
+async def test_sino_fora_do_ar_nao_levanta():
     with patch.object(
-        dm_alerta.TelegramClient,
-        "safe_send",
-        new=AsyncMock(side_effect=RuntimeError("telegram caiu")),
+        dm_alerta,
+        "avisar_administradores",
+        new=AsyncMock(side_effect=RuntimeError("banco caiu")),
     ):
         await dm_alerta.avisar(_conversa(), chave="sem_resposta", motivo="429")
 

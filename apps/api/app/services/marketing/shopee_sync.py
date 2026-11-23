@@ -12,7 +12,8 @@ For each Shopee Integration row we:
      per day for the 7-day window (daily aggregates).
   5. upsert MarketingCampaign rows by (account_id, external_id) so the
      Campanhas tab reflects ongoing/paused state + per-campaign spend/ACOS.
-  6. fire a Telegram alert if balance fell below `_CREDIT_ALERT_THRESHOLD`.
+  6. avisa no sino dos administradores se o saldo caiu abaixo de
+     `_CREDIT_ALERT_THRESHOLD` (M-20, 23/11/2026; antes no Telegram).
 
 Failure mode: if Shopee returns `error_permission_denied` (Ads not enabled
 on the shop) we mark `last_sync_error` on the account and return so the
@@ -52,7 +53,6 @@ from app.services.shopee_ads import (
     ShopeeAdsError,
     ShopeeAdsRateLimit,
 )
-from app.services.telegram import TelegramClient
 
 logger = structlog.get_logger()
 
@@ -65,7 +65,7 @@ _COOLDOWN_KEY = "shopee_ads:global_cooldown"
 # Errors that should NOT increment Integration.consecutive_errors. These
 # are operational states (no permission, no Ads enabled, rate-limited) —
 # not flapping bugs — so they shouldn't fire the "3 failures in a row"
-# Telegram alert. The sync just notes the state and moves on.
+# alert (no sino, M-20). The sync just notes the state and moves on.
 _EXPECTED_SHOPEE_ERRORS = frozenset({
     "error_permission_denied",
     "error_permission",
@@ -110,8 +110,8 @@ async def _is_on_cooldown() -> bool:
 
 async def _set_cooldown(reason: str) -> None:
     """Lock Shopee out for `settings.shopee_ads_cooldown_on_rate_limit_s`
-    seconds (default 3600 = 1h). Best-effort Telegram alert so the
-    operator knows the lockout fired."""
+    seconds (default 3600 = 1h). Avisa no sino dos administradores (M-20,
+    23/11/2026; antes no Telegram) para saberem que a trava disparou."""
     ttl = int(get_settings().shopee_ads_cooldown_on_rate_limit_s)
     try:
         await redis.set(_COOLDOWN_KEY, reason, ex=ttl)
@@ -119,15 +119,20 @@ async def _set_cooldown(reason: str) -> None:
         logger.warning("shopee_ads_cooldown_set_failed", err=str(e)[:200])
         return
     logger.warning("shopee_ads_cooldown_activated", reason=reason, ttl_seconds=ttl)
-    try:
-        await TelegramClient().safe_send(
-            f"⚠️ Shopee Ads RATE LIMITED — cooldown global ativo por {ttl // 60} min.\n"
-            f"Motivo: <code>{reason}</code>"
-        )
-    except Exception:  # noqa: BLE001
-        pass
+    from app.models.enums import AlertSeverity
+    from app.services.alerts import avisar_administradores
 
-# Shopee credit balance below which we Telegram the operator. R$50 picked
+    agora = datetime.now(UTC)
+    await avisar_administradores(
+        "Shopee Ads: limite de chamadas atingido",
+        f"Pausa geral de {ttl // 60} min nas chamadas de Ads da Shopee. Motivo: {reason}",
+        severity=AlertSeverity.WARNING,
+        payload={"marketing": "shopee_cooldown", "motivo": reason},
+        dedupe_key=f"shopee_ads_cooldown:{agora:%Y%m%d%H%M}",
+        plataforma="shopee",
+    )
+
+# Shopee credit balance below which we alert the admins (sino). R$50 picked
 # from the spec; the real "low" threshold varies per shop's daily burn, so
 # this is a backstop — the per-account days_remaining alert in the
 # /credit-alerts endpoint is the primary signal.
@@ -312,7 +317,7 @@ async def sync_shopee_integration(
     await record_sync_success(session, integration)
     await session.commit()
 
-    # ─── post-commit Telegram alerts (best-effort, deduped) ──────────────
+    # ─── post-commit alerts no sino (best-effort, deduped; M-20) ─────────
     if balance is not None:
         await notify_low_credit(integration, credit=balance, threshold=_CREDIT_ALERT_THRESHOLD)
     # Today's ACOS = today's spend / Bling-revenue-today. Use the

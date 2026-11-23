@@ -1,35 +1,44 @@
-"""Marketing module Telegram alerts.
+"""Avisos do módulo de Marketing no sino dos administradores.
 
-Three signals the operator cares about across all platforms:
+M-20 (23/11/2026): eram mensagens no Telegram; agora cada aviso é um alerta
+ADM (`alerts.avisar_administradores`) — todo administrador vê em /alertas,
+com Equipe = ADM, a plataforma e a conta da loja.
 
-  1. Low credit / remaining budget — `notify_low_credit` (called by each
-     sync orchestrator after the upsert when balance < R$50).
-  2. Three consecutive sync failures — `record_sync_failure` increments
-     `Integration.consecutive_errors`; at exactly the 3rd hit we fire one
-     alert (no further spam until the next success resets the counter).
-  3. ACOS materially above target — `notify_high_acos` fires when the
-     account-level ACOS exceeds `target × 2.15` (≈15% on a 7% target).
-     A 30-minute Telegram dedup avoids alerting on every cron tick.
+Três sinais, de todas as plataformas:
 
-All notifications are best-effort: `TelegramClient.safe_send` swallows
-exceptions so an outage in Telegram doesn't break the sync.
+  1. Crédito / orçamento restante baixo — `notify_low_credit` (chamado por
+     cada sync depois do upsert, quando o saldo < R$ 50).
+  2. Três falhas seguidas do sync — `record_sync_failure` soma
+     `Integration.consecutive_errors`; exatamente na 3ª avisa uma vez (nada
+     mais até um sucesso zerar o contador).
+  3. ACOS bem acima do alvo — `notify_high_acos` quando o ACOS da conta passa
+     de `alvo × 2.15` (≈15% num alvo de 7%).
+
+No sino, crédito e ACOS avisam no máximo uma vez por dia por loja (a
+`dedupe_key`); a trava de 30 min em memória continua poupando o banco a cada
+rodada. O aviso nunca derruba o sync.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import AlertSeverity
 from app.models.integration import Integration
-from app.services.telegram import TelegramClient
+from app.services.alerts import avisar_administradores
 
 logger = structlog.get_logger()
 
-# Telegram dedup — same alert key won't be re-sent within this window.
-# Process-local; survives until the worker restarts. Cron runs every 30
-# min, so a 1800s TTL effectively means "one alert per cron tick".
+_SP = ZoneInfo("America/Sao_Paulo")
+
+# Trava em memória — a mesma chave não avisa de novo dentro desta janela.
+# Vale até o worker reiniciar. O cron roda a cada 30 min, então 1800 s é
+# "um aviso por rodada"; no sino, a `dedupe_key` do dia segura o resto.
 _DEDUP_WINDOW_SECONDS = 1800
 _FAILURE_ALERT_THRESHOLD = 3
 _HIGH_ACOS_MULTIPLIER = 2.15  # 7% target → 15% ACOS triggers alert
@@ -47,9 +56,48 @@ def _should_send(integration_id: UUID, key: str) -> bool:
     return True
 
 
+def _platform_value(integration: Integration) -> str:
+    p = integration.platform
+    return p.value if hasattr(p, "value") else str(p)
+
+
+_ROTULOS = {
+    "shopee": "Shopee",
+    "ml": "Mercado Livre",
+    "mercadolivre": "Mercado Livre",
+    "amazon": "Amazon",
+}
+
+
 def _platform_label(platform: str) -> str:
-    return {"shopee": "Shopee", "ml": "Mercado Livre", "mercadolivre": "Mercado Livre", "amazon": "Amazon"}.get(
-        platform, platform.title()
+    return _ROTULOS.get(platform, platform.title())
+
+
+def _hoje() -> str:
+    return datetime.now(_SP).date().isoformat()
+
+
+async def _avisar(
+    integration: Integration,
+    titulo: str,
+    mensagem: str,
+    *,
+    severity: AlertSeverity,
+    chave: str,
+    payload: dict,
+    session: AsyncSession | None = None,
+) -> bool:
+    """O alerta ADM da loja (M-20): com a plataforma e a conta para a tela."""
+    return await avisar_administradores(
+        titulo,
+        mensagem,
+        severity=severity,
+        payload={"marketing": payload.pop("tipo"), **payload},
+        dedupe_key=chave,
+        session=session,
+        integration_id=integration.id,
+        plataforma=_platform_value(integration),
+        conta=integration.name,
     )
 
 
@@ -62,15 +110,18 @@ async def notify_low_credit(
         return
     if not _should_send(integration.id, "low_credit"):
         return
-    label = _platform_label(integration.platform.value if hasattr(integration.platform, "value") else str(integration.platform))
-    await TelegramClient().safe_send(
-        f"⚠️ <b>{label} Ads</b>: crédito baixo em <b>{integration.name}</b> — saldo R$ {credit:.2f}"
+    label = _platform_label(_platform_value(integration))
+    await _avisar(
+        integration,
+        f"{label} Ads: crédito baixo em {integration.name}",
+        f"Saldo R$ {credit:.2f} (abaixo de R$ {threshold:.2f}). Recarregar o crédito de Ads.",
+        severity=AlertSeverity.WARNING,
+        chave=f"mkt_credito_baixo:{integration.id}:{_hoje()}",
+        payload={"tipo": "credito_baixo", "saldo": round(credit, 2)},
     )
 
 
-async def notify_high_acos(
-    integration: Integration, acos: float, acos_target: float
-) -> None:
+async def notify_high_acos(integration: Integration, acos: float, acos_target: float) -> None:
     """Fire when the account-level ACOS exceeds target × multiplier. We
     use a multiplier (not an absolute threshold) so shops with different
     acceptable ACOS get appropriate signals."""
@@ -81,10 +132,14 @@ async def notify_high_acos(
         return
     if not _should_send(integration.id, "high_acos"):
         return
-    label = _platform_label(integration.platform.value if hasattr(integration.platform, "value") else str(integration.platform))
-    await TelegramClient().safe_send(
-        f"🚨 <b>{label} Ads</b>: ACOS alto em <b>{integration.name}</b> — "
-        f"{acos:.1f}% (alvo {acos_target:.1f}%)"
+    label = _platform_label(_platform_value(integration))
+    await _avisar(
+        integration,
+        f"{label} Ads: ACOS alto em {integration.name}",
+        f"ACOS de hoje {acos:.1f}% (alvo {acos_target:.1f}%).",
+        severity=AlertSeverity.WARNING,
+        chave=f"mkt_acos_alto:{integration.id}:{_hoje()}",
+        payload={"tipo": "acos_alto", "acos": round(acos, 2), "alvo": acos_target},
     )
 
 
@@ -96,25 +151,28 @@ async def record_sync_failure(
     message: str,
 ) -> None:
     """Bump the consecutive-failure counter. At exactly the threshold we
-    fire one Telegram alert and let the counter keep climbing — the next
-    alert won't fire until the counter resets to 0 (a successful sync)
-    and climbs back to the threshold. This avoids spam while still
-    re-alerting after recovery + relapse."""
+    fire one alert and let the counter keep climbing — the next alert won't
+    fire until the counter resets to 0 (a successful sync) and climbs back to
+    the threshold. This avoids spam while still re-alerting after recovery +
+    relapse. O alerta (M-20) entra num savepoint da sessão do sync e sai no
+    commit dele."""
     integration.consecutive_errors = (integration.consecutive_errors or 0) + 1
     if integration.consecutive_errors == _FAILURE_ALERT_THRESHOLD:
         if _should_send(integration.id, "consecutive_failures"):
-            label = _platform_label(
-                integration.platform.value if hasattr(integration.platform, "value") else str(integration.platform)
-            )
-            await TelegramClient().safe_send(
-                f"❌ <b>{label} Ads</b>: 3 falhas seguidas em <b>{integration.name}</b> — "
-                f"último erro: <code>{code}: {message[:200]}</code>"
+            label = _platform_label(_platform_value(integration))
+            agora = datetime.now(_SP)
+            await _avisar(
+                integration,
+                f"{label} Ads: 3 falhas seguidas em {integration.name}",
+                f"Último erro: {code}: {message[:200]}",
+                severity=AlertSeverity.ERROR,
+                chave=f"mkt_falhas:{integration.id}:{agora:%Y%m%d%H%M}",
+                payload={"tipo": "falhas_seguidas", "codigo": code},
+                session=session,
             )
 
 
-async def record_sync_success(
-    session: AsyncSession, integration: Integration
-) -> None:
+async def record_sync_success(session: AsyncSession, integration: Integration) -> None:
     """Reset the failure counter on a clean run so the next failure
     streak starts from zero."""
     if integration.consecutive_errors:

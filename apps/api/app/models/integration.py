@@ -68,9 +68,9 @@ class Integration(Base, TimestampMixin):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
     # Counter incremented on each marketing-sync failure, reset on
-    # success. Used by alerts.notify_consecutive_failures to fire
-    # Telegram on exactly the 3rd consecutive miss so flaky APIs don't
-    # spam the operator.
+    # success. Used by marketing.alerts.record_sync_failure to fire the
+    # alert (no sino; M-20) on exactly the 3rd consecutive miss so flaky APIs
+    # don't spam the operator.
     consecutive_errors: Mapped[int] = mapped_column(
         sa.Integer, nullable=False, default=0, server_default=text("0")
     )

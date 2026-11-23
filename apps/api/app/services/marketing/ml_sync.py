@@ -12,7 +12,7 @@ Conserto de 07/10/2026 (docs/marketing-ml-ads.md):
     aggregation_type=DAILY): UMA linha por dia da janela, com o gasto real do
     dia. O endpoint antigo foi desligado pelo ML em 27/05/2026.
   • Erro NUNCA vira sucesso: 404/4xx/5xx/resposta fora do formato grava
-    `sync_status='erro'` na conta, conta falha seguida (Telegram na 3ª) e NÃO
+    `sync_status='erro'` na conta, conta falha seguida (sino na 3ª; M-20) e NÃO
     mexe nos números já gravados. Conta sem Publicidade liberada ou token sem
     o escopo de anúncios → `sync_status='sem_permissao'` (ação do dono, sem
     alarme repetido).
@@ -515,7 +515,7 @@ async def sync_ml_integration(
         ads = await client.fetch_daily_metrics(date_from=start_day, date_to=today, hoje=today)
     except (MLAdsScopeError, MLAdsSemPermissaoError) as e:
         # Ação do dono (ligar Publicidade / reconectar com o escopo), não
-        # falha passageira: não conta como falha seguida (sem Telegram a
+        # falha passageira: não conta como falha seguida (sem alerta no sino a
         # cada 30 min) e não mexe em número nenhum.
         logger.warning(
             "ml_ads_sem_permissao",

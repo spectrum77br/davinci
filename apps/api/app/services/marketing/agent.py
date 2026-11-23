@@ -6,7 +6,7 @@ Pipeline (one cycle per MarketingAccount, runs every 15 min):
   3. calculate_intensity → 0..100 from sales + impressions ratios
   4. make_decision    → rules listed in PARTE 2 of the spec
   5. persist          → MarketingDecision + MarketingMetric + status mirror
-  6. check_alerts     → low-credit Telegram alert (Shopee only, ≤2 days)
+  6. check_alerts     → crédito baixo no sino dos administradores (Shopee, ≤2 dias; M-20)
   7. detect_patterns  → opportunistic mock pattern emission
 
 The whole thing is mock-only: signals are deterministic-ish by hour/day so the
@@ -33,7 +33,6 @@ from app.models.marketing import (
     MarketingPattern,
     MarketingSchedule,
 )
-from app.services.telegram import TelegramClient
 
 logger = structlog.get_logger()
 
@@ -224,10 +223,11 @@ def make_decision(
 
 
 async def check_alerts(account: MarketingAccount, signals: dict) -> str | None:
-    """Telegram alert for Shopee when credit < 2 days of average spend.
+    """Crédito da Shopee para menos de 2 dias do gasto médio.
 
-    Returns the alert message (for the dashboard) or None. Telegram send is
-    best-effort via TelegramClient.safe_send; missing creds just log.
+    Devolve a mensagem (para o painel) ou None. M-20 (23/11/2026): o aviso vai
+    ao sino dos administradores (alerta ADM, um por conta por dia); antes ia
+    ao Telegram. Nunca derruba o ciclo.
     """
     if account.platform != "shopee":
         return None
@@ -245,11 +245,20 @@ async def check_alerts(account: MarketingAccount, signals: dict) -> str | None:
         f"Estimativa: acaba em {days_remaining:.1f} dias\n"
         f"→ Recarregar urgente!"
     )
-    try:
-        tg = TelegramClient()
-        await tg.safe_send(msg)
-    except Exception as e:  # noqa: BLE001 — TelegramConfigError shouldn't abort the cycle
-        logger.info("marketing_telegram_unavailable", err=str(e)[:200])
+    from app.models.enums import AlertSeverity
+    from app.services.alerts import avisar_administradores
+
+    hoje = datetime.now(UTC).date().isoformat()
+    await avisar_administradores(
+        f"Marketing: crédito baixo em {account.name} (Shopee)",
+        msg,
+        severity=AlertSeverity.WARNING,
+        payload={"marketing": "credito_baixo", "account_id": str(account.id)},
+        dedupe_key=f"mkt_agente_credito:{account.id}:{hoje}",
+        integration_id=account.integration_id,
+        plataforma="shopee",
+        conta=account.name,
+    )
     return msg
 
 

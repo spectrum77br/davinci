@@ -8,12 +8,14 @@ no sino (M-19) — todo administrador vê em /alertas com Equipe = ADM, quem nã
 - `alerts.avisar_administradores`: o alerta ADM sem destinatário, a dedupe, a
   sessão própria ou o savepoint de quem chamou, e nunca levanta;
 - o agente de atendimento (teto de custo, pausa, verificador) e os envios
-  sensíveis gravam no sino de verdade.
+  sensíveis gravam no sino de verdade;
+- marketing (crédito, falhas seguidas) com a loja e a dedupe do dia; DMs.
 """
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -25,10 +27,13 @@ from app.models import (
     Alert,
     AlertSeverity,
     AlertType,
+    Integration,
+    IntegrationPlatform,
     UserRole,
 )
 from app.models.alert import ESCOPO_ADM
 from app.redis_client import redis
+from app.security.cipher import encrypt_json
 from app.services import alerts as alerts_svc
 from app.services.atendimento.agente import custo
 
@@ -154,3 +159,63 @@ async def test_envio_sensivel_grava_no_sino(db: AsyncSession):
     (a,) = await _alertas(db, alertas_sensiveis.TITULO_ENVIO)
     assert "Reembolso" in a.message and "conversa=1" in a.message
 
+
+# ================================================================ marketing / DMs
+
+
+async def _loja(db: AsyncSession, make_user, nome: str) -> Integration:
+    dono = await make_user(role=UserRole.ADMIN)
+    i = Integration(
+        user_id=dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name=nome,
+        credentials=encrypt_json({"access_token": "x"}),
+    )
+    db.add(i)
+    await db.commit()
+    await db.refresh(i)
+    return i
+
+
+async def test_credito_baixo_vai_ao_sino_uma_vez_por_dia_com_a_loja(db: AsyncSession, make_user):
+    from app.services.marketing import alerts as mkt
+
+    loja = await _loja(db, make_user, "m20 loja credito")
+    mkt._dedup.clear()
+    await mkt.notify_low_credit(loja, credit=12.5)
+    mkt._dedup.clear()  # a trava em memória passou: a dedupe do dia segura
+    await mkt.notify_low_credit(loja, credit=10.0)
+    await mkt.notify_low_credit(loja, credit=80.0)  # acima do limite: nada
+    (a,) = await _alertas(db, "Shopee Ads: crédito baixo em m20 loja credito")
+    assert a.escopo == ESCOPO_ADM and a.user_id is None
+    assert a.integration_id == loja.id and a.plataforma == "shopee"
+    assert a.conta == "m20 loja credito" and "R$ 12.50" in a.message
+
+
+async def test_tres_falhas_seguidas_vao_ao_sino_com_o_commit_do_sync(db: AsyncSession, make_user):
+    from app.services.marketing import alerts as mkt
+
+    loja = await _loja(db, make_user, "m20 loja falhas")
+    mkt._dedup.clear()
+    for _ in range(4):
+        await mkt.record_sync_failure(db, loja, code="erro_x", message="<b>falhou</b>")
+    await db.commit()
+    (a,) = await _alertas(db, "Shopee Ads: 3 falhas seguidas em m20 loja falhas")
+    assert a.severity == AlertSeverity.ERROR and a.escopo == ESCOPO_ADM
+    assert "erro_x" in a.message
+
+
+async def test_dm_que_caiu_pra_humano_vai_ao_sino(db: AsyncSession):
+    from app.models import DmConversa
+    from app.services import dm_alerta
+
+    chaves = [k async for k in redis.scan_iter("dm:alerta:*")]
+    if chaves:
+        await redis.delete(*chaves)
+    conversa = DmConversa(id=uuid4(), conta="m20_conta_dm", participante_id="1")
+    await dm_alerta.avisar(
+        conversa, chave="pediu_humano", motivo="pediu atendente", texto="meu cpf 123.456.789-00"
+    )
+    (a,) = await _alertas(db, "DM: Pediu atendente · @m20_conta_dm")
+    assert a.escopo == ESCOPO_ADM and a.user_id is None
+    assert "123.456.789-00" not in a.message and "[CPF]" in a.message
