@@ -495,6 +495,7 @@ class LocalERP:
             "catalog.follow.status",
             "catalog.follow.name",
             "catalog.follow.cost",
+            "catalog.follow.rename",
         }:
             from app.erp_local import catalog_follow
 

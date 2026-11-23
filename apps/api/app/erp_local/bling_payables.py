@@ -14,6 +14,7 @@ import json
 import sqlite3
 import time
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from app.erp_local import compat_shadow
 
@@ -123,6 +124,11 @@ def run(erp, reader=None, *, now=None, max_details=MAX_DETAILS):
             "SELECT data FROM bling_payables_runs WHERE json_extract(data,'$.state')='read_ok' "
             "ORDER BY taken_at DESC LIMIT 1"
         ).fetchone()
+        imported = db.execute(
+            "SELECT 1 FROM bling_payables_runs WHERE json_extract(data,'$.state')='imported'"
+        ).fetchone()
+    if imported:
+        return {"taken_at": taken_at, "state": "imported"}  # the bills are the ERP's now
     if last:
         previous = json.loads(last[0])
         age = moment - datetime.fromisoformat(previous["taken_at"])
@@ -281,3 +287,163 @@ def snapshot(db, *, today=None):
         "rows": out,
         "totals": totals,
     }
+
+
+# ---------------------------------------------------------------------------------------------
+# At the switch: Bling's open bills become the ERP's own (Novos procedimentos 13 leaves the moment
+# for later). Bling refuses its payment records (borderôs) and category names to DaVinci's app
+# (403, 23/11), so a partly paid bill comes at its full value with one payment for what Bling
+# already paid, marked as before the switch (kept out of the ERP's management balance), and a
+# category shows by its Bling id until someone renames it. A DI instalment under "importado" is a
+# stock bill of its lot, as the Importação files it.
+
+
+def _day(value):
+    text = str(value or "").strip()[:10]
+    return text if len(text) == 10 and not text.startswith("0000") else ""
+
+
+def _plan_rows(db):
+    from app.erp_local import bling_compat, finance
+
+    stock_ids = bling_compat._stock_categories()
+    names = dict(db.execute("SELECT id,name FROM bling_payable_contacts").fetchall())
+    plan, waiting = [], []
+    for identifier, listed, detail in db.execute(
+        "SELECT id,listed,detail FROM bling_payables ORDER BY id"
+    ):
+        if detail is None:
+            waiting.append(identifier)
+            continue
+        row = {**json.loads(listed), **json.loads(detail)}
+        value = Decimal(str(row.get("valor") or 0)).quantize(Decimal("0.01"))
+        left = Decimal(str(row.get("saldo", row.get("valor")) or 0)).quantize(Decimal("0.01"))
+        due = _day(row.get("vencimento"))
+        issued = _day(row.get("dataEmissao")) or _day(row.get("competencia")) or due
+        contact = str((row.get("contato") or {}).get("id") or "")
+        category = str((row.get("categoria") or {}).get("id") or "")
+        stock = category in stock_ids
+        document = str(row.get("numeroDocumento") or "").strip()
+        payload = {
+            "kind": "payable",
+            "reference": f"BLING-CP-{identifier}",
+            "party": names.get(contact)
+            or (f"Contato Bling {contact}" if contact else "Sem fornecedor no Bling"),
+            "amount": str(value),
+            "issued_on": issued,
+            "competence_on": _day(row.get("competencia")) or issued,
+            "due_date": due,
+            "history": str(row.get("historico") or "")[:2000],
+            "document_number": document[:120],
+            "category": finance.STOCK_CATEGORY
+            if stock
+            else (f"Bling {category}" if category not in {"", "0"} else "Sem categoria"),
+        }
+        if stock:
+            lot = document.rsplit("/", 1)[0].strip() if "/" in document else document
+            payload["lot_number"] = lot or f"Bling {identifier}"
+        paid = value - left if Decimal(0) < left < value else Decimal(0)
+        plan.append({"id": identifier, "payload": payload, "paid": paid, "left": left})
+    return plan, waiting
+
+
+def import_preview(db):
+    """What the switch would bring in, without writing anything."""
+    try:
+        plan, waiting = _plan_rows(db)
+        done = db.execute(
+            "SELECT data FROM bling_payables_runs WHERE json_extract(data,'$.state')='imported'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {"bills": 0, "waiting": 0, "imported": None}
+    by_category = {}
+    for item in plan:
+        name = item["payload"]["category"]
+        by_category[name] = by_category.get(name, 0) + 1
+    return {
+        "bills": len(plan),
+        "waiting": len(waiting),
+        "amount": float(sum(Decimal(i["payload"]["amount"]) for i in plan)),
+        "paid_before": float(sum(i["paid"] for i in plan)),
+        "to_pay": float(sum(i["left"] for i in plan)),
+        "stock_lots": len(
+            {i["payload"]["lot_number"] for i in plan if "lot_number" in i["payload"]}
+        ),
+        "unknown_supplier": sum(
+            1 for i in plan if i["payload"]["party"].startswith(("Contato Bling", "Sem fornecedor"))
+        ),
+        "categories": dict(sorted(by_category.items(), key=lambda kv: -kv[1])[:12]),
+        "imported": json.loads(done[0]) if done else None,
+    }
+
+
+def import_all(erp, *, now=None):
+    """The switch: every copied bill becomes an ERP payable, once. Refused while details are
+    still being read, so nothing comes half."""
+    from app.erp_local.core import ERPError
+
+    with erp.connection() as db:
+        db.executescript(SCHEMA)
+        plan, waiting = _plan_rows(db)
+    if waiting:
+        raise ERPError(
+            "bling_payables_reading",
+            f"Ainda lendo o detalhe de {len(waiting)} contas do Bling. "
+            "Tente depois da próxima rodada.",
+            409,
+        )
+    created = paid = 0
+    for item in plan:
+        result = erp.command(
+            f"bling-cp-{item['id']}",
+            "finance.entry.create",
+            item["payload"],
+            actor="importação do Bling",
+        )
+        fresh = not (result.get("duplicate") or result.get("replayed"))
+        created += 1 if fresh else 0
+        if item["paid"] and fresh:
+            with erp.connection() as db:
+                document = (
+                    result.get("ids", [None])[0]
+                    or db.execute(
+                        "SELECT id FROM documents WHERE external_key=?",
+                        (
+                            json.dumps(["manual_finance", "payable", item["payload"]["reference"]])
+                            + ":1",
+                        ),
+                    ).fetchone()[0]
+                )
+                installment = db.execute(
+                    "SELECT i.id FROM accounts a JOIN finance_installments i ON i.account_id=a.id "
+                    "WHERE a.document_id=? AND i.active=1 ORDER BY i.due_date LIMIT 1",
+                    (document,),
+                ).fetchone()[0]
+            erp.command(
+                f"bling-cp-pago-{item['id']}",
+                "finance.pay",
+                {
+                    "installment_id": installment,
+                    "amount": str(item["paid"]),
+                    "external_id": f"BLING-PAGO-{item['id']}",
+                    "date": item["payload"]["competence_on"] or item["payload"]["due_date"],
+                    "before_switch": True,
+                },
+                actor="importação do Bling",
+            )
+            paid += 1
+    report = {
+        "taken_at": (now or datetime.now(UTC)).isoformat(),
+        "state": "imported",
+        "bills": len(plan),
+        "created": created,
+        "payments_before_switch": paid,
+    }
+    with erp.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT OR REPLACE INTO bling_payables_runs VALUES (?,?)",
+            (report["taken_at"], json.dumps(report)),
+        )
+        db.commit()
+    return report

@@ -324,6 +324,10 @@ def main():
                 from app.erp_local import catalog_follow
 
                 log.info(
+                    "códigos trocados no Bling %s",
+                    catalog_follow.follow_renames(erp, store.all_rows("products")),
+                )
+                log.info(
                     "cadastro %s",
                     catalog_follow.follow(
                         erp, store.all_rows("products"), store.all_rows("components")

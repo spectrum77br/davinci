@@ -186,7 +186,10 @@ function blingPayablesPanel(main=false){
   const body=c.rows.map(r=>`<tr data-payable-row data-search="${esc((r.supplier+' '+r.history+' '+r.document).toLowerCase())}" data-overdue="${r.overdue?1:0}" data-due="${esc(r.due_date)}" data-amount="${esc(r.amount)}" data-balance="${r.balance===null?'':esc(r.balance)}"${r.overdue?' class="late"':''}><td>${esc(day(r.due_date))}</td><td>${esc(r.supplier)}</td><td>${esc(r.history)}</td><td>${esc(r.document)}</td><td class="num">${brl(r.amount)}</td><td class="num">${r.balance===null?'lendo…':brl(r.balance)}</td><td>${esc(r.situation)}${r.payments?` · ${r.payments} pagamento${r.payments>1?'s':''}`:''}${r.repeats?' · repete':''}${r.overdue?' · vencida':''}</td><td>${esc(r.category_id||'—')}</td></tr>`).join('');
   const missing=c.rows.filter(r=>!r.detailed).length;
   const text=`Cópia só de leitura das contas em aberto e pagas em parte no Bling, lida às ${esc(when)}: ${c.totals.count} contas de todos os vencimentos (as que se repetem já estão lançadas até 2037), ${c.totals.overdue} vencidas.${missing?` Ainda lendo o detalhe de ${missing}: fornecedor e histórico aparecem aos poucos, e o que falta pagar das pagas em parte aparece como "lendo…".`:''} Pague e altere no Bling até a troca. A categoria aparece pelo código: o Bling não libera os nomes para o app do DaVinci.`;
-  const list=table(['Vencimento','Fornecedor','Histórico','Documento','Valor','A pagar','Situação','Categoria'],body);
+  const plan=c.import||{},imported=plan.imported;
+  const switchLine=imported?`<p class="source-line">Importadas para o ERP em ${esc(new Date(imported.taken_at).toLocaleString('pt-BR'))}: ${esc(imported.bills)} contas. A partir daí as contas são pagas aqui.</p>`:plan.bills?`<p class="source-line">Na troca: ${esc(plan.bills)} contas viram do ERP (${brl(plan.amount)} no total, ${brl(plan.paid_before)} já pagos no Bling, ${brl(plan.to_pay)} a pagar)${plan.waiting?`; ainda lendo ${esc(plan.waiting)}`:''}. O que já foi pago no Bling entra como um pagamento antes da troca, fora do balanço gerencial.</p>`:'';
+  const importButton=!window.erpConsulta?.active&&!imported&&plan.bills&&!plan.waiting?'<div class="form-footer"><button type="button" id="bling-payables-import">Importar as contas do Bling para o ERP</button></div>':'';
+  const list=switchLine+importButton+table(['Vencimento','Fornecedor','Histórico','Documento','Valor','A pagar','Situação','Categoria'],body);
   if(!main)return panel(title+' (consulta)',text,`<details><summary>Ver as ${c.rows.length} contas</summary>${list}</details>`);
   if(payablesFrom===null)[payablesFrom,payablesTo]=payablesQuarter();
   const filters=`<div class="forms payables-filters"><label>Buscar<input id="payables-query" value="${esc(payablesQuery)}" placeholder="Fornecedor, histórico ou documento"></label><label>Vencimento de<input id="payables-from" type="date" value="${esc(payablesFrom)}"></label><label>até<input id="payables-to" type="date" value="${esc(payablesTo)}"></label><label>Situação<select id="payables-due">${[['','todas'],['1','vencidas'],['0','a vencer']].map(([v,l])=>`<option value="${v}" ${payablesDue===v?'selected':''}>${l}</option>`).join('')}</select></label></div>`;
@@ -354,4 +357,14 @@ document.addEventListener('submit',async e=>{
       await refresh();message('XML importado na base própria. O DANFE usa o gerador compartilhado do Comunicador.');
     }catch(error){message(error.message,true);}finally{busy=false;}
   }
+});
+
+document.addEventListener('click',async e=>{
+  if(!e.target.closest('#bling-payables-import'))return;
+  if(!confirm('Importar todas as contas a pagar do Bling para o ERP? Faça isso uma vez, na troca.'))return;
+  const r=await fetch('/api/erp-local/bling-payables/import',{method:'POST',headers:{'X-ERP-Local':'1'}});
+  const body=await r.json().catch(()=>({}));
+  if(!r.ok)return message(body.message||'Não importei as contas.',true);
+  message(`Contas do Bling importadas: ${body.bills} (${body.payments_before_switch} com pagamento antes da troca).`);
+  blingPayablesCopy=null;await refresh();
 });

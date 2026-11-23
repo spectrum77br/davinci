@@ -24,6 +24,7 @@ COMMANDS = {
     "catalog.follow.status",
     "catalog.follow.name",
     "catalog.follow.cost",
+    "catalog.follow.rename",
 }
 # Bling's situation letter → the ERP's product status. Excluded is inactive here: reversible,
 # and the history and balances stay.
@@ -149,7 +150,132 @@ def apply(erp, db, key, kind, p):
         return _name(erp, db, p)
     if kind == "catalog.follow.cost":
         return _cost(erp, db, p)
+    if kind == "catalog.follow.rename":
+        return _rename(db, p)
     return _add(erp, db, p)
+
+
+# Tables where a row is a copy of Bling or of a store read, keyed by the code: a row already there
+# under the new code wins and the old one goes (the next mirror round fills it anyway).
+COPIED_BY_CODE = {"bling_mirror_stock"}
+
+
+def _swap_code(value, old, new):
+    """The same JSON with every product code `old` (as "sku" or "cause_sku") turned into `new`."""
+    if isinstance(value, list):
+        return [_swap_code(v, old, new) for v in value]
+    if isinstance(value, dict):
+        return {
+            k: (new if k in {"sku", "cause_sku"} and v == old else _swap_code(v, old, new))
+            for k, v in value.items()
+        }
+    return value
+
+
+def _rename(db, p):
+    """Bling changed a product's code (same product, same id): the ERP follows, as Bling does,
+    with its balances, history, kits that use it, details and links under the new code. Orders
+    keep the code they were sold with. Until now this was only reported (b028.24 → z002800.mala,
+    12/11/2026)."""
+    from app.erp_local import bling_mirror
+
+    if set(p) != {"from", "to", "bling_product_id"}:
+        raise ERPError("catalog_follow", "Troca de código não reconhecida.")
+    if bling_mirror.switched(db):
+        raise ERPError(
+            "catalog_follow_stopped", "Há loja trocada para o ERP; o cadastro é do ERP.", 409
+        )
+    old, new = text(p["from"], "código antigo"), text(p["to"], "código novo")
+    origin = db.execute("SELECT data FROM catalog_origin WHERE sku=?", (old,)).fetchone()
+    if not origin or str(json.loads(origin[0]).get("bling_product_id")) != str(
+        p["bling_product_id"]
+    ):
+        raise ERPError(
+            "catalog_follow_rename", "O código antigo não é deste produto do Bling.", 409
+        )
+    if db.execute("SELECT 1 FROM products WHERE sku=?", (new,)).fetchone():
+        raise ERPError("catalog_follow_rename", "O código novo já existe no ERP.", 409)
+    db.execute("PRAGMA defer_foreign_keys=ON")
+    tables = [
+        name
+        for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        if any(c[1] == "sku" for c in db.execute(f"PRAGMA table_info({name})"))  # noqa: S608
+    ]
+    moved = {}
+    for table in sorted(tables, key=lambda t: t != "products"):
+        if table in COPIED_BY_CODE:
+            db.execute(f"DELETE FROM {table} WHERE sku=?", (old,))  # noqa: S608
+            continue
+        # Table names come from sqlite_master, never from input.
+        update = f"UPDATE OR IGNORE {table} SET sku=? WHERE sku=?"  # noqa: S608
+        changed = db.execute(update, (new, old)).rowcount
+        left = db.execute(f"DELETE FROM {table} WHERE sku=?", (old,)).rowcount  # noqa: S608
+        if changed or left:
+            moved[table] = changed
+    # Kits that use it, now and in their structure.
+    kits = 0
+    for sku, components in db.execute(
+        "SELECT sku,components FROM products WHERE kind='kit'"
+    ).fetchall():
+        parts = json.loads(components or "[]")
+        if any(part.get("sku") == old for part in parts):
+            db.execute(
+                "UPDATE products SET components=? WHERE sku=?",
+                (dumps(_swap_code(parts, old, new)), sku),
+            )
+            kits += 1
+    for sku, data in db.execute("SELECT sku,data FROM product_structures").fetchall():
+        loaded = json.loads(data)
+        swapped = _swap_code(loaded, old, new)
+        if swapped != loaded:
+            db.execute("UPDATE product_structures SET data=? WHERE sku=?", (dumps(swapped), sku))
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='compat_ids'").fetchone():
+        # Supplier links are numbered by "code:contact"; the product's own number is Bling's id.
+        db.execute(
+            "UPDATE compat_ids SET local_id=?||substr(local_id,?) "
+            "WHERE kind='supplier_link' AND local_id LIKE ?",
+            (new, len(old) + 1, old + ":%"),
+        )
+    return {"from": old, "to": new, "tables": moved, "kits": kits, "external_writes": False}
+
+
+def follow_renames(erp, products):
+    """A code changed in Bling for a product already here is followed, as long as the new code is
+    not taken here. One that cannot be followed stays reported (`renamed` in `follow`)."""
+    from app.erp_local import bling_mirror
+
+    report = {"renamed": {}, "refused": {}}
+    with erp.connection() as db:
+        if bling_mirror.switched(db):
+            return {"state": "stopped"}
+        origin = {}
+        for row in db.execute("SELECT sku,data FROM catalog_origin"):
+            source = json.loads(row["data"]).get("bling_product_id")
+            if source:
+                origin[str(source)] = row["sku"]
+    by_id = {}
+    for p in products:
+        bid = str(p.get("bling_product_id") or "")
+        if not bid or bid not in origin or not str(p.get("sku") or "").strip():
+            continue
+        rank = (str(p.get("situacao") or "").upper() == "A", str(p.get("updated_at") or ""))
+        if bid not in by_id or rank > by_id[bid][0]:
+            by_id[bid] = (rank, p)
+    for bid, (_, p) in sorted(by_id.items()):
+        here, there = origin[bid], p["sku"].strip()
+        if here.lower() == there.lower():
+            continue
+        try:
+            erp.command(
+                f"catalog-follow-v1:rename:{bid}:{there}",
+                "catalog.follow.rename",
+                {"from": here, "to": there, "bling_product_id": bid},
+                actor="cadastro do Bling",
+            )
+            report["renamed"][here] = there
+        except ERPError as error:
+            report["refused"][here] = error.message[:80]
+    return report
 
 
 def follow_status(erp, products):

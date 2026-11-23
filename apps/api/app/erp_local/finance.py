@@ -174,9 +174,13 @@ def management(db):
                 "SELECT principal,data FROM finance_payments WHERE installment_id=? AND reversed=0",
                 (installment[0],),
             ):
-                when = str(json.loads(payment[1]).get("date") or "")[:7]
-                add(when, category, centers, "paid", Decimal(payment[0]))
+                data_ = json.loads(payment[1])
                 settled += Decimal(payment[0])
+                if data_.get("before_switch"):
+                    continue  # paid in Bling's time: its books, not this balance
+                add(
+                    str(data_.get("date") or "")[:7], category, centers, "paid", Decimal(payment[0])
+                )
             left = Decimal(installment[2]) - settled
             if left > 0:
                 add(str(installment[1])[:7], category, centers, "forecast", left)
@@ -492,6 +496,8 @@ def post_payment(erp, db, key, p):
         "installment_id": installment["id"],
         "bank_id": bank,
     }
+    if p.get("before_switch") is True:
+        data["before_switch"] = True
     external_key = dumps([bank, text(p.get("external_id"), "comprovante")])
     from app.erp_local.pos import receipt_guard
 
@@ -545,6 +551,8 @@ def apply(erp, db, key, kind, p):
             "bank_id",
             "external_id",
             "date",
+            # Paid in Bling before the switch (imported): kept out of the management balance.
+            "before_switch",
         },
         "finance.reverse": {"id"},
         "finance.reconcile": {"id", "statement_line", "amount"},

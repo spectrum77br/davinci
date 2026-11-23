@@ -210,3 +210,63 @@ def test_kit_composition_follows_bling_while_bling_owns_the_catalog(erp):
     unknown = {**first, "component_bling_product_id": "999"}
     report = catalog_follow.follow_structures(erp, rows, [first, unknown])
     assert report["changed"] == 0 and report["waiting"] == {kit["sku"]: "peça fora do catálogo"}
+
+
+def test_a_code_changed_in_bling_is_followed_with_stock_history_kits_and_number(erp):
+    from app.erp_local import bling_compat
+
+    with erp.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO catalog_origin VALUES (?,?)",
+            (
+                "demo.aparelho",
+                json.dumps(
+                    {"bling_product_id": "77", "stock_state": "known", "catalog_state": "ready"}
+                ),
+            ),
+        )
+        kits = [
+            r[0]
+            for r in db.execute("SELECT sku,components FROM products WHERE kind='kit'")
+            if "demo.aparelho" in r[1]
+        ]
+        before = {
+            r[0]: (r[1], r[2])
+            for r in db.execute(
+                "SELECT depot,physical,reserved FROM balances WHERE sku='demo.aparelho'"
+            )
+        }
+        history = db.execute("SELECT count(*) FROM movements WHERE sku='demo.aparelho'").fetchone()[
+            0
+        ]
+        number = bling_compat.numeric_id(db, "product", "demo.aparelho")
+    rows = [{"bling_product_id": "77", "sku": "demo.renomeado", "situacao": "A"}]
+    assert catalog_follow.follow_renames(erp, rows) == {
+        "renamed": {"demo.aparelho": "demo.renomeado"},
+        "refused": {},
+    }
+    with erp.connection() as db:
+        assert not db.execute("SELECT 1 FROM products WHERE sku='demo.aparelho'").fetchone()
+        after = {
+            r[0]: (r[1], r[2])
+            for r in db.execute(
+                "SELECT depot,physical,reserved FROM balances WHERE sku='demo.renomeado'"
+            )
+        }
+        assert after == before
+        assert (
+            db.execute("SELECT count(*) FROM movements WHERE sku='demo.renomeado'").fetchone()[0]
+            == history
+        )
+        for kit in kits:
+            parts = json.loads(
+                db.execute("SELECT components FROM products WHERE sku=?", (kit,)).fetchone()[0]
+            )
+            assert "demo.renomeado" in [p["sku"] for p in parts]
+        assert bling_compat.numeric_id(db, "product", "demo.renomeado") == number
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    # Done once; a code already taken here is refused and stays reported.
+    assert catalog_follow.follow_renames(erp, rows) == {"renamed": {}, "refused": {}}
+    taken = [{"bling_product_id": "77", "sku": "demo.kit", "situacao": "A"}]
+    report = catalog_follow.follow_renames(erp, taken)
+    assert report["renamed"] == {} and "demo.renomeado" in report["refused"]

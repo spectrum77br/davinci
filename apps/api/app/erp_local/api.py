@@ -954,7 +954,14 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         from app.erp_local import bling_payables
 
         with erp.connection() as db:
-            return bling_payables.snapshot(db)
+            return {**bling_payables.snapshot(db), "import": bling_payables.import_preview(db)}
+
+    @app.post("/api/erp-local/bling-payables/import")
+    def bling_payables_import():
+        """At the switch, once: Bling's open bills become the ERP's. Refused in consulta."""
+        from app.erp_local import bling_payables
+
+        return bling_payables.import_all(erp)
 
     @app.post("/api/erp-local/commands")
     def command(body: Command, request: Request):

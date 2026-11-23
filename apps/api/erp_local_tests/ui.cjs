@@ -1637,3 +1637,23 @@ test('an integration card shows the week of sales the ERP read against Bling',as
   assert.match(card.textContent,/Vínculo identificado/);
   dom.window.close();
 });
+
+test('outside consulta the Financeiro offers the one-time import of the Bling bills',async()=>{
+  const {dom,document:d}=await setup({});
+  const fetcher=dom.window.fetch,posted=[];
+  const row={id:'1',supplier:'Fornecedor A',history:'Conta 1',document:'D1',due_date:'2026-12-01',competence:'',amount:100,balance:100,situation:'Em aberto',category_id:null,payments:0,repeats:false,overdue:false,detailed:true};
+  const copy={taken_at:'2026-11-23T12:00:00+00:00',totals:{count:1,amount:100,balance:100,balance_unknown:0,overdue:0},rows:[row],import:{bills:1,waiting:0,amount:100,paid_before:0,to_pay:100,stock_lots:0,unknown_supplier:0,categories:{},imported:null}};
+  dom.window.confirm=()=>true;
+  dom.window.fetch=async(url,options)=>{
+    if(url==='/api/erp-local/bling-payables/import'){posted.push(options?.method);return {ok:true,status:200,json:async()=>({bills:1,created:1,payments_before_switch:0})};}
+    if(url==='/api/erp-local/bling-payables')return {ok:true,status:200,json:async()=>copy};
+    return fetcher(url,options);
+  };
+  d.querySelector('nav [data-page=accounts]').click();
+  for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
+  assert.match(d.querySelector('main').textContent,/Na troca: 1 contas viram do ERP/);
+  d.querySelector('#bling-payables-import').click();
+  for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
+  assert.deepEqual(posted,['POST']);
+  dom.window.close();
+});
