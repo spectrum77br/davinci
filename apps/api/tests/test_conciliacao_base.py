@@ -5166,3 +5166,79 @@ async def test_conferido_tira_do_onde_agir_ate_mudar_algo(db, make_user, auth_as
     )
     p = r.json()["pedido"]
     assert p["conferido"] is False and p["conferido_ate"] is None and p["conferido_motivo"] is None
+
+
+async def test_produto_de_volta_ao_estoque_zera_o_custo_em_qualquer_situacao(db, make_user):
+    """23/11 (Vinicius: "daí o custo sai dobrado, não vai? vendeu de novo…" → "Sim, faz
+    isso"): o produto que voltou novo ao estoque vai ser vendido de novo e o custo dele
+    entra na venda nova — então sai deste pedido em qualquer situação do dinheiro
+    (estornado depois do dinheiro entrar) e também no pedido já finalizado com custo
+    (poofy (amazon) 306219 e Mini (tiktok) 305871). "Trocado" que entrou Novo conta;
+    Trocado que entrou Usado, e Usado, ficam com a pessoa."""
+    loja, _ = await _loja(db, make_user)
+    d = lambda dia: datetime(2026, 10, dia, 12, tzinfo=UTC)  # noqa: E731
+
+    def pedido(numero: str, venda: str, custo: float) -> None:
+        linha = _pedido_bling(numero, venda, d(6), "216.00", custo)
+        linha.bling_id = int(numero) * 10
+        linha.item_codigo = "b009.18"
+        db.add(linha)
+        db.add(_fin(loja.integration_id, venda, gross="216", fee="0", freight="0", net="216"))
+        liberou = _mov(loja, "venda_liberada", d(10), credito="216.00", pedido_mkt=venda)
+        liberou.created_at = d(10)
+        estorno = _mov(loja, "mediacao", d(11), debito="242.92", pedido_mkt=venda)
+        estorno.created_at = d(11)
+        db.add_all([liberou, estorno])
+
+    pedido("306219", "2000030621900001", 100.0)  # estornado depois, mala voltou Nova
+    db.add(_devolucao("306219", "2000030621900001", "b009.18"))
+    pedido("305871", "2000030587100001", 100.0)  # vai ser finalizado antes de voltar
+    pedido("306301", "2000030630100001", 100.0)  # Trocado que entrou Novo
+    db.add(
+        _devolucao(
+            "306301",
+            "2000030630100001",
+            "b009.18",
+            condicao_produto="Trocado",
+            troca_sku="b020.24",
+            troca_condicao="Novo",
+        )
+    )
+    pedido("306302", "2000030630200001", 100.0)  # Trocado que entrou Usado
+    db.add(
+        _devolucao(
+            "306302",
+            "2000030630200001",
+            "b009.18",
+            condicao_produto="Trocado",
+            troca_sku="b020.24",
+            troca_condicao="Usado",
+        )
+    )
+    pedido("306303", "2000030630300001", 100.0)  # voltou Usado
+    db.add(_devolucao("306303", "2000030630300001", "b009.18", condicao_produto="Usado"))
+    await db.commit()
+
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 12, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "306219")
+    assert p.situacao == "estornado_depois"
+    assert p.custo == Decimal("0") and p.custo_regra == "devolvido"
+    assert p.sobrou == Decimal("-26.92")
+    assert "o produto voltou novo ao estoque (Devoluções): custo zero" in p.motivo
+    assert (await _conciliado(db, "306301")).custo_regra == "devolvido"
+    for numero in ("306302", "306303", "305871"):
+        outro = await _conciliado(db, numero)
+        assert outro.custo_regra == "cheio" and outro.custo == Decimal("100.00"), numero
+
+    # 305871: alguém finalizou com o custo; depois o produto voltou novo ao estoque
+    fin = await _conciliado(db, "305871")
+    fin.etapa, fin.etapa_em, fin.etapa_motivo = "finalizado", d(12), "custo mantido"
+    db.add(_devolucao("305871", "2000030587100001", "b009.18"))
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 13, 12, tzinfo=UTC))
+    await db.commit()
+    fin = await _conciliado(db, "305871")
+    assert fin.custo == Decimal("0") and fin.custo_regra == "devolvido"
+    assert fin.etapa == "finalizado"  # continua finalizado; o motivo diz por que zerou
+    assert "custo zero" in fin.motivo

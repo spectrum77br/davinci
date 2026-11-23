@@ -835,7 +835,10 @@ def regra_do_custo(
     Resolvido inclusive ("no resolvido acontece de tudo"), Perdimento, Extraviado,
     Aguardando Devolução — conta o custo cheio. 10/11 (Vinicius, "Sim, faz"): venda
     devolvida cujo produto voltou todo, novo, ao estoque pelo painel Devoluções também
-    zera (`voltou_ao_estoque`, ver `voltou_tudo_ao_estoque`)."""
+    zera (`voltou_ao_estoque`, ver `voltou_tudo_ao_estoque`). 23/11 (Vinicius: "daí o
+    custo sai dobrado, não vai?" → "Sim, faz isso"): vale em qualquer situação do
+    dinheiro e também no pedido já finalizado — o produto de volta vai ser vendido de
+    novo e o custo dele entra na venda nova."""
     if zerado_a_mao:
         return "manual"
     if situacao == "cancelado":
@@ -849,10 +852,16 @@ def regra_do_custo(
 
 def _de_volta_novo(d: Devolution) -> bool:
     """A linha de Devoluções pôs o produto de volta no estoque do Bling como novo: a
-    entrada confirmada (ok) e não estornada depois."""
+    entrada confirmada (ok) e não estornada depois. "Trocado" (voltou outro produto, o
+    `troca_sku`) conta quando entrou Novo (19/11, kfa 306795: "Sim, aplica"); Usado e
+    danificado ficam com a pessoa."""
+    condicao = (d.condicao_produto or "").strip().lower()
+    novo = condicao == "novo" or (
+        condicao == "trocado" and (d.troca_condicao or "").strip().lower() == "novo"
+    )
     return (
         bool(d.devolver_estoque)
-        and (d.condicao_produto or "").strip().lower() == "novo"
+        and novo
         and status_estoque(d) == ESTOQUE_OK
         and d.estoque_mov_revertido_at is None
     )
@@ -2072,15 +2081,16 @@ async def recalcular_loja(
                     calc["motivo"] = "sem o frete do Melhor Envio"
         atual = existentes.get(numero)
         devolvido = calc["recebido"] is not None and calc["recebido"] <= ZERO
-        # 10/11 (Vinicius, "Sim, faz"): bateu, recebeu zero ou menos e o produto voltou
-        # todo, novo, ao estoque → custo zero e segue como qualquer "bateu" (o robô
-        # finaliza depois dos dias sem novidade). Pedido finalizado com custo de outra
-        # regra não muda: a pessoa já decidiu.
-        voltou_ao_estoque = (
-            devolvido
-            and calc["situacao"] == "bateu"
-            and (atual is None or atual.etapa != "finalizado" or atual.custo_regra == "devolvido")
-            and voltou_tudo_ao_estoque(itens, devolucoes_por_numero.get(numero, []))
+        # 10/11 (Vinicius, "Sim, faz"): o produto voltou todo, novo, ao estoque pelo
+        # painel Devoluções → custo zero. A venda devolvida que bateu segue como qualquer
+        # "bateu" (o robô finaliza depois dos dias sem novidade). 23/11 ("daí o custo sai
+        # dobrado, não vai?" → "Sim, faz isso"): em QUALQUER situação do dinheiro
+        # (estornado depois, recebido a menos, em disputa…) e também no pedido já
+        # finalizado — senão o custo do produto entrava aqui e de novo na venda seguinte
+        # (Mini (tiktok) 305871 e poofy (amazon) 306219, finalizados antes de o produto
+        # chegar). O finalizado continua finalizado: o motivo diz por que o custo zerou.
+        voltou_ao_estoque = calc["situacao"] != "cancelado" and voltou_tudo_ao_estoque(
+            itens, devolucoes_por_numero.get(numero, [])
         )
         if voltou_ao_estoque:
             aviso_estoque = "o produto voltou novo ao estoque (Devoluções): custo zero"
