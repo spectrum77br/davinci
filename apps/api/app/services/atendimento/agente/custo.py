@@ -345,15 +345,6 @@ async def avisar_adm(texto: str, *, titulo: str = TITULO_AVISO) -> bool:
     return await _avisar_sino(texto, titulo=titulo)
 
 
-
-async def avisar_telegram(texto: str) -> bool:
-    """Nome antigo de `avisar_adm` (M-20: vai ao sino, não ao Telegram).
-
-    Fica só até o `scripts/agente_reversao.py` passar a chamar `avisar_adm`.
-    """
-    return await avisar_adm(texto)
-
-
 CHAVE_AVISO_DO_DIA = "atd:agente:aviso:{schema}:{tipo}:{dia}"
 
 

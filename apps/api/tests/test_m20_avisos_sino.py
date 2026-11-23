@@ -9,7 +9,8 @@ no sino (M-19) — todo administrador vê em /alertas com Equipe = ADM, quem nã
   sessão própria ou o savepoint de quem chamou, e nunca levanta;
 - o agente de atendimento (teto de custo, pausa, verificador) e os envios
   sensíveis gravam no sino de verdade;
-- marketing (crédito, falhas seguidas) com a loja e a dedupe do dia; DMs.
+- marketing (crédito, falhas seguidas) com a loja e a dedupe do dia; DMs;
+- o script da reversão do agente (`scripts/agente_reversao.py`).
 """
 
 from __future__ import annotations
@@ -219,3 +220,37 @@ async def test_dm_que_caiu_pra_humano_vai_ao_sino(db: AsyncSession):
     (a,) = await _alertas(db, "DM: Pediu atendente · @m20_conta_dm")
     assert a.escopo == ESCOPO_ADM and a.user_id is None
     assert "123.456.789-00" not in a.message and "[CPF]" in a.message
+
+
+# ================================================================ o script da reversão
+
+
+async def test_script_da_reversao_avisa_no_sino(db: AsyncSession, monkeypatch):
+    """`scripts/agente_reversao.py` (a rotina do Mac): o assunto que saiu do
+    automático vira alerta ADM no sino (antes `custo.avisar_telegram`)."""
+    from app.services.atendimento.agente import reversao
+    from scripts import agente_reversao
+
+    feita = {
+        "canal": "c1",
+        "assunto": "cancelamento",
+        "motivo": "erro_critico",
+        "enviaria": 3,
+        "notas": 10,
+        "criticos": 1,
+    }
+
+    async def _reverter(session, decididas, *, gravar=True):
+        return [feita]
+
+    monkeypatch.setattr(reversao, "decidir", lambda *a, **k: [])
+    monkeypatch.setattr(reversao, "reverter", _reverter)
+    resumo = await agente_reversao.rodar([], gravar=True, dias=7)
+    assert resumo["canais"] == [feita]
+    (a,) = await _alertas(db, reversao.TITULO_ALERTA)
+    assert a.escopo == ESCOPO_ADM and a.user_id is None
+    assert "cancelamento: erro_critico" in a.message
+
+    # O dry-run não avisa.
+    await agente_reversao.rodar([], gravar=False, dias=7)
+    assert len(await _alertas(db, reversao.TITULO_ALERTA)) == 1

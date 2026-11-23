@@ -3,8 +3,9 @@
 A rotina do Mac mini, depois de dar a nota ao dia (`agente_auditoria_export`
 → a sessão do Claude → notas.jsonl), manda os dois para cá: o assunto com 1
 erro crítico, ou com a nota "enviaria sem editar" abaixo de 90% em 7 dias
-(10+ notas), sai do `auto_orientacao`/`auto_agente` do canal e o Telegram
-avisa. Só tira — volta pelo clique do dono.
+(10+ notas), sai do `auto_orientacao`/`auto_agente` do canal e o sino dos
+administradores avisa (alerta ADM, M-20 de 23/11/2026; antes o Telegram). Só
+tira — volta pelo clique do dono.
 
 Entrada: JSONL (arquivos ou `-` = a entrada padrão), as linhas da auditoria
 (`"tipo": "envio_automatico"`) e as das notas (`id`, `enviaria_sem_editar`,
@@ -13,7 +14,7 @@ Entrada: JSONL (arquivos ou `-` = a entrada padrão), as linhas da auditoria
 Uso (do Mac, com o OK do Eduardo — GRAVA no canal):
     cat auditoria_*.jsonl notas_*.jsonl | ssh davinci-prod \\
         "docker exec -i davinci-api-1 uv run python -m scripts.agente_reversao - --dry-run"
-    (sem --dry-run: tira os assuntos e avisa no Telegram)
+    (sem --dry-run: tira os assuntos e avisa no sino dos administradores)
 
   --dry-run   só diz o que tiraria (nada gravado, sem aviso).
   --dias N    a janela da nota (padrão 7).
@@ -62,7 +63,8 @@ async def rodar(linhas: list[dict[str, Any]], *, gravar: bool, dias: int) -> dic
         if not gravar:
             await session.rollback()
     if gravar and (texto := reversao.texto_do_alerta(feitas)):
-        await custo.avisar_telegram(texto)
+        # M-20 (23/11/2026): o alerta ADM no sino (antes o Telegram).
+        await custo.avisar_adm(texto, titulo=reversao.TITULO_ALERTA)
     return {
         "gravar": gravar,
         "registros": len(registros),
