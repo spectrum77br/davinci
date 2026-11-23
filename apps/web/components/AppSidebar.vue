@@ -7,7 +7,7 @@ import {
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, Ship, Landmark, Headset,
   ReceiptText, MessagesSquare, Radar, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
-  GitPullRequest, Boxes,
+  GitPullRequest, Boxes, ShoppingCart,
 } from 'lucide-vue-next'
 import { allowedTabs, tabRoutes, TABS_CADASTROS, TABS_CONFIGURACOES, TABS_NF } from '~/lib/navGroups'
 
@@ -191,6 +191,10 @@ const sections = computed<Section[]>(() => [
       // que se divide em Celular · Mala · Eletro como a Tabela de Preços
       // (/anuncios redireciona para /produtos?aba=anuncios).
       { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos', match: ['/produtos', '/anuncios'] },
+      // 23/11/2026 (Marco): as tabelas de produtos e pedidos do DaVinci ERP aqui dentro, só para
+      // quem entra no ERP. O ERP continua com as telas dele por enquanto.
+      { to: '/erp-produtos', label: 'Produtos 2', icon: Package, adminOnly: true, erpOnly: true },
+      { to: '/erp-pedidos', label: 'Pedidos 2', icon: ShoppingCart, adminOnly: true, erpOnly: true },
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       // 13/11/2026: o Faturamento saiu do menu e virou o botão "Faturamento" da
       // Tabela de Preços (/pricing/faturamento; /faturamento redireciona). O

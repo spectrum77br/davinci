@@ -709,10 +709,70 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         limit: int = Query(50, ge=1, le=100),
         situation: int | None = None,
     ):
-        from app.erp_local import store_sales
+        from app.erp_local import bling_compat, store_sales
 
         with erp.connection() as db:
-            return store_sales.listing(db, q, offset, limit, situation)
+            reply = store_sales.listing(db, q, offset, limit, situation)
+            # Bling's names for the situation ids, for lists outside this screen (DaVinci).
+            reply["situations"] = bling_compat.situation_names(db)[0]
+            return reply
+
+    @app.get("/api/erp-local/products/list")
+    def products_list(
+        q: str = Query("", max_length=120),
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=100),
+        kind: str = Query("", max_length=10),
+    ):
+        """One page of products with their stock totals, for lists outside this screen
+        (DaVinci's "Produtos 2"). Only the page is built in full."""
+        from decimal import Decimal
+
+        text = q.strip().casefold()
+        with erp.connection() as db:
+            rows = db.execute("SELECT sku,name,kind FROM products ORDER BY sku").fetchall()
+        matched = [
+            r["sku"]
+            for r in rows
+            if (not kind or r["kind"] == kind)
+            and (not text or text in r["sku"].casefold() or text in (r["name"] or "").casefold())
+        ]
+        page = matched[offset : offset + limit]
+        products = erp.snapshot(skus=page)["products"] if page else []
+
+        def total(balances, key):
+            values = [b[key] for b in balances if b["in_total"]]
+            if not values or any(v is None for v in values):
+                return None
+            return str(sum((Decimal(v) for v in values), Decimal(0)))
+
+        items = []
+        for product in products:
+            details = product.get("details") or {}
+            images = (product.get("images") or {}).get("rows") or []
+            items.append(
+                {
+                    "sku": product["sku"],
+                    "name": product["name"],
+                    "kind": product["kind"],
+                    "status": details.get("status") or "active",
+                    "unit": details.get("unit") or "",
+                    "gtin": details.get("gtin") or "",
+                    "price": product.get("price"),
+                    "cost_price": product.get("cost_price"),
+                    "physical": total(product["balances"], "physical"),
+                    "reserved": None
+                    if product["kind"] == "kit"
+                    else total(product["balances"], "reserved"),
+                    "available": total(product["balances"], "available"),
+                    "components": [
+                        {"sku": c["sku"], "quantity": c["quantity"]}
+                        for c in product.get("components") or []
+                    ],
+                    "image": images[0].get("url") if images else None,
+                }
+            )
+        return {"items": items, "total": len(matched), "offset": offset}
 
     @app.post("/api/erp-local/store-sales/labels")
     def store_sales_labels(body: dict = Body(...)):
