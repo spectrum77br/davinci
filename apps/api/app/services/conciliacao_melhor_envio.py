@@ -50,10 +50,22 @@ def _quando(v: Any) -> datetime | None:
 
 
 def etiquetas(envio: dict[str, Any]) -> dict[str, str]:
+    """As etiquetas do envio como {nome: valor}. O ME devolve o par nos DOIS sentidos:
+    `{"tag": "mi:reference_code", "url": "306697"}` e, nos envios mais velhos,
+    `{"tag": "306372", "url": "mi:reference_code"}` (23/11, kia (amazon) 306372 e
+    305816 de 24–28/10 apareciam "sem o frete do Melhor Envio" com a etiqueta paga no
+    ME — 13 de 60 envios da conta vêm invertidos; o mesmo já valia nos chamados do ME,
+    `chamados_melhor_envio._tag`, desde 18/11)."""
     out: dict[str, str] = {}
     for t in envio.get("tags") or []:
-        if isinstance(t, dict) and t.get("tag"):
-            out[str(t["tag"])] = str(t.get("url") or "").strip()
+        if not isinstance(t, dict):
+            continue
+        tag = str(t.get("tag") or "").strip()
+        url = str(t.get("url") or "").strip()
+        if url.startswith("mi:") and tag and not tag.startswith("mi:"):
+            out[url] = tag  # invertido: o nome veio em "url"
+        elif tag:
+            out[tag] = url
     return out
 
 

@@ -597,6 +597,25 @@ def test_envio_para_frete_le_etiquetas_e_conferencia():
     assert credito["frete_pago"] == Decimal("48.90")
 
 
+def test_envio_para_frete_le_etiqueta_invertida():
+    """23/11 (kia (amazon) 306372 e 305816, 24–28/10): nos envios mais velhos o ME
+    devolve o par invertido — o número em "tag" e o nome em "url". Sem ler os dois
+    sentidos o pedido ficava "sem o frete do Melhor Envio" com a etiqueta paga."""
+    from app.services.conciliacao_melhor_envio import envio_para_frete
+
+    envio = _envio_me("e9", "306372", "702-7066808-2473062", price="69.33")
+    envio["tags"] = [
+        {"tag": "306372", "url": "mi:reference_code"},
+        {"tag": "https://www.bling.com.br/vendas.php#edit/27246652181", "url": "mi:reference_link"},
+        {"tag": "702-7066808-2473062", "url": "mi:marketplace_code"},
+        {"tag": "printed", "url": "2026-10-28T16:05:00+00:00"},
+    ]
+    f = envio_para_frete(envio)
+    assert f["pedido_bling"] == "306372"
+    assert f["pedido_marketplace"] == "702-7066808-2473062"
+    assert f["frete_pago"] == Decimal("69.33")
+
+
 async def test_frete_do_melhor_envio_entra_no_sobrou_e_sem_ele_falta_frete(
     db, make_user, auth_as, client
 ):
