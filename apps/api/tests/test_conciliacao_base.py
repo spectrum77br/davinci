@@ -5036,3 +5036,96 @@ async def test_recalculo_marca_reserva_na_conta_bloqueada(db, make_user):
         await db.refresh(m)
         assert calc.CHAVE_RESERVA_POR_BLOQUEIO not in m.raw
     assert venda_segurada.classificacao == "fatura_ml" and solta.classificacao == "fatura_ml"
+
+
+async def test_conferido_tira_do_onde_agir_ate_mudar_algo(db, make_user, auth_as, client):
+    """23/11 (Vinicius: "eu marco como conferido, não era pra sumir?"): conferido = "já vi,
+    estou esperando". O pedido sai do cartão amarelo (e da contagem) e vai pra lista
+    "esperando"; volta sozinho quando muda algo do que a pessoa viu (aqui: entra dinheiro)
+    ou quando chega a data. Data de volta no passado é recusada."""
+    from app.routers.conciliacao import _esperando
+
+    loja, _integ = await _loja(db, make_user)
+    sem_liberar = {
+        "situacao": "vencido",
+        "etapa": "pendencia",
+        "recebido": None,
+        "liberado_em": None,
+        "liberado_valor": None,
+        "bateu_em": None,
+        "sobrou": None,
+        "dif_previsto_recebido": None,
+    }
+    a = await _pedido_conciliado(loja, pedido_bling="306090", numeroloja="A1", **sem_liberar)
+    b = await _pedido_conciliado(loja, pedido_bling="306028", numeroloja="A2", **sem_liberar)
+    db.add_all([a, b])
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+
+    async def cartao_vencidos() -> str | None:
+        r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+        assert r.status_code == 200, r.text
+        titulos = [x["titulo"] for x in r.json()["agir"] if "sem liberação" in x["titulo"]]
+        return titulos[0] if titulos else None
+
+    assert await cartao_vencidos() == "jlas2 · 2 venda(s) sem liberação, prazo vencido"
+
+    r = await client.patch(
+        "/api/conciliacao/pedidos/306090",
+        json={"loja": "jlas2", "conferido": True, "conferido_motivo": " celular voltando "},
+    )
+    assert r.status_code == 200, r.text
+    p = r.json()["pedido"]
+    assert p["esperando"] is True and p["conferido_motivo"] == "celular voltando"
+    assert p["conferido_ate"] is not None  # padrão: daqui a 7 dias
+    resumo = (await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})).json()
+    assert await cartao_vencidos() == "jlas2 · 1 venda(s) sem liberação, prazo vencido"
+    # o "Ver pedidos" do cartão lista os dois: o cartão avisa
+    (cartao,) = [x for x in resumo["agir"] if "sem liberação" in x["titulo"]]
+    assert cartao["detalhe"].endswith("+1 conferido(s) esperando, na lista também")
+    assert [(e["pedido"], e["motivo"]) for e in resumo["esperando"]] == [
+        ("306090", "celular voltando")
+    ]
+    assert resumo["cartoes"]["vencidos"] == 1
+
+    # data de volta hoje (ou antes) não vale
+    hoje = (await client.get("/api/conciliacao/pedidos/306090", params={"loja": "jlas2"})).json()
+    r = await client.patch(
+        "/api/conciliacao/pedidos/306028",
+        json={"loja": "jlas2", "conferido": True, "conferido_ate": "2026-01-01"},
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "data_de_volta_no_passado"
+
+    # entrou dinheiro no pedido: volta pro amarelo sozinho, o ✓ continua
+    await db.refresh(a)
+    a.recebido = Decimal("-0.49")
+    await db.commit()
+    assert await cartao_vencidos() == "jlas2 · 2 venda(s) sem liberação, prazo vencido"
+    p = (await client.get("/api/conciliacao/pedidos/306090", params={"loja": "jlas2"})).json()
+    assert p["pedido"]["conferido"] is True and p["pedido"]["esperando"] is False
+    assert hoje["pedido"]["esperando"] is True
+    # conferir de novo (sem desmarcar): foto nova, sai do amarelo outra vez
+    r = await client.patch(
+        "/api/conciliacao/pedidos/306090", json={"loja": "jlas2", "conferido": True}
+    )
+    assert r.json()["pedido"]["esperando"] is True
+    assert await cartao_vencidos() == "jlas2 · 1 venda(s) sem liberação, prazo vencido"
+
+    # chegou a data de olhar de novo: volta também
+    await db.refresh(b)
+    b.conferido_em = datetime(2026, 11, 23, 12, tzinfo=UTC)
+    b.conferido_foto = {
+        "situacao": "vencido",
+        "etapa": "pendencia",
+        "recebido": None,
+        "custo": "500.00",
+    }
+    b.conferido_ate = date(2026, 11, 30)
+    assert _esperando(b, date(2026, 11, 29)) is True
+    assert _esperando(b, date(2026, 11, 30)) is False
+    # desmarcar limpa tudo
+    r = await client.patch(
+        "/api/conciliacao/pedidos/306090", json={"loja": "jlas2", "conferido": False}
+    )
+    p = r.json()["pedido"]
+    assert p["conferido"] is False and p["conferido_ate"] is None and p["conferido_motivo"] is None

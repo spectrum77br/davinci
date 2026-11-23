@@ -790,6 +790,7 @@ _CAMPOS_PEDIDO = (
     "etapa_por",
     "etapa_motivo",
     "conferido_por",
+    "conferido_motivo",
     "observacao",
 )
 _DATAS_PEDIDO = (
@@ -800,6 +801,7 @@ _DATAS_PEDIDO = (
     "etapa_em",
     "bateu_em",
     "conferido_em",
+    "conferido_ate",
     "recalculado_em",
     "custo_zerado_em",
 )
@@ -820,6 +822,7 @@ def _pedido_out(p: ConciliacaoPedido) -> dict[str, Any]:
     out["situacao_label"] = SITUACAO_LABELS.get(p.situacao, p.situacao)
     out["etapa_label"] = ETAPA_LABELS.get(p.etapa, p.etapa)
     out["conferido"] = bool(p.conferido_em)
+    out["esperando"] = _esperando(p, datetime.now(_BRT).date())
     out["venda_extras"] = _extras_da_venda(p)
     return out
 
@@ -2404,6 +2407,10 @@ class PedidoPatch(BaseModel):
     loja: str | None = None
     observacao: str | None = Field(default=None, max_length=2000)
     conferido: bool | None = None
+    # 23/11: com o conferido — o que está esperando (opcional) e quando olhar de novo
+    # (padrão: daqui a CONFERIDO_DIAS_PADRAO dias)
+    conferido_motivo: str | None = Field(default=None, max_length=300)
+    conferido_ate: date | None = None
     # "finalizado" (à mão, com motivo quando teve pendência) ou "reaberto".
     etapa: str | None = Field(default=None, pattern="^(finalizado|reaberto)$")
     etapa_motivo: str | None = Field(default=None, max_length=500)
@@ -2427,8 +2434,26 @@ async def marcar_pedido(
     if body.observacao is not None:
         p.observacao = body.observacao.strip() or None
     if body.conferido is not None:
+        hoje = agora.astimezone(_BRT).date()
+        if body.conferido and body.conferido_ate is not None and body.conferido_ate <= hoje:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "data_de_volta_no_passado",
+                    "mensagem": "a data de olhar de novo tem que ser depois de hoje",
+                },
+            )
         p.conferido_em = agora if body.conferido else None
         p.conferido_por = quem if body.conferido else None
+        p.conferido_motivo = (
+            ((body.conferido_motivo or "").strip() or None) if body.conferido else None
+        )
+        p.conferido_ate = (
+            (body.conferido_ate or hoje + timedelta(days=CONFERIDO_DIAS_PADRAO))
+            if body.conferido
+            else None
+        )
+        p.conferido_foto = None  # a foto sai no fim, depois de custo e etapa desta chamada
     if body.zerar_custo is not None:
         await _zerar_custo(session, alvo, p, body, quem, agora)
     if body.etapa == "finalizado":
@@ -2449,6 +2474,8 @@ async def marcar_pedido(
         p.etapa_em = agora
         p.etapa_por = quem
         p.etapa_motivo = (body.etapa_motivo or "").strip() or "reaberto à mão"
+    if body.conferido:
+        p.conferido_foto = _foto_do_pedido(p)
     await session.commit()
     await session.refresh(p)
     return {"pedido": _pedido_out(p)}
@@ -3722,6 +3749,75 @@ async def reabrir_dia(
 # e os dias fechados.
 
 _ETAPAS_PENDENTES = ("pendencia", "reaberto")
+# 23/11 (Vinicius: "eu marco como conferido, não era pra sumir?", mig 0504): conferido =
+# "já vi, estou esperando". O pedido em pendência sai do Onde agir (e do Threema) e vai
+# pra lista "Conferidos, esperando"; volta sozinho quando muda algo do que a pessoa viu
+# (situação, etapa, recebido ou custo) ou quando chega a data de olhar de novo.
+CONFERIDO_DIAS_PADRAO = 7
+
+
+def _valor_da_foto(v: Any) -> str | None:
+    return None if v is None else str(Decimal(str(v)).quantize(Decimal("0.01")))
+
+
+def _foto_do_pedido(p: ConciliacaoPedido) -> dict[str, Any]:
+    """O que a pessoa viu quando marcou conferido (revisão cética 23/11: a diferença e o
+    último movimento também — previsto que muda, reserva que chega atrasada)."""
+    return {
+        "situacao": p.situacao,
+        "etapa": p.etapa,
+        "recebido": _valor_da_foto(p.recebido),
+        "custo": _valor_da_foto(p.custo),
+        "dif": _valor_da_foto(p.dif_previsto_recebido),
+        "ultimo_movimento_em": p.ultimo_movimento_em.isoformat()
+        if p.ultimo_movimento_em
+        else None,
+    }
+
+
+def _mesmo_valor(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    try:
+        return Decimal(str(a)) == Decimal(str(b))
+    except InvalidOperation:
+        return False
+
+
+def _mesma_hora(a: Any, b: datetime | None) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    try:
+        return datetime.fromisoformat(str(a)) == b
+    except ValueError:
+        return False
+
+
+def _esperando(p: ConciliacaoPedido, hoje: date) -> bool:
+    """Conferido e nada mudou desde então: fora do Onde agir. Uma regra só (em Python):
+    o Resumo carrega os conferidos em pendência da loja (poucos) e aplica esta."""
+    foto = p.conferido_foto
+    if not p.conferido_em or not isinstance(foto, dict) or p.etapa not in _ETAPAS_PENDENTES:
+        return False
+    if p.conferido_ate is not None and p.conferido_ate <= hoje:
+        return False
+    return (
+        foto.get("situacao") == p.situacao
+        and foto.get("etapa") == p.etapa
+        and _mesmo_valor(foto.get("recebido"), p.recebido)
+        and _mesmo_valor(foto.get("custo"), p.custo)
+        and _mesmo_valor(foto.get("dif"), p.dif_previsto_recebido)
+        and _mesma_hora(foto.get("ultimo_movimento_em"), p.ultimo_movimento_em)
+    )
+
+
+def _casa_filtro(p: ConciliacaoPedido, filtro: dict[str, str]) -> bool:
+    """O pedido entraria no "Ver pedidos" deste cartão?"""
+    if "situacao" in filtro and p.situacao not in filtro["situacao"].split(","):
+        return False
+    return "etapa" not in filtro or p.etapa in filtro["etapa"].split(",")
+
+
 # 11/11: vale também pra loja por arquivo — o robô baixa o CSV todo dia às 06:00 (eram
 # 7 dias, da época do envio à mão, e a KFA ficou 2 dias sem leitura contando "fechado")
 _ATRASO_EXTRATO = timedelta(hours=36)
@@ -4636,6 +4732,9 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
     mes_ini = dia.replace(day=1)
     lojas_out: list[dict[str, Any]] = []
     agir: list[dict[str, Any]] = []
+    # 23/11: conferido e nada mudou = esperando, fora do Onde agir (lista à parte)
+    hoje = agora.astimezone(_BRT).date()
+    esperando: list[dict[str, Any]] = []
     por_plataforma: dict[str, dict[str, Any]] = {}
     empresa: dict[str, Any] = {"lojas": 0}
     lojas = await lojas_ativas(session)
@@ -4699,6 +4798,38 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             # reaberto que bateu já aparece no cartão dos reabertos
             if situacao == "bateu" and etapa == "pendencia":
                 devolvidas = qtd
+        conferidos = (
+            (
+                await session.execute(
+                    select(ped).where(
+                        *base, ped.etapa.in_(_ETAPAS_PENDENTES), ped.conferido_em.isnot(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        esperando_loja = [p for p in conferidos if _esperando(p, hoje)]
+        for p in esperando_loja:
+            # fora das contagens (cartões, "reabertos", "não liberados")
+            por_etapa[p.etapa] = por_etapa.get(p.etapa, 0) - 1
+            por_situacao[p.situacao] -= 1
+            if p.situacao == "bateu" and p.etapa == "pendencia":
+                devolvidas -= 1
+        for p in esperando_loja:
+            esperando.append(
+                {
+                    "loja": loja.conta,
+                    "pedido": p.pedido_bling,
+                    "situacao_label": SITUACAO_LABELS.get(p.situacao, p.situacao),
+                    "etapa": p.etapa,
+                    "dif": _num(p.dif_previsto_recebido),
+                    "motivo": p.conferido_motivo or p.observacao,
+                    "por": p.conferido_por,
+                    "em": p.conferido_em.isoformat() if p.conferido_em else None,
+                    "ate": p.conferido_ate.isoformat() if p.conferido_ate else None,
+                }
+            )
         mes = await _somas_pedidos(session, loja, mes_ini, dia + timedelta(days=1))
         mes["ajustes_meses_anteriores"], mes["ajustes_qtd"] = await _ajustes_anteriores(
             session, loja, mes_ini, dia + timedelta(days=1)
@@ -4819,6 +4950,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             "pedidos": {
                 "pendencia": pendencias,
                 "reabertos": reabertos,
+                "esperando": len(esperando_loja),
                 "aguardando": por_etapa.get("aguardando", 0),
                 "finalizados": por_etapa.get("finalizado", 0),
                 "conciliados": por_etapa.get("conciliado", 0),
@@ -4853,6 +4985,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             else ("warn" if problemas else "ok"),
         }
         lojas_out.append(linha)
+        agir_da_loja = len(agir)
         # Onde agir hoje
         if contagem["pendente"] or (totais["linhas"] and not saldo_bate):
             agir.append(
@@ -5043,6 +5176,15 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "dia": dia.isoformat(),
                 }
             )
+        # 23/11 (revisão cética): o cartão conta sem os esperando, mas o "Ver pedidos" lista
+        # todos — o cartão diz quantos a mais vão aparecer (com a etiqueta "esperando")
+        for item in agir[agir_da_loja:]:
+            filtro = item.get("filtro")
+            if not filtro:
+                continue
+            n = sum(1 for p in esperando_loja if _casa_filtro(p, filtro))
+            if n:
+                item["detalhe"] += f" · +{n} conferido(s) esperando, na lista também"
         plat = por_plataforma.setdefault(plataforma, {"lojas": 0})
         plat["lojas"] += 1
         for bloco_d in (plat, empresa):
@@ -5089,6 +5231,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         "dias": await _resumo_dos_dias(session, lojas, max(dia, _ontem())),
         "cobrancas_meses": await _cobrancas_por_mes(session, lojas, max(dia, _ontem())),
         "agir": agir,
+        "esperando": sorted(esperando, key=lambda x: (x["ate"] or "9999", x["loja"], x["pedido"])),
         "por_plataforma": por_plataforma,
         "empresa": empresa,
         "cartoes": {

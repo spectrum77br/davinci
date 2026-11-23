@@ -276,6 +276,11 @@ class ConciliacaoPedido(Base, TimestampMixin):
     bateu_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     conferido_por: Mapped[str | None] = mapped_column(String(120), nullable=True)
     conferido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 23/11 (mig 0504): conferido = "já vi, estou esperando" — sai do Onde agir até mudar
+    # algo do que a pessoa viu (foto: situação, etapa, recebido, custo) ou chegar a data
+    conferido_ate: Mapped[date | None] = mapped_column(Date, nullable=True)
+    conferido_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conferido_foto: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     recalculado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -6,7 +6,7 @@
 // resultado e a situação; o Raio-X
 // do pedido selecionado fica à direita. Extrato do dia e Resumo vêm depois.
 import { Download, KeyRound, Loader2, RefreshCw, Search, Upload, Wand2 } from 'lucide-vue-next'
-import { ETAPAS, SITUACOES, diaValido, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, hojeISO, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
+import { ETAPAS, SITUACOES, diaValido, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, hojeISO, sinal, sitCls, somaDias, tipoMov } from '~/lib/conciliacao'
 
 definePageMeta({
   middleware: ['permission'],
@@ -82,6 +82,10 @@ type Pedido = {
   conferido: boolean
   conferido_por: string | null
   conferido_em: string | null
+  // 23/11: conferido = "já vi, estou esperando" — fora do Onde agir até mudar algo ou a data
+  conferido_ate: string | null
+  conferido_motivo: string | null
+  esperando: boolean
   observacao: string | null
 }
 type Resumo = {
@@ -213,6 +217,25 @@ const motivoDraft = ref('')
 const perguntaCusto = ref(false)
 const caixaCusto = ref<HTMLElement | null>(null)
 const custoMotivoDraft = ref('')
+// 23/11 (Vinicius: "eu marco como conferido, não era pra sumir?"): conferido tira o pedido
+// do "Onde agir" até mudar algo (dinheiro, situação, etapa, custo) ou chegar a data
+const conferindo = ref(false)
+const conferidoMotivoDraft = ref('')
+const conferidoAteDraft = ref('')
+const amanhaISO = () => somaDias(hojeISO(), 1) // recalcula a cada abertura (passa da meia-noite)
+function abrirConferir() {
+  conferidoMotivoDraft.value = ''
+  conferidoAteDraft.value = somaDias(hojeISO(), 7)
+  conferindo.value = true
+}
+async function confirmarConferido() {
+  const ok = await marcar({
+    conferido: true,
+    conferido_motivo: conferidoMotivoDraft.value.trim() || undefined,
+    conferido_ate: conferidoAteDraft.value || undefined,
+  })
+  if (ok) conferindo.value = false
+}
 
 // Token do Melhor Envio (15/10): a operação cola aqui; fica cifrado no servidor e nunca volta pra tela.
 type TokenMe = { tem_token: boolean; origem: 'painel' | 'servidor' | null; atualizado_em: string | null; atualizado_por: string | null; conta: string | null; testado_em: string | null; aviso: string | null }
@@ -476,6 +499,7 @@ async function abrir(p: Pedido) {
   motivoDraft.value = ''
   perguntaCusto.value = false
   custoMotivoDraft.value = ''
+  conferindo.value = false
   raioxLoading.value = true
   try {
     const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: contaDoPedido(p) } })
@@ -1002,7 +1026,8 @@ await carregar()
                 <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ p.situacao_bling || '—' }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1">
                   <span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="etapaCls(p.etapa)">{{ p.etapa === 'finalizado' ? '■' : p.etapa === 'reaberto' ? '↺' : '●' }} {{ p.etapa_label }}</span>
-                  <span v-if="p.conferido" class="ml-1 text-emerald-700" :title="`conferido por ${p.conferido_por} em ${fmtDiaHora(p.conferido_em)}`">✓</span>
+                  <span v-if="p.conferido" class="ml-1 text-emerald-700" :title="`conferido por ${p.conferido_por} em ${fmtDiaHora(p.conferido_em)}${p.conferido_motivo ? ': ' + p.conferido_motivo : ''}`">✓</span>
+                  <span v-if="p.esperando" class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-300" :title="p.conferido_motivo || 'conferido, esperando'">esperando<template v-if="p.conferido_ate"> até {{ fmtDia(p.conferido_ate + 'T12:00:00') }}</template></span>
                 </td>
               </tr>
             </tbody>
@@ -1128,16 +1153,35 @@ await carregar()
             <div v-else-if="raiox.pedido.custo_regra === 'manutencao'" class="mt-1 text-muted-foreground">custo zero: Bling em Manutenção (o produto ainda é nosso)</div>
             <div v-else-if="raiox.pedido.custo_regra === 'devolvido'" class="mt-1 text-muted-foreground">custo zero: o produto voltou novo ao estoque (painel Devoluções)</div>
             <div v-if="raiox.pedido.etapa_por" class="mt-1 text-muted-foreground">etapa {{ raiox.pedido.etapa_label }} por {{ raiox.pedido.etapa_por }} em {{ fmtDiaHora(raiox.pedido.etapa_em) }}<span v-if="raiox.pedido.etapa_motivo">: {{ raiox.pedido.etapa_motivo }}</span></div>
+            <div v-if="raiox.pedido.conferido" class="mt-1 text-muted-foreground">
+              conferido por {{ raiox.pedido.conferido_por }} em {{ fmtDiaHora(raiox.pedido.conferido_em) }}<span v-if="raiox.pedido.conferido_motivo">: {{ raiox.pedido.conferido_motivo }}</span>
+              <template v-if="raiox.pedido.esperando"> · fora do "Onde agir"; volta<template v-if="raiox.pedido.conferido_ate"> em {{ fmtDia(raiox.pedido.conferido_ate + 'T12:00:00') }} ou</template> se mudar algo</template>
+              <b v-else-if="['pendencia', 'reaberto'].includes(raiox.pedido.etapa)" class="text-amber-700 dark:text-amber-400"> · voltou pro "Onde agir": mudou algo depois do conferido ou chegou a data</b>
+            </div>
           </div>
           <div v-if="canEdit" class="space-y-1.5">
             <textarea v-model="obsDraft" rows="2" placeholder="observação" class="w-full rounded border bg-background px-2 py-1 text-[11px]" />
             <input v-if="!['bateu', 'cancelado'].includes(raiox.pedido.situacao)" v-model="motivoDraft" placeholder="motivo pra finalizar (obrigatório quando tem pendência)" class="w-full rounded border bg-background px-2 py-1 text-[11px]" />
             <div class="flex flex-wrap gap-1.5">
               <button type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ observacao: obsDraft })">Salvar observação</button>
-              <button type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ conferido: !raiox.pedido.conferido })">{{ raiox.pedido.conferido ? 'Desmarcar conferido' : 'Marcar conferido' }}</button>
+              <button v-if="!raiox.pedido.conferido" type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="abrirConferir()">Marcar conferido</button>
+              <template v-else>
+                <!-- voltou pro Onde agir: confere de novo sem desmarcar (nova foto e nova data) -->
+                <button v-if="!raiox.pedido.esperando && ['pendencia', 'reaberto'].includes(raiox.pedido.etapa)" type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="abrirConferir()">Conferir de novo</button>
+                <button type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ conferido: false })">Desmarcar conferido</button>
+              </template>
               <button v-if="raiox.pedido.etapa !== 'finalizado'" type="button" class="rounded bg-primary px-2 py-1 font-semibold text-primary-foreground" :disabled="salvando" @click="finalizar()">Finalizar</button>
               <button v-else type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ etapa: 'reaberto', etapa_motivo: motivoDraft || 'reaberto à mão' })">Reabrir</button>
               <button v-if="raiox.pedido.custo_regra === 'manual'" type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ zerar_custo: false })">Desfazer custo zerado</button>
+            </div>
+            <div v-if="conferindo && !raiox.pedido.esperando" class="space-y-1.5 rounded border border-sky-300 bg-sky-50 px-2 py-1.5 dark:bg-sky-950/20">
+              <div class="font-semibold">Conferido: sai do "Onde agir" e volta sozinho se mudar algo (dinheiro, situação, etapa ou custo) ou na data abaixo</div>
+              <input v-model="conferidoMotivoDraft" maxlength="300" placeholder="o que está esperando? (ex.: celular voltando, a Shopee ainda vai liquidar)" class="w-full rounded border bg-background px-2 py-1 text-[11px]" />
+              <label class="flex items-center gap-1.5 text-[11px]">olhar de novo em <input v-model="conferidoAteDraft" type="date" :min="amanhaISO()" class="rounded border bg-background px-1.5 py-0.5 text-[11px]" /></label>
+              <div class="flex flex-wrap gap-1.5">
+                <button type="button" class="rounded bg-primary px-2 py-1 font-semibold text-primary-foreground" :disabled="salvando" @click="confirmarConferido()">Confirmar conferido</button>
+                <button type="button" class="px-2 py-1 text-muted-foreground hover:underline" :disabled="salvando" @click="conferindo = false">cancelar</button>
+              </div>
             </div>
             <div v-if="perguntaCusto && raiox.pedido.etapa !== 'finalizado'" ref="caixaCusto" class="space-y-1.5 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 dark:bg-amber-950/20">
               <div class="font-semibold">Custo do produto: {{ fmtMoney(raiox.pedido.custo) }} — manter ou zerar?</div>

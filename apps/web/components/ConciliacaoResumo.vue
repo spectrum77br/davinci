@@ -34,6 +34,7 @@ type PedidosLoja = {
   vencidos: number
   recebido_a_menos: number
   estornados: number
+  esperando?: number
 }
 type Leituras = { extrato_em: string | null; fatura_em: string | null; recalculo_em: string | null; extrato_atrasado: boolean; erro: string | null }
 type Mes = {
@@ -120,12 +121,25 @@ type Agir = {
   dia?: string
   filtro?: Record<string, string>
 }
+// 23/11: pedidos conferidos que estão esperando (fora do Onde agir até mudar algo)
+type Esperando = {
+  loja: string
+  pedido: string
+  situacao_label: string
+  etapa: string
+  dif: number | null
+  motivo: string | null
+  por: string | null
+  em: string | null
+  ate: string | null
+}
 type Resumo = {
   dia: string
   mes: string
   inicio?: string | null
   lojas: LojaResumo[]
   agir: Agir[]
+  esperando?: Esperando[]
   por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas; resultado_mes?: ResultadoMes }>
   empresa: Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas; resultado_mes?: ResultadoMes }
   cartoes: Record<string, number>
@@ -348,6 +362,10 @@ function linkDe(a: Agir): string | null {
   }
   return null
 }
+const esperandoAberto = ref(false)
+function linkEsperando(e: Esperando): string {
+  return router.resolve({ path: '/conciliacao', query: { visao: 'pedidos', loja: e.loja, q: e.pedido } }).href
+}
 function agir(a: Agir) {
   if (a.acao === 'sincronizar' && props.canEdit) emit('sincronizar', a.loja)
 }
@@ -502,7 +520,7 @@ onMounted(() => {
                     </td>
                     <td class="px-2 py-1 text-right tabular-nums">{{ l.dia.linhas || '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.dia.pendentes ? 'text-red-600' : ''">{{ l.dia.linhas ? l.dia.pendentes : '—' }}</td>
-                    <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.pendencia ? 'text-red-600' : ''" @click.stop="emit('ver-pedidos', l.conta, { etapa: 'pendencia' })">{{ l.pedidos.pendencia }}</td>
+                    <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.pendencia ? 'text-red-600' : ''" @click.stop="emit('ver-pedidos', l.conta, { etapa: 'pendencia' })">{{ l.pedidos.pendencia }}<span v-if="l.pedidos.esperando" class="ml-1 text-[10px] font-normal text-muted-foreground" title="conferidos, esperando: fora da conta até mudar algo">+{{ l.pedidos.esperando }} esp.</span></td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.reabertos ? 'text-violet-700' : ''" @click.stop="emit('ver-pedidos', l.conta, { etapa: 'reaberto' })">{{ l.pedidos.reabertos }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.vencidos ? 'text-amber-700' : ''" @click.stop="emit('ver-pedidos', l.conta, { situacao: 'vencido' })">{{ l.pedidos.vencidos }}</td>
                     <td class="px-2 py-1">
@@ -638,9 +656,21 @@ onMounted(() => {
               <a v-if="linkDe(a)" :href="linkDe(a)!" target="_blank" rel="noopener" title="abre numa aba nova" class="shrink-0 rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground">{{ rotuloAcao(a) }}</a>
               <button v-else type="button" class="shrink-0 rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground" @click="agir(a)">{{ rotuloAcao(a) }}</button>
             </div>
-            <div v-if="!dados.agir.length" class="rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-3 text-center text-xs text-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-300">nada pra agir: dia fechado e sem pendência em todas as lojas</div>
+            <div v-if="!dados.agir.length" class="rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-3 text-center text-xs text-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-300">nada pra agir: dia fechado e sem pendência em todas as lojas<template v-if="dados.esperando?.length"> (só os conferidos esperando, abaixo)</template></div>
           </div>
-          <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">Essa lista é a mesma que o vigia vai mandar no Threema de manhã — quem abre o painel vê o detalhe; quem está no celular vê o resumo.</div>
+          <div v-if="dados.esperando?.length" class="border-t px-2 py-1.5">
+            <button type="button" class="flex w-full items-center justify-between gap-2 text-left text-[11px] font-semibold text-muted-foreground" @click="esperandoAberto = !esperandoAberto">
+              <span>Conferidos, esperando ({{ dados.esperando.length }})</span>
+              <span class="font-semibold text-primary underline">{{ esperandoAberto ? 'esconder' : 'mostrar' }}</span>
+            </button>
+            <div v-if="esperandoAberto" class="mt-1.5 space-y-1">
+              <a v-for="e in dados.esperando" :key="e.loja + '|' + e.pedido" :href="linkEsperando(e)" target="_blank" rel="noopener" title="abre o pedido numa aba nova" class="block rounded-md border bg-muted/40 px-2 py-1 text-[11px] hover:bg-muted">
+                <div class="font-semibold">{{ e.loja }} · {{ e.pedido }} · {{ e.situacao_label }}<span v-if="e.dif != null" class="font-normal text-muted-foreground"> ({{ fmtMoney(e.dif) }})</span></div>
+                <div class="text-muted-foreground">{{ e.motivo || 'sem motivo escrito' }} — volta<template v-if="e.ate"> em {{ fmtDia(e.ate + 'T12:00:00') }} ou</template> se mudar algo<template v-if="e.por"> · {{ e.por }}</template></div>
+              </a>
+            </div>
+          </div>
+          <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">Essa lista é a mesma que o vigia vai mandar no Threema de manhã — quem abre o painel vê o detalhe; quem está no celular vê o resumo. Pedido marcado conferido sai daqui e fica em "Conferidos, esperando" até mudar algo nele (dinheiro, situação, etapa ou custo) ou chegar a data escolhida.</div>
         </div>
 
         <!-- Dinheiro nas plataformas (opção B de 15/10): estreito, embaixo do "Onde agir" -->
