@@ -1588,6 +1588,10 @@ test('consulta: Financeiro lists the bills copied from Bling, with search and th
   assert.equal(main.querySelectorAll('[data-payable-row]').length,2);
   assert.equal(d.querySelector('#entry-form'),null);
   assert.equal(d.querySelectorAll('main .creation-panel').length,0);
+  // Opens on the quarter, like Bling; cleared here so the rows of any date show.
+  assert.match(d.getElementById('payables-from').value,/^\d{4}-\d{2}-01$/);
+  for(const id of ['payables-from','payables-to']){const f=d.getElementById(id);f.value='';f.dispatchEvent(new dom.window.Event('change',{bubbles:true}));}
+  assert.match(d.getElementById('payables-count').textContent,/2 de 2 contas · R\$\s?200,00 no total · R\$\s?200,00 a pagar/);
   const due=d.getElementById('payables-due');due.value='1';due.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
   assert.deepEqual([...d.querySelectorAll('[data-payable-row]')].filter(r=>!r.hidden).map(r=>r.children[1].textContent),['Fornecedor A']);
   dom.window.close();

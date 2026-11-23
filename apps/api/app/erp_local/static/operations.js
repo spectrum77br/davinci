@@ -162,7 +162,14 @@ function financeManagementPanel(){
   const body=rows.map(r=>`<tr><td>${esc(month(r.month))}</td><td>${esc(r.category)}</td><td>${esc(r.cost_center)}</td><td class="num">${brl(r.paid)}</td><td class="num">${Number(r.forecast)?brl(r.forecast):'—'}</td></tr>`).join('');
   return panel('Balanço gerencial','Despesa pela data de pagamento, dividida pelos centros de custo. O que está em aberto aparece pelo vencimento, como previsão. Estoque não entra: fecha pelo lote.',table(['Mês','Categoria','Centro de custo','Pago','Previsão'],body));
 }
-let blingPayablesCopy=null,blingPayablesLoading=false,payablesQuery='',payablesDue='';
+let blingPayablesCopy=null,blingPayablesLoading=false,payablesQuery='',payablesDue='',payablesFrom=null,payablesTo=null;
+// Bling's Contas a pagar opens on the current quarter (01/10 to 31/12 in November); same here, so the
+// totals can be compared with its screen.
+function payablesQuarter(){
+  const today=new Date(Date.now()-3*3600e3),y=today.getUTCFullYear(),q=Math.floor(today.getUTCMonth()/3);
+  const pad=n=>String(n).padStart(2,'0'),last=new Date(Date.UTC(y,q*3+3,0)).getUTCDate();
+  return [`${y}-${pad(q*3+1)}-01`,`${y}-${pad(q*3+3)}-${pad(last)}`];
+}
 // Bling's open bills, copied read only (bling_payables). In consulta they are the Financeiro list.
 function blingPayablesPanel(main=false){
   if((!blingPayablesCopy||Date.now()-blingPayablesCopy.at>300000)&&!blingPayablesLoading){
@@ -176,22 +183,35 @@ function blingPayablesPanel(main=false){
   if(!c||!Array.isArray(c.rows)||!c.totals)return main?panel(title,blingPayablesCopy?'A cópia das contas do Bling não respondeu. Tente Atualizar.':'Lendo a cópia das contas do Bling…',''):'';
   if(!c.rows.length)return main?panel(title,c.taken_at?'Nenhuma conta em aberto no Bling.':'O servidor está copiando as contas do Bling, um pedaço a cada 5 minutos, na vez do DaVinci. Volte em alguns minutos.',''):'';
   const day=d=>d?d.split('-').reverse().join('/'):'—',when=c.taken_at?new Date(c.taken_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
-  const body=c.rows.map(r=>`<tr data-payable-row data-search="${esc((r.supplier+' '+r.history+' '+r.document).toLowerCase())}" data-overdue="${r.overdue?1:0}"${r.overdue?' class="late"':''}><td>${esc(day(r.due_date))}</td><td>${esc(r.supplier)}</td><td>${esc(r.history)}</td><td>${esc(r.document)}</td><td class="num">${brl(r.amount)}</td><td class="num">${brl(r.balance)}</td><td>${esc(r.situation)}${r.payments?` · ${r.payments} pagamento${r.payments>1?'s':''}`:''}${r.repeats?' · repete':''}${r.overdue?' · vencida':''}</td><td>${esc(r.category_id||'—')}</td></tr>`).join('');
+  const body=c.rows.map(r=>`<tr data-payable-row data-search="${esc((r.supplier+' '+r.history+' '+r.document).toLowerCase())}" data-overdue="${r.overdue?1:0}" data-due="${esc(r.due_date)}" data-amount="${esc(r.amount)}" data-balance="${r.balance===null?'':esc(r.balance)}"${r.overdue?' class="late"':''}><td>${esc(day(r.due_date))}</td><td>${esc(r.supplier)}</td><td>${esc(r.history)}</td><td>${esc(r.document)}</td><td class="num">${brl(r.amount)}</td><td class="num">${r.balance===null?'lendo…':brl(r.balance)}</td><td>${esc(r.situation)}${r.payments?` · ${r.payments} pagamento${r.payments>1?'s':''}`:''}${r.repeats?' · repete':''}${r.overdue?' · vencida':''}</td><td>${esc(r.category_id||'—')}</td></tr>`).join('');
   const missing=c.rows.filter(r=>!r.detailed).length;
-  const text=`Cópia só de leitura das contas em aberto e pagas em parte no Bling, lida às ${esc(when)}: ${c.totals.count} contas, ${brl(c.totals.amount)} no total, ${brl(c.totals.balance)} a pagar, ${c.totals.overdue} vencidas.${missing?` Ainda lendo o detalhe de ${missing} (fornecedor e histórico aparecem aos poucos).`:''} Pague e altere no Bling até a troca. A categoria aparece pelo código: o Bling não libera os nomes para o app do DaVinci.`;
+  const text=`Cópia só de leitura das contas em aberto e pagas em parte no Bling, lida às ${esc(when)}: ${c.totals.count} contas de todos os vencimentos (as que se repetem já estão lançadas até 2037), ${c.totals.overdue} vencidas.${missing?` Ainda lendo o detalhe de ${missing}: fornecedor e histórico aparecem aos poucos, e o que falta pagar das pagas em parte aparece como "lendo…".`:''} Pague e altere no Bling até a troca. A categoria aparece pelo código: o Bling não libera os nomes para o app do DaVinci.`;
   const list=table(['Vencimento','Fornecedor','Histórico','Documento','Valor','A pagar','Situação','Categoria'],body);
   if(!main)return panel(title+' (consulta)',text,`<details><summary>Ver as ${c.rows.length} contas</summary>${list}</details>`);
-  const filters=`<div class="forms payables-filters"><label>Buscar<input id="payables-query" value="${esc(payablesQuery)}" placeholder="Fornecedor, histórico ou documento"></label><label>Vencimento<select id="payables-due">${[['','todas'],['1','vencidas'],['0','a vencer']].map(([v,l])=>`<option value="${v}" ${payablesDue===v?'selected':''}>${l}</option>`).join('')}</select></label></div>`;
+  if(payablesFrom===null)[payablesFrom,payablesTo]=payablesQuarter();
+  const filters=`<div class="forms payables-filters"><label>Buscar<input id="payables-query" value="${esc(payablesQuery)}" placeholder="Fornecedor, histórico ou documento"></label><label>Vencimento de<input id="payables-from" type="date" value="${esc(payablesFrom)}"></label><label>até<input id="payables-to" type="date" value="${esc(payablesTo)}"></label><label>Situação<select id="payables-due">${[['','todas'],['1','vencidas'],['0','a vencer']].map(([v,l])=>`<option value="${v}" ${payablesDue===v?'selected':''}>${l}</option>`).join('')}</select></label></div>`;
   return panel(title,text,filters+list+'<p class="source-line" id="payables-count"></p>');
 }
 function applyPayablesFilter(){
   const rows=[...document.querySelectorAll('[data-payable-row]')];if(!rows.length)return;
-  const q=payablesQuery.trim().toLowerCase();let shown=0;
-  for(const r of rows){const ok=(!q||r.dataset.search.includes(q))&&(!payablesDue||r.dataset.overdue===payablesDue);r.hidden=!ok;shown+=ok?1:0;}
-  const count=document.getElementById('payables-count');if(count)count.textContent=`${shown} de ${rows.length} contas`;
+  const q=payablesQuery.trim().toLowerCase();let shown=0,amount=0,balance=0,unknown=0;
+  for(const r of rows){
+    const due=r.dataset.due||'';
+    const ok=(!q||r.dataset.search.includes(q))&&(!payablesDue||r.dataset.overdue===payablesDue)&&(!payablesFrom||due>=payablesFrom)&&(!payablesTo||due<=payablesTo);
+    r.hidden=!ok;if(!ok)continue;
+    shown+=1;amount+=Number(r.dataset.amount||0);if(r.dataset.balance==='')unknown+=1;else balance+=Number(r.dataset.balance);
+  }
+  const note=unknown?` (${unknown} paga${unknown>1?'s':''} em parte ainda lendo)`:'';
+  const count=document.getElementById('payables-count');if(count)count.textContent=`${shown} de ${rows.length} contas · ${brl(amount)} no total · ${brl(balance)} a pagar${note}`;
+  const railCount=document.getElementById('payables-rail-count');if(railCount)railCount.textContent=String(shown);
+  const railBalance=document.getElementById('payables-rail-balance');if(railBalance)railBalance.textContent=brl(balance)+(unknown?' +':'');
 }
 document.addEventListener('input',e=>{if(e.target.id==='payables-query'){payablesQuery=e.target.value;applyPayablesFilter();}});
-document.addEventListener('change',e=>{if(e.target.id==='payables-due'){payablesDue=e.target.value;applyPayablesFilter();}});
+document.addEventListener('change',e=>{
+  if(e.target.id==='payables-due'){payablesDue=e.target.value;applyPayablesFilter();}
+  else if(e.target.id==='payables-from'){payablesFrom=e.target.value;applyPayablesFilter();}
+  else if(e.target.id==='payables-to'){payablesTo=e.target.value;applyPayablesFilter();}
+});
 function financeLotsPanel(){
   const lots=state.finance_lots||[];if(!lots.length)return '';
   const rows=lots.map(l=>`<tr><td>${esc(l.lot)}</td><td class="num">${l.value===null?'—':brl(l.value)}</td><td class="num">${l.exchange_rate??'—'}</td><td class="num">${brl(l.payables)}</td><td class="num">${brl(l.paid)}</td><td class="num ${l.difference!==null&&Number(l.difference)<0?'negative':'positive'}">${l.difference===null?'Informe o valor do lote':brl(l.difference)}</td><td>${l.closed?'Fechado':'Em aberto'}</td></tr>`).join('');

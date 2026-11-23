@@ -137,11 +137,18 @@ def run(erp, reader=None, *, now=None, max_details=MAX_DETAILS):
                 for r in db.execute("SELECT id,listed,detail FROM bling_payables")
             }
             known = {r[0] for r in db.execute("SELECT id FROM bling_payable_contacts")}
-        due = [
-            i
-            for i, row in listed.items()
-            if i not in stored or stored[i][1] is None or json.loads(stored[i][0]) != row
-        ][:max_details]
+        # Partly paid bills first (their balance is only in the detail), then the nearest due.
+        due = sorted(
+            (
+                i
+                for i, row in listed.items()
+                if i not in stored or stored[i][1] is None or json.loads(stored[i][0]) != row
+            ),
+            key=lambda i: (
+                str(listed[i].get("situacao")) != "3",
+                str(listed[i].get("vencimento") or ""),
+            ),
+        )[:max_details]
         details = {}
         for chunk in _batches(due):
             results = _read(reader, [(f"/contas/pagar/{i}", []) for i in chunk])
@@ -227,7 +234,7 @@ def snapshot(db, *, today=None):
         return {
             "taken_at": None,
             "rows": [],
-            "totals": {"count": 0, "amount": 0, "balance": 0, "overdue": 0},
+            "totals": {"count": 0, "amount": 0, "balance": 0, "balance_unknown": 0, "overdue": 0},
         }
     today = today or datetime.now(UTC).date().isoformat()
     out = []
@@ -235,7 +242,14 @@ def snapshot(db, *, today=None):
         row = {**json.loads(listed), **(json.loads(detail) if detail else {})}
         contact = str((row.get("contato") or {}).get("id") or "")
         occurrence = row.get("ocorrencia") or {}
-        balance = _money(row.get("saldo", row.get("valor")))
+        # An open bill has no payment, so its balance is its value (140 of 140 read on 23/11); a
+        # partly paid one is known only from its detail.
+        if detail:
+            balance = _money(row.get("saldo", row.get("valor")))
+        elif str(row.get("situacao")) == "1":
+            balance = _money(row.get("valor"))
+        else:
+            balance = None
         out.append(
             {
                 "id": identifier,
@@ -258,7 +272,8 @@ def snapshot(db, *, today=None):
     totals = {
         "count": len(out),
         "amount": round(sum(r["amount"] for r in out), 2),
-        "balance": round(sum(r["balance"] for r in out), 2),
+        "balance": round(sum(r["balance"] for r in out if r["balance"] is not None), 2),
+        "balance_unknown": sum(1 for r in out if r["balance"] is None),
         "overdue": sum(1 for r in out if r["overdue"]),
     }
     return {

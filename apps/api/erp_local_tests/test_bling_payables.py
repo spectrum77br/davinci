@@ -65,7 +65,13 @@ def test_open_bills_are_copied_with_detail_and_supplier_then_closed_ones_leave(e
     assert report["state"] == "read_ok" and report["open"] == 2 and report["details_read"] == 2
     with erp.connection() as db:
         copy = bling_payables.snapshot(db, today="2026-11-23")
-    assert copy["totals"] == {"count": 2, "amount": 400.0, "balance": 250.0, "overdue": 2}
+    assert copy["totals"] == {
+        "count": 2,
+        "amount": 400.0,
+        "balance": 250.0,
+        "balance_unknown": 0,
+        "overdue": 2,
+    }
     first = next(r for r in copy["rows"] if r["id"] == "2")
     assert first["supplier"] == "B" and first["situation"] == "Pago parcialmente"
     assert first["payments"] == 1 and first["repeats"] and first["document"] == "DOC-2"
@@ -156,3 +162,15 @@ def test_cancelled_bills_never_enter_the_copy(erp):
     assert bling_payables.run(erp, reader_for(bills, {"7": "A"}, []))["open"] == 1
     with erp.connection() as db:
         assert [r["id"] for r in bling_payables.snapshot(db)["rows"]] == ["1"]
+
+
+def test_partly_paid_bills_are_read_first_and_their_balance_waits_for_the_detail(erp):
+    bills = [bill(1), bill(2, situation=3, value=300.0), bill(3, situation=3, value=80.0)]
+    bling_payables.run(erp, reader_for(bills, {"7": "A"}, []), max_details=1)
+    with erp.connection() as db:
+        rows = {r["id"]: r for r in bling_payables.snapshot(db)["rows"]}
+        totals = bling_payables.snapshot(db)["totals"]
+    # Read first: a partly paid bill; the open one is its value; the other partly paid is unknown.
+    assert rows["2"]["detailed"] and rows["2"]["balance"] == 150.0
+    assert rows["1"]["balance"] == 100.0 and rows["3"]["balance"] is None
+    assert totals["balance"] == 250.0 and totals["balance_unknown"] == 1
