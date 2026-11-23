@@ -120,7 +120,7 @@ def sale_total(db, channel, store, key, live):
     Mercado Livre and TikTok: products + freight the buyer paid - seller coupon. The other stores:
     the total in the order header."""
     charges = native_ingest.store_charges(db, channel, store, key, live)
-    if channel in native_ingest.CHARGED and charges is None:
+    if native_ingest.charged(channel, store) and charges is None:
         return None
     total = Decimal(0)
     for order in live:

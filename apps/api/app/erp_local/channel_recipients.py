@@ -7,6 +7,7 @@ each field still has to be proven in the parallel run against Bling.
 
 import re
 
+from app.erp_local import bling_copy_order_probe
 from app.erp_local.core import ERPError
 from app.erp_local.cutover import _fold, city_code
 
@@ -241,7 +242,10 @@ READERS = {
 }
 
 
-def project(channel, raw):
+def project(channel, raw, store=None):
+    # A store read from the copy of Bling (ML Fioree) has its buyer as Bling keeps it.
+    if store is not None and bling_copy_order_probe.copied(channel, store):
+        return from_bling_copy(raw)
     if channel not in READERS:
         raise ERPError("recipient_channel", "Canal sem leitor de destinatário.", 409)
     return READERS[channel](raw)

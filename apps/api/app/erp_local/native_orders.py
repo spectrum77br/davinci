@@ -60,10 +60,10 @@ def validate(read):
         from app.erp_local.carrefour_orders import validate as validate_carrefour
 
         return validate_carrefour(read)
-    if isinstance(read, dict) and read.get("source") == "temu_bling_copy_v1_read":
-        from app.erp_local.temu_orders import validate as validate_temu
+    if isinstance(read, dict) and read.get("source") == "bling_copy_v1_read":
+        from app.erp_local.bling_copy_orders import validate as validate_copy
 
-        return validate_temu(read)
+        return validate_copy(read)
     if isinstance(read, dict) and read.get("source") == "tiktok_orders_202309_read":
         from app.erp_local.tiktok_orders import validate as validate_tiktok
 
@@ -420,11 +420,12 @@ def resolve_item(db, store, item, *, channel="amazon"):
     """
     result = {"line_id": item["line_id"], "state": "missing", "sku": None, "kind": None}
     external, variation = (
-        (item["listing_id"], item["variation_id"])
+        (item.get("listing_id"), item.get("variation_id"))
         if channel in {"shopee", "tiktok", "carrefour", "magalu", "ml"}
-        # Temu (copy of Bling) has no listing link: only its seller code, checked by the caller.
         else (item.get("seller_sku"), item.get("asin"))
     )
+    # A sale read from the copy of Bling (Temu, ML Fioree) has no listing link: only its seller
+    # code, checked by the caller.
     if not external or channel not in {"carrefour", "magalu", "ml"} and variation in (None, ""):
         return result
     matches = db.execute(

@@ -11,7 +11,7 @@ import os
 import re
 from datetime import UTC, datetime
 
-from app.erp_local import channel_recipients, pii
+from app.erp_local import bling_copy_order_probe, channel_recipients, pii
 from app.erp_local.core import ERPError, dumps, text
 
 SCHEMA = (
@@ -65,7 +65,7 @@ def apply(erp, db, p):
 
 
 def capture(erp, channel, store, external, raw, *, status=None, now=None):
-    projection = channel_recipients.project(channel, raw)
+    projection = channel_recipients.project(channel, raw, store)
     with erp.connection() as db:
         stored = for_order(db, channel, store, external)
     if stored and (stored["ready"] or not projection["ready"]):
@@ -151,7 +151,8 @@ def due(db, channel, store):
     from app.erp_local.native_ingest import OPEN_STATUS
 
     # Stores only show the buyer while the sale is released for shipping; unpaid shows nothing.
-    allowed = OPEN_STATUS.get(channel)
+    # The copy of Bling has it for any sale Bling keeps (Temu, ML Fioree).
+    allowed = None if bling_copy_order_probe.copied(channel, store) else OPEN_STATUS.get(channel)
     result = {}
     for external, status in sorted(latest.items()):
         if external in done or str(status or "").casefold() in CLOSED:
@@ -239,10 +240,17 @@ def order_recipient(captured):
 
 # Channels whose buyer comes from DaVinci's copy of Bling while Bling is on (no own access yet).
 # Amazon: buyer and address need restricted roles; at the switch they come from our own app.
-# Temu: the whole sale comes from the copy until the store authorizes our own app.
+# Temu: the whole sale comes from the copy until the store authorizes our own app. So do the
+# other stores read from the copy (bling_copy_order_probe.STORES: ML Fioree).
 FROM_BLING = {"amazon", "temu"}
 AMAZON_ID = re.compile(r"\d{3}-\d{7}-\d{7}")
-SALE_NUMBERS = {"amazon": AMAZON_ID, "temu": re.compile(r"PO-\d{3}-\d{5,30}")}
+SALE_NUMBERS = {"amazon": AMAZON_ID, **bling_copy_order_probe.NUMBERS}
+
+
+def from_bling(channel, store):
+    return channel in FROM_BLING or bling_copy_order_probe.copied(channel, store)
+
+
 BLING_COPY_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM (SELECT DISTINCT ON (numeroloja)"
     " numeroloja::text AS order_id, nome_destinatario AS name,"
@@ -262,7 +270,7 @@ def bling_copy_reader(read=None):
     def reader(*, channel, store, ids):
         pattern = SALE_NUMBERS.get(channel)
         valid = [i for i in ids if pattern and pattern.fullmatch(str(i))]
-        if channel not in FROM_BLING or not valid:
+        if not from_bling(channel, store) or not valid:
             return {}
         rows = read(BLING_COPY_SQL.format(ids=",".join(f"'{i}'" for i in valid)))
         return {str(r["order_id"]): r for r in rows if r.get("name") or r.get("document")}

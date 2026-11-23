@@ -1,9 +1,11 @@
-"""Run on the API host: Temu sales of one Bling store, as DaVinci's copy of Bling has them.
+"""Run on the API host: sales of the stores the ERP reads from DaVinci's copy of Bling.
 
-The ERP has no Temu app of its own yet (it needs each store's authorization), so while Bling is on
-its Temu sales come from davinci.bling_orders, read only. The store key is Bling's store code. The
-buyer never leaves here: it is read apart, by order number (recipient_capture.bling_copy_reader).
-At the switch this reading stops with Bling and the store's own app takes over.
+These stores have no app of our own yet: Temu needs each store's authorization, and Mercado Livre
+does not let the Fioree account create one ("No tenés permiso para crear aplicaciones", seen on
+23/11/2026). While Bling is on, their sales come from davinci.bling_orders, read only. The store
+key is Bling's store code. The buyer never leaves here: it is read apart, by order number
+(recipient_capture.bling_copy_reader). At the switch this reading stops with Bling and the store's
+own app takes over.
 """
 
 import asyncio
@@ -14,16 +16,20 @@ import sys
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
-SOURCE = "temu_bling_copy_v1_read"
+SOURCE = "bling_copy_v1_read"
 LIMIT = 500
-# Bling store code -> store, as Bling's store forms name them (observed 10/11/2026).
+# Bling store code -> (channel, store), as Bling's store forms name them (Temu 10/11/2026).
 STORES = {
-    "205925390": "Barbosa",
-    "206288651": "JLAS",
-    "206288703": "Atv",
-    "206288707": "Eron",
+    "205925390": ("temu", "Barbosa"),
+    "206288651": ("temu", "JLAS"),
+    "206288703": ("temu", "Atv"),
+    "206288707": ("temu", "Eron"),
+    # Mercado Livre Fioree (FIORE ARMARINHO), selling since 14/11/2026, not in DaVinci: 23/11/2026.
+    "206368117": ("ml", "Fioree"),
 }
-NUMBER = re.compile(r"PO-\d{3}-\d{5,30}")
+# The sale number each channel sends to Bling: Temu's PO number; Mercado Livre's order or cart
+# number (16 digits in 827 of 827 sales of 30 days, 23/11/2026).
+NUMBERS = {"temu": re.compile(r"PO-\d{3}-\d{5,30}"), "ml": re.compile(r"\d{12,20}")}
 CANCELLED = "12"
 SQL = (
     "SELECT numero::text AS numero, numeroloja::text AS numeroloja,"
@@ -31,10 +37,15 @@ SQL = (
     " item_index, item_codigo::text AS item_codigo, item_quantidade, itemvalor, item_desconto"
     " FROM davinci.bling_orders WHERE loja = :store AND numeroloja IN ("
     " SELECT numeroloja FROM davinci.bling_orders WHERE loja = :store"
-    " AND left(numeroloja, 3) = 'PO-' GROUP BY numeroloja"
+    " AND numeroloja ~ :pattern GROUP BY numeroloja"
     " HAVING max(updated_at) > :since AND max(updated_at) <= :until)"
     " ORDER BY numeroloja, numero, item_index"
 )
+
+
+def copied(channel, store):
+    """True for an account the ERP reads from the copy of Bling instead of the store."""
+    return STORES.get(str(store), (None, None))[0] == channel
 
 
 def money(value):
@@ -51,14 +62,16 @@ def _stamp(value):
 
 
 def project(rows, store, date_from, date_to, now):
-    """One account of a read: each Temu sale once, under the first Bling number it got.
+    """One account of a read: each sale once, under the first Bling number it got.
 
-    A later Bling order with the same Temu number (an exchange or a resend) is Bling's own, not
+    A later Bling order with the same store number (an exchange or a resend) is Bling's own, not
     the sale, as in the stock check."""
+    channel = STORES[str(store)][0]
+    number = NUMBERS[channel]
     by_sale = {}
     for row in rows:
         sale = str(row.get("numeroloja") or "")
-        if NUMBER.fullmatch(sale):
+        if number.fullmatch(sale):
             by_sale.setdefault(sale, []).append(row)
     orders = []
     for sale, sale_rows in by_sale.items():
@@ -98,7 +111,7 @@ def project(rows, store, date_from, date_to, now):
     orders.sort(key=lambda o: (o["updated_at"], o["id"]))
     return {
         "integration_id": store,
-        "platform": "temu",
+        "platform": channel,
         "checked_at": now.isoformat(),
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
@@ -124,7 +137,7 @@ def envelope(accounts, now):
 def refused(store, date_from, date_to, now, state):
     return {
         "integration_id": store,
-        "platform": "temu",
+        "platform": STORES.get(str(store), ("unknown",))[0],
         "checked_at": now.isoformat(),
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
@@ -150,13 +163,20 @@ async def read(request):
             if store not in STORES:
                 accounts.append(refused(store, date_from, date_to, now, "configuration_missing"))
                 continue
+            pattern = "^" + NUMBERS[STORES[store][0]].pattern + "$"
             try:
                 async with SessionLocal() as session:
                     await session.execute(text("SET TRANSACTION READ ONLY"))
                     rows = (
                         (
                             await session.execute(
-                                text(SQL), {"store": store, "since": date_from, "until": date_to}
+                                text(SQL),
+                                {
+                                    "store": store,
+                                    "pattern": pattern,
+                                    "since": date_from,
+                                    "until": date_to,
+                                },
                             )
                         )
                         .mappings()

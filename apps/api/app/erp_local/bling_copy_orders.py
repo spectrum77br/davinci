@@ -1,9 +1,9 @@
-"""Strict shape of a Temu read taken from DaVinci's copy of Bling (temu_order_probe)."""
+"""Strict shape of a read taken from DaVinci's copy of Bling (bling_copy_order_probe)."""
 
 import re
 from datetime import UTC, datetime, timedelta
 
-from app.erp_local import temu_order_probe as probe
+from app.erp_local import bling_copy_order_probe as probe
 from app.erp_local.core import ERPError
 
 ACCOUNT_FIELDS = {
@@ -50,10 +50,10 @@ def _money(value):
         raise ValueError
 
 
-def _order(order, start, end):
+def _order(order, start, end, number):
     if not isinstance(order, dict) or set(order) != ORDER_FIELDS:
         raise ValueError
-    if not isinstance(order["id"], str) or not probe.NUMBER.fullmatch(order["id"]):
+    if not isinstance(order["id"], str) or not number.fullmatch(order["id"]):
         raise ValueError
     if not isinstance(order["bling_number"], str) or not re.fullmatch(
         r"\d{1,20}", order["bling_number"]
@@ -126,7 +126,7 @@ def validate(read):
             if (
                 not isinstance(account, dict)
                 or set(account) != ACCOUNT_FIELDS
-                or account["platform"] != "temu"
+                or account["platform"] not in {*probe.NUMBERS, "unknown"}
                 or account["state"] not in STATES
                 or account["integration_id"] in seen
                 or not isinstance(account["integration_id"], str)
@@ -142,7 +142,7 @@ def validate(read):
                     raise ValueError
                 continue
             if (
-                account["integration_id"] not in probe.STORES
+                not probe.copied(account["platform"], account["integration_id"])
                 or type(account["has_more"]) is not bool
                 or (end - start).total_seconds() > 86400
                 or len(account["orders"]) > probe.LIMIT
@@ -150,7 +150,7 @@ def validate(read):
                 raise ValueError
             orders = set()
             for order in account["orders"]:
-                _order(order, start, end)
+                _order(order, start, end, probe.NUMBERS[account["platform"]])
                 if order["id"] in orders:
                     raise ValueError
                 orders.add(order["id"])

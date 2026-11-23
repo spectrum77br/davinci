@@ -91,7 +91,7 @@ def detail(db, channel, store, number):
     items = bling_mirror.with_bling_lots(db, number, items)
     live = [o for o in orders if not native_ingest._is_cancelled(o)] or orders
     charges = native_ingest.store_charges(db, channel, store, number, live)
-    if channel in native_ingest.CHARGED:
+    if native_ingest.charged(channel, store):
         # Mercado Livre: products + freight the buyer paid - seller's coupon, as Bling keeps it.
         order_total = (
             None if charges is None else items_total + charges["freight"] - charges["coupon"]

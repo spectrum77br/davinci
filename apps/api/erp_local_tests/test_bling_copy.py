@@ -1,19 +1,21 @@
-"""Temu read from DaVinci's copy of Bling: kept and compared like a store, never an own order."""
+"""Stores read from DaVinci's copy of Bling (Temu, ML Fioree): kept and compared like a store,
+never an own order."""
 
 import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.erp_local import bling_copy_order_probe as probe
 from app.erp_local import (
+    bling_copy_orders,
     bling_coverage,
     native_ingest,
+    parallel_check,
     recipient_capture,
     service_loop,
     store_sales,
-    temu_orders,
 )
-from app.erp_local import temu_order_probe as probe
 from app.erp_local.core import ERPError
 
 NOW = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
@@ -63,7 +65,7 @@ def test_each_sale_once_under_its_first_bling_number():
         and first["updated_at"] == (NOW - timedelta(hours=0.5)).isoformat()
     )
     assert cancelled["status"] == "CANCELLED" and account["has_more"] is False
-    temu_orders.validate(read_of(rows))
+    bling_copy_orders.validate(read_of(rows))
 
 
 @pytest.mark.parametrize(
@@ -81,19 +83,21 @@ def test_anything_outside_the_projection_is_refused(change):
     read = read_of([row("309312")])
     change(read["accounts"][0]["orders"][0])
     with pytest.raises(ERPError):
-        temu_orders.validate(read)
+        bling_copy_orders.validate(read)
 
 
 def test_unknown_store_is_never_read_ok():
-    read = read_of([row("309312")], store="999")
+    read = read_of([row("309312")])
+    read["accounts"][0]["integration_id"] = "999"
     with pytest.raises(ERPError):
-        temu_orders.validate(read)
+        bling_copy_orders.validate(read)
     refused = probe.envelope([probe.refused("999", START, END, NOW, "configuration_missing")], NOW)
-    temu_orders.validate(refused)
+    bling_copy_orders.validate(refused)
 
 
 def test_temu_stores_enter_once_and_come_back_after_the_register(erp):
     assert sorted(service_loop.adopt_bling_copy_stores(erp)) == [
+        "ml:Fioree",
         "temu:Atv",
         "temu:Barbosa",
         "temu:Eron",
@@ -196,3 +200,133 @@ def test_coverage_finds_the_temu_sales_the_erp_read(erp):
     assert store["channel"] == "temu" and store["found"] == 1 and store["missing"] == 0
     assert store["name"] == "Temu Barbosa"
     assert store["equal"] == 1
+
+
+FIOREE = "206368117"
+ML_SALE = "2000013912345678"
+
+
+def ml_row(numero="320001", sale=ML_SALE, **changes):
+    return {**row(numero, sale), "total": "61.90", "totalprodutos": "49.90", **changes}
+
+
+def read_fioree(erp, rows):
+    def provider(*, channel, store, date_from, date_to):
+        return read_of(rows, store, date_from, date_to)
+
+    service_loop.adopt_bling_copy_stores(erp)
+    return native_ingest.run_account(erp, "ml", FIOREE, provider, now=NOW)
+
+
+def test_ml_fioree_is_read_from_the_copy_by_its_mercado_livre_number():
+    account = read_of([ml_row(), ml_row("1", SALE)], store=FIOREE)["accounts"][0]
+    assert account["platform"] == "ml" and [o["id"] for o in account["orders"]] == [ML_SALE]
+    bling_copy_orders.validate(read_of([ml_row()], store=FIOREE))
+    # Each store keeps its own channel and number: a Temu number or channel never passes as ML.
+    for change in (
+        lambda read: read["accounts"][0].update(platform="temu"),
+        lambda read: read["accounts"][0]["orders"][0].update(id=SALE),
+    ):
+        read = read_of([ml_row()], store=FIOREE)
+        change(read)
+        with pytest.raises(ERPError):
+            bling_copy_orders.validate(read)
+    assert probe.copied("ml", FIOREE) and not probe.copied("temu", FIOREE)
+    assert not probe.copied("ml", STORE) and not probe.copied("ml", "uuid-de-integracao")
+
+
+def test_fioree_sale_keeps_blings_total_and_is_never_promoted(erp):
+    assert read_fioree(erp, [ml_row()])["added"] == 1
+    with erp.connection() as db:
+        plan = native_ingest.promotion_plan(db, "ml", FIOREE)
+        (sale,) = store_sales.listing(db)["items"]
+        units = native_ingest._units(db, "ml", FIOREE)
+        total = parallel_check.sale_total(db, "ml", FIOREE, ML_SALE, list(units[ML_SALE].values()))
+    # Bling's total already has freight and coupon: no Mercado Livre shipment to wait for.
+    # Blocked only for being a copy (and the buyer not read yet): items matched, total known.
+    assert plan["ready"] == [] and set(plan["blocked"]) <= {"bling_copy", "recipient_missing"}
+    assert "bling_copy" in plan["blocked"]
+    assert sale["channel"] == "ml" and sale["store"] == "ML Fioree" and sale["total"] == "61.90"
+    assert total == "61.90"
+    assert not native_ingest.charged("ml", FIOREE) and native_ingest.charged("ml", "outra")
+
+
+def test_fioree_buyer_comes_from_the_copy_and_other_ml_stores_never_ask_it(erp):
+    read_fioree(erp, [ml_row()])
+
+    def read(_sql):
+        return [
+            {
+                "order_id": ML_SALE,
+                "name": "Bruna Lima",
+                "document": "529.982.247-25",
+                "street": "Rua Exemplo",
+                "number": "8",
+                "complement": "",
+                "district": "Centro",
+                "city": "Belo Horizonte",
+                "state": "MG",
+                "postal_code": "30110-000",
+            }
+        ]
+
+    reader = recipient_capture.bling_copy_reader(read)
+    assert recipient_capture.read_due(erp, "ml", FIOREE, reader, now=NOW)["ready"] == 1
+    assert reader(channel="ml", store="uuid-de-integracao", ids=[ML_SALE]) == {}
+    with erp.connection() as db:
+        found = recipient_capture.for_order(db, "ml", FIOREE, ML_SALE)
+    assert found["ready"] and found["buyer"]["name"] == "Bruna Lima"
+
+
+def test_coverage_finds_fioree_sales_by_their_number(erp):
+    read_fioree(erp, [ml_row()])
+    bling = [
+        {
+            "number": "320001",
+            "store_number": ML_SALE,
+            "bling_store": FIOREE,
+            "store": None,
+            "channel": None,
+            "name": None,
+            "day": "2026-11-17",
+            "total": "61.90",
+            "situation": "15",
+        }
+    ]
+    with erp.connection() as db:
+        accounts = {
+            (r["channel"], r["store"]): r["last_state"]
+            for r in db.execute("SELECT channel,store,last_state FROM ingest_accounts")
+        }
+        (store,) = bling_coverage.compare(db, bling, accounts)["stores"]
+    assert (store["channel"], store["store"], store["name"]) == ("ml", FIOREE, "ML Fioree")
+    assert store["found"] == 1 and store["missing"] == 0 and store["equal"] == 1
+
+
+def test_the_round_reads_copied_stores_through_the_copy_reader(erp, monkeypatch):
+    from app.erp_local import native_orders
+
+    monkeypatch.setattr(native_orders, "import_read", lambda _erp, read: {"observations_added": 0})
+    service_loop.adopt_bling_copy_stores(erp)
+    with erp.connection() as db:
+        db.execute(
+            "INSERT INTO store_policies VALUES ('ml','uuid-nativa','identity_review','{}',?)",
+            (erp.now(),),
+        )
+        db.execute(
+            "INSERT INTO ingest_accounts(channel,store,enabled,authority,failures,updated_at) "
+            "VALUES ('ml','uuid-nativa',1,'bling',0,?)",
+            (erp.now(),),
+        )
+    asked = {}
+
+    def provider_for(platform):
+        def read(*, channel, store, date_from, date_to):
+            asked[(channel, store)] = platform
+            account = {"integration_id": store, "state": "read_ok", "orders": [], "has_more": False}
+            return {"accounts": [account]}
+
+        return read
+
+    service_loop.once(erp, provider_for=provider_for, channels={"ml"})
+    assert asked == {("ml", FIOREE): "bling_copy", ("ml", "uuid-nativa"): "ml"}

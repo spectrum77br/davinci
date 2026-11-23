@@ -40,8 +40,8 @@ def archived_stores(db):
     return out
 
 
-# Channels whose DaVinci integrations the reception adopts. Temu has no integration there and is
-# read from the copy of Bling instead (adopt_bling_copy_stores).
+# Channels whose DaVinci integrations the reception adopts. Temu and ML Fioree have no integration
+# there and are read from the copy of Bling instead (adopt_bling_copy_stores).
 READABLE = {"ml", "shopee", "tiktok", "amazon", "magalu", "carrefour"}
 
 
@@ -91,36 +91,41 @@ def adopt_new_stores(erp):
     return adopted
 
 
-def adopt_bling_copy_stores(erp):
-    """Temu stores, read from DaVinci's copy of Bling: they have no integration in DaVinci, so they
-    enter by their Bling store code. A policy the store register turned inactive comes back, since
-    the register only knows DaVinci's integrations."""
-    from app.erp_local import temu_order_probe
+COPY_LABELS = {"temu": "Temu", "ml": "ML"}
 
+
+def adopt_bling_copy_stores(erp):
+    """Stores read from DaVinci's copy of Bling (Temu, ML Fioree): they have no integration in
+    DaVinci, so they enter by their Bling store code. A policy the store register turned inactive
+    comes back, since the register only knows DaVinci's integrations."""
+    from app.erp_local import bling_copy_order_probe
+
+    stores = bling_copy_order_probe.STORES
     with erp.connection() as db:
         known = {(r[0], r[1]) for r in db.execute("SELECT channel,store FROM ingest_accounts")}
-        for store, name in temu_order_probe.STORES.items():
+        for store, (channel, name) in stores.items():
             db.execute(
-                "INSERT INTO store_policies VALUES ('temu',?,'identity_review',?,?) "
+                "INSERT INTO store_policies VALUES (?,?,'identity_review',?,?) "
                 "ON CONFLICT(channel,store) DO UPDATE SET status='identity_review' "
                 "WHERE store_policies.status='inactive'",
                 (
+                    channel,
                     store,
-                    dumps({"name": f"Temu {name}", "copied_from_bling": True}),
+                    dumps({"name": f"{COPY_LABELS[channel]} {name}", "copied_from_bling": True}),
                     erp.now(),
                 ),
             )
     adopted = []
-    for store, name in temu_order_probe.STORES.items():
-        if ("temu", store) in known:
+    for store, (channel, name) in stores.items():
+        if (channel, store) in known:
             continue
         erp.command(
-            f"adopt-bling-copy-v1:temu:{store}",
+            f"adopt-bling-copy-v1:{channel}:{store}",
             "ingest.account.set",
-            {"channel": "temu", "store": store, "enabled": True},
+            {"channel": channel, "store": store, "enabled": True},
             actor="cópia do Bling",
         )
-        adopted.append(f"temu:{name}")
+        adopted.append(f"{channel}:{name}")
     return adopted
 
 
@@ -216,14 +221,15 @@ def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None, channels=
         if store in archived:
             report[f"{channel}:{store}"] = {"state": "archived"}
             continue
+        copied = native_ingest.copied(channel, store)
         try:
             report[f"{channel}:{store}"] = native_ingest.service_round(
                 erp,
                 channel,
                 store,
-                provider_for(channel),
+                provider_for("bling_copy" if copied else channel),
                 reader=(copy_reader or reader)
-                if channel in recipient_capture.FROM_BLING
+                if recipient_capture.from_bling(channel, store)
                 else reader
                 if channel in channel_recipients.READERS
                 else None,

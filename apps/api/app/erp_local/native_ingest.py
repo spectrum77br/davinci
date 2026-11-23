@@ -11,7 +11,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.erp_local import native_orders, recipient_capture
+from app.erp_local import bling_copy_order_probe, native_orders, recipient_capture
 from app.erp_local.core import ERPError, text
 
 SCHEMA = """
@@ -56,9 +56,10 @@ OPEN_STATUS = {
     "carrefour": {"SHIPPING"},
 }
 CANCELLED = {"CANCELLED", "CANCELED"}
-# Read from DaVinci's copy of Bling, not from the store (Temu, until its own app is authorized):
-# kept and compared like any store, never turned into an own order, since the copy ends with Bling.
-COPIED_FROM_BLING = {"temu"}
+# Read from DaVinci's copy of Bling, not from the store (Temu and Mercado Livre Fioree, until each
+# has an app of our own): kept and compared like any store, never turned into an own order, since
+# the copy ends with Bling. The accounts are bling_copy_order_probe.STORES, by Bling store code.
+copied = bling_copy_order_probe.copied
 VERIFY_CANCELLATION = 83962
 PROMOTION_REFUSALS = {
     "cancelled": "Pedido cancelado na loja.",
@@ -275,9 +276,9 @@ def run_account(erp, channel, store, provider, *, now=None, importer=None):
     return {"state": state, "reads": reads, "observed": observed, "added": added}
 
 
-def first_lookback(channel):
-    long_first = CHARGED | COPIED_FROM_BLING
-    return FIRST_LOOKBACK_WINDOW if channel in long_first else CATCH_UP_LOOKBACK_WINDOW
+def first_lookback(channel, store=None):
+    long_first = channel in CHARGED or copied(channel, store)
+    return FIRST_LOOKBACK_WINDOW if long_first else CATCH_UP_LOOKBACK_WINDOW
 
 
 def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
@@ -295,7 +296,8 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
             "AND state IN ('complete','partial_kept') LIMIT 1",
             (channel, store),
         ).fetchone()
-    start, end = now - (first_lookback(channel) if first else LOOKBACK_WINDOW), now - SAFETY_LAG
+    back = first_lookback(channel, store) if first else LOOKBACK_WINDOW
+    start, end = now - back, now - SAFETY_LAG
     # One day per read, like the reception: the store readers refuse longer windows.
     state, reads, observed, added, position, kept = "complete", 0, 0, 0, start, False
     while position < end:
@@ -418,8 +420,11 @@ def store_charges(db, channel, store, key, orders):
     """Freight and seller coupon that Bling adds to the products, per store, or None if unread.
 
     Mercado Livre: freight from the shipment, coupon from the order. TikTok: the buyer's
-    shipping, without the handling fee TikTok puts in its own total.
+    shipping, without the handling fee TikTok puts in its own total. A sale read from the copy of
+    Bling carries Bling's own total, freight and coupon included.
     """
+    if copied(channel, store):
+        return None
     if channel == "ml":
         return ml_charges(db, store, key, orders)
     if channel == "tiktok":
@@ -434,6 +439,11 @@ def store_charges(db, channel, store, key, orders):
 
 
 CHARGED = {"ml", "tiktok"}
+
+
+def charged(channel, store):
+    """Whether the sale's total is products + freight - coupon read apart from the store."""
+    return channel in CHARGED and not copied(channel, store)
 
 
 def _value_adjustment(orders, items, charges=None):
@@ -468,7 +478,7 @@ def _unit_reasons(db, channel, store, account, key, unit):
         return {"cancelled"}
     reasons = set()
     allowed = OPEN_STATUS.get(channel)
-    if channel in COPIED_FROM_BLING:
+    if copied(channel, store):
         reasons.add("bling_copy")
     elif allowed is None or any(str(o.get("status") or "").upper() not in allowed for o in live):
         reasons.add("not_open")
@@ -477,7 +487,7 @@ def _unit_reasons(db, channel, store, account, key, unit):
 
         if ml_shipping.left(db, store, key):
             reasons.add("not_open")
-    if channel in CHARGED and store_charges(db, channel, store, key, live) is None:
+    if charged(channel, store) and store_charges(db, channel, store, key, live) is None:
         reasons.add("total_unknown")
     if (live[0].get("pack_id") or live[0].get("cart_id")) and not _settled(account, orders):
         reasons.add("cart_waiting")
@@ -694,7 +704,7 @@ def promote(erp, channel, store, external, *, depot):
     orders = list(unit.values())
     live = [o for o in orders if not _is_cancelled(o)]
     charges = None
-    if channel in CHARGED:
+    if charged(channel, store):
         with erp.connection() as db:
             charges = store_charges(db, channel, store, key, live)
         if charges is None:

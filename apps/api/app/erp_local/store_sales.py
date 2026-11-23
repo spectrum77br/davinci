@@ -6,7 +6,7 @@ shows each sale as the store sees it, whether its buyer is kept and what would s
 
 import json
 
-from app.erp_local import native_ingest
+from app.erp_local import bling_copy_order_probe, native_ingest
 
 REASONS = {
     "cancelled": "Cancelado na loja",
@@ -24,18 +24,18 @@ REASONS = {
 }
 SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
 # Stores the ERP does not read yet, shown from DaVinci's copy of Bling (hourly reference) while
-# Bling owns them. Temu: no own app authorized yet; at the switch our own app is authorized and
-# its key stays on the ERP server (Bling's key belongs to Bling's app and leaves with it).
-COPIED = {"temu": lambda number: number.startswith("PO-")}
+# Bling owns them: the stores of bling_copy_order_probe (Temu, ML Fioree) and any Temu number. At
+# the switch each store's own app is authorized and its key stays on the ERP server (Bling's key
+# belongs to Bling's app and leaves with it).
 COPY_NOTE = "Pela cópia do Bling: o ERP ainda não lê esta loja direto"
 STATUS_NAMES = {"BLING_COPY": "Cópia do Bling"}
-# Bling store code -> store, as DaVinci's store_info has it (10/11/2026). Temporary like the bridge.
-COPIED_STORES = {
-    "205925390": "Barbosa",
-    "206288707": "Eron",
-    "206288651": "JLAS",
-    "206288703": "Atv",
-}
+
+
+def _copy_channel(store, number):
+    channel, _ = bling_copy_order_probe.STORES.get(store, (None, None))
+    if channel and number and bling_copy_order_probe.NUMBERS[channel].fullmatch(number):
+        return channel
+    return "temu" if number.startswith("PO-") else None
 
 
 def _situation_id(value):
@@ -88,17 +88,18 @@ def _copied(db, bling):
     for row in rows:
         order = json.loads(row[0])
         number = str(order.get("store_number") or "")
-        channel = next((c for c, match in COPIED.items() if number and match(number)), None)
+        store = str(order.get("store") or "")
+        channel = _copy_channel(store, number)
         if not channel or number in read:
             continue
         live = bling.get(number) or {}
-        store = str(order.get("store") or "")
         found.append(
             {
                 "number": number,
                 "channel": channel,
                 "store_id": store,
-                "store": COPIED_STORES.get(store) or f"Temu · loja {store} no Bling",
+                "store": bling_copy_order_probe.STORES.get(store, (None, None))[1]
+                or f"Temu · loja {store} no Bling",
                 "created_at": str(order.get("date") or ""),
                 "status": "Cópia do Bling",
                 "total": f"{float(order.get('total') or 0):.2f}",
