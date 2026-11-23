@@ -959,6 +959,10 @@ class Settings(BaseSettings):
     # separados por vírgula. Vazio = a mesma lista do App Uranyx (hoje thorfinn e
     # heisenberg), para não depender de mexer no .env agora.
     erp_usuarios: str = ""
+    # Troca de autoridade (etapa 2): vazio = Bling. Preenchido = o ERP próprio responde no lugar
+    # do Bling, com token fixo. Só muda com o OK do Eduardo, no .env do servidor.
+    bling_api_base: str = ""
+    bling_api_token: str = ""
 
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints

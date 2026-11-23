@@ -131,13 +131,16 @@ class BlingClient:
 
     @property
     def access_token(self) -> str | None:
-        return self.creds.get("access_token")
+        return get_settings().bling_api_token or self.creds.get("access_token")
 
     @property
     def expires_at(self) -> int:
         return int(self.creds.get("expires_at") or 0)
 
     def _expired(self, skew: int = 30) -> bool:
+        # O ERP próprio usa token fixo: não há OAuth do Bling para renovar.
+        if get_settings().bling_api_token:
+            return False
         return self.expires_at - skew <= int(time.time())
 
     @staticmethod
@@ -265,7 +268,7 @@ class BlingClient:
     ) -> httpx.Response:
         if self._expired():
             await self.refresh()
-        url = f"{BLING_API_BASE}{path}"
+        url = f"{get_settings().bling_api_base or BLING_API_BASE}{path}"
         headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
 
         # Bling occasionally serves a Cloudflare challenge (HTTP 403 + HTML) under
