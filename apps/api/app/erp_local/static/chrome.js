@@ -61,7 +61,7 @@ function railContent(){
   }else if(page==='logistics'&&logisticsView==='objects'){
     actions+=objectsRail();
   }else{
-    actions+=`<div class="rail-actions">${railButton('reload','Atualizar listagem','id="rail-refresh"')}${railButton('printer','Imprimir esta tela','id="print-page"')}${page==='logistics'?railButton('cart','Abrir pedidos','data-page="orders"'):''}${page==='fiscal'?railButton('file','Abrir arquivo de notas','data-page="fiscal"'):''}${railButton('info','Conferir equivalência','data-page="parity"')}</div><div class="rail-info"><h3>Informações</h3><p>${esc(titles[page][0])}</p><small>Operação própria local</small><small>Envios externos desligados</small></div>`;
+    actions+=`<div class="rail-actions">${railButton('reload','Atualizar listagem','id="rail-refresh"')}${railButton('printer','Imprimir esta tela','id="print-page"')}${page==='logistics'?railButton('cart','Abrir pedidos','data-page="orders"'):''}${page==='fiscal'?railButton('file','Abrir arquivo de notas','data-page="fiscal"'):''}${window.erpConsulta?.active?'':railButton('info','Conferir equivalência','data-page="parity"')}</div><div class="rail-info"><h3>Informações</h3><p>${esc(titles[page][0])}</p>${window.erpConsulta?.active?'<small>O Bling manda até a troca</small><small>Aqui só se consulta</small>':'<small>Operação própria local</small><small>Envios externos desligados</small>'}</div>`;
   }
   return actions;
 }
