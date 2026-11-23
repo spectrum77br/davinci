@@ -1606,6 +1606,7 @@ test('consulta: Integrações says store by store whether the ERP has every sale
   d.querySelector('nav [data-page=integrations]').click();
   const text=d.querySelector('main').textContent;
   assert.match(text,/Lojas: igual ao Bling\?/);assert.match(text,/Igual ao Bling/);assert.match(text,/Não lida pelo ERP/);assert.match(text,/1 de 1 lojas lidas/);
+  assert.equal(d.querySelectorAll('.integration-card').length,0);
   dom.window.close();
 });
 
@@ -1623,5 +1624,16 @@ test('a light product from the screen state opens in the editor after asking for
   for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
   assert.deepEqual(asked.filter(u=>u.includes('/full')),['/api/erp-local/products/dg053.sp/full']);
   assert.equal(d.querySelector('#product-edit-form [name=voltage]').value,'bivolt');
+  dom.window.close();
+});
+
+test('an integration card shows the week of sales the ERP read against Bling',async()=>{
+  const p={channel:'amazon',store:'s-amz',status:'shadow',data:{name:'poofy',platform:'amazon',credentials_present:true,authorization_read:{state:'identity_review',current:false,checked_at:'2026-11-05T10:00:00+00:00'}}};
+  const bling_coverage={from:'2026-11-17',to:'2026-11-23',stores:[{bling_store:'9',channel:'amazon',store:'s-amz',name:'poofy',bling:43,found:43,missing:0,equal:43,different:0}]};
+  const {dom,document:d}=await setup({integration_registry:{policies:[p],unbound_profiles:[],observed_profiles:68},bling_coverage});
+  d.querySelector('nav [data-page=integrations]').click();
+  const card=d.querySelector('.integration-card');
+  assert.match(card.textContent,/43 de 43 vendas iguais ao Bling/);
+  assert.match(card.textContent,/Vínculo identificado/);
   dom.window.close();
 });

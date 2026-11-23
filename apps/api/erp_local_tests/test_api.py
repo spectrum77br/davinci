@@ -333,7 +333,8 @@ def test_screen_state_sends_light_products_and_the_editor_asks_for_the_whole_one
             "stock_min",
             "unit",
         }
-        assert "data" in product["tax"] and set(product["tax"]["data"]) == {"ncm", "item_type"}
+        assert set(product.get("tax", {}).get("data", {})) <= {"ncm", "item_type"}
+        assert "history" not in product.get("structure", {})
         full = c.get("/api/erp-local/products/demo.aparelho/full").json()
         assert "light" not in full and full["sku"] == "demo.aparelho"
         assert len(full["details"]) > len(product["details"]) and "history" not in product

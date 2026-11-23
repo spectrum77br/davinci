@@ -35,35 +35,36 @@ class Command(BaseModel):
 # for the whole product (/products/{sku}/full). On the real base this took the state from 7.3 MB
 # to about 2 MB (23/11).
 LIGHT_DETAILS = ("version", "status", "gtin", "tags", "brand", "stock_min", "unit")
-LIGHT_ORIGIN = ("sellable", "stock_state", "catalog_state", "source_status")
+LIGHT_ORIGIN = ("sellable", "stock_state")
 
 
 def light_product(product):
+    """What lists, filters and forms read, and nothing empty: a missing key means none."""
     out = {
         k: v
         for k, v in product.items()
-        if k not in {"details", "tax", "structure", "price_table", "origin", "images"}
+        if k not in {"details", "tax", "structure", "price_table", "origin", "images", "category"}
     }
     details = product.get("details") or {}
-    out["details"] = {k: details[k] for k in LIGHT_DETAILS if k in details}
+    out["details"] = {k: details[k] for k in LIGHT_DETAILS if details.get(k) not in (None, "", [])}
     origin = product.get("origin")
-    out["origin"] = {k: origin.get(k) for k in LIGHT_ORIGIN} if origin else origin
-    images = product.get("images") or {}
-    out["images"] = {"version": images.get("version", 0), "rows": (images.get("rows") or [])[:1]}
-    tax = product.get("tax") or {}
-    data = tax.get("data") or {}
-    out["tax"] = {
-        "version": tax.get("version", 0),
-        "data": {"ncm": data.get("ncm"), "item_type": data.get("item_type")},
-    }
-    structure = product.get("structure") or {}
-    out["structure"] = {
-        "version": structure.get("version", 0),
-        "mode": structure.get("mode"),
-        "components": structure.get("components") or [],
-    }
-    table = product.get("price_table")
-    out["price_table"] = {"department": table.get("department")} if table else None
+    if origin:
+        out["origin"] = {k: origin.get(k) for k in LIGHT_ORIGIN}
+    rows = (product.get("images") or {}).get("rows") or []
+    if rows:
+        out["images"] = {"rows": rows[:1]}
+    data = (product.get("tax") or {}).get("data") or {}
+    if data.get("ncm") or data.get("item_type"):
+        out["tax"] = {"data": {"ncm": data.get("ncm"), "item_type": data.get("item_type")}}
+    parts = (product.get("structure") or {}).get("components") or []
+    if parts and product.get("kind") != "kit":
+        out["structure"] = {"components": parts}
+    department = (product.get("price_table") or {}).get("department")
+    if department:
+        out["price_table"] = {"department": department}
+    category = product.get("category") or {}
+    if category.get("id"):
+        out["category"] = {"id": category["id"], "version": category.get("version", 0)}
     out["light"] = True
     return out
 
