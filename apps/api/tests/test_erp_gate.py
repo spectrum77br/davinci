@@ -49,3 +49,15 @@ def test_sem_lista_do_erp_vale_a_do_app_uranyx_e_sem_nenhuma_ninguem_entra(monke
     assert erp_acesso.liberado(SimpleNamespace(role=UserRole.ADMIN, email="liberado@exemplo.com"))
     _lista(monkeypatch)
     assert _client(UserRole.ADMIN).get("/api/erp-gate/authorize").status_code == 403
+
+
+def test_liberado_pelo_id_entra_fora_das_listas_e_so_sendo_admin(monkeypatch):
+    _lista(monkeypatch)
+    harry = "439ac041-2a38-4457-a2e4-61bf79ca8533"
+    assert erp_acesso.liberado(
+        SimpleNamespace(id=harry, role=UserRole.ADMIN, email="h@exemplo.com")
+    )
+    assert not erp_acesso.liberado(
+        SimpleNamespace(id=harry, role=UserRole.USER, email="h@exemplo.com")
+    )
+    assert not erp_acesso.liberado(SimpleNamespace(id="u1", role=UserRole.ADMIN, email="x@y.com"))
