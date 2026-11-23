@@ -656,15 +656,8 @@ _MARCAS = {
     ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
     ("services/logistica_amazon_avisos.py", "run", "K.LOGISTICA_AMAZON_PRAZOS"): 1,  # 4
     ("services/devolucao_acao_avisos.py", "run", "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA"): 1,  # 10
-    ("services/chamados_tiktok_reembolso.py", "_avisar", "K.CHAMADOS_TIKTOK_SO_REEMBOLSO"): 1,
-    ("services/chamados_pendencias.py", "varrer", "K.CHAMADOS_ABERTURAS_PRESAS"): 1,  # 14
     ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
     ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,  # 16
-    (
-        "services/vigia_estoque_familia.py",
-        "vigia_estoque_familia_sweep",
-        "K.PRODUTOS_VIGIA_SOMA_FAMILIA",
-    ): 1,  # 24
     # 25, 26 e 27 (Margem)
     ("services/margem_auto_hold.py", "_avisar_threema", "K.MARGEM_PEDIDO_SEGURADO"): 1,
     (
@@ -707,6 +700,15 @@ _PELO_CADASTRO = {
         "services/prioridade_estoque_movimentos.py",
         "avisar_falhas",
         "K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA",
+    ): 1,
+    # F1/C8c: TikTok só reembolso (13), aberturas presas — um envio por
+    # remetente da origem do chamado (14) — e a soma por família (24)
+    ("services/chamados_tiktok_reembolso.py", "_avisar", "K.CHAMADOS_TIKTOK_SO_REEMBOLSO"): 1,
+    ("services/chamados_pendencias.py", "varrer", "K.CHAMADOS_ABERTURAS_PRESAS"): 1,
+    (
+        "services/vigia_estoque_familia.py",
+        "vigia_estoque_familia_sweep",
+        "K.PRODUTOS_VIGIA_SOMA_FAMILIA",
     ): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,

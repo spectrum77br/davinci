@@ -33,10 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados as chamados_svc
-from app.services import threema, threema_registro
+from app.services import threema_envios
 from app.services.chamados_devolucao import TIPO_ABERTURA
 from app.services.chamados_devolucao_sync import ABERTURA_FALHOU_ACOMPANHA
-from app.services.chamados_tiktok_reembolso import _destinatarios, e_chamado_reembolso
+from app.services.chamados_tiktok_reembolso import e_chamado_reembolso
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
@@ -238,24 +238,32 @@ async def varrer(
 
     if not dry_run:
         await session.commit()
-        if avisos:
-            alvos = _destinatarios()
-            if alvos:
-                for contexto, linhas in avisos_por_contexto.items():
-                    texto = (
-                        "⚠️ Chamados com abertura presa (varredura):\n" + "\n".join(linhas[:15])
-                        + ("\n…" if len(linhas) > 15 else "")
-                    )
-                    try:
-                        with threema_registro.envio(K.CHAMADOS_ABERTURAS_PRESAS):
-                            await threema.ThreemaClient(contexto=contexto).send_to_all(
-                                texto, recipients=alvos
-                            )
-                    except Exception as e:  # noqa: BLE001 — cada canal é best-effort
-                        logger.warning(
-                            "chamados_pendencias_threema_falhou",
-                            contexto=contexto, err=str(e)[:200],
-                        )
+        # Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1; a
+        # semente copiou a lista do aviso do TikTok só reembolso, a mesma fonte
+        # de antes). O remetente segue a origem do caso (`contexto=`). O
+        # carimbo da rota já foi gravado no histórico do chamado: desligado ou
+        # ninguém válido = o aviso se perde (o `descarta` do catálogo); no
+        # ninguém válido o núcleo grava o registro `ok=false` e acende o sino.
+        for contexto, linhas in avisos_por_contexto.items():
+            texto = (
+                "⚠️ Chamados com abertura presa (varredura):\n" + "\n".join(linhas[:15])
+                + ("\n…" if len(linhas) > 15 else "")
+            )
+            try:
+                res = await threema_envios.enviar(
+                    K.CHAMADOS_ABERTURAS_PRESAS, texto, contexto=contexto, session=session
+                )
+            except Exception as e:  # noqa: BLE001 — cada canal é best-effort
+                logger.warning(
+                    "chamados_pendencias_threema_falhou",
+                    contexto=contexto, err=str(e)[:200],
+                )
+                continue
+            if res.get("motivo"):
+                logger.warning(
+                    "chamados_pendencias_threema_nao_saiu",
+                    contexto=contexto, motivo=res["motivo"], via=res.get("via"),
+                )
     resumo["avisos"] = avisos
     logger.info(
         "chamados_pendencias_varredura",

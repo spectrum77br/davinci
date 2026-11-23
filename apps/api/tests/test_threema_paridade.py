@@ -3,10 +3,9 @@ ao que cada ponto de envio monta HOJE, para TODOS os envios do servidor
 gerenciados — quem recebe e se está ligado.
 
 "Hoje" é a função antiga de verdade sempre que ela existe
-(`ouvidoria.destinatarios`, `_recipients_margem_auto`, `_destinatarios` do
-TikTok, `recipients_auto` da Amazon e das Devoluções, `denuncia_robo_aviso.
-destinatarios` com a reserva `chamados_ia`, o `send_to_all` que cai no
-THREEMA_RECIPIENTS...). Onde a lista é montada no
+(`ouvidoria.destinatarios`, `_recipients_margem_auto`, `recipients_auto` da
+Amazon e das Devoluções, `denuncia_robo_aviso.destinatarios` com a reserva
+`chamados_ia`, o `send_to_all` que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
 meio de uma função maior, a expressão é copiada aqui E um teste confere que
 ela continua no código — se alguém mudar o ponto de envio, este arquivo
 reprova. Os botões que montam a lista dentro da rota (os 5 Informar e o
@@ -38,8 +37,6 @@ from app.routers import informar as informar_router
 from app.services import (
     chamados_ia_aviso,
     chamados_juridico,
-    chamados_pendencias,
-    chamados_tiktok_reembolso,
     denuncia_relatorio_threema,
     denuncia_robo_aviso,
     devolucao_acao_avisos,
@@ -88,8 +85,8 @@ async def _tuta_antes_da_f1(db) -> list[str]:
     return P(user.threema if user else None)
 
 
-# Cópias congeladas dos pontos que a F1 migrou (C8a e C8b: o código deles já
-# não monta a lista, lê o Cadastro).
+# Cópias congeladas dos pontos que a F1 migrou (C8a, C8b e C8c: o código deles
+# já não monta a lista, lê o Cadastro).
 _ANTES_DA_F1 = {
     # logistica_track_sync.avisar_graves (o mesmo para o pacote de devolução)
     K.LOGISTICA_CORREIOS_GRAVE: lambda db: P(get_settings().threema_recipients),
@@ -116,6 +113,20 @@ _ANTES_DA_F1 = {
             K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
         ),
         lambda db: P(get_settings().nf_sem_estoque_threema_recipients),
+    ),
+    # F1/C8c — chamados_tiktok_reembolso._destinatarios, usado pelo aviso do
+    # TikTok só reembolso (13) e pela varredura das aberturas presas (14): o
+    # TIKTOK_REEMBOLSO, com o grupo do sem estoque de reserva
+    **dict.fromkeys(
+        (K.CHAMADOS_TIKTOK_SO_REEMBOLSO, K.CHAMADOS_ABERTURAS_PRESAS),
+        lambda db: P(
+            get_settings().tiktok_reembolso_threema_recipients
+            or get_settings().nf_sem_estoque_threema_recipients
+        ),
+    ),
+    # vigia_estoque_familia.vigia_estoque_familia_sweep (24)
+    K.PRODUTOS_VIGIA_SOMA_FAMILIA: lambda db: P(
+        getattr(get_settings(), "vigia_estoque_familia_threema_recipients", "")
     ),
 }
 
@@ -144,14 +155,9 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         K.LOGISTICA_AMAZON_PRAZOS: lambda: logistica_amazon_avisos.recipients_auto(db),
         K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: lambda: devolucao_acao_avisos.recipients_auto(db),
         K.DEVOLUCOES_INFORMAR: lambda: _informar(db, "devolucoes"),
-        K.CHAMADOS_TIKTOK_SO_REEMBOLSO: chamados_tiktok_reembolso._destinatarios,
-        K.CHAMADOS_ABERTURAS_PRESAS: chamados_pendencias._destinatarios,
         K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
         K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda: chamados_juridico.recipients_juridico(db),
         K.CONTROLE_ESTOQUE_INFORMAR: lambda: _informar(db, "controle_estoque"),
-        K.PRODUTOS_VIGIA_SOMA_FAMILIA: lambda: P(
-            getattr(get_settings(), "vigia_estoque_familia_threema_recipients", "")
-        ),
         K.MARGEM_PEDIDO_SEGURADO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_REAVALIACAO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_MARGEM_ALTA: lambda: margem_auto_hold._recipients_margem_auto(db),
@@ -350,9 +356,6 @@ async def test_mac_e_informativos_nao_tem_lista_no_servidor(db):
 # Onde a lista é montada no meio de uma função maior, a cópia acima vale só
 # enquanto a expressão continuar no código.
 _EXPRESSOES: dict[str, tuple[str, ...]] = {
-    "services/vigia_estoque_familia.py": (
-        'getattr(settings, "vigia_estoque_familia_threema_recipients", "")',
-    ),
     "services/logistica_bling.py": ("threema.parse_recipients(rule.threema_recipients) or None",),
     "routers/logistica.py": (
         # botão da linha do pedido
@@ -456,6 +459,11 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         # F1/C8b: nenhum dos dois monta lista nenhuma
         "services/nf_auto_enfileirar.py": "parse_recipients",
         "services/prioridade_estoque_movimentos.py": "parse_recipients",
+        # F1/C8c: o `_destinatarios` do TikTok saiu (a varredura das aberturas
+        # presas também o usava) e o vigia da soma não lê mais o .env
+        "services/chamados_tiktok_reembolso.py": "parse_recipients",
+        "services/chamados_pendencias.py": "_destinatarios",
+        "services/vigia_estoque_familia.py": "threema_recipients",
     }
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo

@@ -49,7 +49,6 @@ from uuid import NAMESPACE_URL, uuid5
 import structlog
 from sqlalchemy import or_, select
 
-from app.config import get_settings
 from app.models import (
     Chamado,
     ChamadoAnexo,
@@ -59,7 +58,7 @@ from app.models import (
     IntegrationPlatform,
 )
 from app.services import chamados as chamados_svc
-from app.services import logistica_tiktok, threema, threema_registro
+from app.services import logistica_tiktok, threema_envios
 from app.services.devolucao_returns import epoch_to_dt
 from app.services.marketplaces.tiktok import TikTokClient
 from app.services.threema_catalogo import K
@@ -411,24 +410,26 @@ def _pedido_do_comprador(eventos: list[dict]) -> tuple[object, bool]:
     return None, False
 
 
-def _destinatarios() -> list[str]:
-    s = get_settings()
-    return threema.parse_recipients(
-        s.tiktok_reembolso_threema_recipients or s.nf_sem_estoque_threema_recipients
-    )
+async def _avisar(texto: str, *, session=None) -> None:
+    """Aviso de prazo no Threema. Best-effort.
 
-
-async def _avisar(texto: str) -> None:
-    alvos = _destinatarios()
-    if not alvos:
-        return
+    Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F1; a semente
+    copiou o TIKTOK_REEMBOLSO_THREEMA_RECIPIENTS, com o grupo do sem estoque
+    de reserva — a lista que o `_destinatarios` de antes montava, que segue
+    só como a configuração antiga do núcleo). Desligado ou ninguém válido =
+    não sai, e o aviso daquela faixa se perde: `run_vigia` carimba
+    `aviso_prazo_acao_at` de qualquer jeito (o `descarta` do catálogo; a C0
+    é tarefa à parte). No ninguém válido o núcleo grava o registro
+    `ok=false` e acende o sino dos admins."""
     try:
-        with threema_registro.envio(K.CHAMADOS_TIKTOK_SO_REEMBOLSO):
-            await threema.ThreemaClient(contexto="devolucoes").send_to_all(
-                texto, recipients=alvos
-            )
+        res = await threema_envios.enviar(K.CHAMADOS_TIKTOK_SO_REEMBOLSO, texto, session=session)
     except Exception as e:  # noqa: BLE001 — aviso é best-effort
         logger.warning("tiktok_reembolso_threema_falhou", err=str(e)[:200])
+        return
+    if res.get("motivo"):
+        logger.warning(
+            "tiktok_reembolso_threema_nao_saiu", motivo=res["motivo"], via=res.get("via")
+        )
 
 
 async def _historico(session, ch: Chamado) -> list[str]:
@@ -630,7 +631,7 @@ async def run_vigia(session, *, agora: datetime | None = None, dry_run: bool = F
             await _avisar(texto_aviso(
                 conta=(info.get("conta") or conta), pedido=pedido_bling, caso=caso, nota=nota,
                 prazo=prazo, ultimo=(nivel == "3h"), ch=ch, travada=travada, agora=agora,
-            ))
+            ), session=session)
             rast.aviso_prazo_acao_at = agora
             rast.aviso_prazo_acao_para = prazo_dt
     # Desfecho: chamado que respondeu (lançamento ou antigo) cujo caso saiu de pendente.

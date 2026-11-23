@@ -225,6 +225,11 @@ _USOS_DO_NUCLEO = {
     # lido antes das marcas de "já avisei") e o kit da prioridade (23)
     "services/nf_auto_enfileirar.py": {"enviar", "resolver"},
     "services/prioridade_estoque_movimentos.py": {"enviar"},
+    # F1/C8c: TikTok só reembolso (13), aberturas presas com o remetente da
+    # origem do chamado (14) e a soma por família (24)
+    "services/chamados_tiktok_reembolso.py": {"enviar"},
+    "services/chamados_pendencias.py": {"enviar"},
+    "services/vigia_estoque_familia.py": {"enviar"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {

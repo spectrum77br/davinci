@@ -13,9 +13,12 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
+
+from app.config import get_settings
 from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados_pendencias as svc
-from sqlalchemy import select
+from app.services import threema
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,10 +35,18 @@ class _Threema:
         self.enviados.append(texto)
 
 
+def _quem_recebe(monkeypatch) -> None:
+    """Quem recebe o aviso: desde a F1 (tarefa 16) vem de Cadastros › Envios
+    Threema; sem a semente, vale a configuração antiga (o .env do aviso do
+    TikTok só reembolso, a mesma lista do `_destinatarios` de antes). O
+    caminho pelo Cadastro tem os testes de `test_threema_pontos_chamados_produtos`."""
+    monkeypatch.setattr(get_settings(), "tiktok_reembolso_threema_recipients", "ABCDEFGH")
+
+
 def _sem_threema(monkeypatch) -> list[str]:
     _Threema.enviados = []
-    monkeypatch.setattr(svc, "_destinatarios", lambda: ["ABCDEFGH"])
-    monkeypatch.setattr(svc.threema, "ThreemaClient", _Threema)
+    _quem_recebe(monkeypatch)
+    monkeypatch.setattr(threema, "ThreemaClient", _Threema)
     return _Threema.enviados
 
 
@@ -168,8 +179,8 @@ def threema_separado(monkeypatch):
     valores["threema_devolucoes_gateway_id"] = "*DEVOL01"
     valores["threema_devolucoes_gateway_secret"] = "devolucoes-test-secret"  # noqa: S105 — fictícia
     config = SimpleNamespace(**valores)
-    monkeypatch.setattr(svc.threema, "get_settings", lambda: config)
-    monkeypatch.setattr(svc, "_destinatarios", lambda: ["ABCDEFGH"])
+    monkeypatch.setattr(threema, "get_settings", lambda: config)
+    _quem_recebe(monkeypatch)
     enviados = []
 
     def receber(request):

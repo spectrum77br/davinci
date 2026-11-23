@@ -363,7 +363,9 @@ def _servidor() -> list[EnvioDef]:
                 envs=("tiktok_reembolso_threema_recipients", "nf_sem_estoque_threema_recipients"),
                 grupo=G_TIKTOK_CHAMADOS,
             ),
-            fatia="F1",
+            # Desligado, o aviso daquela faixa se perde: `run_vigia` carimba
+            # `aviso_prazo_acao_at` mesmo sem envio (a C0 é tarefa à parte).
+            fatia="F1", migrado=True,
         ),
         E(
             K.CHAMADOS_ABERTURAS_PRESAS, "Chamados", None, "Abertura de chamado presa",
@@ -374,7 +376,8 @@ def _servidor() -> list[EnvioDef]:
                 envs=("tiktok_reembolso_threema_recipients", "nf_sem_estoque_threema_recipients"),
                 grupo=G_TIKTOK_CHAMADOS,
             ),
-            fatia="F1",
+            # O carimbo da rota vai para o histórico do chamado antes do aviso.
+            fatia="F1", migrado=True,
         ),
         E(
             K.CHAMADOS_IA_PARADA, "Chamados", "IA de Chamado", "IA de Chamado parada",
@@ -461,7 +464,7 @@ def _servidor() -> list[EnvioDef]:
             "tolerância. Repete nas duas rodadas enquanto o problema existir.",
             "horario", "09:20 e 16:20", "servidor", "estoque",
             L(envs=("vigia_estoque_familia_threema_recipients",)),
-            depende_de=(_DEP_FAMILIA,), fatia="F1",
+            depende_de=(_DEP_FAMILIA,), fatia="F1", migrado=True,
         ),
         # ── Margem ─────────────────────────────────────────────────────────
         E(

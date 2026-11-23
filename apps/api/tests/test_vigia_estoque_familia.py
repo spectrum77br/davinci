@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import IntegrationPlatform, LinkSyncStatus, Product, ProductLink
 from app.services import estoque_familia, threema, vigia_estoque_familia
 from tests.test_sync_orchestrator import _make_company_store, _make_integration
@@ -30,6 +31,15 @@ def configurar(monkeypatch):
         cfg = _Config(**kwargs)
         monkeypatch.setattr(estoque_familia, "get_settings", lambda: cfg)
         monkeypatch.setattr(vigia_estoque_familia, "get_settings", lambda: cfg)
+        # Quem recebe: desde a F1 (tarefa 16) vem de Cadastros › Envios
+        # Threema; sem a semente, vale a configuração antiga (o .env do vigia).
+        # O caminho pelo Cadastro tem os testes de
+        # `test_threema_pontos_chamados_produtos`.
+        monkeypatch.setattr(
+            get_settings(),
+            "vigia_estoque_familia_threema_recipients",
+            cfg.vigia_estoque_familia_threema_recipients,
+        )
         return cfg
 
     return _f

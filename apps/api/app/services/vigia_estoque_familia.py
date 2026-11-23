@@ -18,9 +18,13 @@ venda, é normal um anúncio ficar alguns minutos com o número velho até a fil
 de sync alcançá-lo. Acusar isso seria só barulho. O que interessa é o anúncio
 que está errado há horas — esse não vai se resolver sozinho.
 
-DESLIGADO POR PADRÃO: sem `VIGIA_ESTOQUE_FAMILIA_THREEMA_RECIPIENTS` o vigia
-roda, mede e loga, mas não manda mensagem. Assim dá para acompanhar o número
-por alguns dias antes de começar a acordar alguém.
+QUEM RECEBE vem de Cadastros › Envios Threema (tarefa 16, F1). A semente
+copiou a lista do `.env` antigo deste vigia, que nasceu vazia de propósito
+(medir por alguns dias antes de começar a acordar alguém). Desligado no
+Cadastro, o vigia roda, mede e loga, mas não manda mensagem; ligado com
+ninguém válido na lista, também não manda — o núcleo grava o registro e
+acende o sino dos admins, e a tela fica vermelha até alguém ser escolhido ou
+o envio ser desligado.
 
 ANTI-SPAM: o cron roda 2x por dia. Não há tabela de estado — o aviso repete
 enquanto o problema existir, o que é o comportamento certo para uma coisa que
@@ -38,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import session_scope
 from app.models import IntegrationPlatform, Product, ProductLink
-from app.services import threema, threema_registro
+from app.services import threema_envios
 from app.services.estoque_familia import chave_familia, familia_ligada, saldo_publicavel
 from app.services.threema_catalogo import K
 
@@ -183,23 +187,25 @@ async def vigia_estoque_familia_sweep() -> dict:
     if not atrasados:
         return resumo
 
-    recipients = threema.parse_recipients(
-        getattr(settings, "vigia_estoque_familia_threema_recipients", "")
-    )
-    if not recipients:
-        resumo["aviso"] = "recipients_vazio"
-        return resumo
-
+    # Sem carimbo: o aviso repete a cada rodada enquanto o problema existir.
+    # Desligado ou ninguém válido = a rodada não avisa e nada fica guardado (o
+    # `descarta` do catálogo): ao religar, a rodada seguinte avisa o que
+    # continuar atrasado.
     try:
-        with threema_registro.envio(K.PRODUTOS_VIGIA_SOMA_FAMILIA):
-            envio = await threema.ThreemaClient(contexto="estoque").send_to_all(
-                _texto_aviso(atrasados, medida["total"]), recipients
-            )
-        resumo["avisados"] = len(envio.get("sent", []))
-        resumo["falharam"] = len(envio.get("failed", []))
+        envio = await threema_envios.enviar(
+            K.PRODUTOS_VIGIA_SOMA_FAMILIA, _texto_aviso(atrasados, medida["total"])
+        )
     except Exception as exc:  # noqa: BLE001
         # Best-effort: falhar o aviso não pode derrubar o tick; o próximo
         # avisa de novo, porque o problema continua lá.
         logger.warning("vigia_estoque_familia_threema_falhou", error=str(exc)[:300])
         resumo["aviso"] = "threema_falhou"
+        return resumo
+    if envio.get("motivo") == "desligado":
+        resumo["aviso"] = "envio_desligado"
+    elif envio.get("motivo") == "sem_destinatarios":
+        resumo["aviso"] = "recipients_vazio"
+    else:
+        resumo["avisados"] = len(envio.get("sent", []))
+        resumo["falharam"] = len(envio.get("failed", []))
     return resumo

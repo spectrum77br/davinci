@@ -243,7 +243,8 @@ def test_mac_tem_reserva_do_env_do_mac_e_nenhum_remetente_do_servidor():
 
 
 # Os envios que já leem o Cadastro, fatia a fatia (cada commit de fatia
-# acrescenta os seus aqui, junto com o `migrado=True` e os testes por ponto).
+# acrescenta os seus aqui, na ordem do catálogo, junto com o `migrado=True` e
+# os testes por ponto).
 MIGRADOS = [
     # F1/C8a: Logística e Devoluções do .env (itens 5, 6, 7, 8, 9 e 12)
     K.LOGISTICA_CORREIOS_GRAVE,
@@ -252,6 +253,9 @@ MIGRADOS = [
     K.DEVOLUCOES_PACOTE_VOLTA_GRAVE,
     K.DEVOLUCOES_PRAZO_CONTESTACAO,
     K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR,
+    # F1/C8c: Chamados (itens 13 e 14)
+    K.CHAMADOS_TIKTOK_SO_REEMBOLSO,
+    K.CHAMADOS_ABERTURAS_PRESAS,
     # F1/C8b: Estoque e NF (itens 18 a 23)
     K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO,
     K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE,
@@ -259,6 +263,8 @@ MIGRADOS = [
     K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING,
     K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO,
     K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
+    # F1/C8c: Produtos (item 24)
+    K.PRODUTOS_VIGIA_SOMA_FAMILIA,
 ]
 
 
@@ -273,7 +279,8 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     """O que acontece com os avisos enquanto o envio está desligado é o que
     o ponto JÁ faz (o Cadastro não muda o carimbo de ninguém): cada um tem o
     seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`
-    (C8a) e `test_threema_pontos_estoque_nf` (C8b)."""
+    (C8a), `test_threema_pontos_estoque_nf` (C8b) e
+    `test_threema_pontos_chamados_produtos` (C8c)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o carimbo da ocorrência grave é gravado antes do aviso
         K.LOGISTICA_CORREIOS_GRAVE: "descarta",
@@ -297,6 +304,12 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
         K.CONTROLE_ESTOQUE_NF_RECUSA_AGUARDANDO_CANCELAMENTO: "descarta",
         # `avisado_at` só é carimbado quando o aviso sai
         K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA: "acumula",
+        # `aviso_prazo_acao_at` é carimbado mesmo sem envio (C0 à parte)
+        K.CHAMADOS_TIKTOK_SO_REEMBOLSO: "descarta",
+        # o carimbo da rota vai para o histórico do chamado antes do aviso
+        K.CHAMADOS_ABERTURAS_PRESAS: "descarta",
+        # sem carimbo: repete a cada rodada enquanto o problema existir
+        K.PRODUTOS_VIGIA_SOMA_FAMILIA: "descarta",
     }
 
 
