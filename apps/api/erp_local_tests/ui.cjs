@@ -1564,6 +1564,7 @@ test('inside DaVinci (embed=1) only the screen shows, and #orders/store opens th
   const {document:d}=await setup({consulta},'http://127.0.0.1:8765/erp?embed=1#products');
   assert.ok(d.body.classList.contains('embedded'));
   assert.equal(d.getElementById('abertura'),null);
+  assert.doesNotMatch(d.getElementById('title').textContent,/Controle da operação/);
   assert.equal(d.querySelector('nav [data-page=products].active')?.dataset.page||d.getElementById('title').textContent.includes('Produto')?'products':'',  'products');
   const plain=await setup({consulta},'http://127.0.0.1:8765/erp#products');
   assert.ok(!plain.document.body.classList.contains('embedded'));

@@ -12,8 +12,9 @@ const { parse, compileScript, compileTemplate } = require('vue/compiler-sfc')
 
 const root = path.join(__dirname, '..')
 for (const [file, src] of [
-  ['pages/erp-produtos.vue', '/erp?embed=1#products'],
-  ['pages/erp-pedidos.vue', '/erp?embed=1#orders/store'],
+  ['pages/erp-produtos.vue', null],
+  ['pages/erp-pedidos.vue', null],
+  ['components/ErpTelas.vue', '/erp?embed=1#products'],
 ]) {
   const source = fs.readFileSync(path.join(root, file), 'utf8')
   const { descriptor, errors } = parse(source, { filename: file })
@@ -21,9 +22,18 @@ for (const [file, src] of [
   const script = compileScript(descriptor, { id: file })
   const template = compileTemplate({ source: descriptor.template.content, filename: file, id: file, compilerOptions: { bindingMetadata: script.bindings } })
   assert.deepEqual(template.errors, [], file)
-  assert.match(source, /definePageMeta\(\{ middleware: \['admin', 'erp'\] \}\)/, file)
-  assert.ok(source.includes(`<iframe src="${src}"`), `${file} mostra ${src}`)
+  if (src === null) {
+    assert.match(source, /definePageMeta\(\{ middleware: \['admin', 'erp'\] \}\)/, file)
+    continue
+  }
+  // A tela fica no layout e só some da vista (v-show): voltar não recarrega o ERP.
+  assert.ok(source.includes("'/erp-produtos': { src: '/erp?embed=1#products'"), file)
+  assert.ok(source.includes("'/erp-pedidos': { src: '/erp?embed=1#orders/store'"), file)
+  assert.match(source, /v-show="atual === caminho"/, file)
+  assert.match(source, /v-if="auth\.user\?\.erp === true"/, file)
 }
+const layout = fs.readFileSync(path.join(root, 'layouts/default.vue'), 'utf8')
+assert.match(layout, /<slot \/>\n\s*<ClientOnly><ErpTelas \/><\/ClientOnly>/)
 const middleware = fs.readFileSync(path.join(root, 'middleware/erp.ts'), 'utf8')
 assert.match(middleware, /u\.erp !== true\) return navigateTo\('\/403'\)/)
 const sidebar = fs.readFileSync(path.join(root, 'components/AppSidebar.vue'), 'utf8')

@@ -92,6 +92,7 @@ onBeforeUnmount(() => {
       <AppTopbar v-show="!telaCheia" :mobile-menu-open="mobileMenuOpen" @toggle-menu="mobileMenuOpen = !mobileMenuOpen" />
       <main class="app-main flex-1 min-w-0" :class="telaCheia ? 'app-main--tela-cheia' : 'px-3 py-4 sm:px-4 lg:px-6 lg:py-6'">
         <slot />
+        <ClientOnly><ErpTelas /></ClientOnly>
       </main>
     </div>
   </div>
