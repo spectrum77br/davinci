@@ -8,6 +8,11 @@ em app/routers/margens.py): linhas onde o frete real cobrado pelo marketplace
 Só cria quando o prejuizo agregado do pedido é de pelo menos `_MIN_PREJUIZO`
 (R$5): diferenças menores não compensam o esforço de cobrar o reembolso.
 
+Venda do ML abaixo de R$ 79 (`ML_VENDA_MINIMA`) não gera linha, embora a
+Margem continue mostrando o alerta de frete: nessas vendas a cotação do
+anúncio é mais ou menos metade do que o ML cobra, e o ML nega a diferença
+(ver `_ML_VENDA_ABAIXO_SQL`).
+
 Política: nunca atualiza, nunca sobrescreve. Se já existe um refund
 Logistica para o (pedido_bling, conta) — manual ou auto-gerado — o
 INSERT é skipado via WHERE NOT EXISTS. O usuário sempre tem o controle
@@ -94,6 +99,26 @@ _FRETE_RESULTADO_SQL = f"(({_FRETE_PLATAFORMA_SQL}) - ({_FRETE_ANUNCIO_SQL}))"
 # agregado do pedido.
 _MIN_PREJUIZO = 5.0
 
+# Venda do ML abaixo de R$ 79 não vira linha (Vinicius, 23/11/2026: 310187 e
+# 309812). Abaixo de R$ 79 o comprador paga parte do frete e o ML cobra do
+# vendedor o custo base menos o desconto da reputação — mais ou menos o DOBRO da
+# cotação do anúncio (`/shipping_options/free`), com 1 ou com 2 unidades (kit
+# a006: anúncio 7,15 × cobrado 14,45; com 2 unidades, 14,30 × 28,90). O ML nega
+# a diferença: "não encontramos nenhum erro de cobrança" (309812, 309711,
+# 309562). Em 90 dias, as 15 linhas de venda abaixo de R$ 79 eram todas assim;
+# de R$ 79 pra cima, 2 de 92. Vale o bruto da venda inteira (todas as unidades,
+# `marketplace_valor_bruto_pedido`); sem bruto lido, a linha nasce como antes.
+ML_VENDA_MINIMA = 79.0
+# Os mesmos nomes de `logistica_meli._ML_PLATAFORMAS`, escritos em SQL: este
+# módulo é importado pelo financeiro e fica sem depender dos serviços da Logística.
+_ML_SQL = (
+    "lower(btrim(COALESCE(v.plataforma_bling, v.plataforma_financeiro))) "
+    "IN ('ml', 'mercadolivre', 'mercado livre')"
+)
+_ML_VENDA_ABAIXO_SQL = (
+    f"COALESCE(({_ML_SQL}) AND v.marketplace_valor_bruto_pedido < {ML_VENDA_MINIMA}, false)"
+)
+
 # Filtro espelha _ATTENTION_FRETE_SQL: vendedor pagou mais frete que o
 # frete anúncio. Ambas as expressões precisam ser não-nulas (sem dados
 # financeiros sincronizados ainda → skipa).
@@ -116,6 +141,7 @@ SELECT
     SUM({_FRETE_RESULTADO_SQL}) AS prejuizo
 FROM {{source}} v
 WHERE {_FRETE_ATTENTION_FILTER}
+  AND NOT {_ML_VENDA_ABAIXO_SQL}
   AND v.pedido_bling IS NOT NULL
   AND v.loja_nome IS NOT NULL
   AND btrim(v.loja_nome) <> ''

@@ -23,9 +23,12 @@ Este robô roda de hora em hora e faz duas coisas:
    chamados novos por rodada, das vendas mais velhas pras mais novas (a IA abre uma por
    rodada dela; criar tudo de uma vez só empurraria o resto da fila pra trás).
    Pula (sem criar): conta na lista `contas_fora` (conta do ML bloqueada), pedido
-   cancelado no Bling, pedido sem nº da venda e linha cujo frete, relido agora na
-   conciliação, já não passa de R$ 5 (a linha do Reembolso nunca é atualizada depois de
-   lançada — o chamado não pode cobrar o que o próprio DaVinci já não vê).
+   cancelado no Bling, pedido sem nº da venda, venda abaixo de R$ 79 (o ML nega: a
+   cotação do anúncio é mais ou menos metade do que ele cobra nessas vendas — ver
+   `refunds_freight_sync.ML_VENDA_MINIMA`; protege as linhas lançadas antes da trava) e
+   linha cujo frete, relido agora na conciliação, já não passa de R$ 5 (a linha do
+   Reembolso nunca é atualizada depois de lançada — o chamado não pode cobrar o que o
+   próprio DaVinci já não vê).
 2. **Vigia**: linha de frete do ML ainda no prazo cuja consulta não abriu — a IA desistiu
    (`falhou`) ou o chamado está parado há mais de `horas_parado` sem nº de consulta —
    vira ocorrência na Ouvidoria (Threema no modo ligado). Fecha sozinha quando a
@@ -58,12 +61,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import session_scope
 from app.models import BlingOrder, Chamado, ChamadoMensagem, OuvidoriaRobo, Refund
 from app.models.enums import IntegrationPlatform
-from app.models.marketplace_financial import MarketplaceOrderFreightReconciliation
+from app.models.marketplace_financial import (
+    MarketplaceOrderFinancial,
+    MarketplaceOrderFreightReconciliation,
+)
 from app.services import chamados as chamados_svc
 from app.services import ouvidoria
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.logistica_meli import _ML_PLATAFORMAS
-from app.services.refunds_freight_sync import _MIN_PREJUIZO
+from app.services.refunds_freight_sync import _MIN_PREJUIZO, ML_VENDA_MINIMA
 
 logger = structlog.get_logger()
 
@@ -82,14 +88,23 @@ INICIO = datetime(2026, 11, 17, tzinfo=SP)
 # Teto de linhas lidas por rodada (as puladas não gastam a cota de `por_rodada`).
 _MAX_CANDIDATAS = 500
 _MINIMO = Decimal(str(_MIN_PREJUIZO))
+_VENDA_MINIMA = Decimal(str(ML_VENDA_MINIMA))
 
 # Motivos de pular uma linha (contadores da rodada).
 PULA_CONTA_FORA = "conta_fora"
 PULA_CANCELADO = "cancelado"
 PULA_SEM_VENDA = "sem_venda"
+PULA_VENDA_BAIXA = "venda_abaixo_79"
 PULA_SEM_DIFERENCA = "sem_diferenca"
 PULA_REPETIDO = "repetido"
-_PULOS = (PULA_CONTA_FORA, PULA_CANCELADO, PULA_SEM_VENDA, PULA_SEM_DIFERENCA, PULA_REPETIDO)
+_PULOS = (
+    PULA_CONTA_FORA,
+    PULA_CANCELADO,
+    PULA_SEM_VENDA,
+    PULA_VENDA_BAIXA,
+    PULA_SEM_DIFERENCA,
+    PULA_REPETIDO,
+)
 
 LINK_ANUNCIO = "https://produto.mercadolivre.com.br/{}"
 OBSERVACAO = "Aberto automaticamente: diferença de frete do ML (painel Reembolso)"
@@ -232,6 +247,23 @@ async def fretes_do_pedido(
     )
 
 
+async def bruto_da_venda(session: AsyncSession, pedido_bling: str) -> Decimal | None:
+    """Valor bruto da venda do ML (todas as unidades) lido no financeiro do pedido Bling.
+    None = financeiro ainda não lido. Com mais de uma leitura, vale a maior — na dúvida o
+    chamado nasce."""
+    ids = select(BlingOrder.bling_id).where(
+        BlingOrder.numero == pedido_bling, BlingOrder.bling_id.is_not(None)
+    )
+    fin = MarketplaceOrderFinancial
+    return (
+        await session.execute(
+            select(func.max(fin.gross_amount)).where(
+                fin.bling_id.in_(ids), fin.platform == IntegrationPlatform.ML
+            )
+        )
+    ).scalar_one_or_none()
+
+
 # ─── quais linhas ──────────────────────────────────────────────────────────
 
 
@@ -333,6 +365,9 @@ async def abrir_chamado_frete(session: AsyncSession, refund: Refund) -> Chamado 
     venda = (ch.pedido_marketplace or "").strip()
     if not venda:
         return PULA_SEM_VENDA  # a IA abre pela página da venda
+    bruto = await bruto_da_venda(session, ch.pedido_bling or "")
+    if bruto is not None and bruto < _VENDA_MINIMA:
+        return PULA_VENDA_BAIXA
     ab = texto_abertura(refund, await fretes_do_pedido(session, ch.pedido_bling or ""), venda)
     if ab.texto is None:
         return PULA_SEM_DIFERENCA
@@ -497,6 +532,8 @@ async def chamado_frete_ml_run(session: AsyncSession, *, agora: datetime | None 
             partes.append(f"{c[PULA_CONTA_FORA]} de conta fora")
         if c[PULA_CANCELADO]:
             partes.append(f"{c[PULA_CANCELADO]} cancelado(s) no Bling")
+        if c[PULA_VENDA_BAIXA]:
+            partes.append(f"{c[PULA_VENDA_BAIXA]} de venda abaixo de R$ 79")
         if c[PULA_SEM_DIFERENCA]:
             partes.append(f"{c[PULA_SEM_DIFERENCA]} sem diferença no frete relido")
         if c[PULA_SEM_VENDA]:

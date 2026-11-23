@@ -98,10 +98,14 @@ async def _frete(
     cobrado="49.02",
     envio="44001",
     dims=(30, 27, 27, 4000),
+    bruto=None,
 ):
     db.add(BlingOrder(bling_id=bling_id, numero=pedido, numeroloja=venda, item_index=0))
     fin = MarketplaceOrderFinancial(
-        platform=IntegrationPlatform.ML, external_order_id=venda, bling_id=bling_id
+        platform=IntegrationPlatform.ML,
+        external_order_id=venda,
+        bling_id=bling_id,
+        gross_amount=Decimal(bruto) if bruto is not None else None,
     )
     db.add(fin)
     await db.flush()
@@ -258,6 +262,37 @@ async def test_pula_conta_fora_cancelado_sem_venda_e_frete_que_nao_confere(db):
     (ch,) = await _chamados(db)
     assert ch.pedido_bling == "25"
     assert "2 de conta fora" in out["resumo"]
+
+
+async def test_pula_venda_abaixo_de_79(db):
+    """310187 (23/11): ML Poofy, 2 × R$ 30. Abaixo de R$ 79 o ML cobra mais ou menos o
+    dobro da cotação do anúncio e nega a diferença — a linha lançada antes da trava do
+    Reembolso não pode virar chamado."""
+    await _refund(db, pedido="310187", venda="2000016213811845", conta="ML Poofy", prejuizo=13.8)
+    await _frete(
+        db,
+        pedido="310187",
+        venda="2000016213811845",
+        bling_id=9187,
+        anuncio="13.90",
+        cobrado="27.70",
+        bruto="60.00",
+    )
+    # R$ 79 em diante segue cobrando
+    await _refund(db, pedido="310200", venda="v310200", prejuizo=8.17)
+    await _frete(db, pedido="310200", venda="v310200", bling_id=9200, bruto="79.00")
+
+    out = await cf.chamado_frete_ml_run(db, agora=AGORA)
+
+    assert out["criados"] == 1
+    assert out[cf.PULA_VENDA_BAIXA] == 1
+    (ch,) = await _chamados(db)
+    assert ch.pedido_bling == "310200"
+    assert "1 de venda abaixo de R$ 79" in out["resumo"]
+    # a rodada seguinte pula de novo, sem criar
+    out = await cf.chamado_frete_ml_run(db, agora=AGORA)
+    assert out["criados"] == 0
+    assert out[cf.PULA_VENDA_BAIXA] == 1
 
 
 async def test_duas_linhas_do_mesmo_pedido_viram_um_chamado(db):

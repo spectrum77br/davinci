@@ -75,7 +75,8 @@ async def _setup_view(db: AsyncSession, rows: list[dict]) -> None:
                 NULL::numeric AS evento_freight,
                 NULL::numeric AS evento_frete_anuncio,
                 NULL::numeric AS item_proportion,
-                NULL::numeric AS marketplace_frete_real_cobrado_item
+                NULL::numeric AS marketplace_frete_real_cobrado_item,
+                NULL::numeric AS marketplace_valor_bruto_pedido
             WHERE false
         """
     else:
@@ -92,7 +93,9 @@ async def _setup_view(db: AsyncSession, rows: list[dict]) -> None:
                 {r.get("evento_frete_anuncio", "NULL")}::numeric AS evento_frete_anuncio,
                 {r.get("item_proportion", "1")}::numeric AS item_proportion,
                 {r.get("marketplace_frete_real_cobrado_item", "NULL")}::numeric
-                    AS marketplace_frete_real_cobrado_item
+                    AS marketplace_frete_real_cobrado_item,
+                {r.get("marketplace_valor_bruto_pedido", "NULL")}::numeric
+                    AS marketplace_valor_bruto_pedido
             """
             for r in rows
         )
@@ -655,3 +658,93 @@ async def test_cancelled_query_releases_gate_for_next_order(monkeypatch):
         timeout=1,
     )
     assert next_result["rows"] == 1
+
+
+# ─── venda do ML abaixo de R$ 79 (23/11/2026) ──────────────────────────────
+# 310187 (ML Poofy, 2 × R$ 30): anúncio 13,90 (2 × 6,95), cobrado 27,70. Abaixo de
+# R$ 79 o ML cobra mais ou menos o dobro da cotação e nega a diferença.
+
+
+def _venda_ml_barata(**overrides):
+    return _row(
+        **{
+            "pedido_bling": "310187",
+            "pedido_marketplace": "2000016213811845",
+            "loja_nome": "ML Poofy",
+            "frete_projetado_item": 13.90,
+            "evento_frete_anuncio": 13.90,
+            "marketplace_frete_real_cobrado_item": 27.70,
+            "marketplace_valor_bruto_pedido": 60,
+            **overrides,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "bruto,expected",
+    [(60, 0), (78.99, 0), (79, 1), (120, 1), ("NULL", 1)],
+)
+async def test_ml_venda_abaixo_de_79_nao_gera_linha(db, bruto, expected):
+    """Vale o bruto da venda inteira; sem financeiro lido, a linha nasce como antes."""
+    await _setup_view(db, [_venda_ml_barata(marketplace_valor_bruto_pedido=bruto)])
+
+    result = await upsert_freight_refund_for_bling_order(db, pedido_bling="310187")
+    await db.commit()
+
+    assert result["rows"] == expected
+    assert await _count_refunds(db, pedido_bling="310187") == expected
+
+
+async def test_ml_venda_abaixo_de_79_pelo_nome_da_plataforma_no_financeiro(db):
+    await _setup_view(
+        db,
+        [
+            _venda_ml_barata(plataforma_bling=None, plataforma_financeiro=" Mercado Livre "),
+            _venda_ml_barata(pedido_bling="309812", plataforma_bling="MercadoLivre"),
+        ],
+    )
+
+    await upsert_freight_refund_for_bling_order(db, pedido_bling="310187")
+    await upsert_freight_refund_for_bling_order(db, pedido_bling="309812")
+    await db.commit()
+
+    assert await _count_refunds(db) == 0
+
+
+async def test_venda_abaixo_de_79_de_outra_plataforma_continua_gerando_linha(db):
+    """A trava é só do ML: na Shopee a regra do frete é outra."""
+    await _setup_view(
+        db,
+        [
+            _row(
+                plataforma_bling="shopee",
+                evento_freight=20,
+                marketplace_valor_bruto_pedido=40,
+            )
+        ],
+    )
+
+    await upsert_freight_refund_for_bling_order(db, pedido_bling="EDGE")
+    await db.commit()
+
+    assert (await _select_refund(db, "EDGE"))["plataforma"] == "shopee"
+
+
+async def test_backfill_tambem_pula_venda_do_ml_abaixo_de_79(db):
+    await _setup_view(
+        db,
+        [
+            _venda_ml_barata(),
+            _venda_ml_barata(
+                pedido_bling="310200",
+                marketplace_valor_bruto_pedido=150,
+            ),
+        ],
+    )
+
+    result = await backfill_freight_refunds(db)
+    await db.commit()
+
+    assert result["rows"] == 1
+    assert await _count_refunds(db, pedido_bling="310187") == 0
+    assert await _count_refunds(db, pedido_bling="310200") == 1

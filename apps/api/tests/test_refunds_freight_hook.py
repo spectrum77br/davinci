@@ -45,7 +45,8 @@ async def _install_refund_function(db, *, mode: str) -> None:
         evento_freight numeric,
         evento_frete_anuncio numeric,
         item_proportion numeric,
-        marketplace_frete_real_cobrado_item numeric
+        marketplace_frete_real_cobrado_item numeric,
+        marketplace_valor_bruto_pedido numeric
     """
     if mode == "sql_failure":
         body = """
@@ -63,7 +64,8 @@ async def _install_refund_function(db, *, mode: str) -> None:
             LANGUAGE sql STABLE AS $test$
                 SELECT now(), f.pedido_bling, f.external_order_id,
                        f.platform::text, f.platform::text, 'Loja do teste'::text,
-                       f.freight_amount, 10::numeric, 1::numeric, f.freight_amount
+                       f.freight_amount, 10::numeric, 1::numeric, f.freight_amount,
+                       f.gross_amount
                 FROM "{schema}".marketplace_order_financials f
                 WHERE f.pedido_bling = p_pedido
             $test$
