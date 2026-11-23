@@ -527,6 +527,9 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
         "CREATE TABLE {r}.store_info (id uuid PRIMARY KEY, integration_id uuid, sales_team int)",
         "CREATE TABLE {r}.pricing_push_confirmacao (push_key text PRIMARY KEY,"
         " integration_id uuid)",
+        "CREATE TABLE {r}.product_links_audit (id bigserial PRIMARY KEY,"
+        " deleted_at timestamptz NOT NULL DEFAULT now(), link_id uuid, integration_id uuid,"
+        " platform text)",
         "CREATE TABLE {r}.alerts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(),"
         " user_id uuid NOT NULL CONSTRAINT fk_alerts_user_id_users"
         " REFERENCES {r}.users(id) ON DELETE CASCADE,"
@@ -538,7 +541,7 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
     ):
         await db.execute(text(ddl.format(r=f'"{r}"')))
     adm_a, adm_b, londres, dono = (uuid.uuid4() for _ in range(4))
-    i1, link1 = uuid.uuid4(), uuid.uuid4()
+    i1, link1, link_apagado = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     for uid, papel in ((adm_a, "admin"), (adm_b, "admin"), (londres, "user"), (dono, "user")):
         await db.execute(text(f'INSERT INTO "{r}".users VALUES (:i, :p)'), {"i": uid, "p": papel})
     await db.execute(
@@ -549,6 +552,14 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
     )
     await db.execute(
         text(f'INSERT INTO "{r}".store_info VALUES (gen_random_uuid(), :i, 101)'), {"i": i1}
+    )
+    # O vínculo apagado fica na trilha com a integração dele.
+    await db.execute(
+        text(
+            f'INSERT INTO "{r}".product_links_audit (link_id, integration_id, platform)'
+            " VALUES (:l, :i, 'ml')"
+        ),
+        {"l": link_apagado, "i": i1},
     )
     await db.execute(
         text(f"INSERT INTO \"{r}\".pricing_push_confirmacao VALUES ('envio-1', :i)"), {"i": i1}
@@ -587,6 +598,13 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
         "sync_failure",
         "sync_failure:x",
         f'{{"link_id": "{uuid.uuid4()}"}}',
+    )
+    await antigo(
+        "banido_vinculo_apagado",
+        dono,
+        "listing_banned",
+        f"listing_banned:{link_apagado}",
+        f'{{"link_id": "{link_apagado}"}}',
     )
     await antigo("tarefa", londres, "tarefa_atribuida")
     await antigo("zap_a", adm_a, "generic", "zap:restrito:1")
@@ -648,6 +666,9 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
             "adm",
             None,
         )
+        # Vínculo apagado: a integração vem da trilha `product_links_audit`.
+        ba = linhas["banido_vinculo_apagado"]
+        assert (ba.escopo, ba.user_id, ba.integration_id, ba.equipe) == ("equipe", None, i1, 101)
         assert (linhas["tarefa"].escopo, linhas["tarefa"].user_id) == ("pessoal", londres)
         assert (linhas["devolucao"].escopo, linhas["devolucao"].user_id) == ("pessoal", londres)
         # A cópia por administrador continua dirigida a ele (não vira repetida).
@@ -716,6 +737,7 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
             "revisao",
             "revisao_copia",
             "falha_sem_vinculo",
+            "banido_vinculo_apagado",
             "tarefa",
             "zap_a",
             "zap_b",

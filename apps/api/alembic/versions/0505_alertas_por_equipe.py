@@ -20,9 +20,9 @@ ESTRUTURA (alerts):
 CONVERSÃO (upgrade), só o que dá para saber pelo tipo e pelo vínculo:
 - quem já leu (`read_at`) ganha a linha em `alerta_leituras`;
 - pessoal: tarefa atribuída, transferência de estoque e devoluções de quem fez;
-- equipe: Falha sync / Revisão / Banido com `link_id` cujo vínculo ainda existe
-  (vínculo → integração → loja) e o "preço não aplicado" da Amazon (envio →
-  integração);
+- equipe: Falha sync / Revisão / Banido com `link_id` (vínculo → integração →
+  loja; vínculo já apagado → `product_links_audit`, que guarda a integração
+  dele) e o "preço não aplicado" da Amazon (envio → integração);
 - o resto vira ADM (quem é de equipe deixa de ver ADM antigo — é o pedido);
 - alerta de equipe e ADM gravado para quem NÃO é administrador ficam sem
   destinatário (senão ninguém os veria). O dono de antes vai para
@@ -109,6 +109,34 @@ def converter(bind) -> None:
             """
         )
     )
+    # Vínculo apagado depois do alerta (vínculo morto, SKU trocado): a trilha
+    # `product_links_audit` guarda de qual integração ele era. Em 23/11/2026
+    # eram 9.889 alertas assim, todos com a integração ainda viva.
+    tem_trilha = bind.execute(
+        sa.text("SELECT to_regclass(:t) IS NOT NULL"), {"t": f"{s}.product_links_audit"}
+    ).scalar()
+    if tem_trilha:
+        bind.execute(
+            sa.text(
+                f"""
+                UPDATE {s}.alerts a
+                   SET escopo = 'equipe',
+                       integration_id = i.id,
+                       plataforma = coalesce(t.platform, i.platform::text),
+                       conta = i.name,
+                       equipe = {_equipe_da_integracao("i")}
+                  FROM (SELECT DISTINCT ON (link_id) link_id, integration_id, platform
+                          FROM {s}.product_links_audit
+                         WHERE link_id IS NOT NULL AND integration_id IS NOT NULL
+                         ORDER BY link_id, deleted_at DESC) t
+                  JOIN {s}.integrations i ON i.id = t.integration_id
+                 WHERE a.escopo = 'adm'
+                   AND a.type::text IN ({tipos})
+                   AND a.payload->>'link_id' ~ '{UUID_RE}'
+                   AND t.link_id = (a.payload->>'link_id')::uuid
+                """
+            )
+        )
     bind.execute(
         sa.text(
             f"""
