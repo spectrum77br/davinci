@@ -228,6 +228,12 @@ def desfazer(bind) -> None:
 
 
 def upgrade() -> None:
+    # Revisão M-19/M-20 (23/11/2026): `alerts` é tabela quente (o sino de
+    # todos consulta, todo robô grava) e a FK nova trava `integrations`. Sem
+    # limite, uma transação longa segurando uma delas deixaria o ALTER na fila
+    # e TODO o sino parado atrás dele. Com o limite, a migration desiste em 5 s
+    # e é só rodar de novo (conferir o alembic_version depois do deploy).
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_table(
         "alerta_leituras",
         sa.Column(
@@ -321,6 +327,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")  # revisão M-19/M-20: ver o upgrade
     op.drop_index("ix_alerts_integration_id", table_name="alerts", schema=SCHEMA)
     op.drop_index("ix_alerts_escopo_created", table_name="alerts", schema=SCHEMA)
     op.drop_index("ix_alerts_dedupe_compartilhado", table_name="alerts", schema=SCHEMA)

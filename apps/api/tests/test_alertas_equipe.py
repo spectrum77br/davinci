@@ -616,16 +616,22 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
     await antigo("devolucao", londres, "generic", "devolucao_exclusao_chamado:9")
     await db.commit()
 
+    limites: dict[str, str] = {}
+
     def _rodar(conn, passo: str) -> None:
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
             getattr(mod, passo)()
+        # Revisão M-19/M-20: a 0505 mexe em tabela quente — não pode esperar
+        # trava para sempre (e parar o sino de todos atrás dela).
+        limites[passo] = conn.exec_driver_sql("SHOW lock_timeout").scalar()
 
     mod.SCHEMA = r
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
         await db.commit()
+        assert limites["upgrade"] == "5s"
 
         # A estrutura é a do modelo.
         assert await _colunas(db, r, "alerta_leituras") == await _colunas(
@@ -710,6 +716,7 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
         conn = await db.connection()
         await conn.run_sync(_rodar, "downgrade")
         await db.commit()
+        assert limites["downgrade"] == "5s"
         tabelas = (
             (
                 await db.execute(
