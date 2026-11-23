@@ -4,12 +4,10 @@
 // a user who was offline when the admin assigned the tarefa still gets
 // the dialog the next time they hit any page.
 //
-// Server-side scoping: /api/alerts now filters by `Alert.user_id = current
-// user`, so the items array here only contains alerts for THIS user. We
-// still narrow to `type === 'tarefa_atribuida'` because /api/alerts also
-// returns other alert types (low_stock, sync_failure, etc.) and those
-// already have their own UI in the bell icon — this dialog is just for
-// the new tarefa flow.
+// Server-side scoping: /api/alerts só devolve o que a pessoa vê (M-19:
+// ADM / equipe / pessoal), e a tarefa atribuída é pessoal — só de quem a
+// recebeu. Pedimos só `tipos=tarefa_atribuida` e ainda filtramos aqui: os
+// outros tipos já têm a tela do sino; este diálogo é só da tarefa.
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { ClipboardCheck } from 'lucide-vue-next'
 
@@ -35,7 +33,9 @@ async function fetchTarefaAlerts() {
   if (!auth.user) return
   try {
     const r = await api<AlertListResponse>(
-      '/api/alerts?unread_only=true&limit=50',
+      // Só as tarefas (M-19): com a equipe toda vendo os alertas de anúncio,
+      // os 50 não lidos mais novos podiam não ter tarefa nenhuma.
+      '/api/alerts?unread_only=true&tipos=tarefa_atribuida&limit=50',
     )
     pending.value = (r.items || []).filter(
       (a) => a.type === 'tarefa_atribuida' && !a.read_at,
