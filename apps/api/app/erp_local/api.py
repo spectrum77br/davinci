@@ -514,6 +514,14 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             return would.price_sync(erp)
         raise ERPError("homolog_kind", "Ação desconhecida.", 404)
 
+    @app.post("/api/erp-local/homolog/store-data")
+    def homolog_store_data(body: dict = Body(...)):
+        from app.erp_local import would
+
+        if not would.active():
+            raise ERPError("homolog_only", "Só existe na homologação.", 409)
+        return would.store_data(erp, body.get("ids"))
+
     @app.get("/api/erp-local/homolog/plans/{kind}.csv")
     def homolog_plan(kind: str):
         from app.erp_local import would
@@ -971,8 +979,15 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         if actor:
             with erp.connection() as db:
                 access.check_command(db, actor, body.kind, request.headers.get("x-erp-role"))
-            return erp.command(body.operation_key, body.kind, body.payload, actor=actor)
-        return erp.command(body.operation_key, body.kind, body.payload)
+            result = erp.command(body.operation_key, body.kind, body.payload, actor=actor)
+        else:
+            result = erp.command(body.operation_key, body.kind, body.payload)
+        from app.erp_local import would
+
+        if would.active() and body.kind in would.DISPATCHES and not result.get("replayed"):
+            # Homologation: the store's notice of dispatch is only said, never sent.
+            would.dispatch_notice(erp, body.kind, body.payload)
+        return result
 
     @app.post("/api/erp-local/price-preview")
     def preview_prices(body: dict):

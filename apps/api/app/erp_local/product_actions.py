@@ -16,6 +16,7 @@ COMMANDS = {
     "product.restore",
     "product.price_adjust",
     "product.structure.replace",
+    "product.rename",
 }
 BATCH_LIMIT = 1000
 
@@ -257,9 +258,39 @@ def _clone(erp, db, key, p):
     return {"sku": new_sku, "source": sku, "external_writes": False}
 
 
+def _rename(erp, db, p):
+    """The ERP's own code change, as Bling allows: same product, same number for DaVinci, which
+    hears it as Bling's produto.alteracao (bling_compat.capture_events). While Bling still owns
+    the catalog the change is made there and the ERP follows it (catalog_follow), so here it waits
+    for the first store switched to the ERP."""
+    import re
+
+    from app.erp_local import bling_mirror, catalog_follow
+
+    if set(p) != {"from", "to"}:
+        raise ERPError("product_rename", "Informe o código atual e o novo.")
+    if not bling_mirror.switched(db):
+        raise ERPError(
+            "product_rename_bling",
+            "O cadastro ainda segue o Bling: troque o código no Bling e o ERP acompanha.",
+            409,
+        )
+    old = erp.product(db, text(p["from"], "código atual"))["sku"]
+    new = text(p["to"], "código novo")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,99}", new):
+        raise ERPError("invalid_sku", "SKU contém caracteres não permitidos.")
+    if new == old:
+        raise ERPError("product_rename", "O código novo é igual ao atual.")
+    if db.execute("SELECT 1 FROM products WHERE sku=?", (new,)).fetchone():
+        raise ERPError("duplicate_sku", "SKU já cadastrado.", 409)
+    return catalog_follow.move_code(db, old, new)
+
+
 def apply(erp, db, key, kind, p):
     if not isinstance(p, dict):
         raise ERPError("product_batch", "Dados da operação não reconhecidos.")
+    if kind == "product.rename":
+        return _rename(erp, db, p)
     if kind == "product.batch":
         return _batch(erp, db, key, p)
     if kind == "product.price_adjust":

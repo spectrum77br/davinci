@@ -195,6 +195,13 @@ def _rename(db, p):
         )
     if db.execute("SELECT 1 FROM products WHERE sku=?", (new,)).fetchone():
         raise ERPError("catalog_follow_rename", "O código novo já existe no ERP.", 409)
+    return move_code(db, old, new)
+
+
+def move_code(db, old, new):
+    """Every row of product `old` under `new`: balances, history, kits that use it, details, links
+    and the number DaVinci knows it by. Orders keep the code they were sold with. Used when the ERP
+    follows Bling and for the ERP's own change once the catalog is its own (product.rename)."""
     db.execute("PRAGMA defer_foreign_keys=ON")
     tables = [
         name
@@ -235,6 +242,11 @@ def _rename(db, p):
             "UPDATE compat_ids SET local_id=?||substr(local_id,?) "
             "WHERE kind='supplier_link' AND local_id LIKE ?",
             (new, len(old) + 1, old + ":%"),
+        )
+        # A product the ERP numbered itself keeps its number under the new code.
+        db.execute(
+            "UPDATE OR IGNORE compat_ids SET local_id=? WHERE kind='product' AND local_id=?",
+            (new, old),
         )
     return {"from": old, "to": new, "tables": moved, "kits": kits, "external_writes": False}
 

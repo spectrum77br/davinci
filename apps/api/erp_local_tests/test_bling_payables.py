@@ -186,14 +186,16 @@ def test_switch_imports_the_bills_once_with_bling_payments_kept_out_of_the_balan
     partial["detail"].update({"competencia": "2026-11-01", "categoria": {"id": 555}})
     plain = bill(1)
     plain["detail"]["categoria"] = {"id": 0}
+    rent = bill(4, value=50.0)
+    rent["detail"]["categoria"] = {"id": 14693500318}  # Folha › PGTO in Bling's screen
     di = bill(3, value=900.0)
     di["detail"].update({"numeroDocumento": "mala04/2", "categoria": {"id": 14693438796}})
-    bills = [plain, partial, di]
+    bills = [plain, partial, di, rent]
     bling_payables.run(
         erp, reader_for(bills, {"7": "Fornecedor A", "8": "Fornecedor B"}, []), max_details=1
     )
     with erp.connection() as db:
-        assert bling_payables.import_preview(db)["waiting"] == 2
+        assert bling_payables.import_preview(db)["waiting"] == 3
     with pytest.raises(ERPError, match="Ainda lendo"):
         bling_payables.import_all(erp)
     later = datetime.now(UTC) + timedelta(minutes=31)
@@ -203,25 +205,32 @@ def test_switch_imports_the_bills_once_with_bling_payments_kept_out_of_the_balan
     with erp.connection() as db:
         plan = bling_payables.import_preview(db)
     assert (plan["bills"], plan["waiting"], plan["amount"], plan["paid_before"]) == (
-        3,
+        4,
         0,
-        1300.0,
+        1350.0,
         150.0,
     )
-    assert plan["to_pay"] == 1150.0 and plan["stock_lots"] == 1
-    assert plan["categories"] == {"Sem categoria": 1, "Bling 555": 1, "Estoque": 1}
+    assert plan["to_pay"] == 1200.0 and plan["stock_lots"] == 1
+    # Bling's own names, as its screen shows them; an id it never listed stays an id.
+    assert plan["categories"] == {
+        "Sem categoria": 1,
+        "Bling 555": 1,
+        "Estoque": 1,
+        "Folha › PGTO": 1,
+    }
     report = bling_payables.import_all(erp)
-    assert (report["created"], report["payments_before_switch"]) == (3, 1)
+    assert (report["created"], report["payments_before_switch"]) == (4, 1)
     assert bling_payables.import_all(erp)["created"] == 0  # once
     with erp.connection() as db:
         lots = finance.lots(db)
         balance = finance.management(db)
         installments = finance.snapshot(db)["installments"]
     assert any(lot["lot"] == "mala04" for lot in lots)
-    assert len([i for i in installments if i["kind"] == "payable"]) == 3
+    assert len([i for i in installments if i["kind"] == "payable"]) == 4
     # The 150 paid in Bling is not in the ERP's balance; the 150 left is a forecast.
     assert sum(float(r["paid"]) for r in balance) == 0
-    assert sum(float(r["forecast"]) for r in balance) == 100.0 + 150.0  # bill 1 + rest of bill 2
+    # bill 1 + rest of bill 2 + bill 4
+    assert sum(float(r["forecast"]) for r in balance) == 100.0 + 150.0 + 50.0
     assert (
         bling_payables.run(erp, reader_for(bills, {}, []), now=later + timedelta(hours=1))["state"]
         == "imported"

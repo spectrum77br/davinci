@@ -277,3 +277,111 @@ def test_a_prepared_note_gets_a_danfe_marked_without_fiscal_value(tmp_path):
     reply = client.get("/api/erp-local/fiscal/invoices/n1/danfe")
     assert reply.status_code == 200 and reply.content.startswith(b"%PDF")
     assert client.get("/api/erp-local/fiscal/invoices/nada/danfe").status_code == 404
+
+
+def _store_order(erp, external="2000013912345678"):
+    from test_core import run
+
+    identifier = run(
+        erp,
+        "order.import",
+        {
+            "channel": "ml",
+            "store": "loja-ml",
+            "external_id": external,
+            "depot": "geral",
+            "items": [{"sku": "demo.kit", "quantity": "1", "unit_price": "10.00"}],
+        },
+    )["id"]
+    return identifier
+
+
+def _invoice_and_tracking(erp, identifier):
+    from test_core import run
+
+    run(erp, "logistics.prepare", {"id": identifier, "service": "Mercado Envios"})
+    with erp.connection() as db:
+        db.executescript(fiscal_invoices.SCHEMA)
+        company = {"cnpj": "11222333000181", "name": "Empresa teste", "address": {"uf": "SP"}}
+        db.execute(
+            "INSERT INTO fiscal_companies VALUES ('emp',1,?,'2026-11-23')", (json.dumps(company),)
+        )
+        db.execute(
+            "INSERT INTO fiscal_invoices(id,order_id,company_id,series,number,access_key,status,"
+            "version,data,xml,updated_at) VALUES ('nf1',?,'emp',1,321,?,'authorized',1,'{}','',"
+            "'2026-11-23')",
+            (identifier, "3" * 44),
+        )
+        data = json.loads(
+            db.execute("SELECT data FROM logistics_shipments WHERE id=?", (identifier,)).fetchone()[
+                0
+            ]
+        )
+        db.execute(
+            "UPDATE logistics_shipments SET data=? WHERE id=?",
+            (json.dumps({**data, "tracking_code": "BR123456789"}), identifier),
+        )
+
+
+def test_store_data_says_what_the_store_would_get_and_sends_nothing(erp, homolog):
+    bare = _store_order(erp, "2000000000000001")
+    full = _store_order(erp)
+    _invoice_and_tracking(erp, full)
+    reply = would.store_data(erp, [full, bare, full])
+    assert reply["would"] is True and len(reply["plans"]) == 2
+    told = {p["order"]: p["would"] for p in reply["plans"]}
+    assert told[full] == (
+        "Mandaria à Mercado Livre (loja-ml), na venda 2000013912345678, "
+        f"a NF-e 321/1 (chave {'3' * 44}) e o rastreio BR123456789."
+    )
+    assert told[bare].startswith("Nada a mandar à Mercado Livre na venda 2000000000000001")
+    with erp.connection() as db:
+        kept = would.listing(db)
+    assert {k["action"] for k in kept} == {"store_data"}
+    assert kept[0]["name"] == "Dados para a loja virtual"
+    with pytest.raises(ERPError):
+        would.store_data(erp, [])
+
+
+def test_dispatch_in_homologation_records_the_store_notice_only(tmp_path, homolog):
+    app = create_app(tmp_path / "erp.sqlite3")
+    erp = app.state.erp
+    erp.command("seed", "demo.seed", {})
+    identifier = _store_order(erp)
+    _invoice_and_tracking(erp, identifier)
+    with erp.connection() as db:
+        db.execute("UPDATE logistics_shipments SET stage='packed' WHERE id=?", (identifier,))
+    client = TestClient(app, base_url="http://localhost")
+    headers = {"X-ERP-Local": "1"}
+    reply = client.post(
+        "/api/erp-local/commands",
+        json={
+            "operation_key": "despacho-1",
+            "kind": "logistics.dispatch",
+            "payload": {"id": identifier, "proof": "Comprovante local"},
+        },
+        headers=headers,
+    )
+    assert reply.status_code == 200, reply.text
+    state = client.get("/api/erp-local/state").json()
+    notices = [w for w in state["would"] if w["action"] == "dispatch"]
+    assert [n["detail"]["would"] for n in notices] == [
+        "Avisaria à Mercado Livre (loja-ml) que a venda 2000013912345678 saiu, "
+        "com o rastreio BR123456789."
+    ]
+    # The route exists only in homologation.
+    assert (
+        client.post(
+            "/api/erp-local/homolog/store-data", json={"ids": [identifier]}, headers=headers
+        ).json()["plans"][0]["order"]
+        == identifier
+    )
+
+
+def test_store_data_route_is_refused_outside_homologation(tmp_path, monkeypatch):
+    monkeypatch.delenv("ERP_HOMOLOG", raising=False)
+    client = TestClient(create_app(tmp_path / "erp.sqlite3"), base_url="http://localhost")
+    reply = client.post(
+        "/api/erp-local/homolog/store-data", json={"ids": ["x"]}, headers={"X-ERP-Local": "1"}
+    )
+    assert reply.status_code == 409

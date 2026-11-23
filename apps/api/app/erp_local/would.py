@@ -391,3 +391,110 @@ def plan_csv(db, kind):
                 }
             )
     return stream.getvalue()
+
+
+# ---------------------------------------------------------------------------------------------
+# "Enviar dados para loja virtual" and the notice of dispatch: what the store would be told about
+# each order (its authorized NF-e and tracking), recorded for the day, with nothing sent.
+ACTIONS.update({"store_data": "Dados para a loja virtual", "dispatch": "Aviso de despacho à loja"})
+DISPATCHES = {"logistics.dispatch", "logistics.manifest.dispatch"}
+
+
+def _order_plan(db, identifier):
+    import sqlite3
+
+    row = db.execute(
+        "SELECT id,data FROM documents WHERE id=? AND kind='order'", (identifier,)
+    ).fetchone()
+    if not row:
+        raise ERPError("order_not_found", "Pedido não encontrado.", 404)
+    data = json.loads(row["data"])
+    channel, store = data.get("channel") or "", data.get("store") or ""
+    try:
+        invoice = db.execute(
+            "SELECT number,series,access_key FROM fiscal_invoices WHERE order_id=? "
+            "AND status='authorized' ORDER BY rowid DESC",
+            (identifier,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        invoice = None
+    try:
+        shipment = db.execute(
+            "SELECT stage,data FROM logistics_shipments WHERE id=?", (identifier,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        shipment = None
+    return {
+        "order": identifier,
+        "channel": CHANNELS.get(channel, channel),
+        "store": _store_name(db, channel, store) if channel else "",
+        "number": str(data.get("external_id") or ""),
+        "invoice": f"{invoice['number']}/{invoice['series']}" if invoice else "",
+        "access_key": (invoice["access_key"] or "") if invoice else "",
+        "tracking": (json.loads(shipment["data"]).get("tracking_code") or "") if shipment else "",
+        "stage": shipment["stage"] if shipment else "",
+    }
+
+
+def store_data(erp, ids):
+    """What "Enviar dados para loja virtual" would send for each selected order."""
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 200:
+        raise ERPError("homolog_orders", "Selecione de 1 a 200 pedidos.")
+    with erp.connection() as db:
+        plans = [_order_plan(db, str(identifier)) for identifier in dict.fromkeys(ids)]
+    for plan in plans:
+        parts = [
+            f"a NF-e {plan['invoice']} (chave {plan['access_key'] or 'sem chave'})"
+            if plan["invoice"]
+            else "",
+            f"o rastreio {plan['tracking']}" if plan["tracking"] else "",
+        ]
+        sent = " e ".join(p for p in parts if p)
+        if not plan["number"]:
+            plan["would"] = "Nada: pedido sem loja virtual (venda digitada)."
+        elif sent:
+            plan["would"] = (
+                f"Mandaria à {plan['channel']} ({plan['store']}), na venda {plan['number']}, "
+                f"{sent}."
+            )
+        else:
+            plan["would"] = (
+                f"Nada a mandar à {plan['channel']} na venda {plan['number']}: "
+                "ainda sem NF-e autorizada nem rastreio."
+            )
+        target = f"{plan['channel'] or 'Pedido'} {plan['number'] or plan['order']}"
+        record(erp, "store_data", target, plan)
+    return {
+        "would": True,
+        "plans": plans,
+        "message": f"O que faria: {len(plans)} pedido(s) em O que faria; nada foi enviado à loja.",
+    }
+
+
+def dispatched(db, kind, payload):
+    """The orders a dispatch command just let go."""
+    if kind == "logistics.dispatch":
+        return [str(payload.get("id") or "")]
+    row = db.execute(
+        "SELECT data FROM logistics_manifests WHERE id=?", (str(payload.get("id") or ""),)
+    ).fetchone()
+    return [str(i) for i in json.loads(row["data"]).get("ids") or []] if row else []
+
+
+def dispatch_notice(erp, kind, payload):
+    """After "Despachar" in homologation: what each store would be told, recorded, not sent."""
+    with erp.connection() as db:
+        plans = [_order_plan(db, identifier) for identifier in dispatched(db, kind, payload)]
+    for plan in plans:
+        if not plan["number"]:
+            continue
+        plan["would"] = (
+            f"Avisaria à {plan['channel']} ({plan['store']}) que a venda {plan['number']} saiu"
+            + (
+                f", com o rastreio {plan['tracking']}."
+                if plan["tracking"]
+                else ", ainda sem rastreio."
+            )
+        )
+        record(erp, "dispatch", f"{plan['channel']} {plan['number']}", plan)
+    return len(plans)

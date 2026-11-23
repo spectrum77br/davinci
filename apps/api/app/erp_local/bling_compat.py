@@ -1487,8 +1487,24 @@ ORDER_EVENTS = {
 }
 
 
+# A product code changed in the ERP: DaVinci finds the product by the number it knows and takes the
+# new code, as when Bling renames one (webhooks.py, a017.pi → a017.cd).
+PRODUCT_RENAMES = {"product.rename", "catalog.follow.rename"}
+
+
 def capture_events(erp, db, kind, payload, result):
     """Queue the same notification Bling would send. Delivery is a separate, opt-in step."""
+    if kind in PRODUCT_RENAMES and (result or {}).get("to"):
+        code = result["to"]
+        body = {
+            "event": "produto.alteracao",
+            "dados": {"id": numeric_id(db, "product", code), "codigo": code},
+        }
+        db.execute(
+            "INSERT INTO compat_outbox(event,body,created_at) VALUES (?,?,?)",
+            ("produto.alteracao", json.dumps(body, sort_keys=True), erp.now()),
+        )
+        return
     identifier = (result or {}).get("id") or (payload or {}).get("id")
     if kind not in ORDER_EVENTS or not identifier:
         return

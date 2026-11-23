@@ -13,6 +13,25 @@ afterEach(()=>{for(const dom of activeDOMs)dom.window.close();activeDOMs.clear()
 
 const ownOrder=(id,store,status='reserved')=>({id,status,data:{external_id:id,channel:'Teste local',store,depot:'geral',total:'10.00',created_at:'2026-11-05T12:00:00Z',items:[{sku:'demo.aparelho',quantity:'1',unit_price:'10.00'}],requirements:{'demo.aparelho':'1.000'}}});
 
+test('homologation: "Enviar dados para loja virtual" asks what would be sent, outside it stays off',async()=>{
+  const {dom,document:d,requests}=await setup({homolog:{started_at:'2026-11-10T18:13:20+00:00'},orders:[ownOrder('P1','A'),ownOrder('P2','B')]});
+  const sent=[];const plain=dom.window.fetch;
+  dom.window.fetch=async (url,options)=>{if(String(url).includes('/homolog/store-data')){sent.push(JSON.parse(options.body));return {ok:true,status:200,json:async()=>({would:true,plans:[],message:'O que faria: 1 pedido(s) em O que faria; nada foi enviado à loja.'})};}return plain(url,options);};
+  d.querySelector('nav [data-page=orders]').click();
+  const button=d.getElementById('sales-store-data');
+  assert.ok(button&&button.disabled);
+  const box=d.querySelector('[data-sales-select="P2"]')||d.querySelectorAll('[data-sales-select]')[1];
+  box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  d.getElementById('sales-store-data').click();
+  await new Promise(r=>setTimeout(r,10));
+  assert.equal(sent.length,1);assert.equal(sent[0].ids.length,1);
+  assert.match(d.getElementById('notice').textContent,/nada foi enviado à loja/);
+  assert.equal(requests.length,0);
+  const off=await setup({orders:[ownOrder('P1','A')]});
+  off.document.querySelector('nav [data-page=orders]').click();
+  assert.equal(off.document.getElementById('sales-store-data'),null);
+});
+
 test('sales filters keep accounts separate and batch contains only selected own orders',async()=>{
   const {dom,document:d,requests}=await setup({orders:[ownOrder('P1','A'),ownOrder('P2','B'),ownOrder('P3','A','cancelled')]});
   d.querySelector('nav [data-page=orders]').click();
@@ -1479,6 +1498,47 @@ test('consulta: the strip says Bling owns, a change is not sent and the page say
   assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/store-sales/labels'),true);
   assert.equal(dom.window.erpConsultaRefuses('POST','/erp/api/erp-local/commands'),true);
   assert.equal(dom.window.erpConsultaRefuses('GET','/api/erp-local/state'),false);
+});
+
+test('consulta: the product editor only shows, with no save button and nothing sent',async()=>{
+  const p={sku:'dg053.sp',name:'A17',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:1,unit:'UN',status:'active'}};
+  const {dom,document:d,requests}=await setup({products:[p],consulta:{active:true,reason:'automático',message:'Modo consulta: o Bling manda.',read_posts:[]}});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-edit-product]').click();
+  const form=d.querySelector('#product-edit-form');
+  assert.ok(form.classList.contains('read-only'));
+  const buttons=[...form.querySelectorAll('.form-footer button')].map(b=>b.textContent.trim());
+  assert.ok(!buttons.some(t=>/Salvar/.test(t)),buttons.join(','));
+  assert.ok(buttons.includes('Fechar'));
+  assert.match(form.textContent,/Somente consulta: o cadastro continua sendo feito no Bling até a troca/);
+  assert.match(d.querySelector('.rail-info').textContent,/Somente consulta/);
+  assert.equal(form.querySelector('#product-rename-open'),null);
+  const before=requests.length;
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.equal(requests.length,before);
+  d.querySelector('#product-edit-cancel').click();
+  assert.equal(d.querySelector('#product-edit-form'),null);
+});
+
+test('the product code is changed from the editor, as in Bling, and the editor follows it',async()=>{
+  const p={sku:'dg053.sp',name:'A17',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:1,unit:'UN',status:'active'}};
+  const {dom,document:d,requests}=await setup({products:[p],consulta:{active:false,read_posts:[]}});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-edit-product]').click();
+  d.querySelector('#product-rename-open').click();
+  const dialog=d.getElementById('product-rename-dialog');
+  assert.match(dialog.textContent,/Pedidos já registrados mantêm o código da venda/);
+  dialog.querySelector('[data-rename-confirm]').click();
+  assert.equal(requests.length,0);
+  dialog.querySelector('[name=product_rename_to]').value=' dg053.novo ';
+  dialog.querySelector('[data-rename-confirm]').click();
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  const sent=requests.find(r=>r.kind==='product.rename');
+  assert.deepEqual(sent.payload,{from:'dg053.sp',to:'dg053.novo'});
+  assert.equal(d.getElementById('product-rename-dialog'),null);
 });
 
 test('outside consulta a change is sent as before',async()=>{

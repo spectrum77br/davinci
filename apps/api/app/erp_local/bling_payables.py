@@ -6,7 +6,8 @@ copy travels the same read-only way as the shadow check (DaVinci's Bling login o
 only, in DaVinci's own rate slot, never a token refresh). At the switch these are the bills that
 become the ERP's own (Novos procedimentos 13 leaves that transfer for later).
 
-Bling refuses the financial category names to DaVinci's app (403), so a category shows by its id.
+Bling refuses the financial category names to DaVinci's app (403); they come from its own screen,
+read on 23/11/2026 (bling_categories), and a newer category shows by its id.
 Suppliers come by id, only the ones these bills point to, and only the name is kept.
 """
 
@@ -293,9 +294,10 @@ def snapshot(db, *, today=None):
 # At the switch: Bling's open bills become the ERP's own (Novos procedimentos 13 leaves the moment
 # for later). Bling refuses its payment records (borderôs) and category names to DaVinci's app
 # (403, 23/11), so a partly paid bill comes at its full value with one payment for what Bling
-# already paid, marked as before the switch (kept out of the ERP's management balance), and a
-# category shows by its Bling id until someone renames it. A DI instalment under "importado" is a
-# stock bill of its lot, as the Importação files it.
+# already paid, marked as before the switch (kept out of the ERP's management balance). Categories
+# carry Bling's names as its screen shows them (bling_categories); one created after 23/11 shows by
+# its Bling id. A DI instalment under "importado" is a stock bill of its lot, as the Importação
+# files it.
 
 
 def _day(value):
@@ -304,7 +306,7 @@ def _day(value):
 
 
 def _plan_rows(db):
-    from app.erp_local import bling_compat, finance
+    from app.erp_local import bling_categories, bling_compat, finance
 
     stock_ids = bling_compat._stock_categories()
     names = dict(db.execute("SELECT id,name FROM bling_payable_contacts").fetchall())
@@ -337,7 +339,11 @@ def _plan_rows(db):
             "document_number": document[:120],
             "category": finance.STOCK_CATEGORY
             if stock
-            else (f"Bling {category}" if category not in {"", "0"} else "Sem categoria"),
+            else (
+                bling_categories.path(category) or f"Bling {category}"
+                if category not in {"", "0"}
+                else "Sem categoria"
+            ),
         }
         if stock:
             lot = document.rsplit("/", 1)[0].strip() if "/" in document else document

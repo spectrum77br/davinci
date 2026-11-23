@@ -86,6 +86,14 @@ document.addEventListener('click',async e=>{
     a.href=url;a.download='etiquetas.pdf';document.body.append(a);a.click();a.remove();
     message(missing?`Etiquetas baixadas; ${missing} ainda não disponíveis na loja.`:'Etiquetas baixadas.');
   }
+  if(e.target.closest('#sales-store-data')){
+    const ids=(state.orders||[]).filter(o=>salesSelection.has(o.id)).map(o=>o.id);
+    if(!ids.length){message('Selecione os pedidos.',true);return;}
+    const r=await storePost('/api/erp-local/homolog/store-data',{ids}),reply=await r.json();
+    message(r.ok?reply.message:(reply.message||'Não foi possível montar o que faria.'),!r.ok);
+    if(r.ok)await refresh();
+    return;
+  }
   if(e.target.closest('#sales-transport-labels')){
     const items=(state.orders||[]).filter(o=>salesSelection.has(o.id)&&o.data.channel&&o.data.external_id).map(o=>({channel:o.data.channel,store:o.data.store,number:o.data.external_id}));
     if(!items.length){message('Selecione pedidos vindos das lojas.',true);return;}
