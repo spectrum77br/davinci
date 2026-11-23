@@ -1140,7 +1140,7 @@ const informarAberto = ref(false)
       :open="informarAberto"
       contexto="conferencia_shopee"
       somente-cadastro
-      descricao="Quem está marcado recebe no Threema o resumo de cada Conferência quando ela termina (Shopee, Mercado Livre e Amazon, cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Mala, Celular, Eletro e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
+      descricao="Quem está marcado recebe no Threema o resumo de cada Conferência quando ela termina (Shopee, Mercado Livre e Amazon, cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Celular, Eletro, Mala e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
       @close="informarAberto = false"
     />
   </div>

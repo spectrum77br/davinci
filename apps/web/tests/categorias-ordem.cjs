@@ -79,6 +79,26 @@ assert.ok(!/^import /m.test(ler('lib/categorias.ts')), 'lib sem import (roda sol
   assert.deepEqual([...mc[1].matchAll(/"(\w+)"/g)].map((x) => x[1]), ORDEM, 'ERP: tipo de produto')
 }
 
+// M-23 revisão (23/11/2026): os textos que listam as categorias também. A
+// descrição do aviso do Threema da Conferência (a mensagem já sai Celular,
+// Eletro, Mala, Geral) e as ajudas do DaVinci ERP. O como-usar.vtt é legenda
+// do vídeo gravado: segue o áudio, fica de fora.
+{
+  const conf = ler('components/MarketingConferencia.vue')
+  assert.ok(conf.includes('s/ vendas de Celular, Eletro, Mala e Geral'), 'Conferência: texto do aviso do Threema')
+  const pasta = path.join(WEB, '../api/app/erp_local/static')
+  const velhos = []
+  for (const f of fs.readdirSync(pasta).filter((x) => x.endsWith('.js'))) {
+    const s = fs.readFileSync(path.join(pasta, f), 'utf8')
+    for (const m of s.matchAll(/(Celular|Mala|Eletro)(?:, | e | ou | · |\/)(Celular|Mala|Eletro)(?:,? e |,? ou |, | · |\/)(Celular|Mala|Eletro)/g)) {
+      if (m.slice(1, 4).join() !== 'Celular,Eletro,Mala') velhos.push(`${f}: ${m[0]}`)
+    }
+  }
+  assert.deepEqual(velhos, [], 'ERP: textos com as categorias fora da ordem')
+  assert.ok(ler('../api/app/erp_local/static/app.js').includes('rateio entre Celular, Eletro e Mala'))
+  assert.ok(ler('../api/app/erp_local/static/fulfillment.js').includes('(Celular, Eletro ou Mala)'))
+}
+
 // ---------------------------------------------------------------- libs que não importam nada
 {
   const conf = lib('lib/conferencia.ts')

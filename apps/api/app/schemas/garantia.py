@@ -583,7 +583,9 @@ class HistoricoOut(BaseModel):
 
 
 class ResumoDepartamentoOut(BaseModel):
-    chave: str  # celular | mala | eletro (os três sempre, nesta ordem)
+    # celular | eletro | mala (os três sempre, nesta ordem — a alfabética desde
+    # a M-23, 23/11/2026; services/categorias_ordem.py)
+    chave: str
     nome: str
     vendidas: int
     pediram: int = 0

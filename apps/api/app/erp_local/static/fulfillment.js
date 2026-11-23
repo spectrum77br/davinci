@@ -166,7 +166,7 @@ function priceTableGapsPanel(){
   const g=state.price_table_gaps;if(!g||(!g.no_line.length&&!g.no_department.length))return '';
   const rows=[...g.no_line.map(r=>[r.sku,r.name,`Família ${r.family} sem linha na Tabela de Preços`]),...g.no_department.map(r=>[r.sku,r.name,`Linha ${r.line} sem departamento`])];
   const body=rows.map(([sku,name,why])=>`<tr><td>${copyText(sku,'SKU')}</td><td>${esc(name||'')}</td><td>${esc(why)}</td></tr>`).join('');
-  return panel('Cadastro a completar na Tabela de Preços',`Dos ${g.active} produtos simples ativos, ${g.no_line.length} não têm linha na Tabela de Preços do DaVinci (EAN, modelo, certificado, garantia, fotos e prioridade) e ${g.no_department.length} têm linha sem departamento (Celular, Mala ou Eletro). Preencha na Tabela de Preços do DaVinci; o ERP lê de lá.`,`<details><summary>Ver os ${rows.length} produtos</summary>${table(['SKU','Produto','O que falta'],body)}</details>`);
+  return panel('Cadastro a completar na Tabela de Preços',`Dos ${g.active} produtos simples ativos, ${g.no_line.length} não têm linha na Tabela de Preços do DaVinci (EAN, modelo, certificado, garantia, fotos e prioridade) e ${g.no_department.length} têm linha sem departamento (Celular, Eletro ou Mala). Preencha na Tabela de Preços do DaVinci; o ERP lê de lá.`,`<details><summary>Ver os ${rows.length} produtos</summary>${table(['SKU','Produto','O que falta'],body)}</details>`);
 }
 function costPanel(){
   const rows=state.cost_changes||[];if(!rows.length)return '';

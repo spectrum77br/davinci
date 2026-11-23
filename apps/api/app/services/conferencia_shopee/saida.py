@@ -209,6 +209,8 @@ def grupos_em_ordem(rel: Mapping) -> list[Mapping]:
     O relatório guardado fica na ordem em que foi calculado."""
     grupos = [g for g in rel.get("grupos") or [] if isinstance(g, Mapping)]
     return ordenar_categorias(grupos, lambda g: g.get("chave"))
+
+
 # (categoria — mesclada nas linhas seguidas dela —, sub-rótulo, métrica). Métrica
 # None = não existe na Shopee (impressões de afiliados): sempre "—". O Saldo Ads
 # não entra (continua no relatório, no CSV e no JSON).
