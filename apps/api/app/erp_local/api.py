@@ -31,6 +31,43 @@ class Command(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+# The screen's product list carries only what the lists, filters and forms read; the editor asks
+# for the whole product (/products/{sku}/full). On the real base this took the state from 7.3 MB
+# to about 2 MB (23/11).
+LIGHT_DETAILS = ("version", "status", "gtin", "tags", "brand", "stock_min", "unit")
+LIGHT_ORIGIN = ("sellable", "stock_state", "catalog_state", "source_status")
+
+
+def light_product(product):
+    out = {
+        k: v
+        for k, v in product.items()
+        if k not in {"details", "tax", "structure", "price_table", "origin", "images"}
+    }
+    details = product.get("details") or {}
+    out["details"] = {k: details[k] for k in LIGHT_DETAILS if k in details}
+    origin = product.get("origin")
+    out["origin"] = {k: origin.get(k) for k in LIGHT_ORIGIN} if origin else origin
+    images = product.get("images") or {}
+    out["images"] = {"version": images.get("version", 0), "rows": (images.get("rows") or [])[:1]}
+    tax = product.get("tax") or {}
+    data = tax.get("data") or {}
+    out["tax"] = {
+        "version": tax.get("version", 0),
+        "data": {"ncm": data.get("ncm"), "item_type": data.get("item_type")},
+    }
+    structure = product.get("structure") or {}
+    out["structure"] = {
+        "version": structure.get("version", 0),
+        "mode": structure.get("mode"),
+        "components": structure.get("components") or [],
+    }
+    table = product.get("price_table")
+    out["price_table"] = {"department": table.get("department")} if table else None
+    out["light"] = True
+    return out
+
+
 def _plain(value):
     """What FastAPI's encoder did for the few non-JSON values: numbers stay numbers."""
     from datetime import date, datetime
@@ -297,8 +334,10 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "situations": bling_compat.situations_snapshot(db),
                 "statements": bank_statements.snapshot(db),
             }
+        base = erp.snapshot()
+        base["products"] = [light_product(p) for p in base["products"]]
         payload = {
-            **erp.snapshot(),
+            **base,
             **operations,
             "reference": reference.info(),
             "channels": channels.snapshot(),
@@ -314,6 +353,25 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         # Several megabytes on the real base: serialized straight, without FastAPI's per-value
         # conversion, which alone took most of the page load.
         return Response(_state_json(payload), media_type="application/json")
+
+    @app.get("/api/erp-local/products/{sku}/full")
+    def product_full(sku: str, request: Request):
+        """One product with everything the editor shows (details, tax, structure, Tabela de
+        Preços, images, origin), asked when the product is opened."""
+        found = erp.snapshot(skus=[sku])["products"]
+        if not found:
+            raise ERPError("product_not_found", "Produto não encontrado.", 404)
+        payload = {"products": found}
+        if access.enforced():
+            with erp.connection() as db:
+                person = access.who(
+                    db, request.headers.get("x-erp-actor"), request.headers.get("x-erp-role")
+                )
+            payload = access.filter_state(payload, person)
+        products = payload.get("products") or []
+        if not products:
+            raise ERPError("product_hidden", "Sem acesso a produtos.", 403)
+        return Response(_state_json(products[0]), media_type="application/json")
 
     @app.get("/api/erp-local/native-orders")
     def native_orders_of(channel: str = Query(max_length=40), store: str = Query(max_length=120)):

@@ -2,6 +2,23 @@
 let editingProduct='',productEditTab='characteristics';
 let imageUploadBusy=false,draggedProductImage=null,imageLibraryRequest=0;
 const cleanProductImage=row=>({id:row.id,alt:row.alt||''});
+// The screen state brings products light (only what lists read); the editor asks for the whole
+// product when it opens and keeps it a minute, so the per-minute refresh does not reload it.
+const fullProducts={};let fullProductLoading='';
+function ensureFullProduct(sku){
+ const index=state.products.findIndex(p=>p.sku===sku);
+ if(index<0||!state.products[index].light)return true;
+ const kept=fullProducts[sku];
+ if(kept&&Date.now()-kept.at<60000){state.products[index]=kept.data;return true;}
+ if(fullProductLoading!==sku){
+  fullProductLoading=sku;
+  fetch('/api/erp-local/products/'+encodeURIComponent(sku)+'/full').then(r=>r.ok?r.json():Promise.reject(new Error('leitura')))
+   .then(full=>{if(!full||full.sku!==sku)return;fullProducts[sku]={at:Date.now(),data:full};const at=state.products.findIndex(p=>p.sku===sku);if(at>=0)state.products[at]=full;})
+   .catch(()=>message('Não consegui abrir o produto agora. Tente de novo.',true))
+   .finally(()=>{fullProductLoading='';if(editingProduct===sku)render();});
+ }
+ return false;
+}
 function readProductImages(){return [...document.querySelectorAll('#product-image-gallery [data-image-info]')].map(el=>({...JSON.parse(el.dataset.imageInfo),alt:el.querySelector('[data-image-alt]').value}));}
 function productImageFigure(image,index){return `<figure data-image-info="${esc(JSON.stringify(image))}" draggable="true"><button type="button" class="image-preview" data-image-view="${esc(image.id)}"><img src="${esc(image.url)}" alt="${esc(image.alt||image.filename)}"></button><figcaption>${index===0?'Imagem principal':'Imagem '+(index+1)}<small>${esc(image.filename)} · ${image.width} × ${image.height}</small></figcaption><label>Descrição da imagem ${index+1}<input data-image-alt value="${esc(image.alt||'')}" maxlength="120"></label><div class="image-controls"><button type="button" class="action" data-image-move="-1" aria-label="Mover imagem ${index+1} para antes" ${index===0?'disabled':''}>←</button><button type="button" class="action" data-image-move="1" aria-label="Mover imagem ${index+1} para depois">→</button><button type="button" class="action" data-image-primary ${index===0?'disabled':''}>Principal</button><button type="button" class="action danger" data-image-remove aria-label="Remover vínculo da imagem ${index+1}">${icon('trash')}</button></div></figure>`;}
 function updateProductImageGallery(images){const gallery=document.getElementById('product-image-gallery');if(gallery)gallery.innerHTML=images.map(productImageFigure).join('');}
@@ -122,6 +139,7 @@ function productStructureEditor(product){
  return `<h3>Estrutura</h3><label>Tipo de estoque<select disabled><option>${product.kind==='kit'?'Virtual · baixa nas peças':'Físico · montagem por ordem de produção'}</option></select></label><p class="source-line">${product.kind==='kit'?'A capacidade é calculada pelas peças compartilhadas.':'Cadastrar a receita não cria produto acabado; a montagem é lançada na ordem de produção.'} Alterar a composição não muda componentes, reservas ou custos congelados em documentos já salvos.</p>${itemsForm(true,false,rows,true)}<label>Motivo da alteração da estrutura<input name="structure_reason" maxlength="500" placeholder="Explique a mudança nos componentes"></label><h3>Peças físicas da composição atual</h3>${table(['Código (SKU)','Quantidade por unidade'],structure.expanded.map(i=>`<tr><td>${esc(i.sku)}</td><td>${qty(i.quantity)}</td></tr>`).join('')||empty(2,'Nenhuma composição cadastrada.'))}<p class="source-line">Versão da estrutura: ${structure.version}. Kits dentro de kits são expandidos sem duplicar peças. Ciclos, itens repetidos ou pendentes impedem o salvamento. O quadro de peças é atualizado após salvar.</p>${structure.history?.length?`<details><summary>Histórico da estrutura (${structure.history.length} registros recentes)</summary>${table(['Versão','Quando','Responsável','Motivo','Componentes'],structure.history.map(h=>`<tr><td>${h.version}</td><td>${when(h.created_at)}</td><td>${esc(h.data.actor||'Base anterior')}</td><td>${esc(h.data.reason||'Composição anterior')}</td><td>${h.data.components.map(i=>`${qty(i.quantity)} × ${esc(i.sku)}`).join('<br>')}</td></tr>`).join(''))}</details>`:''}`;
 }
 function productDetailsForm(){
+ if(!ensureFullProduct(editingProduct))return `<section class="panel"><p class="source-line">Abrindo ${esc(editingProduct)}…</p></section>`;
  const product=state.products.find(p=>p.sku===editingProduct);
  if(!product)return '';
  const d=product.details||{},field=(name,label,value,type='text',limit=120)=>`<label>${label}<input name="${name}" value="${esc(value??'')}" type="${type}" maxlength="${limit}" ${type==='number'?'min="0" step="0.0001"':''}></label>`;

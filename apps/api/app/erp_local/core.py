@@ -1032,7 +1032,9 @@ class LocalERP:
             return {"id": doc["id"], "status": target}
         raise ERPError("unsupported_command", "Essa operação não está disponível no ERP local.")
 
-    def snapshot(self):
+    def snapshot(self, skus=None):
+        """Everything the screen and the compatible API read. `skus` limits the products to these
+        (the screen's full product, opened one at a time)."""
         with self.connection() as db:
             db.execute("BEGIN")
             from app.erp_local import categories, product_details, product_structures
@@ -1050,7 +1052,20 @@ class LocalERP:
             from app.erp_local import price_table
 
             lines = price_table.index(db)
-            for row in db.execute("SELECT rowid AS position,* FROM products ORDER BY sku"):
+            wanted = list(skus) if skus is not None else None
+            marks = ",".join("?" * len(wanted)) if wanted else ""
+            product_rows = (
+                db.execute("SELECT rowid AS position,* FROM products ORDER BY sku")
+                if wanted is None
+                else db.execute(
+                    f"SELECT rowid AS position,* FROM products WHERE sku IN ({marks}) "  # noqa: S608
+                    "ORDER BY sku",
+                    tuple(wanted),
+                )
+                if wanted
+                else []
+            )
+            for row in product_rows:
                 product = dict(row)
                 product["components"] = json.loads(product["components"])
                 product["price"] = pricing.get(product["sku"], {}).get("price")

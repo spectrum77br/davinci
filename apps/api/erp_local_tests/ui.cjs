@@ -1608,3 +1608,20 @@ test('consulta: Integrações says store by store whether the ERP has every sale
   assert.match(text,/Lojas: igual ao Bling\?/);assert.match(text,/Igual ao Bling/);assert.match(text,/Não lida pelo ERP/);assert.match(text,/1 de 1 lojas lidas/);
   dom.window.close();
 });
+
+test('a light product from the screen state opens in the editor after asking for the whole product',async()=>{
+  const light={sku:'dg053.sp',name:'A17',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',light:true,details:{version:1,status:'active',gtin:'7908855913168'}};
+  const full={...light,light:undefined,details:{version:1,unit:'UN',status:'active',gtin:'7908855913168',gtin_tax:'',voltage:'bivolt'},price_table:null};
+  delete full.light;
+  const {dom,document:d}=await setup({products:[light]});
+  const fetcher=dom.window.fetch,asked=[];
+  dom.window.fetch=async(url,options)=>{asked.push(url);return url==='/api/erp-local/products/dg053.sp/full'?{ok:true,status:200,json:async()=>full}:fetcher(url,options);};
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-edit-product]').click();
+  assert.match(d.querySelector('main').textContent,/Abrindo dg053\.sp/);
+  for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
+  assert.deepEqual(asked.filter(u=>u.includes('/full')),['/api/erp-local/products/dg053.sp/full']);
+  assert.equal(d.querySelector('#product-edit-form [name=voltage]').value,'bivolt');
+  dom.window.close();
+});

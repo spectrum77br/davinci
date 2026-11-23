@@ -314,3 +314,28 @@ def test_stock_entry_keeps_the_purchase_price_in_the_history(tmp_path):
         ]
     entry = next(i for i in items if i["reason"] == "compra")
     assert entry["purchase_price"] == "38.5" and float(entry["unit_cost"]) == 40
+
+
+def test_screen_state_sends_light_products_and_the_editor_asks_for_the_whole_one(tmp_path):
+    from test_core import run
+
+    with client(tmp_path) as c:
+        run(c.app.state.erp, "demo.seed", {})
+        state = c.get("/api/erp-local/state").json()
+        product = next(p for p in state["products"] if p["sku"] == "demo.aparelho")
+        assert product["light"] is True and product["balances"]
+        assert set(product["details"]) <= {
+            "version",
+            "status",
+            "gtin",
+            "tags",
+            "brand",
+            "stock_min",
+            "unit",
+        }
+        assert "data" in product["tax"] and set(product["tax"]["data"]) == {"ncm", "item_type"}
+        full = c.get("/api/erp-local/products/demo.aparelho/full").json()
+        assert "light" not in full and full["sku"] == "demo.aparelho"
+        assert len(full["details"]) > len(product["details"]) and "history" not in product
+        assert full["balances"] == product["balances"]
+        assert c.get("/api/erp-local/products/nao.existe/full").status_code == 404
