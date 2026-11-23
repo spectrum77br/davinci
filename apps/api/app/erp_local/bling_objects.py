@@ -55,6 +55,8 @@ LOGISTICS_EVERY = timedelta(hours=24)
 # A moving object is read again every 6 h; one Bling does not track (8) or still waits, daily.
 MOVING = {0, 1, 4, 7, 11, 12, 13}
 REREAD_MOVING, REREAD_OTHER = timedelta(hours=6), timedelta(hours=24)
+# An order read before its label has no object yet: asked again every 6 h for a week.
+WAIT_LABEL_DAYS = 7
 # One JSON value, as bling_mirror.read_local reads it.
 ORDERS_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM ("
@@ -226,27 +228,41 @@ def run(erp, reader=None, *, now=None, orders_reader=None, calls=CALLS_PER_ROUND
             db.commit()
             report["forgotten"] = _forget_old(db, moment)
             db.commit()
-            known = {r[0] for r in db.execute("SELECT order_id FROM bling_object_orders")}
+            known = {
+                r["order_id"]: (r["objects"], _when(r["read_at"]))
+                for r in db.execute("SELECT order_id,objects,read_at FROM bling_object_orders")
+            }
             cutoff = (moment - timedelta(days=KEEP_DAYS)).date().isoformat()
-            new = sorted(
-                (
-                    o
-                    for o in candidates
-                    if str(o.get("id")) not in known and str(o.get("day") or "")[:10] >= cutoff
-                ),
-                key=lambda o: (str(o.get("day") or ""), str(o.get("id"))),
-                reverse=True,
-            )
+            recent = (moment - timedelta(days=WAIT_LABEL_DAYS)).date().isoformat()
+            new, waiting = [], []
+            for order in candidates:
+                order["id"] = str(order.get("id"))
+                day = str(order.get("day") or "")[:10]
+                if order["id"] not in known:
+                    if day >= cutoff:
+                        new.append(order)
+                    continue
+                objects, read_at = known[order["id"]]
+                # Read before its label: Bling makes the object when the label comes.
+                if (
+                    objects == "[]"
+                    and day >= recent
+                    and read_at
+                    and moment - read_at >= REREAD_MOVING
+                ):
+                    waiting.append((read_at, order))
+            new.sort(key=lambda o: (str(o.get("day") or ""), o["id"]), reverse=True)
+            waiting.sort(key=lambda pair: pair[0])
             room = max(0, (calls - used) // 2)
-            if new and room:
-                for order in new[:room]:
-                    order["id"] = str(order["id"])
-                report["orders"] = _read_orders(db, reader, new[:room], moment)
+            asked = (new + [order for _, order in waiting])[:room]
+            if asked:
+                report["orders"] = _read_orders(db, reader, asked, moment)
                 db.commit()
             due = _due_objects(db, moment, max(0, calls - used - report["orders"]))
             if due:
                 report["objects"] = _read_objects(db, reader, due, moment)
-            report["orders_missing"] = max(0, len(new) - report["orders"])
+            report["orders_missing"] = max(0, len(new) - min(report["orders"], len(new)))
+            report["waiting_label"] = len(waiting)
             db.commit()
     except UnavailableError as error:
         report["state"] = str(error)

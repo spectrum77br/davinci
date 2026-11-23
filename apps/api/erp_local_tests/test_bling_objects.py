@@ -254,3 +254,64 @@ def test_the_order_list_is_one_json_value_as_the_davinci_reader_reads_it():
     assert sql.startswith("SELECT coalesce(json_agg(t),'[]') FROM (") and sql.endswith(") t")
     assert "current_date - 31" in sql
     assert not re.search(r"\b(INSERT|UPDATE|DELETE|DROP)\b", sql.upper())
+
+
+def test_an_order_read_before_its_label_is_asked_again_until_bling_makes_its_object(erp):
+    labelled = {"now": False}
+    seen = []
+
+    def reader(request):
+        results = []
+        for call in request["calls"]:
+            path = call["path"]
+            seen.append(path)
+            if path == "/logisticas":
+                body = {"data": []}
+            elif path.startswith("/pedidos/vendas/"):
+                volumes = [{"id": 5550}] if labelled["now"] else []
+                body = {"data": {"numero": "309999", "transporte": {"volumes": volumes}}}
+            else:
+                body = {
+                    "data": {
+                        "id": 5550,
+                        "servico": {"id": 1, "nome": "Shopee Xpress"},
+                        "rastreamento": {"codigo": "BR1", "situacao": 8},
+                        "dataSaida": "2026-11-23",
+                    }
+                }
+            results.append({"status": 200, "body": body})
+        return {
+            "version": 1,
+            "source": bling_shadow_probe.SOURCE,
+            "read_only": "on",
+            "no_token_refresh": True,
+            "state": "read_ok",
+            "results": results,
+        }
+
+    today = [
+        {
+            "id": 900,
+            "number": "309999",
+            "store": "s",
+            "store_number": "251123X",
+            "day": "2026-11-23",
+            "channel": "shopee",
+        }
+    ]
+    first = bling_objects.run(erp, reader, now=NOW, orders_reader=lambda _sql: today)
+    assert first["orders"] == 1 and first["objects"] == 0
+    seen.clear()
+    assert (
+        bling_objects.run(
+            erp, reader, now=NOW + timedelta(hours=1), orders_reader=lambda _sql: today
+        )["orders"]
+        == 0
+    )
+    labelled["now"] = True
+    later = bling_objects.run(
+        erp, reader, now=NOW + timedelta(hours=7), orders_reader=lambda _sql: today
+    )
+    assert later["orders"] == 1 and later["objects"] == 1
+    with erp.connection() as db:
+        assert [i["tracking"] for i in bling_objects.listing(db)["items"]] == ["BR1"]
