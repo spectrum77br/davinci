@@ -12,9 +12,9 @@ def reader_for(bills, contacts, seen):
             path, params = call["path"], dict(call["params"])
             seen.append(path)
             if path == "/contas/pagar":
-                rows = [
-                    b["list"] for b in bills if str(b["list"]["situacao"]) == params["situacoes[]"]
-                ]
+                # As Bling: filter 4 brings partly paid bills (3), filter 3 the cancelled (5).
+                wanted = {"1": "1", "4": "3", "3": "5"}[params["situacoes[]"]]
+                rows = [b["list"] for b in bills if str(b["list"]["situacao"]) == wanted]
                 page, size = int(params["pagina"]), int(params["limite"])
                 body = {"data": rows[(page - 1) * size : page * size]}
             elif path.startswith("/contas/pagar/"):
@@ -149,3 +149,10 @@ def test_a_429_is_asked_again_after_a_wait(erp, monkeypatch):
 
     assert bling_payables.run(erp, busy)["state"] == "read_ok"
     assert waits == [3, 8]
+
+
+def test_cancelled_bills_never_enter_the_copy(erp):
+    bills = [bill(1), bill(2, situation=5)]
+    assert bling_payables.run(erp, reader_for(bills, {"7": "A"}, []))["open"] == 1
+    with erp.connection() as db:
+        assert [r["id"] for r in bling_payables.snapshot(db)["rows"]] == ["1"]

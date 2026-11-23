@@ -24,8 +24,11 @@ SCHEMA = (
     "CREATE TABLE IF NOT EXISTS bling_payables_runs (taken_at TEXT PRIMARY KEY,"
     " data TEXT NOT NULL);"
 )
-# Bling's account situations: 1 open, 2 paid, 3 partly paid, 4 returned, 5 cancelled.
+# A bill's situation: 1 open, 2 paid, 3 partly paid, 4 returned, 5 cancelled. Bling numbers the list
+# filter differently (checked 23/11): filter 1 brings open bills, 4 the partly paid (situation 3)
+# and 3 the cancelled (situation 5).
 OPEN = {"1": "Em aberto", "3": "Pago parcialmente"}
+LIST_FILTERS = ("1", "4")
 PAGE = 100
 PAGES_PER_READ = 4
 MAX_PAGES = 30
@@ -79,7 +82,7 @@ def _data(result):
 
 def _list(reader):
     listed = {}
-    for situation in OPEN:
+    for situation in LIST_FILTERS:
         first = 1
         while first <= MAX_PAGES:
             pages = range(first, min(first + PAGES_PER_READ, MAX_PAGES + 1))
@@ -94,7 +97,7 @@ def _list(reader):
             for result in _read(reader, calls):
                 rows = _data(result) or []
                 for row in rows:
-                    if isinstance(row, dict) and row.get("id"):
+                    if isinstance(row, dict) and row.get("id") and str(row.get("situacao")) in OPEN:
                         listed[str(row["id"])] = row
                 if len(rows) < PAGE:
                     last = True
