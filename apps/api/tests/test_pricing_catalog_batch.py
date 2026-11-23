@@ -1,5 +1,9 @@
 """Push em lote de preços (Fase 9c) + relatório.
 
+M-20 (23/11/2026): o relatório do lote é um alerta ADM no sino (antes o
+Telegram de quem tinha o chat configurado); o `POST /push-report` (relatório
+manual no Telegram) saiu.
+
 Os testes do Catálogo antigo (GET /catalog-listings, POST /push-catalog e a ⭐
 `in_catalog`) saíram em 06/10/2026 junto com as rotas: o catálogo do ML virou
 coluna de catálogo das contas de kit — ver test_pricing_catalogo_ml.py.
@@ -36,7 +40,6 @@ from app.models import (
     StoreStatus,
     User,
     UserRole,
-    UserSettings,
     UserStatus,
 )
 from app.security.cipher import encrypt_json
@@ -174,17 +177,19 @@ async def test_rotas_do_catalogo_antigo_nao_existem_mais(
 
 
 @pytest.mark.asyncio
-async def test_batch_service_records_progress_and_skips_telegram_when_no_chat(
+async def test_batch_service_records_progress_and_reports_to_the_sino(
     db: AsyncSession,
     user_full: User,
     catalog_setup: dict[str, Any],
     monkeypatch,
 ):
     from app.models import (
+        Alert,
         BackgroundJob,
         BackgroundJobStatus,
         BackgroundJobType,
     )
+    from app.models.alert import ESCOPO_ADM
 
     job = BackgroundJob(
         type=BackgroundJobType.PUSH_PRICES_BATCH,
@@ -197,7 +202,6 @@ async def test_batch_service_records_progress_and_skips_telegram_when_no_chat(
     await db.commit()
     await db.refresh(job)
 
-    # No UserSettings row → no telegram_chat_id → telegram skipped silently.
     with respx.mock() as router:
         _ml_item_ok(router)
         await run_push_prices_batch(
@@ -211,7 +215,6 @@ async def test_batch_service_records_progress_and_skips_telegram_when_no_chat(
                 }
             ],
             idempotency_prefix="batch-test-1",
-            notify_telegram=True,
         )
 
     await db.refresh(job)
@@ -226,79 +229,36 @@ async def test_batch_service_records_progress_and_skips_telegram_when_no_chat(
     assert "calc" not in payload
     assert [lk["externalId"] for lk in payload["links"]] == ["MLB1"]
 
-
-@pytest.mark.asyncio
-async def test_batch_service_sends_telegram_when_chat_configured(
-    db: AsyncSession,
-    user_full: User,
-    catalog_setup: dict[str, Any],
-    monkeypatch,
-):
-    from app.models import (
-        BackgroundJob,
-        BackgroundJobStatus,
-        BackgroundJobType,
+    # M-20: o relatório do lote é um alerta ADM no sino (um por lote), com
+    # quem enviou — mesmo sem nenhum chat configurado.
+    (alerta,) = (
+        (await db.execute(select(Alert).where(Alert.dedupe_key == f"preco_lote:{job.id}")))
+        .scalars()
+        .all()
     )
+    assert alerta.escopo == ESCOPO_ADM and alerta.user_id is None
+    assert alerta.title.startswith("Relatório de envio de preços em lote")
+    assert "Enviados: 1" in alerta.message and user_full.email in alerta.message
+    assert "<b>" not in alerta.message and "<code>" not in alerta.message
 
-    db.add(
-        UserSettings(
-            user_id=user_full.id,
-            telegram_chat_id="999999",
-        )
+
+def test_relatorio_do_lote_em_texto_simples():
+    from app.services.pricing.batch import _format_report
+
+    titulo, texto, erros = _format_report(
+        {"ok": 3, "failed": 2},
+        [
+            {"code": "ml_listing_closed", "detail": "encerrado"},
+            {"code": "no_link", "price": "99.90", "detail": "sem anúncio"},
+            {"code": "ml_error", "price": "10.00", "detail": "x" * 100},
+        ],
+        "Celular",
     )
-    await db.commit()
-
-    job = BackgroundJob(
-        type=BackgroundJobType.PUSH_PRICES_BATCH,
-        status=BackgroundJobStatus.PENDING,
-        created_by=user_full.id,
-        payload={},
-        total=1,
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
-
-    # Token de mentira só durante ESTE teste: o monkeypatch devolve o ambiente
-    # e o cache das settings é limpo de novo no fim — antes ele vazava para
-    # os testes seguintes (test_telegram_client esperava token vazio).
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
-    from app.config import get_settings
-
-    get_settings.cache_clear()  # type: ignore[attr-defined]
-
-    from app.services import telegram as tg_mod
-
-    try:
-        await _envia_lote_com_telegram(db, user_full, catalog_setup, job, tg_mod)
-    finally:
-        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-        get_settings.cache_clear()  # type: ignore[attr-defined]
-
-    await db.refresh(job)
-    assert job.status == BackgroundJobStatus.SUCCEEDED
-
-
-async def _envia_lote_com_telegram(db, user_full, catalog_setup, job, tg_mod) -> None:
-    with respx.mock() as router:
-        _ml_item_ok(router)
-        tg_route = router.post(
-            f"{tg_mod.TELEGRAM_API_BASE}/botfake-token/sendMessage"
-        ).mock(return_value=Response(200, json={"ok": True, "result": {}}))
-        await run_push_prices_batch(
-            db,
-            job_id=job.id,
-            user_id=user_full.id,
-            items=[
-                {
-                    "pricing_account_id": str(catalog_setup["a_reg"].id),
-                    "pricing_product_id": str(catalog_setup["p_reg"].id),
-                }
-            ],
-            idempotency_prefix="batch-tg",
-            notify_telegram=True,
-        )
-        assert tg_route.called
+    assert titulo == "Relatório de envio de preços em lote — Celular"
+    assert "Enviados: 3" in texto and "Pulados (encerrados): 1" in texto
+    assert "Sem vínculo: 1" in texto and erros == 1
+    assert "• no_link R$ 99.90 sem anúncio" in texto
+    assert "<" not in texto
 
 
 # =================================================== push-batch endpoint
@@ -335,7 +295,7 @@ async def test_push_batch_endpoint_creates_job(
     monkeypatch.setattr(pricing_mod, "get_arq_pool", fake_pool)
 
     r = await client.post(
-        "/api/pricing/push-batch?notify_telegram=false",
+        "/api/pricing/push-batch",
         json={
             "items": [
                 {
@@ -347,6 +307,8 @@ async def test_push_batch_endpoint_creates_job(
     )
     assert r.status_code == 201
     assert enqueued["fn"] == "push_prices_batch_run"
+    # M-20: sem o `notify_telegram` (job, usuário, itens, chave).
+    assert len(enqueued["args"]) == 4
 
     from app.models import BackgroundJob, BackgroundJobType
 
@@ -374,24 +336,15 @@ async def test_push_batch_empty_returns_400(
     assert r.json()["detail"]["code"] == "empty_batch"
 
 
-# =================================================== push-report manual
+# =================================================== push-report manual (saiu na M-20)
 
 
 @pytest.mark.asyncio
-async def test_push_report_no_chat_returns_400(
+async def test_push_report_do_telegram_saiu(
     client: AsyncClient,
     user_full: User,
     auth_as: Callable[[User | None], None],
 ):
     auth_as(user_full)
-    import os
-
-    # Remove env so resolve fails
-    os.environ.pop("TELEGRAM_CHAT_ID", None)
-    from app.config import get_settings
-
-    get_settings.cache_clear()  # type: ignore[attr-defined]
-
     r = await client.post("/api/pricing/push-report", json={"summary": "hi"})
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "telegram_not_configured"
+    assert r.status_code in (404, 405)

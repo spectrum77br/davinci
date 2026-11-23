@@ -3,8 +3,9 @@
 Runs in an Arq job so the user can fire 100s of cells without keeping the
 HTTP request open. Drives `push_one` sequentially (respects per-platform
 rate limits already inside MLClient._request) and writes progress to
-`background_jobs`. On completion, fires a Telegram report via `safe_send`
-when the user has Telegram configured (or the global chat is set).
+`background_jobs`. Ao terminar, o relatório do lote vira um alerta ADM no sino
+(M-20, 23/11/2026: todo administrador vê em /alertas, com Equipe = ADM; antes
+ia ao Telegram de quem tinha o chat configurado).
 """
 
 from __future__ import annotations
@@ -13,19 +14,18 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    AlertSeverity,
     BackgroundJob,
     BackgroundJobStatus,
     PricingAccount,
     Segment,
     User,
-    UserSettings,
 )
+from app.services.alerts import avisar_administradores
 from app.services.pricing.push import push_one, resultado_para
-from app.services.telegram import TelegramClient, TelegramConfigError
 
 logger = structlog.get_logger()
 
@@ -42,9 +42,7 @@ _DEPT_LABEL = {
 }
 
 
-async def _infer_batch_department(
-    session: AsyncSession, items: list[dict]
-) -> str | None:
+async def _infer_batch_department(session: AsyncSession, items: list[dict]) -> str | None:
     """Pick the department slug of the first item's pricing_account. The
     bulk-push UI is per-department so this is normally unambiguous; mixed
     batches just get the first one's label."""
@@ -68,23 +66,20 @@ async def _infer_batch_department(
     return _DEPT_LABEL.get(parent.slug, parent.slug)
 
 
-async def _resolve_chat_id(session: AsyncSession, user_id: UUID) -> str | None:
-    settings = (
-        await session.execute(
-            select(UserSettings).where(UserSettings.user_id == user_id)
-        )
-    ).scalar_one_or_none()
-    return settings.telegram_chat_id if settings else None
-
-
-def _format_report(summary: dict, samples: list[dict], department: str | None = None) -> str:
-    """SSH-style Telegram report. Categorizes failures into
-    "Pulados (encerrados)", "Sem vínculo", and "Erros" so the user can
-    triage at a glance and see which SKUs need attention."""
+def _format_report(
+    summary: dict, samples: list[dict], department: str | None = None
+) -> tuple[str, str, int]:
+    """O relatório do lote: (título, texto, erros). Separa as falhas em
+    "Pulados (encerrados)", "Sem vínculo" e "Erros" para a triagem de olho e
+    mostra os SKUs que pedem atenção. Texto simples: o sino não lê HTML
+    (M-20, 23/11/2026; antes era a mensagem do Telegram)."""
     # "bloqueado": célula de catálogo sem para onde enviar (sem anúncio,
     # sincronizado, pausado…) — recusada antes de chamar o ML, é pulo e não erro.
     closed_codes = {
-        "ml_listing_closed", "ml_listing_paused", "ml_listing_under_review", "bloqueado",
+        "ml_listing_closed",
+        "ml_listing_paused",
+        "ml_listing_under_review",
+        "bloqueado",
     }
     no_link_codes = {"no_link", "listing_not_found"}
 
@@ -101,12 +96,12 @@ def _format_report(summary: dict, samples: list[dict], department: str | None = 
             errors.append(s)
 
     header_dept = f" — {department}" if department else ""
+    titulo = f"Relatório de envio de preços em lote{header_dept}"
     lines = [
-        f"🔔 <b>Relatório de Envio de Preços{header_dept}</b>",
-        f"✅ Enviados: {summary['ok']}",
-        f"⏭️ Pulados (encerrados): {len(skipped)}",
-        f"❌ Erros: {len(errors)}",
-        f"🔗 Sem vínculo: {len(no_link)}",
+        f"Enviados: {summary['ok']}",
+        f"Pulados (encerrados): {len(skipped)}",
+        f"Erros: {len(errors)}",
+        f"Sem vínculo: {len(no_link)}",
     ]
 
     def _fmt(s: dict) -> str:
@@ -114,19 +109,19 @@ def _format_report(summary: dict, samples: list[dict], department: str | None = 
         detail = s.get("detail") or ""
         if len(detail) > 80:
             detail = detail[:77] + "…"
-        return f"• <code>{s.get('code','')}</code>{price} {detail}".rstrip()
+        return f"• {s.get('code', '')}{price} {detail}".rstrip()
 
     if errors:
         lines.append("")
-        lines.append(f"<b>Erros (até 10 de {len(errors)}):</b>")
+        lines.append(f"Erros (até 10 de {len(errors)}):")
         for s in errors[:10]:
             lines.append(_fmt(s))
     if no_link:
         lines.append("")
-        lines.append(f"<b>Sem vínculo (até 10 de {len(no_link)}):</b>")
+        lines.append(f"Sem vínculo (até 10 de {len(no_link)}):")
         for s in no_link[:10]:
             lines.append(_fmt(s))
-    return "\n".join(lines)
+    return titulo, "\n".join(lines), len(errors)
 
 
 async def run_push_prices_batch(
@@ -136,7 +131,6 @@ async def run_push_prices_batch(
     user_id: UUID,
     items: list[dict],
     idempotency_prefix: str | None = None,
-    notify_telegram: bool = True,
 ) -> None:
     """Idempotency model: if `idempotency_prefix` is set, each item gets
     `f"{prefix}:{i}"` as its key — a re-enqueue with the same prefix replays
@@ -211,13 +205,25 @@ async def run_push_prices_batch(
     job.finished_at = _now()
     await session.commit()
 
-    if notify_telegram:
-        chat_id = await _resolve_chat_id(session, user_id)
-        if chat_id:
-            try:
-                department_label = await _infer_batch_department(session, items)
-                await TelegramClient(default_chat_id=chat_id).safe_send(
-                    _format_report(summary, failures, department_label)
-                )
-            except TelegramConfigError:
-                logger.warning("batch_push_telegram_skipped", reason="no_token")
+    # M-20 (23/11/2026): o relatório vai ao sino dos administradores (alerta
+    # ADM, um por lote), com quem enviou. Nunca derruba o job.
+    try:
+        department_label = await _infer_batch_department(session, items)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("batch_push_departamento_falhou", err=type(e).__name__)
+        department_label = None
+    titulo, texto, erros = _format_report(summary, failures, department_label)
+    quem = user.name or user.email or str(user.id)
+    await avisar_administradores(
+        titulo,
+        f"Enviado por: {quem}\n{texto}",
+        severity=(
+            AlertSeverity.SUCCESS
+            if summary["failed"] == 0
+            else AlertSeverity.ERROR
+            if erros
+            else AlertSeverity.WARNING
+        ),
+        payload={"preco_lote": str(job_id), "summary": summary},
+        dedupe_key=f"preco_lote:{job_id}",
+    )

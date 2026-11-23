@@ -5535,9 +5535,14 @@ async def push_prices_batch_run(
     user_id: str,
     items: list[dict],
     idempotency_prefix: str | None = None,
-    notify_telegram: bool = True,
+    _notify_telegram_antigo: bool | None = None,
 ) -> None:
-    """Fase 9c: bulk push de preços (sequencial, respeita rate-limit do client)."""
+    """Fase 9c: bulk push de preços (sequencial, respeita rate-limit do client).
+
+    M-20 (23/11/2026): o relatório vai ao sino dos administradores. O 5º
+    argumento (`notify_telegram`) só existe para o job que entrou na fila antes
+    da troca: é ignorado.
+    """
     async with session_scope() as s:
         await run_push_prices_batch(
             s,
@@ -5545,7 +5550,6 @@ async def push_prices_batch_run(
             user_id=UUID(user_id),
             items=items,
             idempotency_prefix=idempotency_prefix,
-            notify_telegram=notify_telegram,
         )
 
 

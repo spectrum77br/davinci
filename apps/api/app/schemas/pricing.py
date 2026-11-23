@@ -482,14 +482,6 @@ class PricingGridOut(BaseModel):
     cells: list[PricingGridCell]
 
 
-# ----------------------------------------------------------------- bulk push (9c)
-
-class PricingPushReportIn(BaseModel):
-    """Manual report send (PRD pricing.sendPushReport)."""
-    summary: str
-    chat_id: str | None = None
-
-
 # ----------------------------------------------------------------- audit (9d)
 
 class SkuAuditRow(BaseModel):

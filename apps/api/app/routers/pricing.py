@@ -1,7 +1,8 @@
 """Pricing router (Fase 9a) — accounts/products/overrides CRUD.
 
-Push/Telegram/Audit endpoints arrive in 9b-9d. This sub-phase ships only
-the data plane.
+Push/Audit endpoints arrive in 9b-9d. This sub-phase ships only
+the data plane. (M-20, 23/11/2026: o relatório manual do Telegram,
+`POST /push-report`, saiu — o relatório do lote vai ao sino.)
 """
 
 from __future__ import annotations
@@ -72,7 +73,6 @@ from app.schemas.pricing import (
     PricingPushBatchIn,
     PricingPushItemOut,
     PricingPushOut,
-    PricingPushReportIn,
     SkuAuditRow,
     StoreInfoCreate,
     StoreInfoOut,
@@ -123,7 +123,6 @@ from app.services.store_departments import (
     manual_store_departments as _manual_store_departments,
 )
 from app.services.store_departments import resolve_store_departments
-from app.services.telegram import TelegramClient, TelegramConfigError
 from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
@@ -1822,8 +1821,9 @@ async def enqueue_push_batch(
         User, Depends(require_permission("tabela_precos", "edit"))
     ],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    notify_telegram: bool = Query(True),
 ) -> JobCreatedOut:
+    """O relatório do lote vai ao sino dos administradores (M-20, 23/11/2026);
+    o antigo `?notify_telegram=` é ignorado."""
     if not body.items:
         raise HTTPException(400, detail={"code": "empty_batch"})
 
@@ -1841,7 +1841,6 @@ async def enqueue_push_batch(
         payload={
             "count": len(items),
             "idempotency_prefix": idempotency_key,
-            "notify_telegram": notify_telegram,
         },
         total=len(items),
     )
@@ -1855,44 +1854,11 @@ async def enqueue_push_batch(
         str(user.id),
         items,
         idempotency_key,
-        notify_telegram,
     )
     if arq is not None:
         job.arq_job_id = arq.job_id
     await session.commit()
     return JobCreatedOut(job_id=job.id)
-
-
-# =============================================================================
-# Manual Telegram report (9c)
-# =============================================================================
-
-@router.post("/push-report", status_code=status.HTTP_204_NO_CONTENT)
-async def send_push_report(
-    body: PricingPushReportIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("tabela_precos", "edit"))
-    ],
-) -> None:
-    chat_id = body.chat_id
-    if not chat_id:
-        from app.models import UserSettings  # local import — avoids cycle
-
-        st = (
-            await session.execute(
-                select(UserSettings).where(user_scope(UserSettings, user))
-            )
-        ).scalar_one_or_none()
-        chat_id = st.telegram_chat_id if st else None
-    try:
-        cli = TelegramClient(default_chat_id=chat_id)
-        await cli.send_message(body.summary)
-    except TelegramConfigError as e:
-        raise HTTPException(
-            400,
-            detail={"code": "telegram_not_configured", "reason": str(e)},
-        ) from e
 
 
 # =============================================================================

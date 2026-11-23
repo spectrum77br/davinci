@@ -594,7 +594,6 @@ async def test_enviar_para_conta_de_outra_equipe_nao_passa(
         job_id=job.id,
         user_id=londrino.id,
         items=[item(cenario.israel), item(cenario.filha_israel)],
-        notify_telegram=False,
     )
     await db.refresh(job)
     assert [d["code"] for d in job.result["details"]] == ["account_not_found"] * 2

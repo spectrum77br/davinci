@@ -302,9 +302,7 @@ async def test_enviar_de_quem_nao_e_adm_sai_sem_os_numeros_da_conta(
     )
     db.add(job)
     await db.commit()
-    await run_push_prices_batch(
-        db, job_id=job.id, user_id=enviador.id, items=[kit, cat], notify_telegram=False
-    )
+    await run_push_prices_batch(db, job_id=job.id, user_id=enviador.id, items=[kit, cat])
     await db.refresh(job)
     assert job.result["summary"]["failed"] == 2
     assert [d["payload"] for d in job.result["details"]] == [{}, {"bloqueio": "sem_preco_catalogo"}]
