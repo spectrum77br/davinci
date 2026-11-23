@@ -64,6 +64,9 @@ ENTRY_FIELDS = {
     "tax_period",
     # Bling's "Conta financeira": the bank account or cash this entry is paid from or into.
     "bank_id",
+    # "management" from the ERP's own screen and spreadsheet: the expense rules of Novos
+    # procedimentos 13 apply. The Bling-compatible route keeps Bling's looser rules.
+    "rules",
 }
 MONTH_INTERVALS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannual": 6, "annual": 12}
 
@@ -266,6 +269,17 @@ def create_entry(erp, db, p):
         and not metadata.get("lot_number")
     ):
         raise ERPError("entry_lot", "Conta de Estoque precisa do número do lote.")
+    if p["kind"] == "payable" and p.get("rules") == "management":
+        # Novos procedimentos 13, items 2 to 4: every expense has a category and answers to the
+        # revenue categories, which are the departments, through the split among them.
+        if not metadata.get("category"):
+            raise ERPError("entry_category", "Informe a categoria da conta a pagar.")
+        stock = metadata["category"].strip().casefold() == STOCK_CATEGORY.casefold()
+        if not stock and not metadata.get("cost_centers"):
+            raise ERPError(
+                "entry_cost_centers",
+                "Divida a despesa entre Celular, Mala e Eletro (soma 100%).",
+            )
     dates = {k: day(p.get(k)) for k in ("issued_on", "competence_on", "due_date")}
     occurrence, count = p.get("occurrence", "once"), p.get("count", 1)
     plan = entry_plan(value, dates["due_date"], occurrence, count)

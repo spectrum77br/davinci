@@ -178,3 +178,35 @@ def test_cost_follows_bling_without_counting_as_an_erp_cost_change(erp):
         cost = db.execute("SELECT cost_price FROM product_pricing WHERE sku='demo.fone'")
         assert cost.fetchone()[0] == "2000.0000"
         assert price_table.cost_changes(db, limit=200) == before
+
+
+def test_kit_composition_follows_bling_while_bling_owns_the_catalog(erp):
+    from app.erp_local import product_structures
+
+    with erp.connection() as db:
+        kit = dict(db.execute("SELECT * FROM products WHERE kind='kit' LIMIT 1").fetchone())
+        simple = [r[0] for r in db.execute("SELECT sku FROM products WHERE kind='simple'")]
+        for index, sku in enumerate([kit["sku"], *simple], 1):
+            db.execute(
+                "INSERT OR REPLACE INTO catalog_origin VALUES (?,?)",
+                (
+                    sku,
+                    json.dumps(
+                        {
+                            "bling_product_id": str(900 + index),
+                            "stock_state": "known",
+                            "catalog_state": "ready",
+                        }
+                    ),
+                ),
+            )
+    rows = [{"bling_product_id": "901", "situacao": "A", "formato": "E", "sku": kit["sku"]}]
+    first = {"kit_bling_product_id": "901", "component_bling_product_id": "902", "quantity": 2}
+    assert catalog_follow.follow_structures(erp, rows, [first])["changed"] == 1
+    with erp.connection() as db:
+        parts = product_structures.details(db, kit)["components"]
+    assert [(p["sku"], p["quantity"]) for p in parts] == [(simple[0], "2.000")]
+    assert catalog_follow.follow_structures(erp, rows, [first])["changed"] == 0
+    unknown = {**first, "component_bling_product_id": "999"}
+    report = catalog_follow.follow_structures(erp, rows, [first, unknown])
+    assert report["changed"] == 0 and report["waiting"] == {kit["sku"]: "peça fora do catálogo"}

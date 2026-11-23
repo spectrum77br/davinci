@@ -245,6 +245,73 @@ def follow_names(erp, products):
     return report
 
 
+def follow_structures(erp, products, components):
+    """Bling's kit compositions onto the kits already here, while Bling owns the catalog
+    (Novos procedimentos 11, item 1: simple and composite as in Bling). Until now only a new kit
+    came in; a part changed later in Bling stayed old here (dg048.ra kit with .pi parts, 23/11).
+    A kit with a part not here yet waits for the next round."""
+    import hashlib
+
+    from app.erp_local import bling_mirror, product_structures
+
+    report = {"changed": 0, "waiting": {}, "refused": {}}
+    with erp.connection() as db:
+        if bling_mirror.switched(db):
+            return {"state": "stopped"}
+        origin = {}
+        for row in db.execute("SELECT sku,data FROM catalog_origin"):
+            source = json.loads(row["data"]).get("bling_product_id")
+            if source:
+                origin[str(source)] = row["sku"]
+        kits = {r["sku"]: dict(r) for r in db.execute("SELECT * FROM products WHERE kind='kit'")}
+    kits_in_bling = {
+        str(p["bling_product_id"])
+        for p in products
+        if p.get("bling_product_id") and p.get("situacao") == "A" and p.get("formato") == "E"
+    }
+    parts_of = {}
+    for c in components:
+        parts_of.setdefault(str(c["kit_bling_product_id"]), []).append(c)
+    for bid in sorted(kits_in_bling & set(parts_of)):
+        sku = origin.get(bid)
+        if not sku or sku not in kits:
+            continue
+        wanted, unknown = {}, False
+        for c in parts_of[bid]:
+            part = origin.get(str(c["component_bling_product_id"]))
+            quantity = _decimal(c.get("quantity"))
+            if not part or quantity is None or quantity <= 0:
+                unknown = True
+                break
+            wanted[part] = wanted.get(part, Decimal(0)) + quantity
+        if unknown:
+            report["waiting"][sku] = "peça fora do catálogo"
+            continue
+        with erp.connection() as db:
+            current = product_structures.details(db, kits[sku])
+        have = {c["sku"]: _decimal(c["quantity"]) for c in current["components"]}
+        if have == wanted:
+            continue
+        parts = [{"sku": k, "quantity": str(v)} for k, v in sorted(wanted.items())]
+        digest = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
+        try:
+            erp.command(
+                f"catalog-follow-v1:structure:{bid}:{digest}",
+                "product.structure.save",
+                {
+                    "sku": sku,
+                    "version": current["version"],
+                    "components": parts,
+                    "reason": "Composição igual à do Bling",
+                },
+                actor="cadastro do Bling",
+            )
+            report["changed"] += 1
+        except ERPError as error:
+            report["refused"][sku] = error.message[:80]
+    return report
+
+
 def follow(erp, products, components):
     """One pass over DaVinci's mirror of Bling: what came in, and what a person must look at.
     Once a store is switched the catalog is the ERP's: nothing more comes from Bling."""

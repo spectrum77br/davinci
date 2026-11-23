@@ -4,7 +4,8 @@ Runs where DaVinci's Bling credentials are (the ERP worker on the server, or the
 through SSH). Only GET, only the paths below, never a token refresh: with the token about to expire
 the round is skipped and DaVinci's own refresh fixes it. Each call waits its turn in DaVinci's own
 Bling queue (the same Redis slot), so DaVinci keeps its rate. Contacts, orders and invoices are not
-on the list, so no buyer data travels.
+on the list, so no buyer data travels. Bling's open payables come too (bling_payables): the list,
+each bill and its supplier by id, only the ids those bills point to.
 """
 
 import asyncio
@@ -29,9 +30,12 @@ ALLOWED = tuple(
         r"/produtos",
         r"/produtos/\d{1,15}",
         r"/estoques/saldos",
+        r"/contas/pagar",
+        r"/contas/pagar/\d{1,15}",
+        r"/contatos/\d{1,15}",
     )
 )
-PARAMS = {"pagina", "limite", "codigo", "idsProdutos[]"}
+PARAMS = {"pagina", "limite", "codigo", "idsProdutos[]", "situacoes[]"}
 STATES = {"read_ok", "token_expired", "configuration_missing", "provider_unavailable"}
 
 

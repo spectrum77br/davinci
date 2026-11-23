@@ -621,3 +621,36 @@ def test_importacao_cost_and_lot_payable_land_as_in_bling(erp, client):
     with erp.connection() as db:
         lot = next(entry for entry in finance.lots(db) if entry["lot"] == "mala04")
     assert lot["payables"] == "500.00" and not lot["closed"]
+
+
+def test_davinci_return_books_a_loose_item_as_a_z_sku_like_in_bling(erp, client):
+    """D8, answered by DaVinci's Devolução panel: a returned piece that does not go back to its
+    own lot SKU becomes `z000N.<tag>` named "... AVULSO", with the cost of the original, its
+    default supplier and one stock entry. The ERP takes the same calls DaVinci sends to Bling."""
+    category = go(client.find_or_create_category("Celulares"))
+    run(erp, "contact.save", {"data": {"name": "Fornecedor Padrão", "roles": ["supplier"]}})
+    supplier = go(client.find_contato_id_by_name("fornecedor padrão"))
+    # DaVinci numbers from its own products table and asks the full code with the tag.
+    assert go(client.product_exists_by_sku("z0001.sp")) is False
+    created = go(
+        client.create_product(
+            sku="z0001.sp", name="Celular Demo AVULSO", price=480, category_id=category
+        )
+    )
+    go(
+        client.link_supplier_to_product(
+            product_id=created["id"], supplier_id=supplier, cost_price=480
+        )
+    )
+    go(
+        client.update_stock_by_id(
+            created["id"], 1, operation="E", observacao="Devolução pedido 123", custo=480
+        )
+    )
+    product = next(p for p in erp.snapshot()["products"] if p["sku"] == "z0001.sp")
+    assert product["name"] == "Celular Demo AVULSO" and product["kind"] == "simple"
+    assert balance(erp, "z0001.sp")[0] == 1
+    with erp.connection() as db:
+        cost = db.execute("SELECT cost_price FROM product_pricing WHERE sku='z0001.sp'")
+        assert cost.fetchone()[0] == "480.0000"
+    assert go(client.product_exists_by_sku("z0001.sp")) is True

@@ -888,6 +888,13 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
     def refresh_reference():
         return reference.refresh()
 
+    @app.get("/api/erp-local/bling-payables")
+    def bling_payables_copy():
+        from app.erp_local import bling_payables
+
+        with erp.connection() as db:
+            return bling_payables.snapshot(db)
+
     @app.post("/api/erp-local/commands")
     def command(body: Command, request: Request):
         # Behind the gate, the proxy says who is acting; a direct request cannot claim that.

@@ -41,6 +41,18 @@ COLUMNS = {
     "número do documento": "document_number",
     "documento": "document_number",
     "conta financeira": "bank_id",
+    "celular": "cc_celular",
+    "% celular": "cc_celular",
+    "mala": "cc_mala",
+    "% mala": "cc_mala",
+    "eletro": "cc_eletro",
+    "% eletro": "cc_eletro",
+    "lote": "lot_number",
+    "número do lote": "lot_number",
+    "numero do lote": "lot_number",
+    "valor do lote": "lot_value",
+    "câmbio": "exchange_rate",
+    "cambio": "exchange_rate",
 }
 KINDS = {
     "pagar": "payable",
@@ -118,9 +130,20 @@ def parse(content, default_kind="payable"):
                 "document_number": raw.get("document_number", ""),
                 "occurrence": "once",
                 "count": 1,
+                "rules": "management",
             }
             if raw.get("bank_id"):
                 payload["bank_id"] = raw["bank_id"]
+            centers = {
+                k: raw[f"cc_{k}"].replace("%", "").replace(",", ".").strip()
+                for k in ("celular", "mala", "eletro")
+                if raw.get(f"cc_{k}", "").strip()
+            }
+            if centers:
+                payload["cost_centers"] = centers
+            for k in ("lot_number", "lot_value", "exchange_rate"):
+                if raw.get(k):
+                    payload[k] = raw[k] if k == "lot_number" else _money(raw[k])
             # Without a reference column the line itself is the reference: same file, same keys.
             digest = hashlib.sha256(repr(sorted(payload.items())).encode()).hexdigest()[:20]
             payload["reference"] = raw.get("reference") or f"PLANILHA-{digest}"

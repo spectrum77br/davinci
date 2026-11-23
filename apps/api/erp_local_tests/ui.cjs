@@ -251,7 +251,7 @@ test('manual account keeps issue, competence, recurrence and payment separate',a
   d.querySelector('nav [data-page=accounts]').click();
   d.querySelector('[data-open-form="entry-form"]').click();
   const form=d.querySelector('#entry-form');
-  for(const [name,value] of Object.entries({kind:'payable',party:'Fornecedor de teste',amount:'100.01',issued_on:'2026-01-31',competence_on:'2026-01-01',due_date:'2026-01-31',history:'Teste <img src=x>',payment_method:'Transferência',category:'Operação',document_number:'D-1',reference:'LOCAL-EXPENSE-001',occurrence:'installments',count:'3'}))form.querySelector(`[name=${name}]`).value=value;
+  for(const [name,value] of Object.entries({kind:'payable',party:'Fornecedor de teste',amount:'100.01',issued_on:'2026-01-31',competence_on:'2026-01-01',due_date:'2026-01-31',history:'Teste <img src=x>',payment_method:'Transferência',category:'Operação',cc_mala:'100',document_number:'D-1',reference:'LOCAL-EXPENSE-001',occurrence:'installments',count:'3'}))form.querySelector(`[name=${name}]`).value=value;
   form.querySelector('[data-entry-tab=occurrence]').click();
   assert.equal(form.querySelector('[data-entry-pane=payment]').hidden,true);
   assert.equal(form.querySelector('[data-entry-pane=occurrence]').hidden,false);
@@ -262,6 +262,8 @@ test('manual account keeps issue, competence, recurrence and payment separate',a
   assert.equal(requests[0].payload.competence_on,'2026-01-01');
   assert.equal(requests[0].payload.occurrence,'installments');
   assert.equal(requests[0].payload.reference,'LOCAL-EXPENSE-001');
+  assert.deepEqual(requests[0].payload.cost_centers,{mala:'100'});
+  assert.equal(requests[0].payload.rules,'management');
   assert.equal(d.querySelectorAll('main img').length,0);
   dom.window.close();
 });

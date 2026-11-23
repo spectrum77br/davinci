@@ -145,7 +145,7 @@ function financePage(){
   const first=pending[0];
   const unpaired=f.payments.filter(p=>p.bank_id&&!p.reversed&&!f.matches.some(m=>m.payment_id===p.id));
   return panel('Contas e parcelas','Tudo nesta tela registra fatos no banco local. Nenhuma transferência ou cobrança é enviada ao banco.',financeLedgerTable(f))+
-  manualFinancePanel()+financeManagementPanel()+financeLotsPanel()+financeCategoriesPanel()+financeImportPanel()+
+  blingPayablesPanel()+manualFinancePanel()+financeManagementPanel()+financeLotsPanel()+financeCategoriesPanel()+financeImportPanel()+
   panel('Plano de parcelas','A soma das parcelas precisa ser exatamente o valor da conta. Contas com baixas precisam de conciliação antes de trocar o plano.',eligible.length?`<form id="schedule-form"><label>Conta<select name="id">${eligible.map(a=>`<option value="${esc(a.id)}">${esc(docLabel(a.document_id))} · ${financeKind(a.kind)} · ${brl(a.amount)}</option>`).join('')}</select></label><div id="schedule-lines">${scheduleLine(eligible[0].amount)}</div><div class="form-footer"><button type="button" class="secondary" id="add-schedule-line">Adicionar parcela</button><button>Definir parcelas localmente</button></div></form>`:'<p class="muted">Sem contas abertas para definir um plano.</p>')+
   panel('Registrar baixa','Principal, taxas, desconto, juros e valor líquido são registrados separadamente. A baixa não efetua pagamento real.',pending.length?`<form id="payment-form"><div class="forms"><label>Parcela<select name="installment_id" id="payment-installment">${pending.map(i=>`<option value="${esc(i.id)}">${esc(docLabel(state.accounts.find(a=>a.id===i.account_id)?.document_id))} · ${esc(i.due_date)} · saldo ${brl(i.remaining)}</option>`).join('')}</select></label>${moneyField('amount','Principal (R$)',payableAmount(first))}${moneyField('fee','Taxa (R$)')}${moneyField('discount','Desconto (R$)')}${moneyField('interest','Juros (R$)')}<label>Conta financeira<select name="bank_id"><option value="">Sem lançamento em caixa</option>${options(f.banks)}</select></label><label>Data<input name="date" type="date" value="${localDay()}" required></label><label>Comprovante / identificador<input name="external_id" value="PG-${crypto.randomUUID()}" required maxlength="120"></label></div><div class="form-footer"><span>Não efetua pagamento real.</span><button>Registrar baixa local</button></div></form>`:'<p class="muted">Sem parcelas pendentes.</p>')+
   panel('Contas financeiras locais','O saldo parte da abertura informada e dos valores líquidos das baixas. São registros de teste, sem conexão bancária.',`<form id="bank-form"><div class="forms"><label>Código<input name="id" required maxlength="120" placeholder="caixa-teste"></label><label>Nome<input name="name" required maxlength="120" placeholder="Caixa de teste"></label>${moneyField('opening','Abertura (R$)')}</div><div class="form-footer"><span>Não abre conta em instituição financeira.</span><button>Cadastrar conta local</button></div></form>`+table(['Conta','Abertura','Saldo calculado'],f.banks.map(b=>`<tr><td>${esc(b.name)}</td><td>${brl(b.opening)}</td><td>${brl(b.balance)}</td></tr>`).join('')||empty(3,'Nenhuma conta financeira local.')))+
@@ -159,6 +159,19 @@ function financeManagementPanel(){
   const month=m=>m?m.slice(5,7)+'/'+m.slice(0,4):'—';
   const body=rows.map(r=>`<tr><td>${esc(month(r.month))}</td><td>${esc(r.category)}</td><td>${esc(r.cost_center)}</td><td class="num">${brl(r.paid)}</td><td class="num">${Number(r.forecast)?brl(r.forecast):'—'}</td></tr>`).join('');
   return panel('Balanço gerencial','Despesa pela data de pagamento, dividida pelos centros de custo. O que está em aberto aparece pelo vencimento, como previsão. Estoque não entra: fecha pelo lote.',table(['Mês','Categoria','Centro de custo','Pago','Previsão'],body));
+}
+let blingPayablesCopy=null,blingPayablesLoading=false;
+function blingPayablesPanel(){
+  if((!blingPayablesCopy||Date.now()-blingPayablesCopy.at>300000)&&!blingPayablesLoading){
+    blingPayablesLoading=true;
+    fetch('/api/erp-local/bling-payables').then(r=>r.ok?r.json():Promise.reject(new Error('leitura')))
+     .then(data=>{blingPayablesCopy={at:Date.now(),data};}).catch(()=>{blingPayablesCopy={at:Date.now(),data:null};})
+     .finally(()=>{blingPayablesLoading=false;if(page==='accounts')render();});
+  }
+  const c=blingPayablesCopy?.data;if(!c||!Array.isArray(c.rows)||!c.rows.length||!c.totals)return '';
+  const day=d=>d?d.split('-').reverse().join('/'):'—',when=c.taken_at?new Date(c.taken_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+  const body=c.rows.map(r=>`<tr${r.overdue?' class="late"':''}><td>${esc(day(r.due_date))}</td><td>${esc(r.supplier)}</td><td>${esc(r.history)}</td><td>${esc(r.document)}</td><td class="num">${brl(r.amount)}</td><td class="num">${brl(r.balance)}</td><td>${esc(r.situation)}${r.payments?` · ${r.payments} pagamento${r.payments>1?'s':''}`:''}${r.repeats?' · repete':''}</td><td>${esc(r.category_id||'—')}</td></tr>`).join('');
+  return panel('Contas a pagar do Bling (consulta)',`Cópia só de leitura das contas em aberto e pagas em parte no Bling, lida às ${esc(when)}. ${c.totals.count} contas, ${brl(c.totals.amount)} no total, ${brl(c.totals.balance)} a pagar, ${c.totals.overdue} vencidas. Pague e altere no Bling até a troca; na troca elas passam a ser do ERP. A categoria aparece pelo código: o Bling não libera os nomes para o app do DaVinci.`,`<details><summary>Ver as ${c.rows.length} contas</summary>${table(['Vencimento','Fornecedor','Histórico','Documento','Valor','A pagar','Situação','Categoria'],body)}</details>`);
 }
 function financeLotsPanel(){
   const lots=state.finance_lots||[];if(!lots.length)return '';
@@ -281,8 +294,9 @@ document.addEventListener('submit',async e=>{
     if(p.kind==='payable'&&String(p.category||'').trim().toLowerCase()==='geral'){message('Não use a categoria Geral: divida a conta entre os centros de custo Celular, Mala e Eletro.',true);return;}
     if(Object.keys(used).length&&Math.round(Object.values(used).reduce((a,v)=>a+Number(v),0)*100)!==10000){message('O rateio entre os centros de custo precisa somar 100%.',true);return;}
     if(p.kind==='payable'&&/^estoque/i.test(String(p.category||'').trim())&&!String(p.lot_number||'').trim()){message('Conta de Estoque precisa do número do lote.',true);return;}
+    if(p.kind==='payable'&&!/^estoque$/i.test(String(p.category||'').trim())&&!Object.keys(used).length){message('Divida a despesa entre Celular, Mala e Eletro (soma 100%).',true);return;}
     for(const k of ['lot_number','lot_value','exchange_rate'])if(!String(p[k]||'').trim())delete p[k];
-    command('finance.entry.create',{...p,...(Object.keys(used).length?{cost_centers:used}:{}),count:Number(p.count)});
+    command('finance.entry.create',{...p,...(Object.keys(used).length?{cost_centers:used}:{}),count:Number(p.count),rules:'management'});
   }else if(formId==='receipt-form'){
     e.preventDefault();command('purchase.receive',{id:p.id,receipt_id:p.receipt_id,lines:[...form.querySelectorAll('[data-receipt-line]')].map(r=>({line:Number(r.dataset.receiptLine),quantity:r.querySelector('[name=received_quantity]').value,lot:r.querySelector('[name=lot]').value})).filter(i=>Number(i.quantity)>0)});
   }else if(formId==='schedule-form'){

@@ -337,6 +337,15 @@ def main():
                     "nomes e custos do cadastro %s",
                     catalog_follow.follow_names(erp, store.all_rows("products")),
                 )
+                from app.erp_local import bling_payables
+
+                log.info("contas a pagar do Bling %s", bling_payables.run(erp))
+                log.info(
+                    "composição dos kits %s",
+                    catalog_follow.follow_structures(
+                        erp, store.all_rows("products"), store.all_rows("components")
+                    ),
+                )
                 from app.erp_local import multi_company
 
                 try:
