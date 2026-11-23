@@ -1,10 +1,14 @@
 """As automáticas na VIRADA do agente (13/11/2026, o Eduardo).
 
-Todas as lojas vão para o automático do agente. As de resposta (menu, opções, "aguarde") e o
-pedido recebido e a pós-conclusão ACABAM (no automático elas não saem); as de evento que
-chamam o cliente FICAM: não pago com cupom ("carrinho"), entregue, convite para seguir a
-loja, "ficou alguma dúvida?" e o chat da avaliação. O brinde e o lembrete já saíam.
-A chave `atendimento_automacoes_eventos_no_auto` liga junto com a virada.
+Todas as lojas vão para o automático do agente. As de resposta (menu, opções, "aguarde")
+ACABAM (no automático elas não saem); as de evento que chamam o cliente FICAM: não pago com
+cupom ("carrinho"), entregue, convite para seguir a loja, "ficou alguma dúvida?" e o chat da
+avaliação. O brinde e o lembrete já saíam. A chave `atendimento_automacoes_eventos_no_auto`
+liga junto com a virada.
+
+23/11/2026, o Eduardo ("libera auto em tds as lojas … essas msgs"): o pedido recebido (o
+cartão do pedido + "Recebemos seu pedido", como no Duoke) e a pós-conclusão também FICAM —
+ligadas em Enviar nas 15 lojas da Shopee desde 19/11, pulavam todas (`ia_no_automatico`).
 """
 
 from __future__ import annotations
@@ -13,8 +17,8 @@ import pytest
 
 from app.services.atendimento import automacoes_catalogo as cat
 
-FICAM = {"nao_pago", "entregue", "convite", "duvida_1", "duvida_2"}
-ACABAM = {"menu", "opcao", "aguarde", "pedido_recebido", "pos"}
+FICAM = {"nao_pago", "entregue", "convite", "duvida_1", "duvida_2", "pedido_recebido", "pos"}
+ACABAM = {"menu", "opcao", "aguarde"}
 
 
 def _autos(tipos: set[str]) -> list[cat.Automacao]:
@@ -57,3 +61,13 @@ def test_o_chat_da_avaliacao_sai_no_automatico_com_a_chave():
     for aut in _autos({"avaliacao_boa", "avaliacao_ruim"}):
         assert cat.chat_segurado_pela_ia(aut, {"canal_auto": True}) == "ia_no_automatico"
         assert cat.chat_segurado_pela_ia(aut, {"canal_auto": True, "eventos_no_auto": True}) is None
+
+
+def test_o_pedido_recebido_da_shopee_sai_com_o_cartao_no_automatico():
+    """O caso do dono (23/11/2026): na loja no automático, com a chave da virada ligada, o
+    pedido recebido da Shopee sai — e sai com o cartão do pedido antes do texto."""
+    aut = cat.CATALOGO["shopee_pedido_recebido"]
+    assert cat.decidir(aut, {"canal_auto": True, "eventos_no_auto": True}) != "ia_no_automatico"
+    assert [p["tipo"] for p in aut.partes] == ["cartao_pedido", "texto"]
+    pos = cat.CATALOGO["shopee_pos_conclusao"]
+    assert cat.decidir(pos, {"canal_auto": True, "eventos_no_auto": True}) != "ia_no_automatico"

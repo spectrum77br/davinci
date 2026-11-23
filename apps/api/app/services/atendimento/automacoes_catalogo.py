@@ -145,10 +145,22 @@ TIPOS_NAO_PAGO_AO_VIVO = (TIPO_NAO_PAGO_BRINDE, TIPO_NAO_PAGO_LEMBRETE)
 # As de EVENTO que FICAM na virada do agente (13/11/2026, o Eduardo: "fica só as que envia
 # coisa como carrinho, mensagem chamando" + entregue, avaliação, convite e "ficou alguma
 # dúvida?"): com `atendimento_automacoes_eventos_no_auto` (o fato `eventos_no_auto`), saem
-# também na loja com o agente no automático. As de resposta (menu, opção, aguarde) e o
-# pedido recebido e a pós-conclusão continuam parando lá — é assim que acabam.
+# também na loja com o agente no automático. As de resposta (menu, opção, aguarde)
+# continuam parando lá — é assim que acabam.
+# 23/11/2026, o Eduardo ("libera auto em tds as lojas … essas msgs"): o PEDIDO RECEBIDO
+# (cartão do pedido + "Recebemos seu pedido", como no Duoke) e a PÓS-CONCLUSÃO também
+# ficam. Ligadas em Enviar desde 19/11 nas 15 lojas da Shopee, não saíam: 321 e 370
+# puladas com `ia_no_automatico`, porque todas as lojas estão no automático.
 TIPOS_SEGUEM_NO_AUTOMATICO = frozenset(
-    {TIPO_NAO_PAGO, TIPO_ENTREGUE, TIPO_CONVITE, TIPO_DUVIDA_1, TIPO_DUVIDA_2}
+    {
+        TIPO_NAO_PAGO,
+        TIPO_ENTREGUE,
+        TIPO_CONVITE,
+        TIPO_DUVIDA_1,
+        TIPO_DUVIDA_2,
+        TIPO_PEDIDO_RECEBIDO,
+        TIPO_POS,
+    }
 )
 # O que volta para antes da noite (`devido_antes_da_noite`) sai este tanto antes de a
 # janela fechar: o motor roda de 2 em 2 min e a última rodada aberta é a das 20h58 —
