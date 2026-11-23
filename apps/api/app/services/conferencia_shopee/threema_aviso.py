@@ -185,9 +185,11 @@ def texto(rel: Mapping[str, Any], link: str, link_davinci: str) -> str:
     """A mensagem inteira (≤ 3500 bytes: as listas encurtam se precisar)."""
     cabecalho = f"📊 {saida.titulo(rel)} ({saida.tipo_texto(rel)})"
     estados = saida.estados(rel)
+    # M-23 (23/11/2026): os grupos em ordem alfabética (Celular, Eletro, Mala),
+    # como na tela e no Excel; o Geral por último.
     grupos = [
         _linha_grupo(g.get("rotulo") or "", g.get("total") or {}, estados)
-        for g in rel.get("grupos") or []
+        for g in saida.grupos_em_ordem(rel)
         if (g.get("total") or {}).get("contas")
     ]
     grupos.append(_linha_grupo("Geral", rel.get("geral") or {}, estados))

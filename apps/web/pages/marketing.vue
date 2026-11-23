@@ -93,7 +93,7 @@ definePageMeta({
     <!-- Abas: cada uma aparece conforme a permissão (marketing / marketing_criativos). -->
     <div v-if="canConferencia || canCriativos" class="flex max-w-full">
       <div class="flex w-fit max-w-full gap-1 overflow-x-auto rounded-md bg-muted/40 p-1">
-        <!-- Conferência: o relatório semanal Mala · Celular · Eletro de segunda e
+        <!-- Conferência: o relatório semanal Celular · Eletro · Mala de segunda e
              quarta, um por marketplace (Shopee | Mercado Livre | Amazon lá dentro),
              com os horários dos anúncios da Shopee e do Mercado Livre embaixo. -->
         <button v-if="canConferencia"

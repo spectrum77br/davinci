@@ -21,8 +21,9 @@
  *    completo sem estar.
  *
  * 07/10/2026: o Resumo virou a planilha antiga do dono ("mais ou menos desse
- * jeito"): métrica × (semana × Mala/Celular/Eletro/Geral), semanas da mais
- * velha pra mais nova, e o bloco Variação (semana atual × anterior) no fim.
+ * jeito"): métrica × (semana × Celular/Eletro/Mala/Geral — ordem da M-23,
+ * 23/11/2026), semanas da mais velha pra mais nova, e o bloco Variação
+ * (semana atual × anterior) no fim.
  * As linhas e colunas saem de planilhaResumo() (lib/conferencia.ts), o mesmo
  * desenho do Excel e do HTML.
  *
@@ -45,7 +46,7 @@ import {
 } from 'lucide-vue-next'
 import { apiErrMsg } from '~/lib/apiError'
 import {
-  ERROS_CONFERENCIA, PLATAFORMAS,
+  ERROS_CONFERENCIA, GRUPOS_PLANILHA, PLATAFORMAS,
   coletaTerminou, comparadoCom, dataHoraBr, ddmm, horaBr,
   nomeArquivo, nomeDoCabecalho, planilhaResumo, plataformaValida, rotuloExecucao,
   infoPlataforma, rotuloStatusColeta, rotuloStatusExecucao, tituloRelatorio, tomStatusColeta,
@@ -81,7 +82,7 @@ const PILL_TOM: Record<string, string> = {
 const PILL_EXECUCAO: Record<string, string> = {
   coletando: 'pill-info', pronto: 'pill-success', cancelado: 'pill-muted',
 }
-const ROTULO_GRUPO: Record<string, string> = { mala: 'Mala', celular: 'Celular', eletro: 'Eletro' }
+const ROTULO_GRUPO: Record<string, string> = { celular: 'Celular', eletro: 'Eletro', mala: 'Mala' }
 const FORMATOS: { fmt: Formato; rotulo: string; icone: any; dica: string }[] = [
   { fmt: 'xlsx', rotulo: 'Excel', icone: FileSpreadsheet, dica: 'Planilha com as 4 semanas' },
   { fmt: 'csv', rotulo: 'CSV', icone: FileText, dica: 'Separado por ";" com vírgula decimal (abre no Excel)' },
@@ -541,8 +542,15 @@ const integracoes = ref<IntegracaoConferencia[] | null>(null)
 // caixinha voltam ao que está salvo — senão mostrariam a escolha que não pegou.
 const versaoContas = ref(0)
 
+// M-23 (23/11/2026): as contas por grupo na ordem das colunas da planilha
+// (Celular antes de Mala, a ordem alfabética de todas as telas) e, dentro do
+// grupo, A–Z. Antes a Mala vinha primeiro.
+function posicaoGrupo(g: string): number {
+  const i = GRUPOS_PLANILHA.findIndex((x) => x.chave === g)
+  return i < 0 ? GRUPOS_PLANILHA.length : i
+}
 const contasOrdenadas = computed(() => [...(contas.value ?? [])].sort((a, b) =>
-  (a.grupo === b.grupo ? 0 : a.grupo === 'mala' ? -1 : 1)
+  posicaoGrupo(a.grupo) - posicaoGrupo(b.grupo)
   || a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }),
 ))
 
@@ -890,8 +898,8 @@ const informarAberto = ref(false)
 
         <!-- RESUMO no formato da planilha antiga do dono (07/10/2026, "mais ou menos
              desse jeito"): categoria + sub-rótulo, cada semana (da mais velha pra mais
-             nova) com Mala · Celular · Eletro · Geral, e a Variação no fim. Larga: rola
-             pro lado com as duas colunas de rótulo paradas. -->
+             nova) com Celular · Eletro · Mala · Geral (M-23), e a Variação no fim.
+             Larga: rola pro lado com as duas colunas de rótulo paradas. -->
         <div v-if="planilha" class="planilha overflow-x-auto rounded-xl border">
           <table class="text-xs" aria-label="Resumo da conferência por semana e grupo">
             <thead>
@@ -1057,8 +1065,8 @@ const informarAberto = ref(false)
                     :disabled="salvandoConta === c.id"
                     @change="(e) => salvarConta(c, { grupo: (e.target as HTMLSelectElement).value as 'mala' | 'celular' })"
                   >
-                    <option value="mala">Mala</option>
                     <option value="celular">Celular</option>
+                    <option value="mala">Mala</option>
                   </select>
                 </td>
                 <td>

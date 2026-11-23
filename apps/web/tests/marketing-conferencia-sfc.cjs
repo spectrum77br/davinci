@@ -543,18 +543,19 @@ async function run() {
     assert.equal(t.relogio.pendentes().length, 0, 'relatório pronto não fica relendo')
     assert.ok(t.ouvintes.has('visibilitychange'), 'ouve a visibilidade')
 
-    // Planilha do Resumo: semanas da mais velha pra mais nova, Mala/Celular/Eletro/Geral.
+    // Planilha do Resumo: semanas da mais velha pra mais nova, Celular/Eletro/Mala/Geral
+    // (M-23, 23/11/2026: categorias em ordem alfabética, o Geral por último).
     const p = s.planilha.value
     assert.deepEqual(p.semanas.map((x) => x.rotulo), ['07/09 a 13/09', '14/09 a 20/09', '21/09 a 27/09', '28/09 a 04/10'])
-    assert.deepEqual(p.grupos.map((g) => g.rotulo), ['Mala', 'Celular', 'Eletro', 'Geral'])
+    assert.deepEqual(p.grupos.map((g) => g.rotulo), ['Celular', 'Eletro', 'Mala', 'Geral'])
     assert.equal(p.variacao, 'Variação (28/09–04/10 × 21/09–27/09)')
     assert.equal(s.blocosCab.value, 5, '4 semanas + a Variação')
     const linhaP = (sub, cat) => p.linhas.find((l) => l.sub === sub && (!cat || l.categoria === cat))
     const vendasP = linhaP('Vendas no período')
-    assert.deepEqual(vendasP.valores[0], ['R$ 1.100,00', 'R$ 1.000,00', 'R$ 1.000,00', 'R$ 1.000,00'], '07/09 primeiro')
-    assert.deepEqual(vendasP.valores[3], ['R$ 1.200,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 4.400,00'], '28/09 por último')
+    assert.deepEqual(vendasP.valores[0], ['R$ 1.000,00', 'R$ 1.000,00', 'R$ 1.100,00', 'R$ 1.000,00'], '07/09 primeiro')
+    assert.deepEqual(vendasP.valores[3], ['R$ 2.000,00', 'R$ 1.000,00', 'R$ 1.200,00', 'R$ 4.400,00'], '28/09 por último')
     assert.deepEqual(vendasP.variacoes.map((v) => [v.texto, v.cor]), [
-      ['▲ 20,0%', 'verde'], ['▲ 25,0%', 'verde'], ['=', 'cinza'], ['▲ 22,2%', 'verde'],
+      ['▲ 25,0%', 'verde'], ['=', 'cinza'], ['▲ 20,0%', 'verde'], ['▲ 22,2%', 'verde'],
     ])
     // % com 2 casas e variação em p.p. (cair é bom).
     const pctP = linhaP('% investimento / vendas')
@@ -577,7 +578,7 @@ async function run() {
     // que gruda logo depois das 2 colunas paradas (sticky left/right).
     assert.equal((html.match(/<span class="semana-txt">/g) || []).length, 5, 'data de cada semana (e a Variação) no span parado')
     assert.match(html, /<th class="rotulo-cab" colspan="2" rowspan="2"/, 'Métrica sobre as 2 colunas de rótulo')
-    assert.deepEqual(cabecalhos.slice(6, 26), Array(5).fill(['Mala', 'Celular', 'Eletro', 'Geral']).flat(), '2ª linha: os 4 grupos em cada bloco')
+    assert.deepEqual(cabecalhos.slice(6, 26), Array(5).fill(['Celular', 'Eletro', 'Mala', 'Geral']).flat(), '2ª linha: os 4 grupos em cada bloco (M-23)')
     const linhasHtml = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
     assert.equal(linhasHtml.length, 10, '10 linhas de métrica')
     const rotulosLinha = linhasHtml.map((x) => [...x.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1].trim()))
@@ -590,11 +591,11 @@ async function run() {
     for (const l of linhasHtml) assert.equal((l.match(/<td/g) || []).length, 20, '4 semanas × 4 grupos + 4 variações')
     const celulas = (l) => [...l.matchAll(/<td class="([^"]*)"[^>]*>([^<]*)<\/td>/g)].map((m) => [m[1], m[2].trim()])
     const ultima = celulas(linhasHtml[9])
-    assert.deepEqual(ultima.slice(12, 16).map((c) => c[1]), ['R$ 1.200,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 4.400,00'], 'semana atual no 4º bloco')
+    assert.deepEqual(ultima.slice(12, 16).map((c) => c[1]), ['R$ 2.000,00', 'R$ 1.000,00', 'R$ 1.200,00', 'R$ 4.400,00'], 'semana atual no 4º bloco')
     assert.deepEqual(ultima.filter((c) => /\bgeral\b/.test(c[0])).length, 5, 'Geral em bege em cada bloco (+ a Variação)')
-    assert.deepEqual(ultima.slice(16).map((c) => c[1]), ['▲ 20,0%', '▲ 25,0%', '=', '▲ 22,2%'])
+    assert.deepEqual(ultima.slice(16).map((c) => c[1]), ['▲ 25,0%', '=', '▲ 20,0%', '▲ 22,2%'])
     assert.match(ultima[16][0], /text-emerald-600 dark:text-emerald-400/, 'variação boa em verde')
-    assert.match(ultima[18][0], /text-muted-foreground/, '"=" em cinza')
+    assert.match(ultima[17][0], /text-muted-foreground/, '"=" em cinza')
     const pctHtml = celulas(linhasHtml[8])
     assert.match(pctHtml[19][0], /text-emerald-600/, '% caindo em verde')
     assert.ok(celulas(linhasHtml[2]).every((c) => c[1] === '—'), 'Impressões de afiliados: "—" em tudo')
@@ -846,14 +847,14 @@ async function run() {
     assert.equal(t.s.isAdmin.value, false)
   }
 
-  // Contas: carrega ao abrir, ordena Mala antes, salva só o que mudou.
+  // Contas: carrega ao abrir, ordena Celular antes de Mala (M-23; antes era Mala antes), salva só o que mudou.
   {
     const t = await montar({ detalhes: DET })
     assert.ok(!urls(t.calls).includes(`GET ${BASE}/contas?plataforma=shopee`), 'só carrega ao abrir')
     t.s.contasAberto.value = true
     await esperar()
     await esperar()
-    assert.deepEqual(t.s.contasOrdenadas.value.map((c) => c.nome), ['Alfa', 'Beta', 'Zeta'])
+    assert.deepEqual(t.s.contasOrdenadas.value.map((c) => c.nome), ['Beta', 'Zeta', 'Alfa'], 'Celular (A–Z) e depois Mala')
     const zeta = t.s.contas.value.find((c) => c.id === 'k1')
     // nome igual: não salva
     t.s.salvarNome(zeta)
@@ -1028,7 +1029,8 @@ async function plataformas() {
       assert.equal(lin(cat, 'afiliados').estado, 'nao_coletado', `${cat} afiliados`)
       assert.equal(lin(cat, 'Ads').estado, null, `${cat} Ads tem número`)
     }
-    assert.deepEqual(lin('Resumo', 'Vendas no período').valores[3], ['R$ 1.300,00', 'R$ 2.600,00', 'R$ 700,00', 'R$ 4.600,00'])
+    // [Celular, Eletro, Mala, Geral] (M-23).
+    assert.deepEqual(lin('Resumo', 'Vendas no período').valores[3], ['R$ 2.600,00', 'R$ 700,00', 'R$ 1.300,00', 'R$ 4.600,00'])
     const html = await renderPlanilha(s)
     const linhasHtml = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
     assert.equal(linhasHtml.length, 10, 'mesmo desenho da Shopee')
@@ -1308,9 +1310,9 @@ async function plataformas() {
     await esperar()
     assert.ok(urls(t.calls).includes(`GET ${BASE}/contas?plataforma=ml`))
     assert.ok(urls(t.calls).includes(`GET ${BASE}/contas/integracoes?plataforma=ml`), 'lista as integrações do ML')
-    assert.deepEqual(s.contasOrdenadas.value.map((c) => c.nome), ['Marquezini', 'Atlas', 'Velasco'], 'Mala antes')
+    assert.deepEqual(s.contasOrdenadas.value.map((c) => c.nome), ['Atlas', 'Velasco', 'Marquezini'], 'Celular antes (M-23)')
     assert.equal(s.contasPorIntegracao.value, true)
-    const [marq, atlas, velasco] = s.contasOrdenadas.value
+    const [atlas, velasco, marq] = s.contasOrdenadas.value
     assert.equal(s.semVinculo(marq), false)
     assert.equal(s.semVinculo(atlas), true, 'sem integração e sem loja')
     assert.equal(s.semVinculo(velasco), true, 'com integração, sem loja do Bling')
@@ -1321,7 +1323,11 @@ async function plataformas() {
     html = await htmlContas(s)
     assert.match(html, /<th>Integração no DaVinci<\/th>\s*<th>Loja no Bling<\/th>/)
     assert.ok(!html.includes('Perfil AdsPower'))
-    const linhas = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
+    // Linhas na ordem da tela: Celular A–Z (Atlas, Velasco) e depois Mala (Marquezini).
+    const [lAtlas, lVelasco, lMarq] = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
+    const linhas = [lMarq, lAtlas, lVelasco] // os índices de antes: Marquezini, Atlas, Velasco
+    assert.match(lAtlas, /value="Atlas"/)
+    assert.match(lMarq, /value="Marquezini"/)
     const caixa = (l) => l.split('type="checkbox"')[1].split('>')[0]
     // Marquezini: a integração dela escolhida no select; a loja no campo.
     // (no SSR o valor escolhido sai no value do <select>)

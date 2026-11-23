@@ -155,8 +155,9 @@ async def test_texto_do_contrato():
     msg = ta.texto(_rel(), "https://app/x", "https://app/marketing?aba=conferencia&execucao=1")
     assert msg == (
         "📊 Conferência Shopee — 27/09 a 03/10/2026 (semana fechada)\n"
-        "Mala: vendas R$ 120.345 (▲ 8,2%) · invest. R$ 9.876 · 8,2% s/ vendas (▼ 0,4 p.p.)\n"
+        # M-23 (23/11/2026): grupos em ordem alfabética (o relatório veio Mala, Celular).
         "Celular: vendas R$ 50.000 · invest. R$ 2.000 · 4,0% s/ vendas\n"
+        "Mala: vendas R$ 120.345 (▲ 8,2%) · invest. R$ 9.876 · 8,2% s/ vendas (▼ 0,4 p.p.)\n"
         "Geral: vendas R$ 170.345 (▲ 53,2%) · invest. R$ 11.876 · 7,0% s/ vendas (▼ 1,1 p.p.)\n"
         "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre), Oliveira (perfil em uso)\n"
         "⚠️ Afiliados incompletos: Mega (até 02/10)\n"
@@ -214,7 +215,8 @@ async def test_texto_do_relatorio_de_verdade():
     msg = ta.texto(rel, "L", "D")
     linhas = msg.split("\n")
     assert linhas[0] == "📊 Conferência Shopee — 27/09 a 03/10/2026 (semana fechada)"
-    assert [linha.split(":")[0] for linha in linhas[1:5]] == ["Mala", "Celular", "Eletro", "Geral"]
+    # M-23 (23/11/2026): Celular, Eletro, Mala e o Geral por último.
+    assert [linha.split(":")[0] for linha in linhas[1:5]] == ["Celular", "Eletro", "Mala", "Geral"]
     assert "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre)" in linhas
     assert "⚠️ Afiliados incompletos: Barbosa (até 02/10)" in linhas
 

@@ -2,7 +2,7 @@
 // (contrato §5, versão 1) e as regras de formatação e de variação.
 //
 // 07/10/2026: o Resumo saiu no formato da planilha antiga do dono ("mais ou
-// menos desse jeito"): métrica × (semana × Mala/Celular/Eletro/Geral) + o bloco
+// menos desse jeito"): métrica × (semana × Celular/Eletro/Mala/Geral) + o bloco
 // Variação. Quem monta as linhas e colunas é planilhaResumo(), aqui embaixo — o
 // Excel e o HTML do servidor seguem o mesmo desenho.
 //
@@ -679,7 +679,7 @@ export function contasTxt(n: number | null | undefined): string {
 // O desenho da planilha antiga do dono ("mais ou menos desse jeito"):
 //
 //                   |   07/09 a 13/09   | … |   28/09 a 04/10   | Variação (28/09–04/10 × 21/09–27/09)
-//   Métrica         | Mala|Cel.|Eletro|Geral | … | Mala|Cel.|Eletro|Geral | Mala|Cel.|Eletro|Geral
+//   Métrica         | Cel.|Eletro|Mala|Geral | … | Cel.|Eletro|Mala|Geral | Cel.|Eletro|Mala|Geral
 //   Vendas    afiliados | …
 //             Ads       | …
 //
@@ -691,11 +691,18 @@ export function contasTxt(n: number | null | undefined): string {
 
 export type ChaveColunaPlanilha = ChaveGrupo | 'geral'
 
-/** As 4 colunas de cada semana (e da Variação), nesta ordem. */
+/**
+ * As 4 colunas de cada semana (e da Variação), nesta ordem. M-23 (23/11/2026):
+ * as categorias em ordem alfabética — Celular, Eletro, Mala, a de
+ * lib/categorias.ts (este arquivo não importa nada; tests/categorias-ordem.cjs
+ * confere) — e o Geral por último. O Excel e o HTML do servidor seguem a mesma
+ * ordem (services/conferencia_shopee/saida.py). Só a ordem das colunas: os
+ * números de cada grupo são os mesmos.
+ */
 export const GRUPOS_PLANILHA: { chave: ChaveColunaPlanilha; rotulo: string }[] = [
-  { chave: 'mala', rotulo: 'Mala' },
   { chave: 'celular', rotulo: 'Celular' },
   { chave: 'eletro', rotulo: 'Eletro' },
+  { chave: 'mala', rotulo: 'Mala' },
   { chave: 'geral', rotulo: 'Geral' },
 ]
 

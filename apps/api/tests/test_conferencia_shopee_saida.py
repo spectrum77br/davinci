@@ -1,8 +1,9 @@
 """Conferência Shopee — os arquivos do relatório (services/conferencia_shopee/saida).
 
 Resumo no desenho da planilha do dono (07/10/2026): métrica (categoria +
-afiliados/Ads) × semanas da mais VELHA para a mais nova × Mala/Celular/Eletro/
-Geral + o bloco Variação (S1 × S2). Excel com só a aba Resumo (cabeçalho
+afiliados/Ads) × semanas da mais VELHA para a mais nova × Celular/Eletro/Mala/
+Geral (M-23, 23/11/2026: ordem alfabética das categorias; antes Mala/Celular/
+Eletro/Geral) + o bloco Variação (S1 × S2). Excel com só a aba Resumo (cabeçalho
 azul-escuro, rótulos e Geral em bege, grade cinza, % como fração com 0.00%,
 gráficos ABAIXO da tabela); HTML com a mesma tabela; MD compacto; CSV com
 `;`, vírgula decimal e as métricas novas. Relatório antigo (sem cliques,
@@ -35,7 +36,7 @@ ABAS = ["Resumo"]  # pedido de 07/10/2026: "é só do resumo que eu preciso"
 NOVAS = calculo.CHAVES[8:]  # cliques, pedidos e conversão (07/10/2026)
 SEMANAS_ANTIGA_PRIMEIRO = ["06/09 a 12/09", "13/09 a 19/09", "20/09 a 26/09", "27/09 a 03/10"]
 VARIACAO = "Variação (27/09–03/10 × 20/09–26/09)"
-GRUPOS = ["Mala", "Celular", "Eletro", "Geral"]
+GRUPOS = ["Celular", "Eletro", "Mala", "Geral"]  # M-23
 NAVY, BEGE = "1F3864", "DDD9C4"
 
 
@@ -106,18 +107,19 @@ def test_excel_resumo_no_desenho_da_planilha():
     ]
     assert {"A6:A7", "A8:A9", "A10:A11", "A12:A13", "A14:A15"} <= mesclas
     assert ws.freeze_panes == "C6"
-    # Números: S1 de Mala em O, S4 em C; Geral na 4ª coluna de cada semana.
-    assert ws["O6"].value == _total(rel, "mala", 0, "vendas_afiliados")
-    assert ws["C6"].value == _total(rel, "mala", 3, "vendas_afiliados")
+    # Números (M-23: Celular, Eletro, Mala, Geral em cada semana): S1 da Mala em
+    # Q, S4 em E; Celular na 1ª coluna (O na S1); Geral na 4ª de cada semana.
+    assert ws["Q6"].value == _total(rel, "mala", 0, "vendas_afiliados")
+    assert ws["E6"].value == _total(rel, "mala", 3, "vendas_afiliados")
     assert ws["R15"].value == _total(rel, "geral", 0, "vendas")
-    assert ws["P9"].value == _total(rel, "celular", 0, "impressoes")
-    assert ws["O6"].number_format == '"R$" #,##0.00'
-    assert ws["P9"].number_format == "#,##0"
+    assert ws["O9"].value == _total(rel, "celular", 0, "impressoes")
+    assert ws["Q6"].number_format == '"R$" #,##0.00'
+    assert ws["O9"].number_format == "#,##0"
     # Impressões de afiliados não existem na Shopee: "—" em tudo, até na variação.
     assert all(ws.cell(8, c).value == "—" for c in range(3, 23))
     # % como FRAÇÃO com 2 casas (aparece 7,00%, não 700%): conversão e % s/ vendas.
     for r, chave in ((10, "conversao_afiliados"), (11, "conversao_ads"), (14, "pct")):
-        c = ws.cell(r, 15)
+        c = ws.cell(r, 17)  # Q: a Mala na S1
         assert c.number_format == "0.00%", chave
         assert c.value == _total(rel, "mala", 0, chave) / 100, chave
     # Variação (S1 × S2, cenário com as 4 semanas iguais): "=" em cinza.
@@ -210,9 +212,10 @@ def test_eletro_sem_conta_mostra_traco():
     )
     _, _, wb = _excel(rel)
     ws = wb["Resumo"]
-    eletro = [ws.cell(r, 3 + 4 * b + 2).value for b in range(4) for r in range(6, 16)]
+    # Eletro é a 2ª coluna de cada semana desde a M-23 (Celular, Eletro, Mala, Geral).
+    eletro = [ws.cell(r, 3 + 4 * b + 1).value for b in range(4) for r in range(6, 16)]
     assert set(eletro) == {"—"}
-    assert ws["U6"].value == "—"  # variação do Eletro
+    assert ws["T6"].value == "—"  # variação do Eletro
     pagina = saida.html(rel)
     assert pagina.count('<td class="vazio">—</td>') >= 4 * 10
 
@@ -227,7 +230,12 @@ def test_csv_ponto_e_virgula_e_virgula_decimal():
     assert cab[8:] == [m["rotulo"] for m in rel["metricas"]]
     n_linhas = sum(len(g["linhas"]) for g in rel["grupos"])
     assert len(linhas) == 1 + 4 * n_linhas
-    inova = linhas[1].split(";")
+    # M-23 (23/11/2026): os grupos em Celular, Eletro, Mala — a Mala (Inova) vem depois.
+    assert [x.split(";")[0] for x in linhas[1:]] == sorted(
+        (x.split(";")[0] for x in linhas[1:]), key=["Celular", "Eletro", "Mala"].index
+    )
+    assert linhas[1].split(";")[0] == "Celular"
+    inova = next(x.split(";") for x in linhas if ";Inova;" in x)
     assert inova[:8] == ["Mala", "Inova", "loja_teste", "ok", "", "27/09–03/10", "27/09/2026",
                          "03/10/2026"]
     assert inova[8] == "1000,00"  # vendas afiliados
@@ -340,7 +348,7 @@ def test_relatorio_antigo_sem_as_metricas_novas_sai_com_traco():
     ws = wb["Resumo"]
     for r in (10, 11):  # Conversão afiliados / Ads
         assert {ws.cell(r, c).value for c in range(3, 23)} == {"—"}, r
-    assert ws["O6"].value == _total(rel, "mala", 0, "vendas_afiliados")
+    assert ws["Q6"].value == _total(rel, "mala", 0, "vendas_afiliados")  # Q: Mala na S1 (M-23)
     pagina = saida.html(rel)
     conv = pagina[pagina.index(">Conversão</td>"):]
     conv = conv[: conv.index(">Investimento</td>")]
@@ -365,7 +373,7 @@ def test_markdown_compacto():
     md = saida.markdown(rel)
     assert md.startswith("# Conferência Shopee — 27/09 a 03/10/2026\n")
     cab = ("| Métrica | | " + " | ".join(SEMANAS_ANTIGA_PRIMEIRO) + f" | {VARIACAO} |")
-    assert md.count(cab) == 4  # Mala, Celular, Eletro, Geral
+    assert md.count(cab) == 4  # Celular, Eletro, Mala, Geral (M-23)
     for trecho in ("## Resumo", "### Mala (1 conta)", "### Celular (3 contas · 1 sem dados)",
                    "### Eletro (1 conta)", "### Geral (4 contas)",
                    "| Vendas | afiliados | " + "R$ 1.000,00 | " * 4 + "= |",
@@ -378,6 +386,18 @@ def test_markdown_compacto():
                    "Gasto de Ads sem produto (ficou em Celular): Barbosa R$ 10,00", "## Notas"):
         assert trecho in md, trecho
     assert "Saldo Ads |" not in md
+    # M-23 (23/11/2026): as tabelas na ordem Celular, Eletro, Mala, Geral.
+    titulos = [md.index(f"### {g} (") for g in ("Celular", "Eletro", "Mala", "Geral")]
+    assert titulos == sorted(titulos)
+    # E as vendas por conta também: as de Celular antes das da Mala.
+    por_conta = md[md.index("## Vendas por conta") : md.index("## Avisos")]
+    grupos = [
+        linha.split(" | ")[0].lstrip("| ")
+        for linha in por_conta.splitlines()[4:]
+        if linha.startswith("| ")
+    ]
+    assert {"Celular", "Mala"} <= set(grupos)
+    assert grupos == sorted(grupos, key=["Celular", "Eletro", "Mala"].index)
 
 
 def test_json_e_nome_do_arquivo():

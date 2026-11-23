@@ -8,7 +8,7 @@ O Resumo (Excel, HTML e a tela) segue o desenho da planilha antiga do dono —
 pedido de 07/10/2026, "mais ou menos desse jeito":
 
                  |  07/09 a 13/09  | … |  28/09 a 04/10  | Variação (28/09–04/10 × 21/09–27/09)
-   Métrica       | Mala|Cel|Ele|Geral | … | Mala|Cel|Ele|Geral | Mala|Cel|Ele|Geral
+   Métrica       | Cel|Ele|Mala|Geral | … | Cel|Ele|Mala|Geral | Cel|Ele|Mala|Geral
    Vendas     afiliados | …
               Ads       | …
    Impressões afiliados | sempre "—" (a Shopee não tem impressões de afiliados)
@@ -16,8 +16,12 @@ pedido de 07/10/2026, "mais ou menos desse jeito":
    Resumo     % investimento / vendas · Vendas no período
 
 Semanas da mais VELHA para a mais nova (S4 → S1) e, no fim, a variação S1 × S2
-de cada grupo. Quem monta as linhas e colunas é `planilha()`, o mesmo desenho
-do `planilhaResumo()` de apps/web/lib/conferencia.ts — mudou lá, muda aqui.
+de cada grupo. Desde a M-23 (23/11/2026) os grupos saem em ordem alfabética —
+Celular, Eletro, Mala — e o Geral por último (services/categorias_ordem.py, a
+mesma lista da tela); vale também para a ordem dos grupos no CSV e no
+Markdown. O relatório guardado não muda: só quem escreve ordena. Quem monta
+as linhas e colunas é `planilha()`, o mesmo desenho do `planilhaResumo()` de
+apps/web/lib/conferencia.ts — mudou lá, muda aqui.
 
   • excel — só a aba "Resumo": a planilha acima (cabeçalho azul-escuro com
     letra branca, rótulos e colunas Geral em bege, grade cinza fina; % gravado
@@ -54,11 +58,13 @@ from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.categorias_ordem import ORDEM_CATEGORIAS, ordenar_categorias
 from app.services.conferencia_shopee import plataformas
 from app.services.conferencia_shopee.calculo import (
     CASAS_PLANILHA,
     METRICA,
     METRICAS,
+    ROTULO_GRUPO,
     dinheiro,
     formatar_planilha,
     variacao,
@@ -188,13 +194,21 @@ def nome_arquivo(rel: Mapping, ext: str) -> str:
 
 # ───────────────────────────────────────────────────────────── a planilha
 
-# As 4 colunas de cada semana (e da Variação), nesta ordem.
+# As 4 colunas de cada semana (e da Variação), nesta ordem. M-23 (23/11/2026):
+# as categorias em ordem alfabética (Celular, Eletro, Mala — a lista única de
+# services/categorias_ordem.py) e o Geral por último. Antes: Mala, Celular,
+# Eletro, Geral.
 GRUPOS_PLANILHA: tuple[tuple[str, str], ...] = (
-    ("mala", "Mala"),
-    ("celular", "Celular"),
-    ("eletro", "Eletro"),
+    *((chave, ROTULO_GRUPO[chave]) for chave in ORDEM_CATEGORIAS),
     ("geral", "Geral"),
 )
+
+
+def grupos_em_ordem(rel: Mapping) -> list[Mapping]:
+    """Os grupos do relatório na ordem da tela (Celular, Eletro, Mala; M-23).
+    O relatório guardado fica na ordem em que foi calculado."""
+    grupos = [g for g in rel.get("grupos") or [] if isinstance(g, Mapping)]
+    return ordenar_categorias(grupos, lambda g: g.get("chave"))
 # (categoria — mesclada nas linhas seguidas dela —, sub-rótulo, métrica). Métrica
 # None = não existe na Shopee (impressões de afiliados): sempre "—". O Saldo Ads
 # não entra (continua no relatório, no CSV e no JSON).
@@ -227,7 +241,7 @@ def rotulo_variacao(rel: Mapping) -> str:
 
 
 def _totais_planilha(rel: Mapping) -> list[Mapping | None]:
-    """O total de Mala, Celular e Eletro e o Geral, na ordem das colunas."""
+    """O total de Celular, Eletro e Mala e o Geral, na ordem das colunas."""
     grupos = {g.get("chave"): g.get("total") for g in rel.get("grupos") or []
               if isinstance(g, Mapping)}
     return [rel.get("geral") if chave == "geral" else grupos.get(chave)
@@ -239,7 +253,7 @@ def planilha(rel: Mapping) -> dict[str, Any]:
 
     {"semanas": [{"indice" (0 = S1), "rotulo": "07/09 a 13/09"}] da mais velha
        para a mais nova,
-     "grupos": [{"chave", "rotulo"}] (Mala, Celular, Eletro, Geral),
+     "grupos": [{"chave", "rotulo"}] (Celular, Eletro, Mala, Geral — M-23),
      "variacao": "Variação (28/09–04/10 × 21/09–27/09)",
      "linhas": [{"categoria", "sub", "chave" (métrica | None), "tipo", "span"
        (linhas que a categoria cobre; 0 = coberta pela de cima),
@@ -590,7 +604,7 @@ def csv(rel: Mapping) -> bytes:
         ["Grupo", "Conta", "Usuário", "Status", "Erro", "Semana", "Início", "Fim",
          *[m["rotulo"] for m in METRICAS]]
     )
-    for g in rel["grupos"]:
+    for g in grupos_em_ordem(rel):
         for lin in g["linhas"]:
             for i, sem in enumerate(rel["semanas"]):
                 valores = lin["semanas"][i] if i < len(lin["semanas"]) else {}
@@ -665,7 +679,7 @@ def markdown(rel: Mapping) -> str:
     out.append("| Grupo | Conta | " + " | ".join(rotulos) + " | Variação |")
     out.append("|---|---|" + "---:|" * (len(rotulos) + 1))
     m = METRICA["vendas"]
-    for g in rel["grupos"]:
+    for g in grupos_em_ordem(rel):
         for lin in g["linhas"]:
             s = lin.get("semanas") or []
             vendas = [dinheiro(_valor(s, x["indice"], "vendas")) for x in p["semanas"]]
