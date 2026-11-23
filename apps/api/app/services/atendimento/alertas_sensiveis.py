@@ -5,8 +5,9 @@ forte — `tipos_pergunta.SENSIVEIS`) avisa e entra na revisão diária (a aba B
 respostas); e ele quer saber quando um assunto sensível passa da régua dos sensíveis (85%).
 
 - `avisar_envios_sensiveis` (cron de 5 em 5 min): os envios da IA (origem davinci_ia) de
-  rascunho sensível desde a última rodada (o cursor no Redis), um aviso no Telegram por envio,
-  com o assunto, a loja e o link da conversa. Sem texto de cliente nem da resposta.
+  rascunho sensível desde a última rodada (o cursor no Redis), um aviso por envio no sino dos
+  administradores (alerta ADM; M-20, 23/11/2026 — antes ia ao Telegram), com o assunto, a
+  loja e o link da conversa. Sem texto de cliente nem da resposta.
 - `aviso_da_regua`: a frase do assunto sensível que a régua acabou de soltar numa loja
   (`regua.aplicar` manda, uma vez por dia por canal e assunto).
 """
@@ -30,6 +31,9 @@ CHAVE_CURSOR = "atd:alertas_sensiveis:ate"
 # Na primeira rodada (sem cursor), olha só este tanto para trás.
 JANELA_INICIAL = timedelta(minutes=15)
 MAX_POR_RODADA = 30
+# O título no sino (M-20, 23/11/2026).
+TITULO_ENVIO = "Atendimento: envio sozinho de assunto sensível"
+TITULO_REGUA = "Atendimento: régua soltou assunto sensível"
 
 
 def _link(conversa_id: Any) -> str:
@@ -43,7 +47,7 @@ def frase_do_envio(assunto: str | None, loja: str | None, plataforma: str | None
     nome = duvida.nome_do_assunto(assunto)
     onde = " · ".join(x for x in (loja, plataforma) if x)
     return (
-        f"🔔 Saiu sozinho (assunto sensível): <b>{nome}</b>"
+        f"Saiu sozinho (assunto sensível): {nome}"
         + (f" — {onde}" if onde else "")
         + f"\nConfira na revisão do dia (aba Banco de respostas) ou na conversa: {link}"
     )
@@ -53,7 +57,7 @@ def aviso_da_regua(assunto: str, loja: str | None, aprovacao: float, decisoes: i
     """O aviso do assunto sensível que a régua soltou numa loja. PURA."""
     nome = duvida.nome_do_assunto(assunto)
     return (
-        f"✅ Régua: <b>{nome}</b> passou de {round(regua.LIMIAR_SENSIVEL * 100)}% de aprovação"
+        f"Régua: {nome} passou de {round(regua.LIMIAR_SENSIVEL * 100)}% de aprovação"
         " da equipe"
         + (f" em {loja}" if loja else "")
         + f" ({round(aprovacao * 100)}% nas últimas {decisoes} decisões). "
@@ -115,8 +119,9 @@ async def avisar_envios_sensiveis(session: AsyncSession, *, agora: datetime | No
         desde = agora - JANELA_INICIAL
     linhas = await envios_sensiveis(session, desde, agora)
     for linha in linhas:
-        await custo.avisar_telegram(
-            frase_do_envio(linha.categoria, linha.loja, linha.plataforma, _link(linha.conversa_id))
+        await custo.avisar_adm(
+            frase_do_envio(linha.categoria, linha.loja, linha.plataforma, _link(linha.conversa_id)),
+            titulo=TITULO_ENVIO,
         )
     # O cursor anda até o último avisado (se a rodada encheu) ou até agora.
     ate = linhas[-1].enviada_em if len(linhas) >= MAX_POR_RODADA else agora

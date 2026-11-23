@@ -27,7 +27,7 @@ As travas, e por que cada uma:
   `mark_as_read=false` é fixo em `mensagens_do_pack`. Enquanto o Duoke estiver
   ligado, o "não lido" é da equipe (desde 14/10/2026 só a PESSOA marca, ao
   abrir a conversa de uma loja em que o DaVinci responde — `lida.py`).
-- SEM IA E SEM ALERTA. Nada aqui chama a IA nem o Telegram. A conversa que a
+- SEM IA E SEM ALERTA. Nada aqui chama a IA nem grava alerta. A conversa que a
   importação CRIA e que ficou esperando resposta há mais de 7 dias (a janela da
   leitura periódica e da IA) entra FECHADA — senão centenas de "vencidas" de
   meses atrás tomariam a fila. A que termina com a resposta da loja entra

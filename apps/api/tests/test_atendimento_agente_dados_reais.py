@@ -73,7 +73,7 @@ from tests.test_atendimento_agente_e2e import (
     lojas,
     redis_mem,
     sem_busca_pendurada,
-    telegram,
+    sino,
 )
 from tests.test_atendimento_agente_furos import _completo, _sai
 from tests.test_atendimento_agente_pacote import _cliente, _gat

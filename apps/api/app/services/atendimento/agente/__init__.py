@@ -23,7 +23,7 @@ Módulos (contrato completo em `scratchpad/agente/interfaces.md`):
   (escopo, evidências, garantias, rastro, ações, uso);
 - `sessao`    — `sessao_leitura()`: a sessão de cada ferramenta;
 - `saida`     — a `Proposta` (resposta final) e a ida à `conferir_saida`;
-- `custo`     — preço por modelo, teto em dólar no Redis, aviso no Telegram;
+- `custo`     — preço por modelo, teto em dólar no Redis, aviso no sino (M-20);
 - `pacote`    — a 1ª mensagem (só banco e cache);
 - `acao_pessoa` — os gatilhos de código da régua 6.3;
 - `checagens` — variações, evidências, promessa da equipe, caminho da
@@ -416,7 +416,7 @@ _LIMITE_DO_WORKSPACE = ("usage limits", "usage_limit")
 #     contador por gatilho (`CHAVE_FALHA`: na 3ª vez, pessoa);
 #   - o pedido inválido (400/422 que fala de parâmetro ou formato — não do
 #     texto da conversa: `output_config`, `cache_control`, o esquema
-#     `strict`...) → a pausa longa do agente, com aviso no Telegram;
+#     `strict`...) → a pausa longa do agente, com aviso no sino (M-20);
 #   - o pedido recusado (outro 400/422) → o rascunho bloqueado, como o
 #     legado — e, repetido em outra conversa seguida, a pausa longa.
 ERRO_CONFIGURACAO = "agente_configuracao"

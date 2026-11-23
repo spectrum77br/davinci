@@ -10,7 +10,7 @@ O que já está pronto no pacote `services/atendimento/agente/`:
   os campos em `required`) e a ida dela à `ia.conferir_saida`;
 - `custo`: preço por modelo (as duas tabelas do Haiku 5.5, o cache de 5 min
   e de 1 h, o fallback), o teto do dia e da conversa no Redis e o aviso no
-  Telegram uma vez por dia;
+  sino dos administradores uma vez por dia (M-20; antes o Telegram);
 - `ResultadoAgente`: o rascunho do agente (`prompt_versao="ag1"`);
 - os contratos dos módulos da próxima fase (assinaturas que os três agentes
   usam entre si).
@@ -176,14 +176,14 @@ def redis_falso(monkeypatch) -> _RedisFalso:
 
 @pytest.fixture
 def avisos(monkeypatch) -> list[str]:
-    """O Telegram nunca é chamado de verdade: os avisos ficam aqui."""
+    """O sino (alerta ADM, M-20) nunca é gravado de verdade: os avisos ficam aqui."""
     enviados: list[str] = []
 
-    async def _avisar(texto: str) -> bool:
+    async def _avisar(texto: str, **_kw) -> bool:
         enviados.append(texto)
         return True
 
-    monkeypatch.setattr(custo, "_avisar_telegram", _avisar)
+    monkeypatch.setattr(custo, "_avisar_sino", _avisar)
     return enviados
 
 
@@ -788,7 +788,7 @@ async def test_teto_da_conversa(redis_falso, avisos, tetos):
         await custo.conferir_teto(conversa_id=conversa)
     # Outra conversa no mesmo dia segue.
     await custo.conferir_teto(conversa_id=uuid4())
-    assert avisos == []  # o teto da conversa não avisa no Telegram
+    assert avisos == []  # o teto da conversa não avisa no sino
 
 
 async def test_teto_do_dia_para_e_avisa_uma_vez(redis_falso, avisos, tetos):
@@ -845,11 +845,11 @@ async def test_aviso_que_nao_saiu_tenta_de_novo(redis_falso, monkeypatch, tetos)
     tetos.atendimento_agente_teto_usd_dia = 0.001
     tentativas: list[str] = []
 
-    async def _falha(texto: str) -> bool:
+    async def _falha(texto: str, **_kw) -> bool:
         tentativas.append(texto)
         return False
 
-    monkeypatch.setattr(custo, "_avisar_telegram", _falha)
+    monkeypatch.setattr(custo, "_avisar_sino", _falha)
     await custo.conferir_teto()  # nada gasto ainda
     assert tentativas == []
     chave = f"atd:agente:usd:{get_settings().database_schema}:{custo.dia_de_hoje()}"

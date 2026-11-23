@@ -5574,10 +5574,13 @@ _recusas_do_agente: list[UUID] = []
 
 
 async def _avisar_pausa_do_agente(texto: str) -> None:
-    """O aviso no Telegram da pausa do agente pelo pedido recusado (um por dia)."""
+    """O aviso no sino dos administradores (alerta ADM; M-20, 23/11/2026 — antes no
+    Telegram) da pausa do agente pelo pedido recusado (um por dia)."""
     from app.services.atendimento.agente import custo as custo_agente
 
-    await custo_agente.avisar_uma_vez_por_dia("pedido_recusado", texto)
+    await custo_agente.avisar_uma_vez_por_dia(
+        "pedido_recusado", texto, titulo="Agente de atendimento: pausa"
+    )
 
 
 async def _erro_do_agente(
@@ -5594,7 +5597,7 @@ async def _erro_do_agente(
     rede e — ajuste r3 — o tempo esgotado) → pausa de 1 min (os contadores
     por gatilho ficam no `responder`: `CHAVE_FALHA` e, do tempo,
     `CHAVE_DEMORA`); o pedido inválido (ou o recusado de novo em OUTRA
-    conversa) → pausa de 1 h com aviso no Telegram; o recusado da 1ª vez → o
+    conversa) → pausa de 1 h com aviso no sino (M-20); o recusado da 1ª vez → o
     rascunho bloqueado do legado (`falha`). Sem o tipo (sem chave): o
     `falha`, que não grava o passageiro. Nada disso conta no teto do dia do
     legado (o agente conta na chave dele).
@@ -5626,7 +5629,7 @@ async def _erro_do_agente(
             geral=True,
         )
         await _avisar_pausa_do_agente(
-            "🤖 <b>Atendimento</b>: o provedor recusou o pedido do agente (Claude) — "
+            "O provedor recusou o pedido do agente (Claude) — "
             f"{erro.motivo}. O agente pausou por 1 h; as conversas seguem para a Caixa Humano."
         )
     else:

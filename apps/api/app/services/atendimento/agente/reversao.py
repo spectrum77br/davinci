@@ -2,7 +2,8 @@
 
 Spec 8 (rollout): o assunto que o agente manda sozinho SAI do automático —
 `auto_orientacao` (os de orientação) e `auto_agente` (os outros) — com alerta
-no Telegram quando a auditoria diária acha 1 erro crítico ou a nota "enviaria
+no sino dos administradores (M-20, 23/11/2026; antes no Telegram) quando a
+auditoria diária acha 1 erro crítico ou a nota "enviaria
 sem editar" fica abaixo de 90% em 7 dias. A nota é da rotina do Mac mini (o
 Claude lê a exportação do dia, `scripts/agente_auditoria_export.py`); aqui é
 a regra (`decidir`, PURA) e o ato (`reverter`, que grava o canal).
@@ -180,8 +181,12 @@ async def reverter(
     return feitas
 
 
+# O título do alerta no sino (M-20, 23/11/2026).
+TITULO_ALERTA = "Agente de atendimento: saiu do automático"
+
+
 def texto_do_alerta(feitas: Sequence[Mapping[str, Any]]) -> str | None:
-    """O alerta do Telegram (sem dado de cliente): o assunto, o porquê e as contas."""
+    """O alerta do sino (sem dado de cliente; M-20): o assunto, o porquê e as contas."""
     if not feitas:
         return None
     linhas = [
@@ -190,6 +195,6 @@ def texto_do_alerta(feitas: Sequence[Mapping[str, Any]]) -> str | None:
         for f in feitas
     ]
     return (
-        "🤖 <b>Atendimento</b>: o agente (Claude) saiu do automático nestes assuntos — "
+        "O agente (Claude) saiu do automático nestes assuntos — "
         "voltam só pelo clique na tela (Canais):\n" + "\n".join(linhas)
     )

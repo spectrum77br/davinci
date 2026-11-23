@@ -77,7 +77,7 @@ def _fase_de_observacao(monkeypatch):
         "atendimento_envio_ativo",
         "atendimento_auto_ativo",
         "atendimento_simulador",
-        "atendimento_alerta_telegram",
+        "atendimento_alerta_prazos",
     ):
         monkeypatch.setattr(s, nome, False)
     # Sem o teto diário da IA (o contador do dia mora no Redis, entre testes);

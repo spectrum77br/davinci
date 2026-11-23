@@ -591,7 +591,7 @@ async function sincronizar() {
                   </PopoverTrigger>
                   <PopoverPortal>
                     <PopoverContent side="bottom" align="end" :side-offset="4" :collision-padding="8" class="z-[70] w-80 rounded-md border bg-background p-2 shadow-lg">
-                      <div class="mb-1.5 text-[11px] text-muted-foreground">Com o agente, estes assuntos não vão para pessoa só pelo assunto: ele orienta o cliente. Marque os que ele pode enviar SOZINHO — e mesmo assim só sai quando ele não marcou ação de pessoa (segurar envio, analisar foto, abrir chamado…) e nada que o validador barre. A reversão vem da auditoria diária (a rotina do Mac roda scripts.agente_reversao): 1 erro crítico, ou nota abaixo de 90% em 7 dias, tira o assunto daqui com aviso no Telegram — até ela rodar, se a nota cair, desmarque aqui.</div>
+                      <div class="mb-1.5 text-[11px] text-muted-foreground">Com o agente, estes assuntos não vão para pessoa só pelo assunto: ele orienta o cliente. Marque os que ele pode enviar SOZINHO — e mesmo assim só sai quando ele não marcou ação de pessoa (segurar envio, analisar foto, abrir chamado…) e nada que o validador barre. A reversão vem da auditoria diária (a rotina do Mac roda scripts.agente_reversao): 1 erro crítico, ou nota abaixo de 90% em 7 dias, tira o assunto daqui com aviso no sino dos administradores — até ela rodar, se a nota cair, desmarque aqui.</div>
                       <label v-for="a in ASSUNTOS_ORIENTACAO" :key="a" class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted">
                         <input type="checkbox" :checked="oriEscolhidas.includes(a)" @change="alternarOrientacao(a)" />
                         {{ orientacaoLabel(a) }}
@@ -624,7 +624,7 @@ async function sincronizar() {
                   </PopoverTrigger>
                   <PopoverPortal>
                     <PopoverContent side="bottom" align="end" :side-offset="4" :collision-padding="8" class="z-[70] w-80 rounded-md border bg-background p-2 shadow-lg">
-                      <div class="mb-1.5 text-[11px] text-muted-foreground">Das categorias do automático, marque só as que o agente empatou ou ganhou da IA de hoje no eval: nas outras, o rascunho dele fica para pessoa conferir. A reversão vem da auditoria diária (a rotina do Mac roda scripts.agente_reversao): 1 erro crítico, ou nota abaixo de 90% em 7 dias, tira o assunto daqui com aviso no Telegram — até ela rodar, se a nota cair, desmarque aqui.</div>
+                      <div class="mb-1.5 text-[11px] text-muted-foreground">Das categorias do automático, marque só as que o agente empatou ou ganhou da IA de hoje no eval: nas outras, o rascunho dele fica para pessoa conferir. A reversão vem da auditoria diária (a rotina do Mac roda scripts.agente_reversao): 1 erro crítico, ou nota abaixo de 90% em 7 dias, tira o assunto daqui com aviso no sino dos administradores — até ela rodar, se a nota cair, desmarque aqui.</div>
                       <label v-for="cat in c.auto_categorias || []" :key="cat" class="flex items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted" :class="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat) ? 'cursor-default opacity-70' : 'cursor-pointer'">
                         <input type="checkbox" :checked="agEscolhidas.includes(cat) && !ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" :disabled="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" @change="alternarDoAgente(cat)" />
                         {{ categoriaLabel(cat) }}

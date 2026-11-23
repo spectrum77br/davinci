@@ -2592,7 +2592,7 @@ async def resumo(
             auto_ativo=s.atendimento_auto_ativo,
             simulador=s.atendimento_simulador,
             simulador_exceto=enviar.fora_do_simulador(),
-            alerta_telegram=s.atendimento_alerta_telegram,
+            alerta_prazos=s.atendimento_alerta_prazos,
             humano_ativa=s.atendimento_leitura_ativa and s.atendimento_humano_ativa,
             humano_modos=list(modos_humano) if modos_humano is not None else None,
             agente_disponivel=agente_config.chave_do_agente(s) is not None,

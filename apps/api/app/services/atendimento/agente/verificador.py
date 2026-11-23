@@ -485,7 +485,8 @@ TRAVA_REPROVOU = "verificador_reprovou"
 TRAVA_TEXTO_MUDOU = "verificador_texto_mudou"
 TRAVA_VENCIDO = "verificador_vencido"
 # Os erros do provedor que não passam sozinhos (o formato do pedido, a chave,
-# a conta, o modelo): avisam no Telegram, uma vez por dia (ajuste r3).
+# a conta, o modelo): avisam no sino dos administradores (M-20, 23/11/2026; antes
+# no Telegram), uma vez por dia (ajuste r3).
 STATUS_QUE_AVISAM = frozenset({"400", "401", "403", "404", "422"})
 
 # Por que não rodou (`fatos.agente.verificador.motivo` com `rodou: false`):
@@ -3430,10 +3431,11 @@ async def no_rascunho(
         # Sem pausar o agente: o copiloto continua útil (ajuste r3).
         await custo.avisar_uma_vez_por_dia(
             "verificador_provedor",
-            f"🤖 <b>Atendimento</b>: o verificador do agente recebeu {r.detalhe}"
+            f"O verificador do agente recebeu {r.detalhe}"
             + (f" ({r.erro_tipo})" if r.erro_tipo else "")
             + " — nenhum rascunho do agente sai sozinho (veja o log "
             "atendimento_agente_verificador_provedor).",
+            titulo="Agente de atendimento: verificador com erro",
         )
     pendencia = checagens.PendenciaAgente(CODIGO, r.motivo(), bloqueia=False, so_auto=True)
     novo = checagens.aplicar(

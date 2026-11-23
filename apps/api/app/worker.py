@@ -1024,13 +1024,14 @@ async def atendimento_humano(ctx: dict) -> dict | None:
 
 
 async def atendimento_prazos(ctx: dict) -> None:
-    """A cada 15 min: aviso no Telegram das conversas com prazo vencendo ou vencido.
+    """A cada 15 min: aviso no sino dos administradores das conversas com prazo
+    vencendo ou vencido (alerta ADM; M-20, 23/11/2026 — antes ia ao Telegram).
 
     É o remédio dos 80 h da Amazon: a mensagem que cai num e-mail que ninguém
     olha. Um aviso agrupado por rodada; cada conversa entra uma vez por nível
-    (dedupe Redis). Desligado por padrão (`atendimento_alerta_telegram`).
+    (dedupe Redis). Desligado por padrão (`atendimento_alerta_prazos`).
     """
-    if not _settings.atendimento_alerta_telegram:
+    if not _settings.atendimento_alerta_prazos:
         return
     from app.services.atendimento import sync as _atendimento_sync
 
@@ -1186,8 +1187,9 @@ _ATENDIMENTO_ALERTA_SENSIVEL_MINUTOS = set(range(2, 60, 5))
 
 async def atendimento_alertas_sensiveis(ctx: dict) -> dict | None:
     """De 5 em 5 minutos: cada envio sozinho de assunto sensível (reembolso, cancelamento,
-    troca, reclamação forte) vira um aviso no Telegram, com o assunto, a loja e o link — o
-    Eduardo, 13/11/2026 (`services/atendimento/alertas_sensiveis.py`)."""
+    troca, reclamação forte) vira um aviso no sino dos administradores (M-20, 23/11/2026;
+    antes no Telegram), com o assunto, a loja e o link — o Eduardo, 13/11/2026
+    (`services/atendimento/alertas_sensiveis.py`)."""
     from app.services.atendimento import alertas_sensiveis as _alertas
 
     async with session_scope() as s:

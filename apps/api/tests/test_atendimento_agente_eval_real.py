@@ -63,7 +63,7 @@ from tests.test_atendimento_agente_e2e import (
     api,
     envios,
     ia_ligada,
-    telegram,
+    sino,
 )
 from tests.test_atendimento_agente_furos import _completo, _sai
 from tests.test_atendimento_agente_laco import (

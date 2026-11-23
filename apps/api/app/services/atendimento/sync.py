@@ -33,7 +33,6 @@ de ~200 leituras/min da Magalu.
 from __future__ import annotations
 
 import asyncio
-import html
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -59,7 +58,6 @@ from app.services.atendimento.constantes import (
     STATUS_CANAL,
     ResultadoSync,
 )
-from app.services.telegram import TelegramClient
 
 logger = structlog.get_logger()
 
@@ -93,8 +91,8 @@ ALERTA_ANTECEDENCIA = timedelta(hours=2)
 # aviso novo. 48 h cobre com folga o maior SLA (24 h) depois do vencimento.
 ALERTA_DEDUP_TTL_S = 48 * 3600
 _CHAVE_ALERTA = "atendimento:alerta:{}:{}:{}"
-# Linhas por aviso: a mensagem do Telegram é para triagem na tela de
-# bloqueio, não uma lista completa (a lista completa é o filtro da tela).
+# Linhas por aviso: o alerta do sino é para triagem, não uma lista completa
+# (a lista completa é o filtro "vencendo" da tela).
 ALERTA_MAX_LINHAS = 15
 ALERTA_MAX_CONVERSAS = 200
 
@@ -474,7 +472,7 @@ async def sincronizar_tudo() -> dict:
     return resumo
 
 
-# ── Alerta de prazo (Telegram) ────────────────────────────────────────────
+# ── Alerta de prazo (sino dos administradores; M-20, 23/11/2026) ──────────
 
 
 def _nivel(prazo: datetime, agora: datetime) -> str:
@@ -491,7 +489,7 @@ async def _reservar_aviso(chave: str) -> bool:
 
 
 async def _devolver_avisos(chaves: list[str]) -> None:
-    """O Telegram falhou: solta as reservas para a próxima rodada tentar de novo."""
+    """O alerta não gravou: solta as reservas para a próxima rodada tentar de novo."""
     if not chaves:
         return
     try:
@@ -509,28 +507,27 @@ def _link_da_tela(conversa_id: UUID | None = None) -> str:
 def _linha_do_aviso(c: AtendimentoConversa, prazo: datetime, nivel: str) -> str:
     """Uma linha por conversa, SEM texto nem nome de comprador.
 
-    Termina num link que abre a conversa direto na tela: quem recebe no
-    celular chega na resposta com um toque.
+    Termina no link que abre a conversa direto na tela. Texto simples: o
+    sino não lê HTML (M-20, 23/11/2026; antes era a mensagem do Telegram).
     """
-    icone = "🔴" if nivel == "vencida" else "🟠"
     local = prazo.astimezone(SP_TZ).strftime("%d/%m %H:%M")
-    conta = html.escape(c.conta or "loja?")
-    pedido = f" · pedido {html.escape(c.pedido_marketplace)}" if c.pedido_marketplace else ""
+    conta = c.conta or "loja?"
+    pedido = f" · pedido {c.pedido_marketplace}" if c.pedido_marketplace else ""
     quando = f"venceu {local}" if nivel == "vencida" else f"vence {local}"
-    onde = f"{html.escape(c.plataforma)} {html.escape(c.canal)}"
-    abrir = f' · <a href="{html.escape(_link_da_tela(c.id), quote=True)}">abrir</a>'
-    return f"{icone} {onde} · {conta}{pedido} · {quando}{abrir}"
+    onde = f"{c.plataforma} {c.canal}"
+    return f"{onde} · {conta}{pedido} · {quando} · {_link_da_tela(c.id)}"
 
 
 async def alertar_prazos(session: AsyncSession) -> int:
-    """Avisa no Telegram as conversas com prazo vencendo (< 2 h) ou vencido.
+    """Avisa no sino dos administradores as conversas com prazo vencendo (< 2 h) ou vencido.
 
-    Só com `atendimento_alerta_telegram`. Um aviso por rodada, agrupado (a
-    fila inteira mora na tela, com o filtro "vencendo"); cada conversa entra
-    uma vez por nível. Devolve quantas conversas entraram no aviso. Nunca
-    levanta por causa do Telegram.
+    M-20 (23/11/2026): o aviso é um alerta ADM (`alerts.avisar_administradores`);
+    antes ia ao Telegram. Só com `atendimento_alerta_prazos`. Um aviso por
+    rodada, agrupado (a fila inteira mora na tela, com o filtro "vencendo");
+    cada conversa entra uma vez por nível. Devolve quantas conversas entraram
+    no aviso. Nunca levanta por causa do aviso.
     """
-    if not get_settings().atendimento_alerta_telegram:
+    if not get_settings().atendimento_alerta_prazos:
         return 0
     agora = datetime.now(UTC)
     base = select(AtendimentoConversa).where(
@@ -593,19 +590,26 @@ async def alertar_prazos(session: AsyncSession) -> int:
         return 0
 
     vencidas = sum(1 for _c, _p, n in novas if n == "vencida")
-    linhas = [
-        f"⏰ <b>Atendimento</b>: {len(novas)} conversa(s) sem resposta "
+    titulo = (
+        f"Atendimento: {len(novas)} conversa(s) sem resposta "
         f"({vencidas} vencida(s), {len(novas) - vencidas} vencendo)"
-    ]
-    linhas += [_linha_do_aviso(c, p, n) for c, p, n in novas[:ALERTA_MAX_LINHAS]]
+    )
+    linhas = [_linha_do_aviso(c, p, n) for c, p, n in novas[:ALERTA_MAX_LINHAS]]
     if len(novas) > ALERTA_MAX_LINHAS:
         linhas.append(f"… e mais {len(novas) - ALERTA_MAX_LINHAS} — filtro “vencendo” na tela")
-    linhas.append(f'— <a href="{html.escape(_link_da_tela(), quote=True)}">abrir o Atendimento</a>')
-    try:
-        enviado = await TelegramClient().safe_send("\n".join(linhas))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("atendimento_alerta_falhou", err=type(e).__name__)
-        enviado = False
+    linhas.append(f"Abrir o Atendimento: {_link_da_tela()}")
+    from app.models import AlertSeverity
+    from app.services.alerts import avisar_administradores
+
+    enviado = await avisar_administradores(
+        titulo,
+        "\n".join(linhas),
+        severity=AlertSeverity.ERROR if vencidas else AlertSeverity.WARNING,
+        payload={
+            "atendimento_prazos": True,
+            "conversas": [str(c.id) for c, _p, _n in novas[:ALERTA_MAX_CONVERSAS]],
+        },
+    )
     if not enviado:
         await _devolver_avisos(reservadas)
         return 0

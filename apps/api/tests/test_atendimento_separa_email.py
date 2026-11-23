@@ -20,7 +20,7 @@ que não pode falhar (`services/atendimento/separa_email.py`):
   • a prévia/ordem antiga do chat: a migration 0391 refaz (e o downgrade volta);
   • a conversa PRINCIPAL do pedido (Ag. cancelamento, troca, oferta,
     devolução) continua o chat depois do aviso por e-mail — a de e-mail vai
-    por último; o alerta do Telegram, o cartão Cliente e a thread da Amazon
+    por último; o alerta de prazo, o cartão Cliente e a thread da Amazon
     pelo Gmail não pegam a conversa de e-mail.
 """
 
@@ -39,6 +39,7 @@ from sqlalchemy import func, select, text
 from app.config import get_settings
 from app.models import AtendimentoConversa, AtendimentoMensagem, UserRole
 from app.models.mail_atendimento import MailFolder, MailMessageMeta
+from app.services import alerts as alerts_svc
 from app.services.atendimento import abas as abas_svc
 from app.services.atendimento import amazon_email, etiqueta_fatos, gravar, humano, separa_email
 from app.services.atendimento import cliente as cliente_svc
@@ -705,8 +706,8 @@ async def test_principal_do_pedido_e_o_chat_depois_do_aviso(db, cena):
 # ─────────────── o que ainda olhava a conversa de e-mail como chat ───────────────
 
 
-async def test_alerta_do_telegram_so_com_a_caixa(db, cena, monkeypatch):
-    """O alerta de prazo do Telegram é o filtro "vencendo" da Caixa: a conversa
+async def test_alerta_de_prazo_so_com_a_caixa(db, cena, monkeypatch):
+    """O alerta de prazo (no sino desde a M-20) é o filtro "vencendo" da Caixa: a conversa
     de e-mail (que mora na aba E-mail, com o número dela) não entra."""
     m = await _mundo(db, cena)
     for c in (m["ml"], m["chat"]):
@@ -714,18 +715,17 @@ async def test_alerta_do_telegram_so_com_a_caixa(db, cena, monkeypatch):
         c.aguardando_resposta = True
         c.sem_resposta_necessaria = False
     await db.commit()
-    monkeypatch.setattr(get_settings(), "atendimento_alerta_telegram", True)
+    monkeypatch.setattr(get_settings(), "atendimento_alerta_prazos", True)
     enviados: list[str] = []
 
-    class _Telegram:
-        async def safe_send(self, texto):
-            enviados.append(texto)
-            return True
+    async def _sino(titulo, mensagem=None, **_kw):  # M-20: o alerta ADM no sino
+        enviados.append(f"{titulo}\n{mensagem}")
+        return True
 
     async def _sempre(_chave):
         return True
 
-    monkeypatch.setattr(sync_svc, "TelegramClient", _Telegram)
+    monkeypatch.setattr(alerts_svc, "avisar_administradores", _sino)
     monkeypatch.setattr(sync_svc, "_reservar_aviso", _sempre)
     ml_id, chat_id = m["ml"].id, m["chat"].id
     assert await sync_svc.alertar_prazos(db) == 1

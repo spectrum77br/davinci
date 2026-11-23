@@ -7,7 +7,8 @@
 - 401/403 vira `sem_escopo`, tentado de novo só de hora em hora;
 - a trava por canal impede duas leituras juntas;
 - o alerta de prazo avisa uma vez por conversa e nível, sem texto de
-  comprador, e devolve a reserva se o Telegram falhar.
+  comprador, e devolve a reserva se o alerta não gravar (M-20, 23/11/2026: o
+  aviso é um alerta ADM no sino, não mais o Telegram).
 
 Os adaptadores são de outros lotes: aqui entram falsos, pelo contrato.
 """
@@ -31,8 +32,10 @@ from app.models import (
     IntegrationPlatform,
     User,
 )
+from app.models.alert import ESCOPO_ADM, Alert
 from app.redis_client import redis
 from app.security.cipher import encrypt_json
+from app.services import alerts as alerts_svc
 from app.services.atendimento import clientes, gravar, sync
 from app.services.atendimento import shopee as adaptador_shopee
 from app.services.atendimento.constantes import ResultadoSync
@@ -445,16 +448,41 @@ async def _conversa_com_prazo(
     return c
 
 
-async def test_alerta_desligado_nao_avisa(db, monkeypatch):
-    monkeypatch.setattr(get_settings(), "atendimento_alerta_telegram", False)
+@pytest.fixture
+def sino(monkeypatch) -> list[str]:
+    """O alerta ADM de verdade (M-20), com o texto (título + mensagem) guardado."""
+    textos: list[str] = []
+    real = alerts_svc.avisar_administradores
+
+    async def _gravar(titulo, mensagem=None, **kw):
+        textos.append(f"{titulo}\n{mensagem or ''}")
+        return await real(titulo, mensagem, **kw)
+
+    monkeypatch.setattr(alerts_svc, "avisar_administradores", _gravar)
+    return textos
+
+
+async def _alertas_de_prazo(db: AsyncSession) -> list[Alert]:
+    return list(
+        (
+            await db.execute(
+                select(Alert).where(Alert.payload["atendimento_prazos"].as_boolean().is_(True))
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def test_alerta_desligado_nao_avisa(db, monkeypatch, sino):
+    monkeypatch.setattr(get_settings(), "atendimento_alerta_prazos", False)
     await _conversa_com_prazo(db, externo_id="a", prazo=datetime.now(UTC) - timedelta(hours=1))
-    with patch.object(sync.TelegramClient, "safe_send", new=AsyncMock(return_value=True)) as tg:
-        assert await sync.alertar_prazos(db) == 0
-    tg.assert_not_awaited()
+    assert await sync.alertar_prazos(db) == 0
+    assert sino == [] and await _alertas_de_prazo(db) == []
 
 
-async def test_alerta_avisa_uma_vez_por_nivel_sem_dado_de_comprador(db, monkeypatch):
-    monkeypatch.setattr(get_settings(), "atendimento_alerta_telegram", True)
+async def test_alerta_avisa_uma_vez_por_nivel_sem_dado_de_comprador(db, monkeypatch, sino):
+    monkeypatch.setattr(get_settings(), "atendimento_alerta_prazos", True)
     agora = datetime.now(UTC)
     vencida = await _conversa_com_prazo(
         db, externo_id="vencida", prazo=agora - timedelta(hours=3), pedido="701-1234567-1234567"
@@ -462,35 +490,41 @@ async def test_alerta_avisa_uma_vez_por_nivel_sem_dado_de_comprador(db, monkeypa
     await _conversa_com_prazo(db, externo_id="vencendo", prazo=agora + timedelta(minutes=50))
     await _conversa_com_prazo(db, externo_id="folgada", prazo=agora + timedelta(hours=10))
 
-    with patch.object(sync.TelegramClient, "safe_send", new=AsyncMock(return_value=True)) as tg:
-        assert await sync.alertar_prazos(db) == 2
-        (texto,) = [c.args[0] for c in tg.call_args_list]
-        assert "1 vencida(s), 1 vencendo" in texto
-        assert "701-1234567-1234567" in texto
-        assert "Fulana" not in texto and "texto do comprador" not in texto
-        # Cada linha abre a conversa direto na tela (o `?conversa=` da página).
-        assert f"/atendimento?conversa={vencida.id}" in texto
+    assert await sync.alertar_prazos(db) == 2
+    (texto,) = sino
+    assert "1 vencida(s), 1 vencendo" in texto
+    assert "701-1234567-1234567" in texto
+    assert "Fulana" not in texto and "texto do comprador" not in texto
+    # Cada linha abre a conversa direto na tela (o `?conversa=` da página).
+    assert f"/atendimento?conversa={vencida.id}" in texto
+    assert "<a " not in texto and "<b>" not in texto  # o sino é texto simples
+    # M-20: o alerta é ADM, de todos os administradores (sem destinatário).
+    (alerta,) = await _alertas_de_prazo(db)
+    assert alerta.escopo == ESCOPO_ADM and alerta.user_id is None
+    assert alerta.title.startswith("Atendimento: 2 conversa(s) sem resposta")
 
-        # Mesma rodada de novo: nada novo a avisar.
-        assert await sync.alertar_prazos(db) == 0
-        assert tg.await_count == 1
+    # Mesma rodada de novo: nada novo a avisar.
+    assert await sync.alertar_prazos(db) == 0
+    assert len(sino) == 1
 
 
-async def test_alerta_devolve_a_reserva_se_o_telegram_falhar(db, monkeypatch):
-    monkeypatch.setattr(get_settings(), "atendimento_alerta_telegram", True)
+async def test_alerta_devolve_a_reserva_se_o_alerta_nao_gravar(db, monkeypatch):
+    monkeypatch.setattr(get_settings(), "atendimento_alerta_prazos", True)
     await _conversa_com_prazo(db, externo_id="v", prazo=datetime.now(UTC) - timedelta(hours=1))
-    with patch.object(sync.TelegramClient, "safe_send", new=AsyncMock(return_value=None)):
+    with patch.object(alerts_svc, "avisar_administradores", new=AsyncMock(return_value=False)):
         assert await sync.alertar_prazos(db) == 0
-    with patch.object(sync.TelegramClient, "safe_send", new=AsyncMock(return_value=True)) as tg:
+    with patch.object(
+        alerts_svc, "avisar_administradores", new=AsyncMock(return_value=True)
+    ) as aviso:
         assert await sync.alertar_prazos(db) == 1
-    tg.assert_awaited_once()
+    aviso.assert_awaited_once()
 
 
-async def test_alerta_nao_se_afoga_em_vencidas_velhas(db, monkeypatch):
+async def test_alerta_nao_se_afoga_em_vencidas_velhas(db, monkeypatch, sino):
     """O "ok, obrigado" que ficou na fila, a primeira leitura de 7 dias: 200
     vencidas VELHAS (já avisadas) enchiam o LIMIT pela ordem de prazo, o
     dedupe as descartava — e a conversa que vence em 1 h nem era lida."""
-    monkeypatch.setattr(get_settings(), "atendimento_alerta_telegram", True)
+    monkeypatch.setattr(get_settings(), "atendimento_alerta_prazos", True)
     agora = datetime.now(UTC)
     db.add_all(
         [
@@ -503,9 +537,8 @@ async def test_alerta_nao_se_afoga_em_vencidas_velhas(db, monkeypatch):
     )
     await db.commit()
     nova = await _conversa_com_prazo(db, externo_id="nova", prazo=agora + timedelta(hours=1))
-    with patch.object(sync.TelegramClient, "safe_send", new=AsyncMock(return_value=True)) as tg:
-        assert await sync.alertar_prazos(db) == 1
-        (texto,) = [c.args[0] for c in tg.call_args_list]
+    assert await sync.alertar_prazos(db) == 1
+    (texto,) = sino
     assert f"?conversa={nova.id}" in texto
     assert "0 vencida(s), 1 vencendo" in texto
 
@@ -523,7 +556,7 @@ async def test_crons_do_worker_respeitam_os_settings(monkeypatch):
     s = worker._settings
     monkeypatch.setattr(s, "atendimento_leitura_ativa", False)
     monkeypatch.setattr(s, "atendimento_ia_ativa", False)
-    monkeypatch.setattr(s, "atendimento_alerta_telegram", False)
+    monkeypatch.setattr(s, "atendimento_alerta_prazos", False)
     tudo = AsyncMock(return_value={})
     gerar = AsyncMock(return_value=0)
     alertar = AsyncMock(return_value=0)
@@ -541,7 +574,7 @@ async def test_crons_do_worker_respeitam_os_settings(monkeypatch):
 
     monkeypatch.setattr(s, "atendimento_leitura_ativa", True)
     monkeypatch.setattr(s, "atendimento_ia_ativa", True)
-    monkeypatch.setattr(s, "atendimento_alerta_telegram", True)
+    monkeypatch.setattr(s, "atendimento_alerta_prazos", True)
     tudo.return_value = {"canais": 0}
     assert await worker.atendimento_sincronizar({}) == {"canais": 0}
     await worker.atendimento_rascunhos({})

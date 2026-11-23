@@ -98,7 +98,7 @@ def _fase_de_observacao(monkeypatch):
         "atendimento_ia_ativa",
         "atendimento_auto_ativo",
         "atendimento_simulador",
-        "atendimento_alerta_telegram",
+        "atendimento_alerta_prazos",
     ):
         monkeypatch.setattr(s, nome, False)
     monkeypatch.setattr(s, "atendimento_envio_ativo", True)

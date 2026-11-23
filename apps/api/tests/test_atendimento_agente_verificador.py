@@ -80,14 +80,14 @@ def _sem_limites():
 
 @pytest.fixture
 async def teto_limpo(monkeypatch):
-    """O gasto do DIA do agente zerado (no schema dos testes) e o Telegram falso."""
+    """O gasto do DIA do agente zerado (no schema dos testes) e o sino falso (M-20)."""
     avisos: list[str] = []
 
-    async def _falso(texto: str) -> bool:
+    async def _falso(texto: str, **_kw) -> bool:
         avisos.append(texto)
         return True
 
-    monkeypatch.setattr(custo, "_avisar_telegram", _falso)
+    monkeypatch.setattr(custo, "_avisar_sino", _falso)
     schema, dia = get_settings().database_schema, custo.dia_de_hoje()
     chaves = (
         custo.CHAVE_DIA.format(schema=schema, dia=dia),

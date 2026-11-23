@@ -150,7 +150,7 @@ function abasDe(veEmail: boolean) {
 const abasVisiveis = computed(() => abasDe(veAbaEmail.value))
 
 // `?tab=lojas` abre direto na aba; `?conversa=<id>` abre a conversa (é o link
-// que o alerta de prazo no Telegram manda) — com `?tab=mail`, a conversa de
+// que o alerta de prazo no sino leva; M-20) — com `?tab=mail`, a conversa de
 // e-mail na aba E-mail (quem não vê a aba: na Caixa).
 const abaQuery = typeof route.query.tab === 'string' ? route.query.tab : ''
 const aba = ref<Aba>(abasDe(veAbaEmail.value).some((a) => a.value === abaQuery) ? (abaQuery as Aba) : 'caixa')

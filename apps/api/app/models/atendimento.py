@@ -353,7 +353,7 @@ class AtendimentoConversa(Base, TimestampMixin):
         Boolean, nullable=False, default=False, server_default=text("false"), index=True
     )
     # Relógio do SLA de cada plataforma (ML pergunta 1 h, Amazon 24 h...).
-    # É a coluna do filtro "vencendo" e do alerta no Telegram.
+    # É a coluna do filtro "vencendo" e do alerta de prazo no sino (M-20).
     prazo_resposta_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )

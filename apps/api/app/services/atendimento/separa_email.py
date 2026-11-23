@@ -30,7 +30,7 @@ métricas, abas, detalhe, recálculo da fila, ponte):
 Quem procura "a conversa do pedido" põe a de e-mail por último
 (`etiqueta_fatos.conversas_do_pedido`) e não a conta como chat com o
 comprador (`reclamacoes_devolucoes.e_com_o_comprador`); o alerta de prazo do
-Telegram, o cartão Cliente do chat e a thread da Amazon pelo Gmail ficam só
+sino (M-20), o cartão Cliente do chat e a thread da Amazon pelo Gmail ficam só
 com a Caixa (`na_caixa_sql`).
 
 As duas expressões SQL nunca dão NULL (`dados` e `canal` são NOT NULL; a marca

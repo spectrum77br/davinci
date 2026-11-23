@@ -255,7 +255,8 @@ async def aplicar(
 
 
 async def _avisar_sensiveis_soltos(session: AsyncSession, soltos: list[tuple[Any, Taxa]]) -> None:
-    """Um aviso no Telegram por loja e assunto sensível soltos (uma vez por dia). Nunca levanta."""
+    """Um aviso no sino (alerta ADM; M-20, 23/11/2026 — antes no Telegram) por loja e assunto
+    sensível soltos (uma vez por dia). Nunca levanta."""
     from app.models import Integration
     from app.services.atendimento import alertas_sensiveis
     from app.services.atendimento.agente import custo
@@ -275,6 +276,7 @@ async def _avisar_sensiveis_soltos(session: AsyncSession, soltos: list[tuple[Any
                 alertas_sensiveis.aviso_da_regua(
                     t.tipo, nomes.get(canal.integration_id), t.fracao, t.decisoes
                 ),
+                titulo=alertas_sensiveis.TITULO_REGUA,
             )
     except Exception:  # noqa: BLE001 — o aviso nunca derruba a régua
         return

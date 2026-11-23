@@ -22,7 +22,7 @@ PONTE de verdade, `tests/test_mail_ponte.cena`, quando o cenário é do ML):
   • a oferta nunca sai pela conversa de e-mail (painel e rota); o pedido SÓ
     com a conversa de e-mail é o pedido sem conversa (sem oferta pelo DaVinci);
   • a devolução liga o chat — e só com a conversa de e-mail, nenhuma;
-  • o alerta do Telegram, o cartão Cliente do chat e a thread da Amazon pelo
+  • o alerta de prazo (sino), o cartão Cliente do chat e a thread da Amazon pelo
     Gmail não pegam a conversa de e-mail.
 """
 
@@ -36,6 +36,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.models import AtendimentoConversa, AtendimentoMensagem, BlingOrder, NfFaturamento
+from app.services import alerts as alerts_svc
 from app.services.atendimento import (
     amazon_email,
     etiqueta_fatos,
@@ -549,7 +550,7 @@ async def test_devolucao_encerrada_so_com_a_conversa_de_email_fica_sem_conversa(
 # ─────────────── o alerta, o cartão Cliente e a thread da Amazon ───────────────
 
 
-async def test_alerta_do_telegram_nao_leva_a_conversa_de_email(db, cena, monkeypatch):
+async def test_alerta_de_prazo_nao_leva_a_conversa_de_email(db, cena, monkeypatch):
     """A sonda `test_sonda_alerta_telegram_leva_conversa_de_email`: a conversa de
     e-mail da ponte com o prazo vencendo não entra no alerta (o filtro
     "vencendo" é da Caixa); o chat vencendo, sim."""
@@ -562,18 +563,17 @@ async def test_alerta_do_telegram_nao_leva_a_conversa_de_email(db, cena, monkeyp
     email.sem_resposta_necessaria = False
     await db.commit()
     email_id = email.id
-    monkeypatch.setattr(get_settings(), "atendimento_alerta_telegram", True)
+    monkeypatch.setattr(get_settings(), "atendimento_alerta_prazos", True)
     enviados: list[str] = []
 
-    class _Telegram:
-        async def safe_send(self, texto):
-            enviados.append(texto)
-            return True
+    async def _sino(titulo, mensagem=None, **_kw):  # M-20: o alerta ADM no sino
+        enviados.append(f"{titulo}\n{mensagem}")
+        return True
 
     async def _sempre(_chave):
         return True
 
-    monkeypatch.setattr(sync_svc, "TelegramClient", _Telegram)
+    monkeypatch.setattr(alerts_svc, "avisar_administradores", _sino)
     monkeypatch.setattr(sync_svc, "_reservar_aviso", _sempre)
 
     assert await sync_svc.alertar_prazos(db) == 0

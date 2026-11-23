@@ -7,7 +7,7 @@ falso do httpx2 (as respostas do modelo ROTEIRIZADAS por caso), o pacote, as
 6 ferramentas (com a sessão só de leitura), a régua "ação de pessoa", as
 checagens, a `ia.conferir_saida(agente=True)`, o `_salvar` e o
 `_talvez_enviar`. Falsos só a loja (HTTP: `clientes.factory.client_for`), o
-Telegram do teto e o envio para a plataforma (`enviar.enviar_resposta`, o
+aviso do teto no sino (M-20) e o envio para a plataforma (`enviar.enviar_resposta`, o
 espião do teste da IA).
 
 Os casos (Kia, Shopee, com o manual base de verdade no banco):
@@ -163,15 +163,16 @@ def _sem_limites():
 
 
 @pytest.fixture(autouse=True)
-def telegram(monkeypatch) -> list[str]:
-    """O aviso do teto no Telegram (falso): guarda o texto."""
+def sino(monkeypatch) -> list[str]:
+    """O aviso do teto no sino dos administradores (falso; M-20, 23/11/2026 —
+    antes o Telegram): guarda o texto."""
     avisos: list[str] = []
 
-    async def _falso(texto: str) -> bool:
+    async def _falso(texto: str, **_kw) -> bool:
         avisos.append(texto)
         return True
 
-    monkeypatch.setattr(custo, "_avisar_telegram", _falso)
+    monkeypatch.setattr(custo, "_avisar_sino", _falso)
     return avisos
 
 
@@ -1042,7 +1043,7 @@ async def test_k_so_com_a_chave_do_agente_so_os_canais_dele_rodam(
 
 
 async def test_l_teto_do_dia_atingido_sem_rascunho_e_a_caixa_humano_pega(
-    db: AsyncSession, make_user, agente_ligado, api, envios, telegram, monkeypatch
+    db: AsyncSession, make_user, agente_ligado, api, envios, sino, monkeypatch
 ):
     from app.redis_client import redis
 
@@ -1057,14 +1058,14 @@ async def test_l_teto_do_dia_atingido_sem_rascunho_e_a_caixa_humano_pega(
     await redis.delete(custo.CHAVE_AVISO.format(schema=get_settings().database_schema, dia=dia))
     with pytest.raises(custo.TetoEstourado):
         await custo.registrar({"input_tokens": 5000, "output_tokens": 500}, MODELO)
-    telegram.clear()
+    sino.clear()
     await redis.delete(custo.CHAVE_AVISO.format(schema=get_settings().database_schema, dia=dia))
 
     r = await ia.gerar_rascunho(db, conversa)
 
     assert r is None and await _rascunhos(db, conversa) == []
     assert api.pedidos == [] and envios == []
-    assert len(telegram) == 1 and "teto do dia" in telegram[0]
+    assert len(sino) == 1 and "teto do dia" in sino[0]
     # A Caixa Humano (loja no Automático) pega a conversa passada a espera da IA.
     depois = datetime.now(UTC) + humano.ESPERA_IA + timedelta(minutes=1)
     lojas_da_caixa = await humano.lojas_da_caixa(db, humano.modos_da_caixa())

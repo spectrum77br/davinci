@@ -58,7 +58,7 @@ from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     lojas,
     redis_mem,
     sem_busca_pendurada,
-    telegram,
+    sino,
 )
 from tests.test_atendimento_agente_redondo import SHOPEE_REAL, VAI_AO_VERIFICADOR
 from tests.test_atendimento_ia import PEDIDO_MKT, _importar_manual_base, _pedido_completo

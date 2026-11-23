@@ -334,10 +334,10 @@ def ajustes(monkeypatch):
     }.items():
         monkeypatch.setattr(s, nome, valor)
 
-    async def _sem_telegram(texto: str) -> bool:
+    async def _sem_sino(texto: str, **_kw) -> bool:
         return True
 
-    monkeypatch.setattr(custo, "_avisar_telegram", _sem_telegram)
+    monkeypatch.setattr(custo, "_avisar_sino", _sem_sino)
     return s
 
 

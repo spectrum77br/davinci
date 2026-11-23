@@ -721,8 +721,11 @@ class Settings(BaseSettings):
     # `devolucao_acoes_desligadas`. Nasce desligado, como a troca: a primeira
     # resposta é acompanhada pelo dono. Ler o histórico não depende disto.
     atendimento_devolucao_acoes_ativa: bool = False
-    # Aviso no Telegram de conversa com prazo vencendo/vencido.
-    atendimento_alerta_telegram: bool = False
+    # Aviso de conversa com prazo vencendo/vencido no sino dos administradores
+    # (alerta ADM). M-20 (23/11/2026): era `atendimento_alerta_telegram` (ia ao
+    # Telegram, desligado na produção); a variável velha é ignorada. Nasce
+    # desligado, como antes: ligar é decisão do dono.
+    atendimento_alerta_prazos: bool = False
     # SÓ LOCAL: o envio vai para um simulador que finge sucesso (externo_id
     # `sim:...`). É como se testa a tela de ponta a ponta sem escrever para
     # comprador nenhum. Nunca ligar em produção.

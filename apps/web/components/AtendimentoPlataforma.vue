@@ -19,7 +19,8 @@ export type Flags = {
   // Plataformas que ESCAPAM do simulador ligado: o que se responde nelas
   // CHEGA ao comprador (`atendimento_simulador_exceto`). Vazio sem simulador.
   simulador_exceto?: string[]
-  alerta_telegram?: boolean
+  // O aviso de prazo no sino dos administradores (M-20, 23/11/2026; era alerta_telegram).
+  alerta_prazos?: boolean
   // A triagem da Caixa Humano está rodando (09/10/2026). false = desligada no
   // servidor: a Caixa Humano só mostra as de IA pausada. A API antiga não manda.
   humano_ativa?: boolean

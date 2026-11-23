@@ -1341,7 +1341,8 @@ class FlagsOut(BaseModel):
     # normalizado como no envio): o que se responde nelas CHEGA ao comprador.
     # Vazio sem o simulador.
     simulador_exceto: list[str] = Field(default_factory=list)
-    alerta_telegram: bool
+    # O aviso de prazo no sino (M-20, 23/11/2026; era `alerta_telegram`).
+    alerta_prazos: bool
     # A triagem da Caixa Humano está rodando (`atendimento_humano_ativa` E a
     # leitura). Desligada, a Caixa Humano só mostra as de IA pausada.
     humano_ativa: bool = False

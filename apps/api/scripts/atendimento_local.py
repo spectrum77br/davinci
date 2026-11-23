@@ -2237,7 +2237,7 @@ def _ambiente_da_api(envio_real_amazon: str | None = None) -> None:
     `get_settings()` é lida uma vez e fica em cache: o que for posto no
     ambiente depois não vale. Forçados: SIMULADOR ligado (se o envio for
     ligado, nada sai para comprador), LEITURA/AUTO/ALERTA desligados (nada
-    chama loja, nada manda Telegram). O ENVIO nasce DESLIGADO — é o primeiro
+    chama loja, nada avisa prazo). O ENVIO nasce DESLIGADO — é o primeiro
     teste em produção: o DaVinci só lê e mostra o que a IA responderia, quem
     responde é o Duoke. Um `ATENDIMENTO_ENVIO_ATIVO=true` exportado liga o
     envio (para o simulador) para quem quiser testar a caixa de resposta.
@@ -2250,7 +2250,7 @@ def _ambiente_da_api(envio_real_amazon: str | None = None) -> None:
     os.environ["ATENDIMENTO_SIMULADOR_EXCETO"] = ""
     os.environ["ATENDIMENTO_LEITURA_ATIVA"] = "false"
     os.environ["ATENDIMENTO_AUTO_ATIVO"] = "false"
-    os.environ["ATENDIMENTO_ALERTA_TELEGRAM"] = "false"
+    os.environ["ATENDIMENTO_ALERTA_PRAZOS"] = "false"
     os.environ.setdefault("ATENDIMENTO_ENVIO_ATIVO", "false")
     os.environ["APP_NAME"] = NOME_APP
     if envio_real_amazon:

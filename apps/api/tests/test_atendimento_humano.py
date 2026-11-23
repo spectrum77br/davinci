@@ -567,7 +567,7 @@ def _chaves(monkeypatch):
         "atendimento_envio_ativo",
         "atendimento_ia_ativa",
         "atendimento_auto_ativo",
-        "atendimento_alerta_telegram",
+        "atendimento_alerta_prazos",
         "atendimento_simulador",
     ):
         monkeypatch.setattr(s, nome, False)

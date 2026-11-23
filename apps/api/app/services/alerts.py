@@ -222,3 +222,56 @@ async def _push_telegram(session: AsyncSession, *, user_id: UUID, alert: Alert) 
     body = head if not alert.message else f"{head}\n{html.escape(alert.message)}"
     tg = TelegramClient()
     await tg.safe_send(body, chat_id=us.telegram_chat_id)
+
+
+async def avisar_administradores(
+    titulo: str,
+    mensagem: str | None = None,
+    *,
+    severity: AlertSeverity = AlertSeverity.WARNING,
+    payload: dict[str, Any] | None = None,
+    dedupe_key: str | None = None,
+    session: AsyncSession | None = None,
+    integration_id: UUID | None = None,
+    plataforma: str | None = None,
+    conta: str | None = None,
+) -> bool:
+    """O aviso que só ia ao Telegram vira alerta no sino (M-20, 23/11/2026).
+
+    O DaVinci não fala mais com o Telegram ("pode excluir as integrações com o
+    telegram, não utilizamos mais", o administrador em 23/11): o aviso dos
+    robôs (atendimento, agente, marketing, DMs, relatório de preços) passa a
+    ser um alerta ADM (M-19) — todo administrador vê no sino e em /alertas,
+    com Equipe = ADM. Texto simples: o sino não lê HTML.
+
+    Sem `session`, abre a sua e grava na hora (quem avisa depois do commit:
+    DMs, agente, marketing). Com `session`, grava num savepoint dela (o
+    commit é de quem chamou). Nunca levanta: o aviso não derruba o robô.
+    Devolve True quando o alerta está no sino (novo, ou já gravado antes pela
+    mesma `dedupe_key`) e False quando não deu para gravar.
+    """
+    campos: dict[str, Any] = {
+        "type": AlertType.GENERIC,
+        "title": titulo[:300],
+        "severity": severity,
+        "message": mensagem,
+        "payload": payload or {},
+        "dedupe_key": dedupe_key,
+        "escopo": ESCOPO_ADM,
+        "integration_id": integration_id,
+        "plataforma": plataforma,
+        "conta": conta,
+    }
+    try:
+        if session is None:
+            from app import db as _db  # tardio: o teste troca a fábrica de sessões
+
+            async with _db.session_scope() as s:
+                await emit_alert(s, **campos)
+        else:
+            async with session.begin_nested():
+                await emit_alert(session, **campos)
+    except Exception as e:  # noqa: BLE001 — o aviso nunca derruba quem avisa
+        logger.warning("aviso_adm_falhou", titulo=titulo[:80], err=type(e).__name__)
+        return False
+    return True

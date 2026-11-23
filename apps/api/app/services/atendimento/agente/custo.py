@@ -19,7 +19,8 @@ com o teto deles (`atendimento_agente_teto_usd_dia_replay`), e nunca comem
 o teto do ao vivo (`atendimento_agente_teto_usd_dia`). A CONVERSA do
 replay/eval também tem chave própria (`…:replay:conversa:{id}`, revisão de
 20/10/2026) e pode ter outro teto (`teto_conversa`: o braço Sonnet do eval
-custa ~10× o Haiku). O teto de cada DIA avisa no Telegram uma vez por dia.
+custa ~10× o Haiku). O teto de cada DIA avisa no sino dos administradores
+(alerta ADM, M-20 de 23/11/2026; antes ia ao Telegram) uma vez por dia.
 A requisição que estourou o tempo não devolve o `usage` (o servidor pode ter
 cobrado): `registrar_estimativa` soma o custo provável dela no dia. O schema
 na chave é o mesmo cuidado do `ia._CHAVE_TETO`: os testes de cada lote rodam
@@ -53,7 +54,7 @@ CHAVE_DIA = "atd:agente:usd:{schema}:{dia}"
 CHAVE_DIA_REPLAY = "atd:agente:usd:{schema}:{dia}:replay"
 CHAVE_CONVERSA = "atd:agente:usd:{schema}:{dia}:conversa:{conversa}"
 CHAVE_CONVERSA_REPLAY = "atd:agente:usd:{schema}:{dia}:replay:conversa:{conversa}"
-# O aviso do teto do dia no Telegram: um por dia (e um do dia dos testes).
+# O aviso do teto do dia (no sino, M-20): um por dia (e um do dia dos testes).
 CHAVE_AVISO = "atd:agente:usd:{schema}:{dia}:avisado"
 CHAVE_AVISO_REPLAY = "atd:agente:usd:{schema}:{dia}:replay:avisado"
 TTL_S = 2 * 24 * 3600
@@ -319,28 +320,47 @@ def _tetos(teto_conversa: float | None = None, *, replay: bool = False) -> tuple
     )
 
 
-async def _avisar_telegram(texto: str) -> bool:
-    """O aviso no Telegram (o teste troca). Nunca levanta."""
-    try:
-        from app.services.telegram import TelegramClient
+# M-20 (23/11/2026): o título do alerta no sino; a frase vai na mensagem.
+TITULO_AVISO = "Agente de atendimento"
 
-        return await TelegramClient().safe_send(texto)
+
+async def _avisar_sino(texto: str, *, titulo: str = TITULO_AVISO) -> bool:
+    """O aviso do agente no sino dos administradores (o teste troca). Nunca levanta.
+
+    M-20 (23/11/2026): era o Telegram; agora é o alerta ADM do DaVinci
+    (`alerts.avisar_administradores`), que todo administrador vê em /alertas.
+    """
+    try:
+        from app.services.alerts import avisar_administradores
+
+        return await avisar_administradores(titulo, texto)
     except Exception as e:  # noqa: BLE001 — o aviso nunca derruba o agente
         logger.warning("atendimento_agente_teto_aviso_falhou", err=type(e).__name__)
         return False
 
 
+async def avisar_adm(texto: str, *, titulo: str = TITULO_AVISO) -> bool:
+    """O aviso no sino, sem limite por dia (a reversão do automático, o envio
+    sensível). Nunca levanta."""
+    return await _avisar_sino(texto, titulo=titulo)
+
+
+
 async def avisar_telegram(texto: str) -> bool:
-    """O aviso no Telegram, sem limite por dia (a reversão do automático). Nunca levanta."""
-    return await _avisar_telegram(texto)
+    """Nome antigo de `avisar_adm` (M-20: vai ao sino, não ao Telegram).
+
+    Fica só até o `scripts/agente_reversao.py` passar a chamar `avisar_adm`.
+    """
+    return await avisar_adm(texto)
 
 
 CHAVE_AVISO_DO_DIA = "atd:agente:aviso:{schema}:{tipo}:{dia}"
 
 
-async def avisar_uma_vez_por_dia(tipo: str, texto: str) -> None:
-    """Um aviso no Telegram por `tipo` por dia (SET NX no Redis; revisão 2 de
-    20/10/2026: a pausa do agente pelo pedido recusado). Nunca levanta."""
+async def avisar_uma_vez_por_dia(tipo: str, texto: str, *, titulo: str = TITULO_AVISO) -> None:
+    """Um aviso no sino por `tipo` por dia (SET NX no Redis; revisão 2 de
+    20/10/2026: a pausa do agente pelo pedido recusado; M-20: no sino, não no
+    Telegram). Nunca levanta."""
     dia = datetime.now(SAO_PAULO).strftime("%Y-%m-%d")
     chave = CHAVE_AVISO_DO_DIA.format(schema=get_settings().database_schema, tipo=tipo, dia=dia)
     try:
@@ -349,7 +369,7 @@ async def avisar_uma_vez_por_dia(tipo: str, texto: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("atendimento_agente_aviso_sem_redis", err=type(e).__name__)
         return
-    if not await _avisar_telegram(texto):
+    if not await _avisar_sino(texto, titulo=titulo):
         try:
             await redis.delete(chave)
         except Exception:  # noqa: BLE001, S110
@@ -367,17 +387,19 @@ async def _avisar_teto_do_dia(dia: str, gasto: float, teto: float, *, replay: bo
         logger.warning("atendimento_agente_teto_indisponivel", err=type(e).__name__)
         return
     if replay:
+        titulo = "Agente de atendimento: testes parados pelo teto"
         texto = (
-            f"🤖 <b>Atendimento</b>: os testes do agente (replay, eval, calibração) pararam "
-            f"pelo teto deles — US$ {gasto:.2f} de US$ {teto:.2f} em {dia}. O agente ao vivo segue."
+            f"Os testes do agente (replay, eval, calibração) pararam pelo teto deles — "
+            f"US$ {gasto:.2f} de US$ {teto:.2f} em {dia}. O agente ao vivo segue."
         )
     else:
+        titulo = "Agente de atendimento: teto de custo do dia"
         texto = (
-            f"🤖 <b>Atendimento</b>: o agente (Claude) parou pelo teto do dia — "
+            f"O agente (Claude) parou pelo teto do dia — "
             f"US$ {gasto:.2f} de US$ {teto:.2f} em {dia}. As conversas seguem para a Caixa Humano."
         )
-    if not await _avisar_telegram(texto):
-        # Não saiu: devolve a marca para a próxima tentativa avisar.
+    if not await _avisar_sino(texto, titulo=titulo):
+        # Não gravou: devolve a marca para a próxima tentativa avisar.
         try:
             await redis.delete(chave)
         except Exception:  # noqa: BLE001, S110

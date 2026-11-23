@@ -54,11 +54,11 @@ async def test_um_aviso_por_envio_sensivel_e_o_cursor_anda(
 
     avisos: list[str] = []
 
-    async def falso(texto):
+    async def falso(texto, **_kw):
         avisos.append(texto)
         return True
 
-    monkeypatch.setattr(custo, "avisar_telegram", falso)
+    monkeypatch.setattr(custo, "avisar_adm", falso)
     await redis.delete(alertas_sensiveis.CHAVE_CURSOR)
     agora = datetime.now(UTC)
     conversa = await _conversa(db, make_user, comprador_nome="Maria Souza")
