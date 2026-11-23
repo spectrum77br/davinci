@@ -659,3 +659,23 @@ def test_davinci_return_books_a_loose_item_as_a_z_sku_like_in_bling(erp, client)
         cost = db.execute("SELECT cost_price FROM product_pricing WHERE sku='z0001.sp'")
         assert cost.fetchone()[0] == "480.0000"
     assert go(client.product_exists_by_sku("z0001.sp")) is True
+
+
+def test_an_order_leaves_the_stock_when_davinci_marks_it_shipped_as_in_bling(erp, client):
+    """Bling reserves while the order is Em aberto or Em digitação and books the exit when it moves
+    on (15 Em andamento, set by DaVinci when the store shows it shipped)."""
+    created = order(erp, external="LOJA-SAIDA", sku="demo.aparelho")
+    physical, reserved, _ = balance(erp)
+    identifier = go(client.list_pedidos_vendas(numeros_lojas=["LOJA-SAIDA"]))[0]["id"]
+    assert go(client.update_order_situacao(identifier, 21)) is True  # label ready
+    assert balance(erp)[:2] == (physical, reserved)
+    assert go(client.update_order_situacao(identifier, 15)) is True  # shipped
+    quantity = physical - balance(erp)[0]
+    assert quantity > 0 and reserved - balance(erp)[1] == quantity
+    status = next(o for o in erp.snapshot()["orders"] if o["id"] == created["id"])["status"]
+    assert status == "shipped"
+    # Delivered later moves nothing more; a cancellation after the exit is refused, as before.
+    assert go(client.update_order_situacao(identifier, 83953)) is True
+    assert balance(erp)[0] == physical - quantity
+    with pytest.raises(httpx.HTTPStatusError):
+        go(client.update_order_situacao(identifier, 12))

@@ -48,6 +48,14 @@ FIRST_OWN_ID = 900_000_000_000
 OWN_NUMBER_START = 900_000
 TOKEN_ENV = "ERP_COMPAT_TOKEN"  # noqa: S105 - environment variable name
 MODULE_SALES = 98310
+# Bling keeps an order's stock reserved while it is Em aberto (6) or Em digitação (21, label
+# ready; 83965 Enviado Etiqueta is the old name of that step) and books the exit, using up the
+# reservation, once it moves on: 15 Em andamento (DaVinci sets it when the store shows the order
+# shipped) or any later situation. Measured on 23/11: Bling's reserved stock was exactly the units
+# of the orders in 6 and 21 for 181 of 205 SKUs. Cancelled (12) releases instead; Aguardando
+# cancelamento (83955) and Verificar cancelamento (83962) keep it here until someone decides.
+RESERVING_SITUATIONS = frozenset({6, 21, 83965})
+NOT_SHIPPED_SITUATIONS = RESERVING_SITUATIONS | {12, 83955, 83962}
 SITUATIONS = {
     6: "Em aberto",
     9: "Atendido",
@@ -1255,6 +1263,9 @@ def router(erp):
                     field_code="order_shipped",
                 )
             _command(erp, "order.cancel", {"id": doc["id"]})
+        elif situation_id not in NOT_SHIPPED_SITUATIONS and doc["status"] == "reserved":
+            # The order left: the stock goes out as in Bling, taking the reservation with it.
+            _command(erp, "order.stock", {"id": doc["id"]})
         with erp.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             _set_situation(erp, db, doc, situation_id)
