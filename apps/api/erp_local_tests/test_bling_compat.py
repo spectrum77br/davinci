@@ -583,3 +583,41 @@ def test_notices_reach_davinci_only_once_the_switch_turns_them_on(erp, monkeypat
     assert service_loop.deliver_notices(erp)["delivered"] == len(posted) >= 1
     assert {url for url, _ in posted} == {"http://api:8000/api/webhooks/bling"}
     assert "pedido.alteracao" in {event for _, event in posted}
+
+
+def test_importacao_cost_and_lot_payable_land_as_in_bling(erp, client):
+    """Novos procedimentos 11 (items 3 and 5) and 13 (item 6) once the Importação writes here:
+    the default supplier's cost is the product cost and its change goes to the cost result;
+    a DI instalment under Bling's "importado" category is a stock payable of its lot."""
+    from app.erp_local import price_table
+
+    part = go(client.find_active_product_by_sku("demo.aparelho"))["id"]
+    run(erp, "contact.save", {"data": {"name": "Fornecedor Lote", "roles": ["supplier"]}})
+    supplier = go(client.find_contato_id_by_name("fornecedor lote"))
+    physical = balance(erp)[0]
+    go(client.link_supplier_to_product(product_id=part, supplier_id=supplier, cost_price=10))
+    before = "10"
+    go(client.link_supplier_to_product(product_id=part, supplier_id=supplier, cost_price=21))
+    with erp.connection() as db:
+        cost = db.execute("SELECT cost_price FROM product_pricing WHERE sku='demo.aparelho'")
+        assert cost.fetchone()[0] == "21.0000"
+        change = price_table.cost_changes(db, limit=1)[0]
+    assert change["sku"] == "demo.aparelho" and change["cost_to"] == "21.0000"
+    from decimal import Decimal
+
+    assert Decimal(change["result"]) == ((Decimal(21) - Decimal(before)) * physical).quantize(
+        Decimal("0.01")
+    )
+    go(
+        client.create_conta_pagar(
+            contato_id=supplier,
+            valor=500,
+            vencimento="2027-01-10",
+            historico="DI — lote mala04 — parcela 2/3",
+            categoria_id=14693438796,
+            numero_documento="mala04/2",
+        )
+    )
+    with erp.connection() as db:
+        lot = next(entry for entry in finance.lots(db) if entry["lot"] == "mala04")
+    assert lot["payables"] == "500.00" and not lot["closed"]

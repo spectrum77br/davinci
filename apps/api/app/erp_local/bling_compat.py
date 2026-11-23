@@ -537,6 +537,24 @@ def discard(erp, db, key, p):
     return {"id": doc["id"], "discarded": True, "external_writes": False}
 
 
+def _stock_categories():
+    """Bling's payable categories that mean a stock lot. DaVinci's Importação files each DI
+    instalment under "importado" with the lot as document number ("mala04" or "mala04/2")."""
+    raw = os.environ.get("ERP_COMPAT_STOCK_CATEGORIES", "14693438796")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _stock_lot(body):
+    """Novos procedimentos 13, item 6: a stock payment keeps its category and lot."""
+    category = str((body.get("categoria") or {}).get("id") or "")
+    if not category or category not in _stock_categories():
+        return {}
+    from app.erp_local import finance
+
+    lot = re.sub(r"/\d+$", "", str(body.get("numeroDocumento") or "")).strip()
+    return {"category": finance.STOCK_CATEGORY, **({"lot_number": lot} if lot else {})}
+
+
 def _command(erp, kind, payload):
     return erp.command(str(uuid4()), kind, payload, actor="integração davinci")
 
@@ -873,6 +891,20 @@ def router(erp):
                 "reason": "Integração DaVinci",
             },
         )
+        if row["is_default"] and payload.get("precoCusto") is not None:
+            # In Bling the default supplier's cost is the product's cost, and DaVinci's Importação
+            # sets costs only this way (Novos procedimentos 11, items 3 and 5).
+            with erp.connection() as db:
+                details = product_details.details(db, sku)
+            _command(
+                erp,
+                "product.update",
+                {
+                    "sku": sku,
+                    "version": details["version"],
+                    "data": {"cost_price": str(payload["precoCusto"])},
+                },
+            )
         with erp.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             identifier = numeric_id(db, "supplier_link", sku + ":" + contact)
@@ -1276,6 +1308,7 @@ def router(erp):
             erp,
             "finance.entry.create",
             {
+                **_stock_lot(body),
                 "kind": "payable",
                 "reference": body.get("numeroDocumento") or "davinci-" + str(uuid4()),
                 "party": party,

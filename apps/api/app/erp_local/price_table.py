@@ -90,6 +90,27 @@ def _decimal(value):
         return None
 
 
+def gaps(db):
+    """Active simple products the Tabela de Preços does not cover yet (Novos procedimentos 11,
+    item 2) or that have no department (13, item 3: every product has a revenue category)."""
+    try:
+        rows = db.execute(
+            "SELECT p.sku,p.name FROM products p JOIN catalog_origin c ON c.sku=p.sku "
+            "WHERE p.kind='simple' AND json_extract(c.data,'$.sellable')=1 ORDER BY p.sku"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {"active": 0, "no_line": [], "no_department": []}
+    lines = index(db)
+    no_line, no_department = [], []
+    for sku, name in rows:
+        found = for_sku(lines, sku)
+        if not found:
+            no_line.append({"sku": sku, "name": name, "family": family(sku)})
+        elif not found["department"]:
+            no_department.append({"sku": sku, "name": name, "line": found["line"]})
+    return {"active": len(rows), "no_line": no_line, "no_department": no_department}
+
+
 def record_cost_change(erp, db, key, sku, before, after, actor):
     """Kept only for a simple product whose cost really changed and had a cost before."""
     old, new = _decimal(before), _decimal(after)

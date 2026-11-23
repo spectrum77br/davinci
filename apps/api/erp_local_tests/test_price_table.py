@@ -160,3 +160,24 @@ def test_listings_and_bling_situations_come_from_davinci(tmp_path):
     assert "999001" in names and inactive == {"83958"}
     csv_reply = client.get("/api/erp-local/cost-changes.csv")
     assert csv_reply.status_code == 200 and csv_reply.text.startswith("data;sku;")
+
+
+def test_gaps_list_active_simple_products_the_price_table_does_not_cover(erp):
+    with erp.connection() as db:
+        simple = [r[0] for r in db.execute("SELECT sku FROM products WHERE kind='simple'")][:2]
+        for sku in simple:
+            db.execute(
+                "INSERT OR REPLACE INTO catalog_origin VALUES (?,?)",
+                (sku, json.dumps({"sellable": True})),
+            )
+    reference(erp, pricing=[{**LINE, "id": "l9", "sku": "outra"}])
+    with erp.connection() as db:
+        gaps = price_table.gaps(db)
+    assert gaps["active"] == 2 and not gaps["no_department"]
+    assert sorted(r["sku"] for r in gaps["no_line"]) == sorted(simple)
+    families = ",".join(sorted({price_table.family(sku) for sku in simple}))
+    reference(erp, pricing=[{**LINE, "id": "l9", "sku": families, "department": ""}])
+    with erp.connection() as db:
+        gaps = price_table.gaps(db)
+    assert not gaps["no_line"]
+    assert sorted(r["sku"] for r in gaps["no_department"]) == sorted(simple)

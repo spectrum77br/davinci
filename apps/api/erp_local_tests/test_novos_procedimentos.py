@@ -196,3 +196,47 @@ def as_decimal(value):
     from decimal import Decimal
 
     return Decimal(str(value))
+
+
+def test_stock_payable_needs_its_lot(erp):
+    with pytest.raises(ERPError, match="número do lote"):
+        _payable(erp, "L1", cost_centers={"mala": "100"})
+    with pytest.raises(ERPError, match="número do lote"):
+        _payable(erp, "L2", category=" estoque ")
+
+
+def test_management_balance_counts_a_bill_on_the_day_it_was_paid(erp):
+    _payable(
+        erp,
+        "F1",
+        category="Frete",
+        due_date="2026-11-30",
+        cost_centers={"celular": "50", "mala": "50"},
+    )
+    _payable(erp, "S1", lot_number="LOTE-9")  # stock: not an expense
+    with erp.connection() as db:
+        installment = next(
+            i
+            for i in finance.snapshot(db)["installments"]
+            if as_decimal(i["amount"]) == 1000 and i["due_date"] == "2026-11-30"
+        )
+    run(
+        erp,
+        "finance.pay",
+        {
+            "installment_id": installment["id"],
+            "amount": "400",
+            "external_id": "PG-F1",
+            "date": "2026-12-05",
+        },
+    )
+    with erp.connection() as db:
+        rows = finance.management(db)
+    assert {
+        (r["month"], r["category"], r["cost_center"], r["paid"], r["forecast"]) for r in rows
+    } == {
+        ("2026-12", "Frete", "Celular", "200.00", "0.00"),
+        ("2026-12", "Frete", "Mala", "200.00", "0.00"),
+        ("2026-11", "Frete", "Celular", "0.00", "300.00"),
+        ("2026-11", "Frete", "Mala", "0.00", "300.00"),
+    }

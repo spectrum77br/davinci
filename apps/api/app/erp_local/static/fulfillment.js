@@ -160,6 +160,12 @@ function wouldPanel(){
   const rows=(state.would||[]).map(w=>`<tr><td>${esc(hour(w.at))}</td><td>${esc(w.name)}</td><td>${esc(w.target)}</td><td class="would-text">${esc(w.detail?.would||'')}${['stock','price'].includes(w.action)?` <a href="/api/erp-local/homolog/plans/${w.action}.csv">Baixar a lista</a>`:''}</td></tr>`);
   return panel('O que o ERP faria hoje','Na homologação, cada ação que sairia para as lojas ou para a SEFAZ fica aqui com o que seria mandado. Nada foi enviado.',rows.length?table(['Hora','Ação','Pedido ou nota','O que faria'],rows.join('')):'<p class="empty">Nenhuma ação ainda. Imprima uma etiqueta ou envie uma NF-e para ver o que o ERP faria.</p>');
 }
+function priceTableGapsPanel(){
+  const g=state.price_table_gaps;if(!g||(!g.no_line.length&&!g.no_department.length))return '';
+  const rows=[...g.no_line.map(r=>[r.sku,r.name,`Família ${r.family} sem linha na Tabela de Preços`]),...g.no_department.map(r=>[r.sku,r.name,`Linha ${r.line} sem departamento`])];
+  const body=rows.map(([sku,name,why])=>`<tr><td>${copyText(sku,'SKU')}</td><td>${esc(name||'')}</td><td>${esc(why)}</td></tr>`).join('');
+  return panel('Cadastro a completar na Tabela de Preços',`Dos ${g.active} produtos simples ativos, ${g.no_line.length} não têm linha na Tabela de Preços do DaVinci (EAN, modelo, certificado, garantia, fotos e prioridade) e ${g.no_department.length} têm linha sem departamento (Celular, Mala ou Eletro). Preencha na Tabela de Preços do DaVinci; o ERP lê de lá.`,`<details><summary>Ver os ${rows.length} produtos</summary>${table(['SKU','Produto','O que falta'],body)}</details>`);
+}
 function costPanel(){
   const rows=state.cost_changes||[];if(!rows.length)return '';
   const total=rows.reduce((sum,r)=>sum+Number(r.result),0),when=t=>new Date(t).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});

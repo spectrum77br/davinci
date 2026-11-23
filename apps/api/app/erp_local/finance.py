@@ -103,6 +103,8 @@ def entry_plan(amount, due_date, occurrence, count):
 
 
 COST_CENTERS = {"celular": "Celular", "mala": "Mala", "eletro": "Eletro"}
+# Novos procedimentos 13, item 6: stock is not an expense; it closes by lot.
+STOCK_CATEGORY = "Estoque"
 
 
 def _management(p):
@@ -129,6 +131,57 @@ def _management(p):
         if p.get("exchange_rate") not in (None, ""):
             out["exchange_rate"] = str(number(p["exchange_rate"], unit=True))
     return out
+
+
+def management(db):
+    """Novos procedimentos 13, item 1: in the management balance a bill counts on the day it was
+    paid, split among the cost centers. What is still open shows by its due date as a forecast.
+    Stock is not an expense (item 6): it stays in the lots."""
+    rows = {}
+
+    def add(month, category, centers, field, amount):
+        for center, share in (centers or {"": "100"}).items():
+            entry = rows.setdefault(
+                (month, category, center),
+                {
+                    "month": month,
+                    "category": category,
+                    "cost_center": COST_CENTERS.get(center, "Sem rateio"),
+                    "paid": Decimal(0),
+                    "forecast": Decimal(0),
+                },
+            )
+            entry[field] += amount * Decimal(share) / 100
+
+    for row in db.execute(
+        "SELECT d.data,a.id FROM documents d JOIN accounts a ON a.document_id=d.id "
+        "WHERE d.kind='financial' AND a.kind='payable' AND a.status!='cancelled'"
+    ):
+        data = json.loads(row[0])
+        category = (data.get("category") or "").strip() or "Sem categoria"
+        if category.casefold() == STOCK_CATEGORY.casefold():
+            continue
+        centers = data.get("cost_centers") or {}
+        for installment in db.execute(
+            "SELECT id,due_date,amount FROM finance_installments WHERE account_id=? AND active=1",
+            (row[1],),
+        ):
+            settled = Decimal(0)
+            for payment in db.execute(
+                "SELECT principal,data FROM finance_payments WHERE installment_id=? AND reversed=0",
+                (installment[0],),
+            ):
+                when = str(json.loads(payment[1]).get("date") or "")[:7]
+                add(when, category, centers, "paid", Decimal(payment[0]))
+                settled += Decimal(payment[0])
+            left = Decimal(installment[2]) - settled
+            if left > 0:
+                add(str(installment[1])[:7], category, centers, "forecast", left)
+    cent = Decimal("0.01")
+    return [
+        {**e, "paid": str(e["paid"].quantize(cent)), "forecast": str(e["forecast"].quantize(cent))}
+        for _, e in sorted(rows.items())
+    ]
 
 
 def lots(db):
@@ -207,6 +260,12 @@ def create_entry(erp, db, p):
             raise ERPError("entry_bank", "Conta financeira não encontrada.", 404)
         metadata["bank_id"] = bank
     metadata.update(_management(p))
+    if (
+        p["kind"] == "payable"
+        and metadata.get("category", "").strip().casefold() == STOCK_CATEGORY.casefold()
+        and not metadata.get("lot_number")
+    ):
+        raise ERPError("entry_lot", "Conta de Estoque precisa do número do lote.")
     dates = {k: day(p.get(k)) for k in ("issued_on", "competence_on", "due_date")}
     occurrence, count = p.get("occurrence", "once"), p.get("count", 1)
     plan = entry_plan(value, dates["due_date"], occurrence, count)
