@@ -95,7 +95,10 @@ function applyBlingLayout(){
     const form=document.getElementById(id);if(!form)continue;
     const section=form.closest('.panel');section.classList.add('creation-panel');section.dataset.formPanel=id;content.append(section);
   }
-  if(page==='accounts'){
+  if(page==='accounts'&&window.erpConsulta?.active){
+    // Consulta: Bling's bills and the summaries are the page; no ledger, filters or forms to fold.
+    document.querySelector('header h1').textContent='Contas a pagar';
+  }else if(page==='accounts'){
     document.querySelector('header h1').textContent=({payable:'Contas a pagar',receivable:'Contas a receber',refund:'Reembolsos'})[financeLedgerKind]||'Contas financeiras';
     document.querySelector('header h1').insertAdjacentHTML('beforeend',`<select id="finance-bank" aria-label="Conta financeira"><option value="">Todas as contas financeiras</option>${(state.finance?.banks||[]).map(b=>`<option value="${esc(b.id)}" ${b.id===financeFilters.bank?'selected':''}>${esc(b.name||b.id)}</option>`).join('')}</select>`);
     const history=[...content.children].find(s=>s.querySelector('.panel-head h2')?.textContent==='Baixas e estornos');

@@ -1584,8 +1584,10 @@ test('consulta: Financeiro lists the bills copied from Bling, with search and th
   for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
   const main=d.querySelector('main');
   assert.match(main.textContent,/Contas a pagar do Bling/);
+  assert.equal(d.querySelector('header h1').textContent,'Contas a pagar');
   assert.equal(main.querySelectorAll('[data-payable-row]').length,2);
   assert.equal(d.querySelector('#entry-form'),null);
+  assert.equal(d.querySelectorAll('main .creation-panel').length,0);
   const due=d.getElementById('payables-due');due.value='1';due.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
   assert.deepEqual([...d.querySelectorAll('[data-payable-row]')].filter(r=>!r.hidden).map(r=>r.children[1].textContent),['Fornecedor A']);
   dom.window.close();
