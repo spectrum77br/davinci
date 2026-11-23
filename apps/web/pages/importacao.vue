@@ -19,6 +19,7 @@ import {
   Pencil, Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
   Send, CheckCircle2, Clock, Briefcase, Zap, Smartphone,
 } from 'lucide-vue-next'
+import { ordenarCategorias } from '~/lib/categorias'
 import { isoToday } from '~/lib/date'
 import { parseBRNumber, formatBRNumber, formatPercent } from '~/lib/number'
 import { calcularReposicao, explicarReposicao, type ResultadoReposicao } from '~/utils/reposicao'
@@ -50,14 +51,15 @@ type Tab = 'mala' | 'resumo' | 'cotacao' | 'certificacoes' | 'frete'
 const tab = ref<Tab>('mala')
 
 // ── Categoria (selector top-level, espelha /pricing/tabela) ───────────
-// Mesma ordem e mesmo padrão da Tabela de Preços: Celular, Mala, Eletro
-// (Eduardo, 05/11/2026).
+// Mesma ordem e mesmo padrão da Tabela de Preços (Eduardo, 05/11/2026). Desde
+// a M-23 (23/11/2026) a ordem é a alfabética de todas as telas: Celular,
+// Eletro, Mala (lib/categorias.ts). Continua abrindo em Celular.
 type Categoria = 'mala' | 'eletro' | 'celular'
-const CATEGORIAS = [
+const CATEGORIAS = ordenarCategorias([
   { key: 'celular' as const, label: 'Celular', icon: Smartphone },
-  { key: 'mala' as const, label: 'Mala', icon: Briefcase },
   { key: 'eletro' as const, label: 'Eletro', icon: Zap },
-]
+  { key: 'mala' as const, label: 'Mala', icon: Briefcase },
+], (c) => c.key)
 // A aba Kit saiu em 05/11/2026 e a Certificações (a mesma tela do menu
 // Suprimentos › Certificações) entrou no lugar dela, nas três categorias.
 // Aba Frete é específica do Celular (etapa 4) — operacional de
@@ -71,7 +73,7 @@ const route = useRoute()
 const router = useRouter()
 const categoria = ref<Categoria>(
   (typeof route.query.cat === 'string'
-    && (['mala', 'eletro', 'celular'] as const).includes(route.query.cat as Categoria))
+    && (['celular', 'eletro', 'mala'] as const).includes(route.query.cat as Categoria))
     ? (route.query.cat as Categoria)
     : 'celular',
 )
@@ -1706,7 +1708,7 @@ onScopeDispose(() => {
 
 <template>
   <div class="space-y-3 p-4">
-    <!-- Selector top-level de categoria (Celular / Mala / Eletro) -->
+    <!-- Selector top-level de categoria (Celular / Eletro / Mala — M-23) -->
     <div class="flex flex-wrap gap-2">
       <button
         v-for="cat in CATEGORIAS"

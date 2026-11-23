@@ -44,6 +44,7 @@ function lib(rel) {
 }
 const REPOSICAO = lib('../utils/reposicao.ts')
 const LIBS = {
+  '~/lib/categorias': lib('../lib/categorias.ts'),
   '~/lib/date': lib('../lib/date.ts'),
   '~/lib/number': lib('../lib/number.ts'),
   '~/utils/reposicao': REPOSICAO,
@@ -537,14 +538,15 @@ const VERMELHO = '!text-red-700'
     assert.ok(modal.texto.includes(DICA_NOME[cat]), `${cat}: dica do nome gerado`)
   }
 
-  // ═════════════════════ Categorias na ordem da Tabela de Preços; Kit → Certificações
+  // ═════════════════════ Categorias na ordem de todas as telas (M-23, 23/11/2026:
+  // alfabética — Celular, Eletro, Mala); Kit → Certificações
   {
     const botoes = (doc) => [...doc.querySelectorAll('button')].map(texto)
     const { doc, estado, chamadas, deNovo } = await abrir({ cat: undefined, produtos: CELULAR, lotes: [] })
     // Sem ?cat= abre no Celular, como a Tabela de Preços.
     assert.equal(estado.categoria, 'celular')
     const cats = botoes(doc).filter((b) => /^(Celular|Mala|Eletro) \(/.test(b)).map((b) => b.split(' ')[0])
-    assert.deepEqual(cats, ['Celular', 'Mala', 'Eletro'])
+    assert.deepEqual(cats, ['Celular', 'Eletro', 'Mala'], 'M-23: ordem alfabética')
     assert.ok(!chamadas.some((c) => c.url.startsWith('/api/importacao/kit')), 'nada da aba Kit é carregado')
     const abas = (d) => botoes(d).filter((b) => ['Importação', 'Resumo', 'Cotação', 'Certificações', 'Frete', 'Kit'].includes(b))
     assert.deepEqual(abas(doc), ['Importação', 'Resumo', 'Cotação', 'Certificações', 'Frete'])
