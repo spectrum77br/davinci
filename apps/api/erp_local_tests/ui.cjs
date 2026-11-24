@@ -1703,6 +1703,24 @@ test('inside DaVinci (embed=1) only the screen shows, and #orders/store opens th
   assert.match(css,/body\.embedded \.sidebar,body\.embedded \.erp-topbar/);
 });
 
+test('M-28: Produtos 2 (embed) marks the screen from the first paint; Pedidos 2 keeps the banner',async()=>{
+  const consulta={active:true,reason:'automático',message:'Modo consulta.',read_posts:[]};
+  // Antes do primeiro desenho (sem o state ainda), para a faixa não piscar.
+  const dom=new JSDOM(fs.readFileSync(path.join(assets,'index.html'),'utf8'),{url:'http://127.0.0.1:8765/erp?embed=1#products',runScripts:'outside-only'});activeDOMs.add(dom);
+  dom.window.fetch=()=>new Promise(()=>{});
+  dom.window.eval(['consulta.js','chrome.js','operations.js','fulfillment.js','catalog.js','integrations.js','contacts.js','returns.js','deposits.js','sellers.js','inventory.js','product-characteristics.js','product-details.js','product-list.js','price-lists.js','categories.js','production.js','payment-methods.js','cash-register.js','pos.js','proposals.js','sales-form.js','access.js','inbound.js','tax-guides.js','companies.js','store-sales.js','app.js','navigation.js'].filter(f=>fs.existsSync(path.join(assets,f))).map(f=>fs.readFileSync(path.join(assets,f),'utf8')).join('\n'));
+  assert.equal(dom.window.document.body.dataset.screen,'products');
+  const {document:d}=await setup({consulta},'http://127.0.0.1:8765/erp?embed=1#products');
+  assert.equal(d.body.dataset.screen,'products');assert.ok(d.body.classList.contains('embedded'));
+  assert.match(d.getElementById('environment').textContent,/CONSULTA/,'o texto continua lá; só o CSS desta tela esconde');
+  const orders=await setup({consulta},'http://127.0.0.1:8765/erp?embed=1#orders');
+  assert.equal(orders.document.body.dataset.screen,'orders');
+  const css=fs.readFileSync(path.join(assets,'bling-layout.css'),'utf8');
+  const only=[...css.matchAll(/^body\.embedded\[data-screen=products\][^{]*\{/gm)].map(m=>m[0]);
+  assert.equal(only.length,7,'as regras do M-28 valem só para Produtos embutido');
+  assert.doesNotMatch(css,/body\.embedded #environment|body\.embedded #header-context/);
+});
+
 test('outside consulta a change is sent as before',async()=>{
   const {dom,document:d,requests}=await setup({consulta:{active:false,read_posts:[]}});
   assert.ok(!d.getElementById('environment').classList.contains('consulta'));

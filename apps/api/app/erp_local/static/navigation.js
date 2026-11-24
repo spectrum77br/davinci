@@ -44,4 +44,4 @@ document.addEventListener('click',e=>{if(e.target.closest('#back')&&navigationIn
 (function(){const [asked,view]=decodeURIComponent(location.hash.slice(1)).split('/');if(asked&&titles[asked])page=asked;if(page==='orders'&&view==='store')salesView='store';})();
 // Inside DaVinci (?embed=1, or framed): only the screen itself, without the ERP's own menus and
 // without the opening animation, which would replay on every click in DaVinci's menu.
-(function(){if(new URLSearchParams(location.search).get('embed')==='1'||window.self!==window.top){document.body.classList.add('embedded');document.getElementById('abertura')?.remove();const [title,sub]=titles[page]||[];if(title){document.getElementById('title').textContent=title;document.getElementById('subtitle').textContent=sub||'';}}})();
+(function(){if(new URLSearchParams(location.search).get('embed')==='1'||window.self!==window.top){document.body.classList.add('embedded');document.body.dataset.screen=page;document.getElementById('abertura')?.remove();const [title,sub]=titles[page]||[];if(title){document.getElementById('title').textContent=title;document.getElementById('subtitle').textContent=sub||'';}}})();

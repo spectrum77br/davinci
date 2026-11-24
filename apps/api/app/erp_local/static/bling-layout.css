@@ -206,6 +206,15 @@ body.consulta .extra{display:none!important}
 #product-edit-form .consulta-note{color:#0f5132;font-weight:600;margin-right:auto}
 /* Inside DaVinci ("Produtos 2", "Pedidos 2"): the screen without the ERP's own menus. */
 body.embedded .sidebar,body.embedded .erp-topbar,body.embedded footer,body.embedded #back{display:none!important}body.embedded .workspace{margin-left:0;width:100%}body.embedded #action-rail{top:79px}body.embedded .abertura{display:none!important}
+/* "Produtos 2" no DaVinci: sem a faixa do modo e sem o "Todas as lojas"; título, abas Produtos /
+   Anúncios e Atualizar com as letras da Tabela de Preços do DaVinci. Só nesta tela embutida. */
+body.embedded[data-screen=products] #environment,body.embedded[data-screen=products] #header-context{display:none!important}
+body.embedded[data-screen=products] #action-rail{top:50px}
+body.embedded[data-screen=products] header h1{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:22px;font-weight:600;letter-spacing:-.55px;color:rgb(15,23,41)}
+body.embedded[data-screen=products] #products-view-tabs{gap:8px}
+body.embedded[data-screen=products] #products-view-tabs button{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:14px;font-weight:400;line-height:20px;padding:6px 12px;border-radius:8px;border:1px solid rgb(229,231,235);background:#fff;color:rgb(15,23,41)}
+body.embedded[data-screen=products] #products-view-tabs button.active{background:rgb(36,99,235);border-color:rgb(36,99,235);color:#fff}
+body.embedded[data-screen=products] header #refresh{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:12px;font-weight:500;line-height:16px;height:28px;padding:0 10px;border-radius:8px;border:1px solid rgb(229,231,235);background:#fff;color:rgb(15,23,41)}
 /* M-30 (Produtos 2): barra Buscar | Estoque | Tags | Categoria | Situação no visual dos filtros
    Plataforma/Contas da Tabela de Preços do DaVinci (fonte do DaVinci, 28px de altura, caixinha com
    "Marcar todas · Limpar" e uma caixa de marcar por opção). No lugar do funil e do painel Filtrar. */
