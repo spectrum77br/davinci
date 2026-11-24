@@ -52,6 +52,7 @@ from app.models import (
 )
 from app.services import margem_auto_hold, ouvidoria, threema, threema_envios, threema_registro
 from app.services.threema_catalogo import CATALOGO, K
+from tests.test_denuncia_robo_aviso import RedisFake
 from tests.test_margem_auto_hold import HOJE, FakeBling, _audits, _seed_pedido, _snapshot
 from tests.test_margem_reavaliar_reprovados import AGORA, FakeBlingComSituacao, _seed_reprovado
 from tests.test_threema_pontos_logistica_devolucoes import _Fake, _ligar, _registro, _sinos
@@ -112,6 +113,8 @@ def _ambiente(monkeypatch):
     # a configuração antiga sem reserva: o OUVIDORIA geral vazio
     monkeypatch.setattr(s, "ouvidoria_threema_recipients", "")
     monkeypatch.setattr(threema, "ThreemaClient", _FakeCanal)
+    # a marca da hora do "ninguém válido" do resumo do robô (34)
+    monkeypatch.setattr(ouvidoria, "redis", RedisFake())
 
     async def _sem_refetch(session, bling_id: int) -> None:
         """A reavaliação rebusca o financeiro (apagaria a linha semeada do

@@ -545,7 +545,7 @@ export function avisaRoboCadastro(r: RoboThreema): { linha1: string; linha2: str
       : {
           linha1: 'Ninguém',
           linha2: 'ninguém válido no Cadastro',
-          title: 'Ninguém da lista em Cadastros › Envios Threema tem Threema válido e ativo: o aviso não está saindo (os admins foram avisados).',
+          title: 'Ninguém da lista em Cadastros › Envios Threema tem Threema válido e ativo: quando houver pendência, o aviso não sai e os admins são avisados.',
         }
   }
   return {

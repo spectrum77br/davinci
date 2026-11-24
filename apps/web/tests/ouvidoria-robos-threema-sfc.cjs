@@ -168,6 +168,9 @@ const margem = (extra = {}) => robo({
     assert.match(desligado.title, /saem juntas ao religar/)
     const ninguem = lib.avisaRoboCadastro(robo({ threema_destinatarios: [] }))
     assert.deepEqual([ninguem.linha1, ninguem.linha2], ['Ninguém', 'ninguém válido no Cadastro'])
+    // revisão da F3: sem pendência nada é tentado (nem sino) — a dica não pode dizer que avisou
+    assert.match(ninguem.title, /quando houver pendência, o aviso não sai e os admins são avisados/)
+    assert.doesNotMatch(ninguem.title, /foram avisados/)
     const antiga = lib.avisaRoboCadastro(robo({ threema_via: 'legado', threema_destinatarios: [] }))
     assert.equal(antiga.linha2, 'configuração antiga vazia')
     assert.match(lib.avisaRoboCadastro(robo({ threema_via: 'legado' })).title, /configuração antiga/)

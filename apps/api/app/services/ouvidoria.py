@@ -65,6 +65,7 @@ from app.models import (
     OuvidoriaRobo,
     OuvidoriaRodada,
 )
+from app.redis_client import redis
 from app.services import threema
 
 logger = structlog.get_logger()
@@ -1227,6 +1228,16 @@ def texto_aviso(
 # e pulava dia sim, dia não (Vigia de Conciliação)
 FOLGA_REAVISO = timedelta(minutes=15)
 
+# Ninguém válido no Cadastro (tarefa 16, revisão da F3), com pendência: sem
+# carimbo, a mesma pendência volta a cada tick do robô, e cada volta gravaria
+# um registro `ok=false` (um lote no Histórico) — robô de 10 min = 144 por dia.
+# A tentativa que chega ao núcleo (registro + sino) sai no máximo uma vez por
+# hora por envio, como na F1/F2 (`nf_auto_enfileirar._pode_avisar`,
+# `denuncia_robo_aviso.NINGUEM`); Redis fora = não passa. Nenhum carimbo é
+# gasto: quem acertar a lista recebe a pendência no tick seguinte.
+AVISO_NINGUEM_PREFIXO = "ouvidoria:aviso_ninguem:"
+AVISO_NINGUEM_S = 3600
+
 
 async def pendentes_de_aviso(
     session: AsyncSession, robo: OuvidoriaRobo, agora: datetime | None = None
@@ -1264,6 +1275,19 @@ async def pendentes_de_aviso(
     return out
 
 
+async def _ninguem_passa(chave: str) -> bool:
+    """A tentativa com ninguém válido desta hora (ver `AVISO_NINGUEM_PREFIXO`):
+    a 1ª da hora marca e passa; as outras, não. Redis fora = não passa."""
+    try:
+        marcou = await redis.set(
+            f"{AVISO_NINGUEM_PREFIXO}{chave}", "1", nx=True, ex=AVISO_NINGUEM_S
+        )
+    except Exception as e:  # noqa: BLE001 — sem a marca, melhor calar que repetir
+        logger.warning("ouvidoria_aviso_ninguem_dedupe_falhou", chave=chave, err=str(e)[:200])
+        return False
+    return bool(marcou)
+
+
 async def avisar_pendentes(
     session: AsyncSession, robo_chave: str, *, agora: datetime | None = None
 ) -> dict:
@@ -1287,8 +1311,9 @@ async def avisar_pendentes(
     * Ninguém pela configuração antiga (não migrado, emergência ou sem
       semente, com a lista vazia): `sem_destinatarios`, calado, como antes.
     * Ninguém válido no Cadastro, com pendência: o núcleo grava o registro
-      `ok=false` e acende o sino dos admins; sem carimbo (sai quando a lista
-      for acertada)."""
+      `ok=false` e acende o sino dos admins, no máximo uma vez por hora por
+      envio (`AVISO_NINGUEM_S`); sem carimbo (sai quando a lista for
+      acertada)."""
     agora = _agora(agora)
     robo = await session.get(OuvidoriaRobo, robo_chave)
     if robo is None:
@@ -1312,6 +1337,9 @@ async def avisar_pendentes(
     pendentes = await pendentes_de_aviso(session, robo, agora)
     if not pendentes:
         return {"avisadas": 0}
+    if not quem.ids and not await _ninguem_passa(chave):
+        # Ninguém válido e esta hora já chegou ao núcleo: nem registro, nem sino.
+        return {"avisadas": 0, "motivo": "ninguem_valido"}
     texto = texto_aviso(robo.nome, pendentes, link=link_painel(robo_chave))
     try:
         # O remetente vem do CATÁLOGO (o `contexto` do RoboDef, copiado no

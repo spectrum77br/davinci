@@ -16,7 +16,9 @@ tem quem recebe e o re-aviso editados lá, só por admin. O PATCH daqui IGNORA
 `threema_recipients` e `reaviso_horas` desses robôs (e a chave da config que
 o Cadastro passou a governar, `config_no_cadastro`), com um aviso em
 `avisos` — não 422: a aba aberta antes da publicação continua salvando o
-resto. A lista "Avisar" fica congelada como reserva de emergência.
+resto. A lista "Avisar" fica congelada como reserva de emergência. O
+cadastro e a remoção de contato avulso (`POST`/`DELETE`
+`/threema/destinatarios`) respondem 410: contato externo é do Cadastro.
 
 `RUNNERS` é o registro "chave do robô → função que roda uma varredura". O
 import é tardio de propósito: o serviço de cada robô puxa clients de
@@ -41,7 +43,6 @@ from app.deps.auth import require_permission
 from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada, User
 from app.schemas.ouvidoria import (
     ContaOut,
-    ContatoThreemaIn,
     DestinatarioOut,
     OcorrenciaOut,
     OcorrenciasPage,
@@ -337,63 +338,49 @@ async def threema_destinatarios(
     _user: Annotated[User, Depends(require_permission("ouvidoria", "view"))],
 ) -> list[DestinatarioOut]:
     """Quem pode receber os avisos: `[{id, nome, origem}]` pro seletor da tela
-    (usuários ativos com Threema em Admin › Usuários + contatos avulsos
-    cadastrados aqui + apelidos do `.env`)."""
+    (usuários ativos com Threema em Admin › Usuários + contatos externos de
+    Cadastros › Envios Threema + apelidos do `.env`)."""
     return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
 
 
-@router.post("/threema/destinatarios", response_model=list[DestinatarioOut])
+# Os contatos externos (quem recebe aviso sem login no DaVinci) moraram aqui
+# até a F3/C10a: a tela dos robôs cadastrava e tirava o "contato avulso" por
+# estas duas rotas. Elas gravavam em `threema_contato`, a mesma tabela que os
+# envios do Cadastro leem — tirar um contato o deixava inativo (e fora de
+# todo envio que o usa) e cadastrar de novo o reativava, sem a conferência
+# de "esse ID é de um usuário" do Cadastro. "Só ADM altera quem recebe"
+# (decisão do dono, 23/11): a tela virou um link para Contatos externos e as
+# rotas ficam recusadas para todo mundo, como o PUT do Informar migrado (aba
+# aberta antes da publicação vê a frase e nada muda). Quem edita contato é
+# só o admin, em Cadastros › Envios Threema (routers/threema_envios.py).
+_CONTATO_NO_CADASTRO = {
+    "code": "contato_no_cadastro",
+    "message": (
+        "Os contatos externos agora são cadastrados em Cadastros › Envios Threema › "
+        "Contatos externos (só admin). Recarregue a página."
+    ),
+}
+
+
+@router.post("/threema/destinatarios", status_code=status.HTTP_410_GONE)
 async def criar_contato_threema(
-    body: ContatoThreemaIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
-) -> list[DestinatarioOut]:
-    """Cadastra um contato avulso do Threema (nome + ID) e devolve a lista
-    inteira já com ele.
-
-    Vinicius, 22/09/2026: o "roma" (VBS64V3S) precisa receber aviso e não tem
-    login no DaVinci — sem isto a única porta era a lista do `.env`, que exige
-    mexer no servidor e subir de novo. Quem TEM login continua vindo de
-    Admin › Usuários: lá o nome é o do cadastro e manda neste.
-
-    Grava em `threema_contato` (Contatos externos do Cadastro de envios
-    Threema, tarefa 16) — services/threema.salvar_contato."""
-    try:
-        await threema.salvar_contato(session, threema_id=body.id, nome=body.nome)
-    except threema.ContatoInvalidoError as e:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "contato_invalido", "message": str(e)},
-        ) from e
-    await session.commit()
-    logger.info("ouvidoria_threema_contato", contato=body.id.strip().upper(), por=_autor(user))
-    return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
+) -> None:
+    """Recusado (410) desde a F3/C10a: contato externo é cadastrado em
+    Cadastros › Envios Threema › Contatos externos, só por admin."""
+    logger.info("ouvidoria_threema_contato_recusado", acao="cadastrar", por=_autor(user))
+    raise HTTPException(status.HTTP_410_GONE, detail=_CONTATO_NO_CADASTRO)
 
 
-@router.delete("/threema/destinatarios/{threema_id}", response_model=list[DestinatarioOut])
+@router.delete("/threema/destinatarios/{threema_id}", status_code=status.HTTP_410_GONE)
 async def remover_contato_threema(
     threema_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
-) -> list[DestinatarioOut]:
-    """Tira da lista um contato avulso. Quem veio de Admin › Usuários ou do
-    `.env` não sai por aqui — some quando o cadastro dele mudar lá. Contato
-    que um envio do Cadastro usa fica inativo em vez de sumir
-    (services/threema.remover_contato)."""
-    try:
-        await threema.remover_contato(session, threema_id)
-    except threema.ContatoInvalidoError as e:  # publicação antes do alembic
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "contato_invalido", "message": str(e)},
-        ) from e
-    await session.commit()
-    logger.info(
-        "ouvidoria_threema_contato_removido",
-        contato=threema_id.strip().upper(),
-        por=_autor(user),
-    )
-    return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
+) -> None:
+    """Recusado (410) desde a F3/C10a: contato externo sai (ou fica inativo)
+    em Cadastros › Envios Threema › Contatos externos, só por admin."""
+    logger.info("ouvidoria_threema_contato_recusado", acao="remover", por=_autor(user))
+    raise HTTPException(status.HTTP_410_GONE, detail=_CONTATO_NO_CADASTRO)
 
 
 @router.patch("/robos/{chave}", response_model=RoboOut)

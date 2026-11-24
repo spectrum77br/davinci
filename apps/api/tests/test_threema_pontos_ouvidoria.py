@@ -38,10 +38,18 @@ from sqlalchemy import select
 
 from app import db as db_mod
 from app.config import get_settings
-from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, ThreemaEnvio, UserRole, UserStatus
+from app.models import (
+    OuvidoriaOcorrencia,
+    OuvidoriaRobo,
+    ThreemaContato,
+    ThreemaEnvio,
+    UserRole,
+    UserStatus,
+)
 from app.routers import ouvidoria as router_ouvidoria
 from app.services import ouvidoria, threema, threema_envios, threema_registro
 from app.services.threema_catalogo import CATALOGO, K, chave_ouvidoria
+from tests.test_denuncia_robo_aviso import RedisFake
 from tests.test_threema_pontos_logistica_devolucoes import _Fake, _ligar, _registro, _sinos
 from tests.test_threema_resolver import _usuario, desmigrar, migrar, semeado
 from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
@@ -86,6 +94,14 @@ def _ambiente(monkeypatch):
     monkeypatch.setattr(threema, "ThreemaClient", _FakeCanal)
     yield
     threema_envios.limpar_cache()
+
+
+@pytest.fixture(autouse=True)
+def redis_fake(monkeypatch):
+    """A marca da hora do "ninguém válido" (`ouvidoria.AVISO_NINGUEM_PREFIXO`)."""
+    r = RedisFake()
+    monkeypatch.setattr(ouvidoria, "redis", r)
+    return r
 
 
 async def _pessoas(db):
@@ -285,6 +301,67 @@ async def test_ninguem_valido_registra_acende_o_sino_e_nao_carimba(db):
     assert (await ouvidoria.avisar_pendentes(db, robo))["avisadas"] == 1
     assert [e["destinos"] for e in _Fake.envios] == [["TSTJ0006"]]
     assert len(await _sinos(db, chave)) == 1
+
+
+async def test_ninguem_valido_chega_ao_registro_uma_vez_por_hora(db, redis_fake):
+    """Revisão da F3: sem carimbo, a mesma pendência volta a cada tick (robô
+    de 10 min). Só a 1ª tentativa da hora chega ao núcleo — um registro
+    `ok=false` e o sino —, como na F1/F2; a pendência segue sem carimbo e,
+    acertada a lista, sai no tick seguinte (a marca da hora não segura)."""
+    chave, robo = K.OUVIDORIA_VIGIA_ROBO_MELHORENVIO, "vigia_robo_melhorenvio"
+    admin, joana, sumido = await _pessoas(db)
+    await _robo(db, robo)
+    await semeado(db, chave, sumido)
+    # sem pendência: nada chega ao núcleo e a marca da hora não é gasta
+    assert await ouvidoria.avisar_pendentes(db, robo) == {"avisadas": 0}
+    assert redis_fake.d == {}
+    await _pendencia(db, robo)
+    for _ in range(3):  # três ticks seguidos, dentro da mesma hora
+        r = await ouvidoria.avisar_pendentes(db, robo)
+        assert r == {"avisadas": 0, "motivo": "ninguem_valido"}
+    assert _Fake.envios == []
+    assert len(await _registro(db, chave)) == 1
+    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert set(redis_fake.d) == {f"{ouvidoria.AVISO_NINGUEM_PREFIXO}{chave}"}
+    (o,) = await _ocorrencias(db, robo)
+    assert o.avisada_em is None
+    # vencida a marca (passou a hora), a tentativa seguinte volta ao registro
+    redis_fake.d.clear()
+    assert (await ouvidoria.avisar_pendentes(db, robo))["motivo"] == "ninguem_valido"
+    assert len(await _registro(db, chave)) == 2
+    # acertada a lista, o tick seguinte avisa a mesma pendência, com a marca de pé
+    await semeado(db, chave, joana)
+    threema_envios.limpar_cache()
+    assert await ouvidoria.avisar_pendentes(db, robo) == {"avisadas": 1}
+    assert [e["destinos"] for e in _Fake.envios] == [["TSTJ0006"]]
+    (o,) = await _ocorrencias(db, robo)
+    assert o.avisada_em is not None
+
+
+async def test_ninguem_valido_com_redis_fora_nao_repete_o_registro(db, monkeypatch):
+    """Redis fora: sem a marca da hora, a tentativa com ninguém válido não
+    chega ao núcleo (melhor calar que gravar um registro a cada tick); com
+    gente válida, o aviso sai normalmente (não depende do Redis)."""
+
+    class _RedisFora:
+        async def set(self, *a, **k):
+            raise ConnectionError("redis fora")
+
+    monkeypatch.setattr(ouvidoria, "redis", _RedisFora())
+    chave, robo = K.OUVIDORIA_VIGIA_NOTA_CHEIA, "vigia_nota_cheia"
+    _admin, joana, sumido = await _pessoas(db)
+    await _robo(db, robo)
+    await semeado(db, chave, sumido)
+    await _pendencia(db, robo)
+    r = await ouvidoria.avisar_pendentes(db, robo)
+    assert r == {"avisadas": 0, "motivo": "ninguem_valido"}
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+    (o,) = await _ocorrencias(db, robo)
+    assert o.avisada_em is None
+    await semeado(db, chave, joana)
+    threema_envios.limpar_cache()
+    assert await ouvidoria.avisar_pendentes(db, robo) == {"avisadas": 1}
+    assert [e["destinos"] for e in _Fake.envios] == [["TSTJ0006"]]
 
 
 @pytest.mark.parametrize("modo", ["silencioso", "desligado"])
@@ -514,6 +591,67 @@ async def test_a_tela_dos_robos_mostra_quem_recebe_pelo_cadastro(
     assert "TSTJ0006" not in r.text
     det = (await client.get("/api/ouvidoria/robos/vigia_importacao")).json()
     assert det["threema_destinatarios"] == imp["threema_destinatarios"]
+
+
+async def test_rotas_antigas_de_contato_avulso_nao_mudam_quem_recebe(
+    db, client, make_user, auth_as
+):
+    """Revisão da F3: a tela dos robôs não cadastra nem tira mais contato
+    avulso (virou link para Contatos externos), e as rotas antigas também
+    não — elas gravavam em `threema_contato`, que os envios migrados leem.
+    Quem edita a Ouvidoria (e até o admin, que edita no Cadastro) recebe
+    410: tirar o roma não o deixa inativo no aviso do robô, e cadastrar de
+    novo não reativa o contato que o admin desligou."""
+    chave = K.OUVIDORIA_VIGIA_CORREIOS
+    admin, joana, _ = await _pessoas(db)
+    await _robo(db, "vigia_correios")
+    await threema.salvar_contato(db, threema_id=ID["roma"], nome="roma")
+    await db.commit()
+    roma = (
+        await db.execute(select(ThreemaContato).where(ThreemaContato.threema_id == ID["roma"]))
+    ).scalar_one()
+    await semeado(db, chave, joana, roma)
+
+    async def _quem() -> tuple:
+        threema_envios.limpar_cache()
+        return tuple((await threema_envios.resolver(chave, session=db)).ids)
+
+    assert await _quem() == ("TSTJ0006", ID["roma"])
+    editor = await make_user(permissions=_perms(edit=True))
+    auth_as(editor)
+    r = await client.delete(f"/api/ouvidoria/threema/destinatarios/{ID['roma'].lower()}")
+    assert r.status_code == 410, r.text
+    assert r.json()["detail"]["code"] == "contato_no_cadastro"
+    assert await _quem() == ("TSTJ0006", ID["roma"])
+    await db.refresh(roma)
+    assert roma.ativo is True
+    # o admin desliga o roma em Contatos externos; o editor não o religa daqui
+    auth_as(admin)
+    r = await client.patch(f"/api/threema/contatos/{roma.id}", json={"ativo": False})
+    assert r.status_code == 200, r.text
+    assert await _quem() == ("TSTJ0006",)
+    auth_as(editor)
+    r = await client.post(
+        "/api/ouvidoria/threema/destinatarios", json={"id": ID["roma"], "nome": "roma"}
+    )
+    assert r.status_code == 410, r.text
+    assert "Contatos externos" in r.json()["detail"]["message"]
+    assert await _quem() == ("TSTJ0006",)
+    await db.refresh(roma)
+    assert (roma.ativo, roma.nome) == (False, "roma")
+    # contato novo também não entra por aqui — nem pelo admin
+    auth_as(admin)
+    r = await client.post(
+        "/api/ouvidoria/threema/destinatarios", json={"id": "TSTN0011", "nome": "novo"}
+    )
+    assert r.status_code == 410, r.text
+    novo = await db.execute(select(ThreemaContato).where(ThreemaContato.threema_id == "TSTN0011"))
+    assert novo.scalar_one_or_none() is None
+    # quem só vê a Ouvidoria segue barrado antes (403) e lê o seletor
+    auth_as(await make_user(permissions=_perms()))
+    r = await client.delete(f"/api/ouvidoria/threema/destinatarios/{ID['roma']}")
+    assert r.status_code == 403
+    assert (await client.get("/api/ouvidoria/threema/destinatarios")).status_code == 200
 
 
 async def test_quem_recebe_leve_abre_para_quem_ve_a_ouvidoria(db, client, make_user, auth_as):
