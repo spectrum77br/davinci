@@ -2753,6 +2753,21 @@ async def test_ia_encerrado_sem_decisao_segue_quando_alguem_fala_depois(client, 
         return next(c for c in r.json()["items"] if c["id"] == cid)["status_aba"]
 
     assert (await sync.sync_respostas(db))["novos"] == 1
+    # Linha do tempo explícita (24/11/2026): o `created_at` das falas é o relógio
+    # do Postgres (server_default) e o `status_plataforma_at` do Encerrado é o do
+    # processo (`datetime.now`). Aqui os passos ficam a ~50 ms um do outro e o
+    # banco de teste (VM do colima) chegou a andar ~70 ms adiantado: a fala velha
+    # do mediador caía "depois" do Encerrado da IA, o caso "seguia" e a coluna
+    # dava Análise Humano — de vez em quando, conforme a deriva da VM. Em produção
+    # banco e API usam o mesmo relógio e os passos ficam minutos longe. Então: a
+    # conversa até aqui é de 2 min atrás e a IA fechou há 1 min.
+    for m in (
+        await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id))
+    ).scalars():
+        m.created_at -= timedelta(minutes=2)
+        if m.enviada_at is not None:
+            m.enviada_at -= timedelta(minutes=2)
+    await db.commit()
     assert await _na_fila()
     # a IA lê errado e sugere fechar → Encerrado, some da fila dela
     a = await client.post("/api/chamados/agent/analise", headers=h, json={
@@ -2761,6 +2776,8 @@ async def test_ia_encerrado_sem_decisao_segue_quando_alguem_fala_depois(client, 
     await db.commit()
     await db.refresh(ch)
     assert ch.status_plataforma == "encerrado"
+    ch.status_plataforma_at -= timedelta(minutes=1)
+    await db.commit()
     assert not await _na_fila()
     assert await _aba() == "encerrado"
     # a varredura segue lendo o Encerrado sem decisão — e não conta de novo como encerrado
