@@ -19,6 +19,18 @@
 // na tela o que o servidor já mandou.
 //
 // M-24 (24/11/2026): o "?" da barra do topo (M-18) abre a "Ajuda · Faturamento".
+//
+// M-36 (24/11/2026, prévia aprovada em 24/11): Investimento = afiliados + Ads,
+// do Marketing (Shopee: as semanas fechadas da Conferência; ML: o Ads por dia).
+// O servidor manda os dois pedaços; o balão mostra "Afiliados R$ X + Ads R$ Y"
+// e, quando é o caso, até quando vão as semanas fechadas. "—" = sem dado.
+//
+// M-37 (24/11/2026, prévia aprovada em 24/11): a Margem (só ADM) deixou de ser
+// a faixa da aba Contas e virou a margem real da Conciliação, (Σ sobrou de
+// todos os pedidos − Ads) ÷ Σ custo, com 1 casa e negativa em vermelho. O
+// balão mostra a conta e quantos pedidos entraram de cada jeito; o Total faz
+// a mesma conta com as somas das contas filtradas. "—" = conta fora da
+// Conciliação ou período que começa antes do início dela.
 import { computed, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
@@ -36,7 +48,24 @@ const isAdmin = useIsAdmin()
 // Pendências vêm da grade da Tabela de Preços: quem não a vê fica com "—".
 const podeVerPrecos = useCan('tabela_precos', 'view')
 
-type MargemFaixa = { min: number; max: number }
+// M-37: a margem real da Conciliação (regras no servidor, services/
+// faturamento_margem.py). `valor` em fração; null = "—" (sem custo para
+// dividir). `antes_do_inicio`: o período começa antes de `inicio` → "—".
+type MargemReal = {
+  valor: number | null
+  sobrou: number
+  ads: number
+  ads_com_dado?: boolean
+  ads_ate?: string | null
+  custo: number
+  pedidos: number
+  pagos: number
+  previstos: number
+  cancelados: number
+  sem_valor: number
+  inicio?: string | null
+  antes_do_inicio?: boolean
+}
 type FaturamentoLinha = {
   store_id: string
   loja: string | null
@@ -49,10 +78,15 @@ type FaturamentoLinha = {
   equipe?: number | null
   contas_preco?: string[]
   investimento?: number | null
+  // M-36: os dois pedaços do investimento (null = aquele pedaço sem dado) e
+  // até quando vão as semanas fechadas da Conferência, se param antes do fim.
+  investimento_afiliados?: number | null
+  investimento_ads?: number | null
   investimento_desde?: string | null
   investimento_parcial?: boolean
+  investimento_ate?: string | null
   // Só vem para administrador.
-  margem?: MargemFaixa | null
+  margem?: MargemReal | null
 }
 type EquipeOpcao = { numero: number; nome: string }
 type FaturamentoOut = {
@@ -76,7 +110,7 @@ function ajudaFaturamento(admin: boolean) {
       {
         titulo: 'Para que serve',
         itens: [
-          'Mostra quanto cada conta vendeu no período: pedidos, faturamento e ticket médio, junto com as pendências da Tabela de Preços e o investimento em Ads e afiliados.',
+          'Mostra quanto cada conta vendeu no período: pedidos, faturamento e ticket médio, junto com as pendências da Tabela de Preços e o investimento (afiliados + Ads, do Marketing).',
         ],
       },
       {
@@ -87,10 +121,10 @@ function ajudaFaturamento(admin: boolean) {
           { termo: 'Faturamento', texto: 'soma do total dos pedidos, como está no Bling. É o valor bruto: não desconta comissão nem reembolso.' },
           { termo: 'Ticket médio', texto: 'faturamento ÷ pedidos.' },
           { termo: 'Pendências', cartao: true, texto: 'quantos cartões vermelhos a conta tem na Tabela de Preços (Celular, Eletro e Mala).' },
-          { termo: 'Investimento', texto: 'total gasto em Ads e afiliados na conta no período. "—" quer dizer sem dado.' },
-          { termo: '% Investimento', texto: 'investimento ÷ faturamento.' },
+          { termo: 'Investimento', texto: 'afiliados + Ads, do Marketing, na conta no período. Shopee: as semanas fechadas da Conferência (a semana que cruza o período entra pelos dias; a semana atual entra quando fechar). Mercado Livre: o Ads de cada dia. Passe o mouse para ver as duas partes. "—" quer dizer sem dado.' },
+          { termo: '% Investimento', texto: 'investimento ÷ faturamento da conta. Na linha Total, a soma dos investimentos ÷ o faturamento total.' },
           ...(admin
-            ? [{ termo: 'Margem (só ADM)', texto: 'margens da conta cadastradas na aba Contas, da menor à maior.' }]
+            ? [{ termo: 'Margem (só ADM)', texto: 'resultado das vendas no período, da Conciliação: (sobrou de todos os pedidos − Ads) ÷ custo dos produtos. Pedido ainda não pago entra pelo valor previsto; pedido sem valor de venda fica fora até a plataforma calcular a venda. Só o Ads é descontado: os afiliados já saem do valor de cada pedido. Negativa em vermelho. "—" quer dizer conta fora da Conciliação, sem pedido no período (fica fora do Total, com o Ads dela) ou período que começa antes do início dela (24/10/2026). Passe o mouse para ver a conta.' }]
             : []),
         ],
       },
@@ -402,25 +436,71 @@ const total = computed(() => {
   let pedidos = 0
   let faturamento = 0
   let investimento: number | null = null
+  let afiliados: number | null = null
+  let ads: number | null = null
   let parcial = false
+  let ate = false
   let pendencias: number | null = null
+  // Margem (M-37): (Σ sobrou − Σ Ads) ÷ Σ custo das contas com Conciliação.
+  // A conta com o período antes do início dela fica fora (e o balão conta).
+  // A conta sem pedido no período também fica fora, com o Ads dela: é o que
+  // dá os 24,0% de nov/2026 do exemplo aprovado (Ads R$ 35.011,50).
+  let margem: MargemReal | null = null
+  let margemAntes = 0
+  let margemSemPedido = 0
+  let margemInicio: string | null = null
   for (const r of linhas) {
     pedidos += r.pedidos
     faturamento += r.faturamento
     if (r.investimento != null) {
       investimento = (investimento ?? 0) + r.investimento
+      if (r.investimento_afiliados != null) afiliados = (afiliados ?? 0) + r.investimento_afiliados
+      if (r.investimento_ads != null) ads = (ads ?? 0) + r.investimento_ads
       parcial ||= !!r.investimento_parcial
+      ate ||= !!r.investimento_ate
     }
     const p = pendenciasDe(r)
     if (p != null) pendencias = (pendencias ?? 0) + p
+    const m = r.margem
+    if (m?.antes_do_inicio) {
+      margemAntes += 1
+      if (m.inicio && (!margemInicio || m.inicio > margemInicio)) margemInicio = m.inicio
+    } else if (m && m.pedidos === 0) {
+      margemSemPedido += 1
+    } else if (m) {
+      margem ??= { valor: null, sobrou: 0, ads: 0, ads_com_dado: true, ads_ate: null, custo: 0, pedidos: 0, pagos: 0, previstos: 0, cancelados: 0, sem_valor: 0 }
+      margem.sobrou += m.sobrou
+      margem.ads += m.ads
+      margem.custo += m.custo
+      margem.pedidos += m.pedidos
+      margem.pagos += m.pagos
+      margem.previstos += m.previstos
+      margem.cancelados += m.cancelados
+      margem.sem_valor += m.sem_valor
+      if (!m.ads_com_dado) margem.ads_com_dado = false
+      if (m.ads_ate && (!margem.ads_ate || m.ads_ate < margem.ads_ate)) margem.ads_ate = m.ads_ate
+    }
+  }
+  if (margem) {
+    margem.sobrou = Math.round(margem.sobrou * 100) / 100
+    margem.ads = Math.round(margem.ads * 100) / 100
+    margem.custo = Math.round(margem.custo * 100) / 100
+    margem.valor = margem.custo > 0 ? (margem.sobrou - margem.ads) / margem.custo : null
   }
   return {
     pedidos,
     faturamento: Math.round(faturamento * 100) / 100,
     ticket: pedidos ? faturamento / pedidos : null,
     investimento: investimento == null ? null : Math.round(investimento * 100) / 100,
+    afiliados: afiliados == null ? null : Math.round(afiliados * 100) / 100,
+    ads: ads == null ? null : Math.round(ads * 100) / 100,
     parcial,
+    ate,
     pendencias,
+    margem,
+    margemAntes,
+    margemSemPedido,
+    margemInicio,
   }
 })
 
@@ -439,25 +519,90 @@ function fmtPctInvestimento(inv: number | null | undefined, fat: number): string
   if (inv == null || !(fat > 0)) return '—'
   return `${((inv / fat) * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`
 }
-// Margem como na aba Contas: "42.5%"; diferentes = "10.2% – 55.3%".
-function fmtMargem1(v: number): string {
-  return `${(v * 100).toFixed(1)}%`
+// Margem (M-37): percentual com 1 casa ("25,2%"); o valor que conta na tela
+// já arredondado, para "-0,0%" não aparecer nem ficar vermelho à toa.
+function pctMargem(m: MargemReal | null | undefined): number | null {
+  if (!m || m.antes_do_inicio || m.valor == null || !Number.isFinite(m.valor)) return null
+  const pct = Math.round(m.valor * 1000) / 10
+  return pct === 0 ? 0 : pct
 }
-function fmtMargem(m: MargemFaixa | null | undefined): string {
-  if (!m) return '—'
-  const min = fmtMargem1(m.min)
-  const max = fmtMargem1(m.max)
-  return min === max ? min : `${min} – ${max}`
+function fmtMargem(m: MargemReal | null | undefined): string {
+  const pct = pctMargem(m)
+  if (pct == null) return '—'
+  return `${pct.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`
+}
+function classeMargem(m: MargemReal | null | undefined): string {
+  const pct = pctMargem(m)
+  if (pct == null) return 'text-muted-foreground'
+  return pct < 0 ? 'text-red-600' : ''
 }
 function dataDM(iso: string | null | undefined): string {
   if (!iso) return ''
   const [, m, d] = iso.split('-')
   return `${d}/${m}`
 }
-function tituloInvestimento(r: FaturamentoLinha): string | undefined {
-  if (r.investimento == null) return 'Sem dado de gasto em Ads nesta conta no período.'
-  return r.investimento_parcial ? `gasto guardado desde ${dataDM(r.investimento_desde)}` : undefined
+function dataDMA(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const [a, m, d] = iso.split('-')
+  return `${d}/${m}/${a}`
 }
+// O balão da Margem: a conta do pedido ("Sobrou R$ X − Ads R$ Y ÷ custo R$ Z ·
+// N pedidos: A pagos, B com valor previsto, C cancelados, D sem valor de
+// venda") e, embaixo, o que explica um "—" ou o Ads.
+function contaMargem(m: MargemReal): string[] {
+  const linhas = [
+    `Sobrou ${fmtBRL(m.sobrou)} − Ads ${fmtBRL(m.ads)} ÷ custo ${fmtBRL(m.custo)}`
+      + ` · ${fmtInt(m.pedidos)} pedidos: ${fmtInt(m.pagos)} pagos, ${fmtInt(m.previstos)} com valor previsto,`
+      + ` ${fmtInt(m.cancelados)} cancelados, ${fmtInt(m.sem_valor)} sem valor de venda`,
+  ]
+  if (m.valor == null) linhas.push(m.pedidos ? 'sem custo para dividir' : 'nenhum pedido na Conciliação no período')
+  return linhas
+}
+function tituloMargem(m: MargemReal | null | undefined): string {
+  if (!m) return 'Conta fora da Conciliação.'
+  if (m.antes_do_inicio) return `A Conciliação começa em ${dataDMA(m.inicio)}. Escolha um período a partir dessa data.`
+  const linhas = contaMargem(m)
+  if (!m.ads_com_dado) linhas.push('sem dado de Ads no Marketing: conta R$ 0,00')
+  if (m.ads_ate) linhas.push(`Ads das semanas fechadas até ${dataDM(m.ads_ate)} (a semana atual entra quando fechar)`)
+  return linhas.join('\n')
+}
+const tituloMargemTotal = computed(() => {
+  const t = total.value
+  const fora = t.margemAntes
+    ? `${t.margemAntes} conta(s) fora: a Conciliação começa em ${dataDMA(t.margemInicio)}.`
+    : null
+  const semPedido = t.margemSemPedido
+    ? `${t.margemSemPedido} conta(s) sem pedido no período ficam fora (o Ads delas também).`
+    : null
+  if (!t.margem) return [fora, semPedido].filter(Boolean).join('\n') || 'Nenhuma conta filtrada está na Conciliação.'
+  const linhas = contaMargem(t.margem)
+  if (!t.margem.ads_com_dado) linhas.push('Conta sem dado de Ads no Marketing entra com R$ 0,00.')
+  if (t.margem.ads_ate) linhas.push('Alguma conta só tem o Ads das semanas fechadas da Conferência (a semana atual entra quando fechar).')
+  if (fora) linhas.push(fora)
+  if (semPedido) linhas.push(semPedido)
+  return linhas.join('\n')
+})
+// M-36: o balão do Investimento — "Afiliados R$ X + Ads R$ Y" (pedaço sem
+// dado = "—") e, embaixo, desde quando há dado (período começa antes) e até
+// quando vão as semanas fechadas da Conferência.
+function partesInvestimento(afiliados: number | null | undefined, ads: number | null | undefined): string {
+  return `Afiliados ${fmtBRL(afiliados)} + Ads ${fmtBRL(ads)}`
+}
+function tituloInvestimento(r: FaturamentoLinha): string {
+  if (r.investimento == null) return 'Sem dado de afiliados nem de Ads no Marketing para esta conta no período.'
+  const linhas = [partesInvestimento(r.investimento_afiliados, r.investimento_ads)]
+  if (r.investimento_parcial) linhas.push(`dado guardado desde ${dataDM(r.investimento_desde)}`)
+  if (r.investimento_ate) linhas.push(`semanas fechadas até ${dataDM(r.investimento_ate)} (a semana atual entra quando fechar)`)
+  return linhas.join('\n')
+}
+const tituloInvestimentoTotal = computed(() => {
+  const t = total.value
+  if (t.investimento == null) return 'Sem dado de afiliados nem de Ads no Marketing nas contas filtradas.'
+  const linhas = [partesInvestimento(t.afiliados, t.ads)]
+  if (t.parcial) linhas.push('Alguma conta só tem dado depois do início do período.')
+  if (t.ate) linhas.push('Alguma conta só tem as semanas fechadas da Conferência (a semana atual entra quando fechar).')
+  return linhas.join('\n')
+})
 function tituloPendencias(p: number | null): string {
   if (pendenciasEstado.value === 'sem_acesso') return 'Sem acesso à Tabela de Preços.'
   if (pendenciasEstado.value === 'erro') return 'As pendências não carregaram — clique em Atualizar.'
@@ -703,9 +848,9 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Faturamento</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Ticket médio</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24" title="Cartões vermelhos da conta na Tabela de Preços (Celular, Eletro e Mala).">Pendências</th>
-            <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" title="Gasto em Ads no período. A comissão de afiliados ainda não entra (o DaVinci não a coleta). — = sem dado.">Investimento</th>
+            <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" title="Afiliados + Ads, do Marketing, no período. Passe o mouse na conta para ver as duas partes. — = sem dado.">Investimento</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border whitespace-nowrap">% Investimento</th>
-            <th v-if="isAdmin" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" data-coluna-so-admin="margem" title="Margens da conta cadastradas na aba Contas, da menor à maior.">Margem</th>
+            <th v-if="isAdmin" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" data-coluna-so-admin="margem" title="Margem real da Conciliação: (sobrou de todos os pedidos − Ads) ÷ custo. Passe o mouse na conta para ver a conta. — = fora da Conciliação.">Margem</th>
           </tr>
         </thead>
         <tbody>
@@ -753,7 +898,7 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
               <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="border border-border px-2 py-1 text-xs text-center tabular-nums">{{ fmtPctInvestimento(r.investimento, r.faturamento) }}</td>
-            <td v-if="isAdmin" class="border border-border px-2 py-1 text-xs text-center tabular-nums" data-margem>{{ fmtMargem(r.margem) }}</td>
+            <td v-if="isAdmin" class="border border-border px-2 py-1 text-xs text-center tabular-nums" :class="classeMargem(r.margem)" :title="tituloMargem(r.margem)" data-margem>{{ fmtMargem(r.margem) }}</td>
           </tr>
         </tbody>
         <tfoot v-if="linhasFiltradas.length" class="sticky bottom-0 z-10 bg-muted font-semibold" data-total>
@@ -770,12 +915,12 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
                 <span class="text-left">{{ textoPendencias(total.pendencias) }}</span>
               </span>
             </td>
-            <td class="border border-border px-2 py-1 text-xs text-right tabular-nums" :title="total.parcial ? 'Alguma conta só tem o gasto guardado depois do início do período.' : undefined">
+            <td class="border border-border px-2 py-1 text-xs text-right tabular-nums" :title="tituloInvestimentoTotal" data-investimento-total>
               <template v-if="total.investimento != null">{{ fmtBRL(total.investimento) }}<span v-if="total.parcial" class="text-muted-foreground">*</span></template>
               <template v-else>—</template>
             </td>
             <td class="border border-border px-2 py-1 text-xs text-center tabular-nums">{{ fmtPctInvestimento(total.investimento, total.faturamento) }}</td>
-            <td v-if="isAdmin" class="border border-border px-2 py-1"></td>
+            <td v-if="isAdmin" class="border border-border px-2 py-1 text-xs text-center tabular-nums" :class="classeMargem(total.margem)" :title="tituloMargemTotal" data-margem-total>{{ fmtMargem(total.margem) }}</td>
           </tr>
         </tfoot>
       </table>

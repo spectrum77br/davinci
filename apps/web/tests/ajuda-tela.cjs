@@ -308,14 +308,16 @@ async function principal() {
     assert.equal(secao(ADM, 'Bom saber').itens.length, 2)
     const tudo = JSON.stringify(ADM)
     for (const trecho of [
-      'Mostra quanto cada conta vendeu no período: pedidos, faturamento e ticket médio, junto com as pendências da Tabela de Preços e o investimento em Ads e afiliados.',
+      'Mostra quanto cada conta vendeu no período: pedidos, faturamento e ticket médio, junto com as pendências da Tabela de Preços e o investimento (afiliados + Ads, do Marketing).',
       'pedidos Em aberto, Em andamento e Entregues. Cancelados e devolvidos não entram. Cada pedido conta uma vez.',
       'soma do total dos pedidos, como está no Bling. É o valor bruto: não desconta comissão nem reembolso.',
       'faturamento ÷ pedidos.',
       'quantos cartões vermelhos a conta tem na Tabela de Preços (Celular, Eletro e Mala).',
-      'total gasto em Ads e afiliados na conta no período. \\"—\\" quer dizer sem dado.',
-      'investimento ÷ faturamento.',
-      'margens da conta cadastradas na aba Contas, da menor à maior.',
+      // M-36 (24/11/2026): "afiliados + Ads, do Marketing".
+      'afiliados + Ads, do Marketing, na conta no período. Shopee: as semanas fechadas da Conferência (a semana que cruza o período entra pelos dias; a semana atual entra quando fechar). Mercado Livre: o Ads de cada dia. Passe o mouse para ver as duas partes. \\"—\\" quer dizer sem dado.',
+      'investimento ÷ faturamento da conta. Na linha Total, a soma dos investimentos ÷ o faturamento total.',
+      // M-37 (24/11/2026): a Margem virou a margem real da Conciliação.
+      'resultado das vendas no período, da Conciliação: (sobrou de todos os pedidos − Ads) ÷ custo dos produtos. Pedido ainda não pago entra pelo valor previsto; pedido sem valor de venda fica fora até a plataforma calcular a venda. Só o Ads é descontado: os afiliados já saem do valor de cada pedido. Negativa em vermelho. \\"—\\" quer dizer conta fora da Conciliação, sem pedido no período (fica fora do Total, com o Ads dela) ou período que começa antes do início dela (24/10/2026). Passe o mouse para ver a conta.',
       'pelo nome da conta.',
       'por mês ou personalizado (de/até). Vale a data da venda.',
       'marque o que quer ver. Quem tem equipe só vê as contas dela.',
@@ -324,6 +326,8 @@ async function principal() {
       'A linha Total soma só o que está filtrado.',
     ]) assert.ok(tudo.includes(trecho), `o texto do pedido: ${trecho}`)
     assert.ok(!JSON.stringify(LEITOR).includes('Margem'), 'nada de Margem para quem não é ADM')
+    assert.ok(!JSON.stringify(LEITOR).includes('Conciliação'), 'nem da conta dela')
+    assert.ok(!tudo.includes('aba Contas, da menor à maior'), 'a faixa da aba Contas saiu (M-37)')
     assert.doesNotMatch(descriptor.template.content, /v-html/)
 
     // Com o composable de verdade: na aba Faturamento a página (só Tabela) solta

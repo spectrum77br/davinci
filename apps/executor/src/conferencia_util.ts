@@ -74,6 +74,20 @@ export interface VendaItem {
   pedidos: number;
 }
 
+/** O investimento de UM dia da semana (M-36 item 6, 24/11/2026): o
+ *  Faturamento soma o mês pelos dias em vez de ratear a semana que cruza o
+ *  mês. `afiliados` = comissão do dia (as parcelas do "Invest. afiliados"),
+ *  `ads` = gasto de Ads do dia (as do "Invest. Ads"), em R$. null = a Shopee
+ *  não devolveu aquele dia, ou o dia a dia dela não fechou com o total da
+ *  semana. Os dias com número somam EXATAMENTE o total da semana que vai no
+ *  payload (centavo a centavo), então quem soma os dias vê o mesmo número da
+ *  tela da Conferência. */
+export interface DiaDados {
+  dia: string; // YYYY-MM-DD
+  afiliados: number | null;
+  ads: number | null;
+}
+
 /** Uma semana coletada. Seção null = a chamada falhou (o motivo vai em avisos). */
 export interface SemanaDados {
   inicio: string;
@@ -85,6 +99,14 @@ export interface SemanaDados {
   vendas: VendasTotais | null;
   vendas_itens: VendaItem[] | null;
   avisos: string[];
+  /** M-36 item 6 (24/11/2026): um item por dia da semana, do início ao fim.
+   *  null = não lido. Coleta de antes de 24/11 não tem a chave. NÃO entra no
+   *  relatório nem no status da coleta. */
+  dias: DiaDados[] | null;
+  /** Por que um lado do dia a dia ficou null (formato que a coleta não
+   *  reconheceu, soma que não fechou). Fica de fora dos `avisos` de
+   *  propósito: o relatório de seg/qua lista os avisos e não pode mudar. */
+  dias_motivos: string[];
 }
 
 /** O que sobe pro DaVinci (contrato §4, versao 1). Dinheiro em R$ (float),
@@ -359,6 +381,188 @@ export function saldoDaCarteira(data: any): number {
 }
 
 // ---------------------------------------------------------------------------
+// Dia a dia de afiliados e de Ads (M-36 item 6, 24/11/2026)
+//
+// O Faturamento (Tabela de Preços) soma o investimento do mês; com a semana
+// inteira só dava pra ratear a semana que cruza o mês pelos dias. As duas
+// chamadas que a coleta JÁ faz trazem o dia a dia — o seller_daily (lista por
+// dia) e o get_time_graph (blocos por hora) — e ele era descartado. Nenhuma
+// chamada nova à Shopee. Regra de ouro: um dia só ganha número quando a soma
+// dos dias fecha com o total da semana que a Conferência mostra; senão o lado
+// inteiro da semana fica null e o Faturamento usa a semana (item 5).
+// ---------------------------------------------------------------------------
+
+/** Campos da comissão do dia nos itens do `data.list` do seller_daily, em
+ *  ordem de preferência. Os totais da semana são `dis_total_*` (conferidos
+ *  ao vivo); o nome do campo DO DIA não foi conferido — o do total sem o
+ *  "total_", como `dis_actual_amount`/`order_count` dos dias. */
+export const CAMPOS_COMISSAO_DIA = ["dis_seller_commission", "dis_total_seller_commission", "dis_estimated_seller_commission"];
+
+/** Um lado (afiliados ou Ads) do dia a dia de uma semana: um valor por dia de
+ *  `diasDaSemana`, e o motivo quando ficou tudo null por um problema (null
+ *  sem motivo = a seção da semana já falhou e o aviso dela já existe). */
+export interface LadoDoDia {
+  valores: (number | null)[];
+  motivo: string | null;
+}
+
+/** Número sem arredondar (string ou número); null se não for número. */
+function numeroCru(v: unknown): number | null {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
+  const n = typeof v === "number" ? v : Number(String(v).replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Nomes dos campos de um item (só os nomes, nunca os valores) pro motivo. */
+function nomesDosCampos(x: unknown): string {
+  return x && typeof x === "object" ? Object.keys(x).slice(0, 20).join(", ") : typeof x;
+}
+
+function brl2(n: number): string {
+  return n.toFixed(2);
+}
+
+/** Reparte o total da semana (`alvo`, em R$ com 2 casas) pelos dias pra soma
+ *  bater EXATAMENTE: cada dia arredondado ao centavo e a sobra de centavos
+ *  vai pros dias com maior resto (dia zerado não ganha nem perde centavo).
+ *  null se não dá (sobra maior que os dias com valor, ou um dia mudaria de
+ *  sinal). */
+export function repartirCentavos(valores: number[], alvo: number): number[] | null {
+  const cents = valores.map((v) => Math.round(v * 100));
+  let falta = Math.round(alvo * 100) - cents.reduce((a, b) => a + b, 0);
+  const comValor = valores.map((_, i) => i).filter((i) => valores[i] !== 0);
+  if (Math.abs(falta) > comValor.length) return null;
+  const resto = (i: number) => valores[i] * 100 - cents[i];
+  const ordem = comValor.sort((a, b) => (falta > 0 ? resto(b) - resto(a) : resto(a) - resto(b)) || a - b);
+  for (let k = 0; falta !== 0; k++) {
+    const passo = falta > 0 ? 1 : -1;
+    cents[ordem[k]] += passo;
+    falta -= passo;
+  }
+  if (cents.some((c, i) => (valores[i] > 0 && c < 0) || (valores[i] < 0 && c > 0))) return null;
+  return cents.map((c) => c / 100);
+}
+
+/** Encaixa os valores crus no total: `null` nos dias desconhecidos fica null;
+ *  o resto é repartido até somar o `alvo`. */
+function encaixar(dias: string[], crus: (number | null)[], alvo: number, rotulo: string): LadoDoDia {
+  const idx = crus.map((v, i) => (v === null ? -1 : i)).filter((i) => i >= 0);
+  const rep = repartirCentavos(idx.map((i) => crus[i] as number), alvo);
+  if (rep === null) return { valores: dias.map(() => null), motivo: `${rotulo}: não deu pra repartir os centavos da semana` };
+  const valores: (number | null)[] = dias.map(() => null);
+  idx.forEach((i, k) => (valores[i] = rep[k]));
+  return { valores, motivo: null };
+}
+
+/** Comissão de afiliados de cada dia, do `data.list` do seller_daily que a
+ *  coleta já pede (até 24/11 só servia pro último dia publicado). Dia sem
+ *  linha até `publicadoAte` (o último dia que a Shopee já publicou) = 0 — a
+ *  soma das linhas fechou com o total, então ele não tem comissão; depois
+ *  dele = null (ainda não saiu, nunca 0 inventado). `alvo` = a comissão da
+ *  semana que vai no payload (null = a seção falhou). */
+export function afiliadosPorDia(sem: Semana, data: any, publicadoAte: string | null, alvo: number | null): LadoDoDia {
+  const dias = diasDaSemana(sem);
+  const nulos = (motivo: string | null): LadoDoDia => ({ valores: dias.map(() => null), motivo });
+  if (alvo === null) return nulos(null);
+  const total = numeroCru(data?.dis_total_seller_commission);
+  if (total === null) return nulos("afiliados: sem o total da semana");
+  if (!Array.isArray(data?.list)) return nulos("afiliados: a Shopee não mandou a lista por dia");
+  const porDia = new Map<string, number>();
+  for (const x of data.list) {
+    const ymd = typeof x?.ymd === "string" ? x.ymd : "";
+    if (!YMD.test(ymd) || ymd < sem.inicio || ymd > sem.fim) continue;
+    const campo = CAMPOS_COMISSAO_DIA.find((c) => numeroCru(x?.[c]) !== null);
+    if (!campo) return nulos(`afiliados: comissão do dia não reconhecida (campos: ${nomesDosCampos(x)})`);
+    porDia.set(ymd, (porDia.get(ymd) ?? 0) + (numeroCru(x[campo]) as number));
+  }
+  const soma = [...porDia.values()].reduce((a, b) => a + b, 0);
+  if (Math.abs(soma - total) > 0.011) {
+    return nulos(`afiliados: a soma dos dias (R$ ${brl2(soma)}) não fecha com a semana (R$ ${brl2(total)})`);
+  }
+  const crus = dias.map((d) => porDia.get(d) ?? (publicadoAte !== null && d <= publicadoAte ? 0 : null));
+  return encaixar(dias, crus, alvo, "afiliados");
+}
+
+/** Gasto de Ads de cada dia, somando os blocos do `report_by_time` que o
+ *  get_time_graph da semana já devolve (a página manda só hora e custo de
+ *  cada bloco). Só vale se TODO bloco tem hora (epoch, s ou ms) dentro da
+ *  semana, em hora cheia ou quarto de hora, de no máximo 1 h em 1 h, e a
+ *  soma fecha com o `report_aggregate.cost`. Dia sem bloco = 0 (Ads é em
+ *  tempo real e a semana já fechou). `alvo` = o gasto da semana no payload. */
+export function adsPorDia(sem: Semana, data: any, alvo: number | null): LadoDoDia {
+  const dias = diasDaSemana(sem);
+  const nulos = (motivo: string | null): LadoDoDia => ({ valores: dias.map(() => null), motivo });
+  if (alvo === null) return nulos(null);
+  const total = numeroCru(data?.report_aggregate?.cost);
+  if (total === null) return nulos("Ads: sem o total da semana");
+  // Semana sem gasto: todo dia é 0, venha o gráfico como vier.
+  if (total === 0 && alvo === 0) return { valores: dias.map(() => 0), motivo: null };
+  const blocos = data?.report_by_time;
+  const campos = typeof data?.report_by_time__campos === "string" ? data.report_by_time__campos : "";
+  if (!Array.isArray(blocos)) {
+    const erro = typeof data?.report_by_time__erro === "string" ? ` (${data.report_by_time__erro})` : "";
+    return nulos(`Ads: a Shopee não mandou o gráfico por hora${erro}`);
+  }
+  const n = Number(data?.report_by_time__n);
+  if (Number.isFinite(n) && n > blocos.length) return nulos(`Ads: gráfico por hora cortado (${blocos.length} de ${n} blocos)`);
+  const ini = epochInicioDia(sem.inicio);
+  const fim = epochFimDia(sem.fim);
+  const porDia = new Map<string, number>();
+  const horas: number[] = [];
+  for (const b of blocos) {
+    const campoHora = CAMPOS_HORA_ADS.find((c) => numeroCru(b?.[c]) !== null);
+    const campoCusto = CAMPOS_CUSTO_ADS.find((c) => numeroCru(b?.[c]) !== null);
+    if (!campoHora || !campoCusto) {
+      return nulos(`Ads: bloco por hora sem ${campoHora ? "custo" : "horário"} reconhecível (campos: ${campos || nomesDosCampos(b)})`);
+    }
+    let ts = numeroCru(b[campoHora]) as number;
+    if (ts > 1e11) ts = Math.floor(ts / 1000); // milissegundos
+    if (ts < ini || ts > fim || (ts - ini) % 900 !== 0) {
+      return nulos(`Ads: horário do bloco fora da semana ou fora do quarto de hora (${campoHora}=${String(b[campoHora]).slice(0, 20)})`);
+    }
+    horas.push(ts);
+    const dia = hojeBRT(new Date(ts * 1000));
+    porDia.set(dia, (porDia.get(dia) ?? 0) + (numeroCru(b[campoCusto]) as number));
+  }
+  // Blocos de 1 dia inteiro (ou de 3 h…) podiam atravessar a meia-noite de
+  // Brasília: só aceita gráfico de 1 h em 1 h ou mais fino.
+  const distintas = [...new Set(horas)].sort((a, b) => a - b);
+  let passo = Infinity;
+  for (let i = 1; i < distintas.length; i++) passo = Math.min(passo, distintas[i] - distintas[i - 1]);
+  if (!(passo <= 3600 && 3600 % passo === 0)) return nulos(`Ads: o gráfico não é por hora (${distintas.length} horários)`);
+  const soma = [...porDia.values()].reduce((a, b) => a + b, 0);
+  if (Math.abs(soma - total) > 1000) {
+    return nulos(`Ads: a soma das horas (R$ ${brl2(soma / 100_000)}) não fecha com a semana (R$ ${brl2(total / 100_000)})`);
+  }
+  return encaixar(dias, dias.map((d) => (porDia.get(d) ?? 0) / 100_000), alvo, "Ads");
+}
+
+/** Os `dias` de uma semana já coletada. Nunca lança: o dia a dia não pode
+ *  mexer no que a coleta já tem (o pior caso é tudo null com o motivo). */
+export function diasDaColeta(
+  sem: Semana,
+  p: { daily: any; publicadoAte: string | null; alvoAfiliados: number | null; graficoAds: any; alvoAds: number | null }
+): { dias: DiaDados[]; motivos: string[] } {
+  const ds = diasDaSemana(sem);
+  let af: LadoDoDia;
+  let ad: LadoDoDia;
+  try {
+    af = afiliadosPorDia(sem, p.daily, p.publicadoAte, p.alvoAfiliados);
+  } catch (e: any) {
+    af = { valores: ds.map(() => null), motivo: `afiliados: ${String(e?.message || e).slice(0, 120)}` };
+  }
+  try {
+    ad = adsPorDia(sem, p.graficoAds, p.alvoAds);
+  } catch (e: any) {
+    ad = { valores: ds.map(() => null), motivo: `Ads: ${String(e?.message || e).slice(0, 120)}` };
+  }
+  return {
+    dias: ds.map((dia, i) => ({ dia, afiliados: af.valores[i], ads: ad.valores[i] })),
+    motivos: [af.motivo, ad.motivo].filter((m): m is string => !!m).map((m) => m.slice(0, 300)),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Paginação
 // ---------------------------------------------------------------------------
 
@@ -388,6 +592,12 @@ export interface Req {
   /** /api/v2/login/: só username/shopid/shop_name saem da página (a resposta
    *  tem tokens — nunca vão pro log nem pro DaVinci). */
   login?: boolean;
+  /** listas a ENXUGAR antes de sair da página: cada item vira um objeto só
+   *  com os `campos` (caminho com ponto vira chave "a.b"), até `max` itens;
+   *  ao lado ficam `<lista>__n` (quantos vieram) e `<lista>__campos` (os
+   *  NOMES dos campos do 1º item, pra quem for conferir o formato). Roda
+   *  antes da poda; se der erro, a lista é apagada como antes. */
+  enxugar?: { lista: string; campos: string[]; max: number }[];
 }
 
 const QS_AFILIADOS = "is_real_time=0&order_type=2&channel=0";
@@ -422,6 +632,16 @@ export function reqItensAfiliados(s: Semana, pagina: number): Req {
   };
 }
 
+/** Campos de cada bloco do `report_by_time` do get_time_graph, em ordem de
+ *  preferência (M-36 item 6, 24/11/2026). Até 24/11 a coleta jogava o bloco
+ *  fora na página sem ler e o formato dele nunca foi conferido ao vivo: por
+ *  isso vários nomes possíveis, e o dia só vale se as horas caem dentro da
+ *  semana e a soma fecha com o `report_aggregate.cost` (adsPorDia). */
+export const CAMPOS_HORA_ADS = ["timestamp", "key", "time", "start_time", "ts", "datetime", "date"];
+export const CAMPOS_CUSTO_ADS = ["cost", "metrics.cost", "report.cost", "data.cost", "stats.cost", "value.cost"];
+/** 96 blocos por dia × 7 = 672 numa semana; folga pra semana com mais blocos. */
+export const MAX_BLOCOS_ADS = 3000;
+
 export function reqAdsAgregado(s: Semana): Req {
   return {
     path: "/api/pas/v1/report/get_time_graph/",
@@ -434,8 +654,12 @@ export function reqAdsAgregado(s: Semana): Req {
       need_roi_target_setting: false,
       filter_params: { campaign_type: "new_cpc_homepage" },
     },
-    // 96 blocos por dia (~900 KB na semana) — só o agregado interessa
-    podar: ["data.report_by_time"],
+    // 96 blocos por dia (~900 KB na semana): o total sai do agregado; dos
+    // blocos só sobem a hora e o custo (o gasto de Ads de cada dia, M-36
+    // item 6, 24/11/2026) — uns 30 KB na semana.
+    enxugar: [
+      { lista: "data.report_by_time", campos: [...CAMPOS_HORA_ADS, ...CAMPOS_CUSTO_ADS], max: MAX_BLOCOS_ADS },
+    ],
   };
 }
 
@@ -488,6 +712,7 @@ export function scriptChamada(req: Req, timeoutMs: number): string {
     method: req.method,
     body: req.body === undefined ? null : req.body,
     podar: req.podar || [],
+    enxugar: req.enxugar || [],
     login: req.login === true,
     timeout: timeoutMs,
   };
@@ -508,6 +733,39 @@ export function scriptChamada(req: Req, timeoutMs: number): string {
     if (!resto.length) { delete o[k]; return; }
     podar(o[k], resto);
   };
+  const pegar = (o, c) => {
+    let x = o;
+    for (const k of c.split('.')) { if (!x || typeof x !== 'object') return undefined; x = x[k]; }
+    return x;
+  };
+  const enxugar = (o, e) => {
+    const p = e.lista.split('.');
+    let pai = o;
+    for (const k of p.slice(0, -1)) pai = pai && typeof pai === 'object' ? pai[k] : undefined;
+    const ult = p[p.length - 1];
+    if (!pai || typeof pai !== 'object' || !Array.isArray(pai[ult])) return;
+    try {
+      const l = pai[ult];
+      const prim = l.find((x) => x && typeof x === 'object');
+      const nomes = prim ? Object.keys(prim).slice(0, 25).map((k) => (prim[k] && typeof prim[k] === 'object' && !Array.isArray(prim[k]))
+        ? k + '{' + Object.keys(prim[k]).slice(0, 25).join(',') + '}' : k) : [];
+      const curta = l.slice(0, e.max).map((x) => {
+        const r = {};
+        for (const c of e.campos) {
+          const v = pegar(x, c);
+          if (typeof v === 'number') r[c] = v;
+          else if (typeof v === 'string') r[c] = v.slice(0, 40);
+        }
+        return r;
+      });
+      pai[ult] = curta;
+      pai[ult + '__n'] = l.length;
+      pai[ult + '__campos'] = nomes.join(', ').slice(0, 600);
+    } catch (err) {
+      delete pai[ult];
+      pai[ult + '__erro'] = String((err && err.message) || err).slice(0, 120);
+    }
+  };
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), a.timeout);
   try {
@@ -527,6 +785,7 @@ export function scriptChamada(req: Req, timeoutMs: number): string {
         body = Object.assign({ username: d.username || null, shopid: d.shopid == null ? null : d.shopid,
                  shop_name: d.shop_name == null ? null : d.shop_name }, erro);
       } else {
+        for (const e of a.enxugar) enxugar(body, e);
         for (const p of a.podar) podar(body, p.split('.'));
       }
     }
@@ -721,6 +980,8 @@ export function semanaVazia(s: Semana): SemanaDados {
     vendas: null,
     vendas_itens: null,
     avisos: [],
+    dias: null,
+    dias_motivos: [],
   };
 }
 
@@ -817,6 +1078,13 @@ export function resumoConferencia(status: string, erro: string | null, d: Coleta
       `  vendas: ${s.vendas ? `${brl(s.vendas.valor)} · ${num(s.vendas.pedidos)} ped.` : "—"}` +
         ` (${s.vendas_itens ? s.vendas_itens.length : "—"} itens)`
     );
+    // M-36 item 6 (24/11/2026): quantos dias vieram com número — é aqui que
+    // se confere, no Mac, se o formato do dia a dia foi reconhecido.
+    if (s.dias) {
+      const com = (lado: "afiliados" | "ads") => s.dias!.filter((x) => x[lado] !== null).length;
+      out.push(`  dia a dia: afiliados ${com("afiliados")}/${s.dias.length} dias · Ads ${com("ads")}/${s.dias.length} dias`);
+    }
+    for (const m of s.dias_motivos || []) out.push(`  dia a dia: ${m}`);
     for (const a of s.avisos) out.push(`  aviso: ${a}`);
   });
   for (const a of d.avisos) out.push(`aviso: ${a}`);

@@ -66,7 +66,7 @@ from app.services.conferencia_shopee import (
     servidor,
     threema_aviso,
 )
-from app.services.conferencia_shopee.dados import ColetaDadosV1, ConfereDados
+from app.services.conferencia_shopee.dados import ColetaDadosV1, ConfereDados, limpar_dias
 
 # Reexportado: o modelo do ColetaDados morava aqui até 07/10/2026.
 __all__ = ["ColetaDadosV1", "router"]
@@ -215,6 +215,9 @@ async def agent_resultado(
     try:
         body = ResultadoIn.model_validate(json.loads(bruto or b"null"))
         if body.dados is not None:
+            # M-36 item 6 (24/11/2026): o dia a dia de afiliados/Ads é conferido
+            # à parte — torto sai sozinho, a loja continua (dados.limpar_dias).
+            body.dados = limpar_dias(body.dados)
             ConfereDados.model_validate({"dados": body.dados})
     except (ValueError, RecursionError, ValidationError) as e:
         erros = (

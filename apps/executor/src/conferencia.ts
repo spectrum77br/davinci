@@ -419,6 +419,10 @@ async function coletarLoja(job: JobConferencia, page: Page): Promise<ResultadoCo
 
   const avisos: string[] = [];
   const semanas = job.semanas.map(u.semanaVazia);
+  // O `data` cru do seller_daily e do get_time_graph de cada semana fica
+  // guardado pro dia a dia (M-36 item 6, 24/11/2026) — sem chamada nova.
+  const dailyCru: any[] = job.semanas.map(() => null);
+  const graficoAds: any[] = job.semanas.map(() => null);
 
   // S1 primeiro: diz se os afiliados do último dia já saíram. Se a chamada
   // falhar não dá pra saber — segue sem esperar (a seção fica null). Lista
@@ -426,9 +430,10 @@ async function coletarLoja(job: JobConferencia, page: Page): Promise<ResultadoCo
   // há o que esperar, e o servidor também não lista como incompleta
   // (contrato §4). Esperar até as 15:00 toda semana a loja sem afiliados
   // não traria dia nenhum.
-  const dailyS1 = await secao(semanas[0].avisos, "afiliados", async () =>
-    u.afiliadosDoDaily((await s.json(u.reqSellerDaily(job.semanas[0])))?.data)
-  );
+  const dailyS1 = await secao(semanas[0].avisos, "afiliados", async () => {
+    dailyCru[0] = (await s.json(u.reqSellerDaily(job.semanas[0])))?.data;
+    return u.afiliadosDoDaily(dailyCru[0]);
+  });
   semanas[0].afiliados = dailyS1 ? dailyS1.totais : null;
   const ultimoDia = dailyS1 ? dailyS1.ultimoDia : null;
   if (ultimoDia !== null && ultimoDia < job.afiliados_ate) {
@@ -447,18 +452,38 @@ async function coletarLoja(job: JobConferencia, page: Page): Promise<ResultadoCo
     const sem = job.semanas[w];
     const sd = semanas[w];
     if (w > 0) {
-      sd.afiliados = await secao(sd.avisos, "afiliados", async () =>
-        u.afiliadosDoDaily((await s.json(u.reqSellerDaily(sem)))?.data).totais
-      );
+      sd.afiliados = await secao(sd.avisos, "afiliados", async () => {
+        dailyCru[w] = (await s.json(u.reqSellerDaily(sem)))?.data;
+        return u.afiliadosDoDaily(dailyCru[w]).totais;
+      });
     }
     sd.afiliados_itens = await secao(sd.avisos, "itens de afiliados", () => itensAfiliados(s, sem, sd.avisos));
-    sd.ads = await secao(sd.avisos, "Ads", async () =>
-      u.adsDoAgregado((await s.json(u.reqAdsAgregado(sem)))?.data?.report_aggregate)
-    );
+    sd.ads = await secao(sd.avisos, "Ads", async () => {
+      graficoAds[w] = (await s.json(u.reqAdsAgregado(sem)))?.data;
+      return u.adsDoAgregado(graficoAds[w]?.report_aggregate);
+    });
     sd.ads_itens = await secao(sd.avisos, "anúncios de Ads", () => anunciosAds(s, sem, sd.avisos));
     const vendas = await secao(sd.avisos, "vendas", () => vendasDaSemana(s, sem, sd.avisos));
     sd.vendas = vendas ? vendas.totais : null;
     sd.vendas_itens = vendas ? vendas.itens : null;
+
+    // Dia a dia (M-36 item 6): o último dia de afiliados publicado vale pra
+    // S1 (a lista de S1 diz até onde a Shopee já publicou; lista vazia = loja
+    // sem afiliado, nada a esperar); as semanas de trás já fecharam há dias.
+    const publicadoAte =
+      w > 0 ? sem.fim : ultimoDia !== null && ultimoDia < job.afiliados_ate ? ultimoDia : job.afiliados_ate;
+    const dd = u.diasDaColeta(sem, {
+      daily: dailyCru[w],
+      publicadoAte,
+      alvoAfiliados: sd.afiliados ? sd.afiliados.comissao : null,
+      graficoAds: graficoAds[w],
+      alvoAds: sd.ads ? sd.ads.gasto : null,
+    });
+    sd.dias = dd.dias;
+    sd.dias_motivos = dd.motivos;
+    if (dd.motivos.length) {
+      log.warn(`conferência ${job.conta}: dia a dia ${u.ddmm(sem.inicio)}–${u.ddmm(sem.fim)}: ${dd.motivos.join(" · ")}`);
+    }
   }
 
   const saldo = await secao(avisos, "saldo de Ads", async () =>

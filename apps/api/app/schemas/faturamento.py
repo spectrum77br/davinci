@@ -8,12 +8,32 @@ from datetime import date, datetime
 from pydantic import BaseModel, Field
 
 
-class MargemFaixa(BaseModel):
-    """As margens da aba Contas (margin1..5, fração: 0.425 = 42,5%) das contas
-    de preço da loja: a menor e a maior (iguais = uma margem só)."""
+class MargemReal(BaseModel):
+    """A Margem da loja no período (M-37, 24/11/2026; regras em services/
+    faturamento_margem.py): (sobrou − ads) ÷ custo, da Conciliação. Era a
+    faixa menor–maior da aba Contas.
 
-    min: float
-    max: float
+    `valor` em fração (0.252 = 25,2%); None = "—" (sem custo para dividir ou
+    `antes_do_inicio`: o período começa antes de `inicio`, o início da
+    Conciliação das contas da loja). `ads`: só a parte de Ads do Investimento
+    (afiliados já saem do sobrou de cada pedido); `ads_com_dado` False = sem
+    dado de Ads, conta 0; `ads_ate`: as semanas fechadas da Conferência vão
+    até esse dia. As contagens vão para o balão: N pedidos = pagos + com
+    valor previsto + cancelados + sem valor de venda (estes fora da conta)."""
+
+    valor: float | None = None
+    sobrou: float
+    ads: float
+    ads_com_dado: bool = False
+    ads_ate: date | None = None
+    custo: float
+    pedidos: int
+    pagos: int
+    previstos: int
+    cancelados: int
+    sem_valor: int
+    inicio: date | None = None
+    antes_do_inicio: bool = False
 
 
 class FaturamentoLinha(BaseModel):
@@ -35,14 +55,22 @@ class FaturamentoLinha(BaseModel):
     # cartões vermelhos delas na grade (coluna Pendências). Vazia = a loja não
     # tem conta na Tabela de Preços ("—").
     contas_preco: list[str] = Field(default_factory=list)
-    # Gasto guardado (Ads + afiliados) no período; None = sem dado ("—").
-    # `investimento_desde`: desde quando o gasto está guardado; `parcial`: o
-    # período começa antes disso.
+    # M-36 (24/11/2026): afiliados + Ads do Marketing no período; None = sem
+    # dado nenhum ("—", nunca zero). Os pedaços ao lado (None = aquele pedaço
+    # sem dado): a tela mostra "Afiliados R$ X + Ads R$ Y" e a Margem (M-37)
+    # desconta só o de Ads. `investimento_desde`: desde quando a loja tem
+    # dado; `parcial`: o período começa antes disso. `investimento_ate`: o
+    # último dia das semanas fechadas da Conferência, quando param antes do
+    # fim do período (a semana corrente entra quando fechar).
     investimento: float | None = None
+    investimento_afiliados: float | None = None
+    investimento_ads: float | None = None
     investimento_desde: date | None = None
     investimento_parcial: bool = False
+    investimento_ate: date | None = None
     # SÓ para administrador: a API não manda este campo a quem não é ADM.
-    margem: MargemFaixa | None = None
+    # M-37: None = a loja não tem conta nem pedido na Conciliação ("—").
+    margem: MargemReal | None = None
 
 
 class FaturamentoOut(BaseModel):

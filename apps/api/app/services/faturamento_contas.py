@@ -8,26 +8,41 @@ ligadas à loja assim:
    (a régua da cerca de equipe: `_chave_da_conta`, sem acento, espaço nem o
    nome da plataforma na frente), quando só UMA loja do cadastro tem esse
    nome e a integração não é o FK de outra loja.
-2. Contas da Tabela de Preços (`contas_preco_das_lojas`) — Pendências e
-   Margem: a conta de kit cujo `store_info_id` é a loja; sem `store_info_id`,
-   a que usa a integração da loja (a mesma régua da cerca da Tabela,
-   `_team_scope_accounts`). A coluna de catálogo vai com a conta de kit dela.
-3. Contas de Ads do Marketing (`contas_ads_das_lojas`) — Investimento: a
-   conta de Ads (não arquivada) cuja integração é a da loja; sem integração
-   (Shopee pelo AdsPower) ou com integração que não é de loja nenhuma, pelo
-   nome + plataforma da conta de Ads, com a mesma régua do 1.
+2. Contas da Tabela de Preços (`contas_preco_das_lojas`) — Pendências (a
+   Margem saiu daqui na M-37, 24/11/2026: agora vem da Conciliação, em
+   faturamento_margem, ligada à loja pelo pedido do Bling): a conta de kit
+   cujo `store_info_id` é a loja; sem `store_info_id`, a que usa a integração
+   da loja (a mesma régua da cerca da Tabela, `_team_scope_accounts`). A
+   coluna de catálogo vai com a conta de kit dela.
+3. Contas de Ads do Marketing (`contas_ads_das_lojas`) — Investimento, o
+   gasto por dia (`marketing_gasto_dia`): a conta de Ads (não arquivada) cuja
+   integração é a da loja; sem integração (Shopee pelo AdsPower) ou com
+   integração que não é de loja nenhuma, pelo nome + plataforma da conta de
+   Ads, com a mesma régua do 1.
+4. Contas da Conferência (`contas_conferencia_das_lojas`) — Investimento
+   (M-36, 24/11/2026): pela CHAVE INTERNA, nunca pelo nome da tela (item 7 do
+   pedido): a loja do Bling da conta (`bling_loja_id` = `store_info.
+   bling_store_id`); sem ela, na Shopee a `conta_key` (o account_name da loja
+   Shopee em minúsculas, a régua da própria Conferência em conferencia_shopee/
+   classificacao) e no ML/Amazon a integração da conta (pela regra 1).
 
 Uma conta vai para UMA loja só (a primeira regra que acha); se a regra acha
 duas lojas, a conta fica de fora (melhor "—" que número na loja errada).
+
+Investimento da loja (M-36, `investimento_das_lojas`) = afiliados + Ads, cada
+pedaço de uma fonte: o gasto POR DIA do Marketing (marketing_gasto_dia —
+hoje o Ads do ML, "mais atual", item 3) quando a loja tem dia guardado no
+período; senão as coletas semanais da Conferência (faturamento_conferencia —
+a Shopee, afiliados + Ads). Pedaço sem dado em nenhuma = None; os dois None =
+"—" na tela, nunca zero.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID
 
 import structlog
@@ -37,12 +52,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.team_scope import _chave_da_conta
 from app.models import Integration, MarketingAccount, MarketingGastoDia, PricingAccount, StoreInfo
+from app.models.conferencia_shopee import ConferenciaShopeeConta
 from app.models.pricing import CANAL_CATALOGO
+from app.services import faturamento_conferencia as conferencia_svc
+from app.services.faturamento_conferencia import ContaConferencia
 
 logger = structlog.get_logger()
-
-_MARGENS = ("margin1", "margin2", "margin3", "margin4", "margin5")
-
 
 async def integracoes_das_lojas(session: AsyncSession) -> dict[UUID, set[UUID]]:
     """Loja (todas do cadastro) → as integrações dela (regra 1 do módulo)."""
@@ -113,29 +128,23 @@ async def contas_preco_das_lojas(
     return dict(out)
 
 
-def faixa_de_margem(contas: Sequence[PricingAccount]) -> tuple[Decimal, Decimal] | None:
-    """A menor e a maior margem (margin1..5) de TODAS as contas de preço da
-    loja, as da aba Contas: as de kit e a margem própria da coluna de catálogo
-    (botão "% margens"; NULL nela = usa a da conta de kit, que já entra).
-    Sem nenhuma margem preenchida: None."""
-    valores = [
-        v for c in contas for v in (getattr(c, campo) for campo in _MARGENS) if v is not None
-    ]
-    if not valores:
-        return None
-    return min(valores), max(valores)
-
-
 @dataclass
 class Investimento:
-    """Gasto da loja no período. `total` None = nenhum dia guardado no
-    período (a tela mostra "—"). `desde`: o primeiro dia a partir do qual
-    TODAS as contas de Ads da loja com histórico têm o gasto guardado;
-    `parcial`: o período começa antes dele."""
+    """Gasto da loja no período (M-22; M-36 em 24/11/2026). `total` =
+    afiliados + Ads; None = nenhum dos dois tem dado (a tela mostra "—").
+    `afiliados` e `ads`: cada pedaço (None = sem dado; a Margem da M-37 usa
+    SÓ o `ads`). `desde`: o primeiro dia a partir do qual TODAS as contas da
+    loja com histórico (nas fontes usadas) têm dado; `parcial`: o período
+    começa antes dele. `ate`: o último dia coberto pelas semanas fechadas da
+    Conferência quando é antes do fim do período (a semana corrente entra
+    quando fechar); None = cobre até o fim ou não usou a Conferência."""
 
     total: Decimal | None
     desde: date | None
     parcial: bool
+    ads: Decimal | None = None
+    afiliados: Decimal | None = None
+    ate: date | None = None
 
 
 async def contas_ads_das_lojas(
@@ -176,28 +185,100 @@ async def contas_ads_das_lojas(
     return dict(out)
 
 
-async def investimento_das_lojas(
+def _minusculo(valor: str | None) -> str:
+    return (valor or "").strip().lower()
+
+
+async def contas_conferencia_das_lojas(
+    session: AsyncSession, integ_por_loja: dict[UUID, set[UUID]]
+) -> dict[UUID, list[ContaConferencia]]:
+    """Loja → as contas da Conferência (Shopee, ML e Amazon) dela (regra 4).
+    Conta inativa entra: as coletas antigas dela continuam valendo para os
+    períodos em que ela coletava."""
+    loja_da_integ = _loja_da_integracao(integ_por_loja)
+    por_bling: dict[str, set[UUID]] = defaultdict(set)
+    # conta_key → (lojas Shopee ativas, arquivadas) com esse account_name.
+    shopee_ativas: dict[str, set[UUID]] = defaultdict(set)
+    shopee_arquivadas: dict[str, set[UUID]] = defaultdict(set)
+    for loja_id, plataforma, nome, bling, arquivada_em in (
+        await session.execute(
+            select(
+                StoreInfo.id,
+                StoreInfo.platform,
+                StoreInfo.account_name,
+                StoreInfo.bling_store_id,
+                StoreInfo.archived_at,
+            )
+        )
+    ).all():
+        if (bling or "").strip():
+            por_bling[bling.strip()].add(loja_id)
+        if _minusculo(plataforma) == "shopee" and _minusculo(nome):
+            alvo = shopee_ativas if arquivada_em is None else shopee_arquivadas
+            alvo[_minusculo(nome)].add(loja_id)
+    out: dict[UUID, list[ContaConferencia]] = defaultdict(list)
+    for conta_id, plataforma, conta_key, integ_id, bling in (
+        await session.execute(
+            select(
+                ConferenciaShopeeConta.id,
+                ConferenciaShopeeConta.plataforma,
+                ConferenciaShopeeConta.conta_key,
+                ConferenciaShopeeConta.integration_id,
+                ConferenciaShopeeConta.bling_loja_id,
+            )
+        )
+    ).all():
+        plataforma = _minusculo(plataforma) or "shopee"
+        # A 1ª chave que acha loja decide (achou duas: a conta fica de fora).
+        candidatas: set[UUID] = set()
+        if (bling or "").strip():
+            candidatas = por_bling.get(bling.strip(), set())
+        if not candidatas and plataforma == "shopee" and _minusculo(conta_key):
+            chave = _minusculo(conta_key)
+            # A loja ativa com esse nome; só arquivada, a arquivada (o período
+            # antigo dela ainda aparece no Faturamento).
+            candidatas = shopee_ativas.get(chave) or shopee_arquivadas.get(chave) or set()
+        if not candidatas and integ_id is not None and integ_id in loja_da_integ:
+            dona = loja_da_integ[integ_id]
+            if dona is None:
+                continue  # duas lojas reclamam a integração: fica de fora
+            candidatas = {dona}
+        loja = _loja_unica(candidatas)
+        if loja is not None:
+            out[loja].append(ContaConferencia(id=conta_id, plataforma=plataforma))
+    return dict(out)
+
+
+async def _gasto_por_dia(
     session: AsyncSession,
     contas_ads: dict[UUID, list[UUID]],
     inicio: date,
     fim: date,
-) -> dict[UUID, Investimento]:
-    """Loja → o gasto guardado (Ads + afiliados) nos dias [inicio, fim]."""
+) -> tuple[dict[UUID, tuple[Decimal | None, Decimal | None]], dict[UUID, date]]:
+    """Por conta de Ads: (Ads, afiliados) guardados por dia em [inicio, fim]
+    (None = nenhum dia com aquele número) e o 1º dia guardado de cada uma."""
     todas = sorted({c for contas in contas_ads.values() for c in contas})
     if not todas:
-        return {}
-    soma = func.coalesce(MarketingGastoDia.gasto_ads, 0) + func.coalesce(
-        MarketingGastoDia.gasto_afiliados, 0
-    )
+        return {}, {}
     try:
         # SAVEPOINT: sem a migration 0507 (código no ar antes dela — o deploy
-        # não roda migration) a tabela não existe; aí só o Investimento fica
-        # "—" e a aba (pedidos, faturamento) abre normal.
+        # não roda migration) a tabela não existe; aí só o Ads por dia fica
+        # sem dado e a aba (pedidos, faturamento, Conferência) abre normal.
         async with session.begin_nested():
-            no_periodo = dict(
-                (
+            no_periodo = {
+                conta: (
+                    Decimal(ads) if n_ads else None,
+                    Decimal(afiliados) if n_afiliados else None,
+                )
+                for conta, ads, n_ads, afiliados, n_afiliados in (
                     await session.execute(
-                        select(MarketingGastoDia.marketing_account_id, func.sum(soma))
+                        select(
+                            MarketingGastoDia.marketing_account_id,
+                            func.sum(MarketingGastoDia.gasto_ads),
+                            func.count(MarketingGastoDia.gasto_ads),
+                            func.sum(MarketingGastoDia.gasto_afiliados),
+                            func.count(MarketingGastoDia.gasto_afiliados),
+                        )
                         .where(
                             MarketingGastoDia.marketing_account_id.in_(todas),
                             MarketingGastoDia.dia >= inicio,
@@ -206,7 +287,7 @@ async def investimento_das_lojas(
                         .group_by(MarketingGastoDia.marketing_account_id)
                     )
                 ).all()
-            )
+            }
             primeiro_dia = dict(
                 (
                     await session.execute(
@@ -221,14 +302,64 @@ async def investimento_das_lojas(
             )
     except ProgrammingError as e:
         logger.warning("faturamento_investimento_sem_historico", erro=str(e)[:300])
-        return {}
+        return {}, {}
+    return no_periodo, primeiro_dia
+
+
+def _soma(valores: list[Decimal | None]) -> Decimal | None:
+    achados = [v for v in valores if v is not None]
+    return sum(achados, Decimal("0")) if achados else None
+
+
+def _centavos(v: Decimal | None) -> Decimal | None:
+    return None if v is None else v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+async def investimento_das_lojas(
+    session: AsyncSession,
+    contas_ads: dict[UUID, list[UUID]],
+    inicio: date,
+    fim: date,
+    contas_conferencia: dict[UUID, list[ContaConferencia]] | None = None,
+) -> dict[UUID, Investimento]:
+    """Loja → afiliados + Ads nos dias [inicio, fim] (M-36; regra no topo do
+    módulo). Cada pedaço: o guardado por dia no Marketing quando a loja tem
+    algum dia com aquele número no período; senão o da Conferência."""
+    por_dia, primeiro_dia = await _gasto_por_dia(session, contas_ads, inicio, fim)
+    conferencia = (
+        await conferencia_svc.gasto_da_conferencia(session, contas_conferencia, inicio, fim)
+        if contas_conferencia
+        else {}
+    )
     out: dict[UUID, Investimento] = {}
-    for loja, contas in contas_ads.items():
-        com_dado = [c for c in contas if c in no_periodo]
-        if not com_dado:
+    for loja in set(contas_ads) | set(conferencia):
+        contas = contas_ads.get(loja, [])
+        com_dado = [por_dia[c] for c in contas if c in por_dia]
+        dia_ads = _soma([ads for ads, _ in com_dado])
+        dia_afiliados = _soma([afiliados for _, afiliados in com_dado])
+        conf = conferencia.get(loja)
+        ads, afiliados = _centavos(dia_ads), _centavos(dia_afiliados)
+        usou_conferencia = False
+        if ads is None and conf is not None and conf.ads is not None:
+            ads, usou_conferencia = conf.ads, True
+        if afiliados is None and conf is not None and conf.afiliados is not None:
+            afiliados, usou_conferencia = conf.afiliados, True
+        if ads is None and afiliados is None:
             out[loja] = Investimento(total=None, desde=None, parcial=False)
             continue
-        total = sum((Decimal(no_periodo[c]) for c in com_dado), Decimal("0"))
-        desde = max(primeiro_dia[c] for c in contas if c in primeiro_dia)
-        out[loja] = Investimento(total=total, desde=desde, parcial=inicio < desde)
+        desdes: list[date] = []
+        if dia_ads is not None or dia_afiliados is not None:
+            desdes += [primeiro_dia[c] for c in contas if c in primeiro_dia]
+        if usou_conferencia and conf is not None and conf.desde is not None:
+            desdes.append(conf.desde)
+        desde = max(desdes) if desdes else None
+        ate = conf.ate if usou_conferencia and conf is not None else None
+        out[loja] = Investimento(
+            total=(ads or Decimal("0")) + (afiliados or Decimal("0")),
+            desde=desde,
+            parcial=desde is not None and inicio < desde,
+            ads=ads,
+            afiliados=afiliados,
+            ate=ate if ate is not None and ate < fim else None,
+        )
     return out

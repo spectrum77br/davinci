@@ -22,8 +22,12 @@ interface Opcoes {
   falhar?: (path: string, body: any) => { status: number; texto: string } | "rede" | null;
   semDiasAfiliadosS1?: boolean; // seller_daily de S1 com a lista vazia
   semCliquesAfiliados?: boolean; // formato antigo: sem `clicks` no daily nem nos itens
+  adsSemHora?: boolean; // gráfico de Ads sem horário nos blocos (formato que o dia a dia não reconhece)
   loginUrl?: string; // pra onde a Central manda quando deslogada
 }
+
+/** Gasto de Ads de cada dia da semana na Shopee falsa (1/100.000 de real). */
+const GASTO_DIA = [500000, 700000, 600000, 800000, 400000, 900000, 600000];
 
 /** Responde como a Central do Vendedor (formas reais, números inventados). */
 function shopeeFalsa(o: Opcoes) {
@@ -56,7 +60,13 @@ function shopeeFalsa(o: Opcoes) {
         code: 0,
         msg: "success",
         data: {
-          list: vazia ? [] : [{ ymd: u.somarDias(ultimo, -1) }, { ymd: ultimo }],
+          // comissão de cada dia (M-36 item 6): 20,25 + 15,25 = a da semana
+          list: vazia
+            ? []
+            : [
+                { ymd: u.somarDias(ultimo, -1), dis_actual_amount: "400.00", dis_seller_commission: "20.25", order_count: 4 },
+                { ymd: ultimo, dis_actual_amount: "300.00", dis_seller_commission: "15.25", order_count: 3 },
+              ],
           last_update_time: 1,
           total_order_count: 7,
           dis_total_actual_amount: "700.00",
@@ -82,10 +92,18 @@ function shopeeFalsa(o: Opcoes) {
     }
     if (path === "/api/pas/v1/report/get_time_graph/") {
       assert.equal(body.end_time % 86400, (86400 - 1 + 3 * 3600) % 86400, "Ads tem que terminar 23:59:59 BRT");
+      // 96 blocos por dia (de 15 em 15 min), com o gasto do dia ao meio-dia:
+      // R$ 5 + 7 + 6 + 8 + 4 + 9 + 6 = R$ 45 = o agregado da semana.
+      const blocos: any[] = [];
+      for (let ts = body.start_time; ts <= body.end_time; ts += 900) {
+        const i = Math.floor((ts - body.start_time) / 86_400);
+        const cost = (ts - body.start_time) % 86_400 === 12 * 3600 ? GASTO_DIA[i] : 0;
+        blocos.push({ timestamp: ts, cost, impression: 0, click: 0, ctr: 0, enfeite: { texto: "y".repeat(50) } });
+      }
       return r(200, {
         code: 0,
         data: {
-          report_by_time: new Array(10).fill({ cost: 1 }),
+          report_by_time: o.adsSemHora ? new Array(10).fill({ cost: 1 }) : blocos,
           report_aggregate: { impression: 900, click: 30, cost: 4500000, broad_gmv: 60000000, broad_order: 3 },
         },
       });
@@ -203,6 +221,24 @@ test("loja completa: 4 semanas, paginação, somas e saldo → ok", async () => 
   assert.equal(d.semanas[3].inicio, "2026-09-06");
   assert.ok(!JSON.stringify(r).includes("SEGREDO"), "token do login não pode vazar");
   assert.ok(!JSON.stringify(r).includes("pesado"), "blocos podados não sobem");
+  // M-36 item 6 (24/11/2026): o dia a dia sai das MESMAS 50 chamadas.
+  assert.deepEqual(s1.dias, [
+    { dia: "2026-09-27", afiliados: 0, ads: 5 },
+    { dia: "2026-09-28", afiliados: 0, ads: 7 },
+    { dia: "2026-09-29", afiliados: 0, ads: 6 },
+    { dia: "2026-09-30", afiliados: 0, ads: 8 },
+    { dia: "2026-10-01", afiliados: 0, ads: 4 },
+    { dia: "2026-10-02", afiliados: 20.25, ads: 9 },
+    { dia: "2026-10-03", afiliados: 15.25, ads: 6 },
+  ]);
+  for (const s of d.semanas) {
+    assert.deepEqual(s.dias_motivos, []);
+    assert.equal(s.dias!.length, 7);
+    const soma = (lado: "afiliados" | "ads") => Math.round(s.dias!.reduce((a, x) => a + (x[lado] ?? NaN), 0) * 100);
+    assert.equal(soma("afiliados"), Math.round(s.afiliados!.comissao * 100), `${s.inicio}: dias = Invest. afiliados`);
+    assert.equal(soma("ads"), Math.round(s.ads!.gasto * 100), `${s.inicio}: dias = Invest. Ads`);
+  }
+  assert.ok(!JSON.stringify(r).includes("yyyy"), "do gráfico por hora só sobem hora e custo");
 });
 
 test("afiliados do último dia ainda não saíram e dentro do prazo → aguardando_afiliados", async () => {
@@ -221,6 +257,10 @@ test("passou do prazo dos afiliados → coleta com aviso", async () => {
   assert.equal(r.status, "ok");
   assert.deepEqual(r.dados!.avisos, ["afiliados só até 02/10"]);
   assert.equal(r.dados!.afiliados_ultimo_dia, "2026-10-02");
+  // O dia que a Shopee ainda não publicou fica null (nunca 0); Ads é em tempo real.
+  assert.deepEqual(r.dados!.semanas[0].dias!.map((x) => x.afiliados), [0, 0, 0, 0, 20.25, 15.25, null]);
+  assert.ok(r.dados!.semanas[0].dias!.every((x) => x.ads !== null));
+  assert.ok(r.dados!.semanas.slice(1).every((s) => s.dias!.every((x) => x.afiliados !== null)), "semanas de trás já fecharam");
 });
 
 test("uma chamada com erro comum → só a seção fica null, status parcial", async () => {
@@ -240,6 +280,9 @@ test("uma chamada com erro comum → só a seção fica null, status parcial", a
   assert.notEqual(r.dados!.semanas[1].ads_itens, null);
   assert.notEqual(r.dados!.semanas[0].ads, null);
   assert.match(r.erro || "", /1 de 25 partes sem dados/);
+  // Ads da semana falhou: o Ads de cada dia fica null sem motivo novo (o aviso já existe).
+  assert.ok(r.dados!.semanas[1].dias!.every((x) => x.ads === null && x.afiliados !== null));
+  assert.deepEqual(r.dados!.semanas[1].dias_motivos, []);
 });
 
 test("um dia de vendas que falha derruba as vendas da semana (não soma pela metade)", async () => {
@@ -343,6 +386,31 @@ test("S1 sem nenhum dia de afiliados (loja sem venda de afiliado) → não esper
   assert.equal(r.dados!.afiliados_ultimo_dia, null, "null = nada a esperar (o servidor não lista como incompleta)");
   assert.deepEqual(r.dados!.avisos, []);
   assert.equal(f.chamadas.length, 50, "coletou a loja inteira, sem voltar pra fila");
+  // Total de R$ 35,50 com a lista vazia: o dia a dia não fecha → null com o
+  // motivo, FORA dos avisos (o relatório não muda).
+  const s1 = r.dados!.semanas[0];
+  assert.ok(s1.dias!.every((x) => x.afiliados === null && x.ads !== null));
+  assert.match(s1.dias_motivos.join(" "), /afiliados: a soma dos dias \(R\$ 0\.00\) não fecha com a semana \(R\$ 35\.50\)/);
+  assert.deepEqual(s1.avisos, []);
+});
+
+test("gráfico de Ads num formato que o dia a dia não reconhece → Ads do dia null; a Conferência não muda", async () => {
+  const normal = await coletarNaPagina(job, paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true }).page);
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true, adsSemHora: true });
+  const r = await coletarNaPagina(job, f.page);
+  assert.equal(r.status, "ok", r.erro || "");
+  assert.equal(f.chamadas.length, 50);
+  for (const s of r.dados!.semanas) {
+    assert.ok(s.dias!.every((x) => x.ads === null && x.afiliados !== null));
+    assert.match(s.dias_motivos.join(" "), /Ads: bloco por hora sem horário reconhecível \(campos: cost\)/);
+    assert.deepEqual(s.avisos, []);
+  }
+  // Tirando o dia a dia, os números da coleta são os mesmos.
+  const semDias = (d: u.ColetaDados) =>
+    d.semanas.map(({ dias: _d, dias_motivos: _m, ...resto }) => resto);
+  assert.deepEqual(semDias(r.dados!), semDias(normal.dados!));
+  assert.deepEqual(r.dados!.avisos, normal.dados!.avisos);
+  assert.equal(r.dados!.saldo_ads, normal.dados!.saldo_ads);
 });
 
 // A 1ª chamada da loja é o /api/v2/login/: bloqueio ali para NA HORA — sem

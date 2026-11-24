@@ -266,7 +266,18 @@ test("JS de página: SPC_CDS na URL, csrftoken no POST, poda dos blocos pesados"
   assert.equal(pedidos[0].init.headers["x-csrftoken"], "tok%20x");
   assert.equal(JSON.parse(pedidos[0].init.body).end_time, 1791169199);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body, { code: 0, data: { report_aggregate: { impression: 1 } } });
+  // M-36 item 6 (24/11/2026): o gráfico por hora não é mais apagado — sai
+  // enxuto (só hora e custo de cada bloco), com a contagem e os nomes dos
+  // campos do 1º bloco ao lado.
+  assert.deepEqual(r.body, {
+    code: 0,
+    data: {
+      report_aggregate: { impression: 1 },
+      report_by_time: [{}],
+      report_by_time__n: 1,
+      report_by_time__campos: "x",
+    },
+  });
 
   const lista = { code: 0, result: { total: 1, items: [{ id: 1, paid_sales: 2, models: [{ a: 1 }] }] } };
   const g = await rodarNaPagina(u.scriptChamada(u.reqVendasDia("2026-10-04", 1), 1000), {
@@ -429,6 +440,9 @@ test("payload v1: chaves na ordem do contrato e status ok/parcial/erro", () => {
     "vendas",
     "vendas_itens",
     "avisos",
+    // M-36 item 6 (24/11/2026): no fim, depois de tudo o que já existia.
+    "dias",
+    "dias_motivos",
   ]);
   assert.equal(d.versao, 1);
   assert.equal(d.coletado_em, "2026-10-05T16:41:02Z");
@@ -468,4 +482,190 @@ test("validarJob recusa job torto antes de abrir perfil", () => {
     u.validarJob({ ...ok, semanas: [{ inicio: "2026-10-03", fim: "2026-09-27" }, ...p.semanas.slice(1)] }) || "",
     /semana inválida/
   );
+});
+
+// ---------------------------------------------------------------------------
+// Dia a dia de afiliados e de Ads (M-36 item 6, 24/11/2026)
+// ---------------------------------------------------------------------------
+const SEM = { inicio: "2026-11-15", fim: "2026-11-21" }; // domingo a sábado
+const DIAS = u.diasDaSemana(SEM);
+
+test("repartirCentavos: soma bate centavo a centavo; dia zerado não ganha centavo", () => {
+  const r = u.repartirCentavos([1.004, 2.004, 3.004, 0], 6.01)!;
+  assert.equal(Math.round(r.reduce((a, b) => a + b, 0) * 100), 601);
+  assert.equal(r[3], 0, "dia sem movimento continua 0");
+  assert.deepEqual(u.repartirCentavos([0.333333, 0.333333, 0.333334], 1), [0.33, 0.33, 0.34]);
+  assert.deepEqual(u.repartirCentavos([10, 5], 15), [10, 5]);
+  assert.deepEqual(u.repartirCentavos([], 0), []);
+  assert.equal(u.repartirCentavos([0, 0], 0.05), null, "sobra sem dia com valor pra receber");
+  assert.equal(u.repartirCentavos([1, 1], 5), null, "sobra maior que os dias");
+});
+
+const DAILY_DIA = {
+  list: [
+    { ymd: "2026-11-16", dis_actual_amount: "300.00", dis_seller_commission: "15.1245", order_count: 3 },
+    { ymd: "2026-11-18", dis_actual_amount: "200.00", dis_seller_commission: "10.003", order_count: 2 },
+    { ymd: "2026-11-21", dis_actual_amount: "100.00", dis_seller_commission: "5.0035", order_count: 1 },
+    { ymd: "2026-11-14", dis_actual_amount: "999.00", dis_seller_commission: "99", order_count: 9 }, // fora da semana
+  ],
+  dis_total_actual_amount: "600.00",
+  dis_total_seller_commission: "30.131",
+  total_order_count: 6,
+};
+
+test("afiliados por dia: comissão de cada dia, dia sem linha = 0, soma = a da semana", () => {
+  const alvo = u.afiliadosDoDaily(DAILY_DIA).totais.comissao; // 30.13 (o que vai no payload)
+  const r = u.afiliadosPorDia(SEM, DAILY_DIA, SEM.fim, alvo);
+  assert.equal(r.motivo, null);
+  // 15,1245 + 10,003 + 5,0035 = 30,131 → R$ 30,13: o centavo que sobra vai pro maior resto
+  assert.deepEqual(r.valores, [0, 15.13, 0, 10, 0, 0, 5]);
+  assert.equal(Math.round(r.valores.reduce((a: number, b) => a + (b ?? 0), 0) * 100), 3013, "igual ao Invest. afiliados da semana");
+});
+
+test("afiliados por dia: depois do último dia publicado = null (nunca 0 inventado)", () => {
+  const sem21 = { ...DAILY_DIA, list: DAILY_DIA.list.slice(0, 2), dis_total_seller_commission: "25.1275" };
+  const r = u.afiliadosPorDia(SEM, sem21, "2026-11-19", 25.13);
+  assert.deepEqual(r.valores, [0, 15.13, 0, 10, 0, null, null]);
+  assert.equal(r.motivo, null);
+});
+
+test("afiliados por dia: campo do dia desconhecido ou soma que não fecha → semana toda null, com o motivo", () => {
+  const semCampo = { ...DAILY_DIA, list: [{ ymd: "2026-11-16", dis_actual_amount: "300.00", comissao_x: "1" }] };
+  const a = u.afiliadosPorDia(SEM, semCampo, SEM.fim, 30.13);
+  assert.deepEqual(a.valores, DIAS.map(() => null));
+  assert.match(a.motivo || "", /comissão do dia não reconhecida \(campos: ymd, dis_actual_amount, comissao_x\)/);
+  assert.ok(!(a.motivo || "").includes("300"), "só os nomes dos campos, nunca os valores");
+
+  const naoFecha = u.afiliadosPorDia(SEM, { ...DAILY_DIA, dis_total_seller_commission: "40" }, SEM.fim, 40);
+  assert.deepEqual(naoFecha.valores, DIAS.map(() => null));
+  assert.match(naoFecha.motivo || "", /soma dos dias \(R\$ 30\.13\) não fecha com a semana \(R\$ 40\.00\)/);
+
+  const semLista = u.afiliadosPorDia(SEM, { ...DAILY_DIA, list: undefined }, SEM.fim, 30.13);
+  assert.match(semLista.motivo || "", /não mandou a lista por dia/);
+
+  // A seção da semana falhou: tudo null SEM motivo (o aviso da seção já existe).
+  assert.deepEqual(u.afiliadosPorDia(SEM, null, SEM.fim, null), { valores: DIAS.map(() => null), motivo: null });
+});
+
+test("afiliados por dia: semana sem afiliado (lista vazia, total 0) → 0 em todo dia publicado", () => {
+  const vazio = { list: [], dis_total_actual_amount: "0", dis_total_seller_commission: "0", total_order_count: 0 };
+  assert.deepEqual(u.afiliadosPorDia(SEM, vazio, SEM.fim, 0).valores, DIAS.map(() => 0));
+});
+
+/** Gráfico de Ads de 15 em 15 min (96 blocos por dia), com `custos[i]` (em
+ *  1/100.000 de real) no meio-dia do dia i e 0 no resto. */
+function graficoAds(sem: u.Semana, custos: number[], f: (ts: number, cost: number) => any = (ts, cost) => ({ timestamp: ts, cost })) {
+  const blocos: any[] = [];
+  const ini = u.epochInicioDia(sem.inicio);
+  for (let ts = ini; ts <= u.epochFimDia(sem.fim); ts += 900) {
+    const i = Math.floor((ts - ini) / 86_400);
+    blocos.push(f(ts, (ts - ini) % 86_400 === 12 * 3600 ? custos[i] : 0));
+  }
+  const total = custos.reduce((a, b) => a + b, 0);
+  return { report_aggregate: { impression: 1, click: 1, cost: total, broad_gmv: 0, broad_order: 0 }, report_by_time: blocos, report_by_time__n: blocos.length };
+}
+const CUSTOS = [500000, 700000, 600000, 800000, 400000, 900000, 612345]; // R$ 5 … R$ 6,12345
+
+test("Ads por dia: soma os blocos do dia (horário de Brasília) e fecha com o gasto da semana", () => {
+  const g = graficoAds(SEM, CUSTOS);
+  assert.equal(g.report_by_time.length, 96 * 7);
+  const alvo = u.adsDoAgregado(g.report_aggregate).gasto; // 45.12
+  const r = u.adsPorDia(SEM, g, alvo);
+  assert.equal(r.motivo, null);
+  assert.deepEqual(r.valores, [5, 7, 6, 8, 4, 9, 6.12]);
+  // milissegundos e custo aninhado (metrics.cost) também servem
+  const ms = graficoAds(SEM, CUSTOS, (ts, cost) => ({ key: ts * 1000, "metrics.cost": cost }));
+  assert.deepEqual(u.adsPorDia(SEM, ms, alvo).valores, [5, 7, 6, 8, 4, 9, 6.12]);
+  // semana sem gasto: 0 em todo dia, venha o gráfico como vier
+  assert.deepEqual(u.adsPorDia(SEM, { report_aggregate: { cost: 0 } }, 0).valores, DIAS.map(() => 0));
+});
+
+test("Ads por dia: formato que não dá pra confiar → semana toda null, com o motivo", () => {
+  const alvo = 45.12;
+  const nulos = DIAS.map(() => null);
+  const casos: [string, any, RegExp][] = [
+    ["sem horário", { ...graficoAds(SEM, CUSTOS, (_ts, cost) => ({ cost })), report_by_time__campos: "cost, ctr" }, /sem horário reconhecível \(campos: cost, ctr\)/],
+    ["sem custo", graficoAds(SEM, CUSTOS, (ts) => ({ timestamp: ts })), /sem custo reconhecível/],
+    ["horário fora da semana", graficoAds(SEM, CUSTOS, (ts, cost) => ({ timestamp: ts + 86_400, cost })), /fora da semana/],
+    ["horário quebrado", graficoAds(SEM, CUSTOS, (ts, cost) => ({ timestamp: ts + 60, cost })), /fora do quarto de hora/],
+    ["soma que não fecha", { ...graficoAds(SEM, CUSTOS), report_aggregate: { cost: 9_000_000 } }, /soma das horas \(R\$ 45\.12\) não fecha com a semana \(R\$ 90\.00\)/],
+    ["gráfico cortado na página", { ...graficoAds(SEM, CUSTOS), report_by_time__n: 5000 }, /cortado \(672 de 5000 blocos\)/],
+    ["sem gráfico", { report_aggregate: { cost: 4_512_345 }, report_by_time__erro: "x" }, /não mandou o gráfico por hora \(x\)/],
+  ];
+  for (const [nome, data, motivo] of casos) {
+    const r = u.adsPorDia(SEM, data, alvo);
+    assert.deepEqual(r.valores, nulos, nome);
+    assert.match(r.motivo || "", motivo, nome);
+  }
+  // Blocos de um dia inteiro podiam atravessar a meia-noite de Brasília.
+  const porDia = {
+    report_aggregate: { cost: 4_512_345 },
+    report_by_time: DIAS.map((d, i) => ({ timestamp: u.epochInicioDia(d), cost: CUSTOS[i] })),
+  };
+  assert.match(u.adsPorDia(SEM, porDia, alvo).motivo || "", /não é por hora/);
+  // A seção Ads da semana falhou: tudo null SEM motivo.
+  assert.deepEqual(u.adsPorDia(SEM, null, null), { valores: nulos, motivo: null });
+});
+
+test("diasDaColeta: um item por dia, nunca lança, motivos fora dos avisos", () => {
+  const g = graficoAds(SEM, CUSTOS);
+  const ok = u.diasDaColeta(SEM, { daily: DAILY_DIA, publicadoAte: SEM.fim, alvoAfiliados: 30.13, graficoAds: g, alvoAds: 45.12 });
+  assert.deepEqual(ok.motivos, []);
+  assert.deepEqual(ok.dias[1], { dia: "2026-11-16", afiliados: 15.13, ads: 7 });
+  assert.deepEqual(ok.dias.map((x) => x.dia), DIAS);
+  // getter que explode no meio da leitura: vira null + motivo, não derruba a coleta
+  const bomba = { get list(): any { throw new Error("explodiu"); }, dis_total_seller_commission: "1" };
+  const r = u.diasDaColeta(SEM, { daily: bomba, publicadoAte: SEM.fim, alvoAfiliados: 1, graficoAds: g, alvoAds: 45.12 });
+  assert.ok(r.dias.every((x) => x.afiliados === null && x.ads !== null));
+  assert.deepEqual(r.motivos, ["afiliados: explodiu"]);
+});
+
+test("dia a dia não muda o status da coleta e aparece no resumo do --teste-conferencia", () => {
+  const sem = u.periodoConferencia("semanal", new Date("2026-10-05T16:30:00Z")).semanas;
+  const base = {
+    inicioMs: 0,
+    fimMs: 1000,
+    chamadas: 1,
+    login: { username: "loja_teste", shopid: 1, shop_name: "Loja" },
+    loginAutoUsado: false,
+    saldo: 1,
+    ultimoDia: "2026-10-03",
+    avisos: [],
+  };
+  const cheias = sem.map(semanaCheia);
+  const nulos = cheias.map((s) => ({
+    ...s,
+    dias: u.diasDaSemana(s).map((dia) => ({ dia, afiliados: null, ads: null })),
+    dias_motivos: ["Ads: o gráfico não é por hora (7 horários)"],
+  }));
+  const d = u.montarDados({ ...base, semanas: nulos });
+  assert.deepEqual(u.statusDaColeta(d), { status: "ok", erro: null }, "dia a dia null não é seção que falhou");
+  assert.deepEqual(d.avisos, []);
+  const texto = u.resumoConferencia("ok", null, d);
+  assert.match(texto, /dia a dia: afiliados 0\/7 dias · Ads 0\/7 dias/);
+  assert.match(texto, /dia a dia: Ads: o gráfico não é por hora/);
+});
+
+test("JS de página: o gráfico por hora sai só com hora e custo (o resto fica na página)", async () => {
+  const s = { inicio: "2026-11-15", fim: "2026-11-21" };
+  const bloco = (ts: number) => ({ timestamp: ts, metrics: { cost: 5, ctr: 0.1, pesado: "x".repeat(500) }, extra: { pesado: true } });
+  const corpo = { code: 0, data: { report_aggregate: { cost: 10 }, report_by_time: [bloco(1), bloco(2)] } };
+  const { r } = await rodarNaPagina(u.scriptChamada(u.reqAdsAgregado(s), 1000), { status: 200, texto: JSON.stringify(corpo) });
+  assert.deepEqual(r.body.data.report_by_time, [
+    { timestamp: 1, "metrics.cost": 5 },
+    { timestamp: 2, "metrics.cost": 5 },
+  ]);
+  assert.equal(r.body.data.report_by_time__n, 2);
+  assert.equal(r.body.data.report_by_time__campos, "timestamp, metrics{cost,ctr,pesado}, extra{pesado}");
+  assert.ok(!JSON.stringify(r).includes("xxxxx"), "o peso não sai da página");
+  // lista maior que o teto: corta e conta (o dia a dia recusa, a seção Ads não)
+  const muitos = { code: 0, data: { report_aggregate: { cost: 1 }, report_by_time: Array.from({ length: u.MAX_BLOCOS_ADS + 2 }, (_, i) => bloco(i)) } };
+  const m = await rodarNaPagina(u.scriptChamada(u.reqAdsAgregado(s), 1000), { status: 200, texto: JSON.stringify(muitos) });
+  assert.equal(m.r.body.data.report_by_time.length, u.MAX_BLOCOS_ADS);
+  assert.equal(m.r.body.data.report_by_time__n, u.MAX_BLOCOS_ADS + 2);
+  // gráfico que não é lista: fica como veio (pequeno) e a seção Ads segue
+  const torto = { code: 0, data: { report_aggregate: { cost: 1 }, report_by_time: null } };
+  const t = await rodarNaPagina(u.scriptChamada(u.reqAdsAgregado(s), 1000), { status: 200, texto: JSON.stringify(torto) });
+  assert.equal(t.r.status, 200);
+  assert.deepEqual(t.r.body.data.report_aggregate, { cost: 1 });
 });

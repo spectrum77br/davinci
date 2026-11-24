@@ -119,7 +119,9 @@ Para cada loja (`src/conferencia.ts`):
 Com o AdsPower fora do ar o executor **nem pede loja** (senão a execução
 inteira virava `erro` em segundos). Se a entrega do resultado falhar por rede
 ou 5xx, tenta mais 2 vezes (10 s e 20 s); se mesmo assim não for, o DaVinci
-devolve a loja pra fila sozinho depois de 20 min. Se o DaVinci recusar os
+devolve a loja pra fila sozinho depois de 20 min — só se ainda faltarem mais de
+20 min para o corte; depois do corte nenhuma loja começa e ela expira no prazo,
+sem número naquela rodada. Se o DaVinci recusar os
 números (422: formato que ele não reconhece), manda só o status `erro` com o
 motivo — a loja fecha em vez de abrir o perfil de novo.
 
@@ -141,7 +143,10 @@ npm start -- --teste-conferencia k1dkeaxv --parcial  # dom até ontem
 ```
 
 O teste não espera os afiliados (só avisa) e respeita as mesmas regras de
-perfil aberto.
+perfil aberto. Desde 24/11/2026 (M-36 item 6) o resumo de cada semana tem a
+linha `dia a dia: afiliados 7/7 dias · Ads 7/7 dias` — é o investimento de
+cada dia que o Faturamento usa; menos de 7 vem com o motivo logo abaixo
+(docs/conferencia-shopee.md §6.1).
 
 Teste automático das partes puras e da coleta com uma Shopee falsa (sem
 AdsPower): `npm test`.
@@ -210,6 +215,14 @@ Parar / recarregar:
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.davinci.executor.plist
 ```
+
+**Quando reiniciar** (24/11/2026, revisão da M-36): só com **nenhuma rodada
+da Shopee em andamento** — conferir em Marketing › Conferência que não há
+rodada "coletando", nem a agendada (seg/qua 13:30–18:00 BRT) nem uma manual
+("Gerar agora", que pode estar à noite). Reiniciar no meio mata a loja que está
+sendo coletada; ela só volta para a fila depois de 20 min e, se o corte (17:30,
+ou 3 h depois da manual) chegar antes, expira sem número naquela rodada — até 3
+lojas de uma vez.
 
 ## Aposentar o `~/marionete` antigo
 

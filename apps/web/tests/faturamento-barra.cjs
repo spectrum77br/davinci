@@ -13,7 +13,14 @@
 //    Margem (só ADM); cabeçalho e Total fixos;
 //  - Pendências pela regra da grade (lib/cartaoVermelho.ts): grade e
 //    conferência das três categorias, uma vez; "0", "—" e o cartãozinho;
-//  - Investimento "—" sem dado, "*" com "gasto guardado desde dd/mm";
+//  - Investimento "—" sem dado, "*" com "dado guardado desde dd/mm";
+//  - M-36: Investimento = afiliados + Ads do Marketing; o balão "Afiliados
+//    R$ X + Ads R$ Y" (pedaço sem dado = "—"), até quando vão as semanas
+//    fechadas da Conferência; % Investimento e Total com a soma;
+//  - M-37: Margem = margem real da Conciliação, 1 casa ("25,2%"), negativa em
+//    vermelho, "—" fora da Conciliação ou antes do início dela; o balão "Sobrou
+//    R$ X − Ads R$ Y ÷ custo R$ Z · N pedidos: …"; Total = (Σ sobrou − Σ Ads)
+//    ÷ Σ custo das contas filtradas; nada disso para quem não é ADM;
 //  - busca e filtros valem para a tabela E o Total; Atualizar relê tudo;
 //  - Período: Por mês / Personalizado, uma caixa por vez.
 const assert = require('node:assert/strict')
@@ -77,14 +84,28 @@ const RESPOSTA = {
   itens: [
     { store_id: 'S1', loja: 'mega', tipo: 'shopee', departments: ['eletro', 'celular'], pedidos: 316,
       faturamento: 340373.63, ticket_medio: 1077.13, equipe: 102, contas_preco: ['A1', 'A2'],
-      investimento: null, investimento_desde: null, investimento_parcial: false, margem: { min: 0.102, max: 0.553 } },
+      // M-36: o exemplo do pedido (Shopee pela Conferência, semanas até 21/11).
+      investimento: 8430.57, investimento_afiliados: 5711.94, investimento_ads: 2718.63,
+      investimento_desde: '2026-10-18', investimento_parcial: false, investimento_ate: '2026-11-21',
+      // M-37: o exemplo do pedido — (73.017,55 − 2.718,63) ÷ 278.695,00 = 25,2%.
+      margem: { valor: (73017.55 - 2718.63) / 278695, sobrou: 73017.55, ads: 2718.63, ads_com_dado: true,
+        ads_ate: '2026-11-21', custo: 278695, pedidos: 397, pagos: 172, previstos: 182, cancelados: 33, sem_valor: 10,
+        inicio: '2026-10-24', antes_do_inicio: false } },
     { store_id: 'S2', loja: 'forpaper', tipo: 'mercadolivre', departments: ['mala'], pedidos: 10,
       faturamento: 1000, ticket_medio: 100, equipe: 103, contas_preco: ['A3', 'A3c'],
-      investimento: 150, investimento_desde: '2026-11-15', investimento_parcial: true, margem: { min: 0.425, max: 0.425 } },
+      investimento: 150, investimento_afiliados: null, investimento_ads: 150,
+      investimento_desde: '2026-11-15', investimento_parcial: true,
+      // Negativa: (100 − 150) ÷ 1.000 = −5,0%, em vermelho.
+      margem: { valor: -0.05, sobrou: 100, ads: 150, ads_com_dado: true, ads_ate: null, custo: 1000, pedidos: 10,
+        pagos: 6, previstos: 3, cancelados: 1, sem_valor: 0, inicio: '2026-10-24', antes_do_inicio: false } },
     { store_id: 'S3', loja: 'vita', tipo: 'ml', departments: [], pedidos: 0, faturamento: 0, ticket_medio: 0,
-      equipe: 101, contas_preco: ['Z9'], investimento: 0, investimento_desde: '2026-05-20', investimento_parcial: false, margem: null },
+      equipe: 101, contas_preco: ['Z9'], investimento: 0, investimento_afiliados: null, investimento_ads: 0,
+      investimento_desde: '2026-05-20', investimento_parcial: false, margem: null },
     { store_id: '999', loja: 'Sem cadastro (999)', tipo: null, departments: [], pedidos: 1, faturamento: 20,
-      ticket_medio: 20 },
+      ticket_medio: 20,
+      // A órfã (Temu sem cadastro) tem a Margem pela loja do Bling; sem Ads.
+      margem: { valor: 0.5, sobrou: 10, ads: 0, ads_com_dado: false, ads_ate: null, custo: 20, pedidos: 2, pagos: 1,
+        previstos: 0, cancelados: 0, sem_valor: 1, inicio: '2026-10-24', antes_do_inicio: false } },
   ],
   total_pedidos: 327, total_faturamento: 341393.63,
   start: '2026-11-01T00:00:00', end: '2026-12-01T00:00:00', teams: [103, 101, 102],
@@ -256,19 +277,30 @@ async function principal() {
   assert.match(html, /<td class="border border-border px-2 py-1 text-xs text-left font-medium">mega<\/td>/, 'nome à esquerda')
   assert.match(html, /<td class="border border-border px-2 py-1 text-xs text-right tabular-nums font-medium">R\$/, 'R$ à direita')
   const [mega, forpaper, vita, orfa] = linhas(html)
-  assert.deepEqual(mega, ['mega', 'Shopee', '2', 'Celular Eletro', '316', brl(340373.63), brl(1077.13), '5', '—', '—', '10.2% – 55.3%'],
-    'o exemplo do pedido (Tipo em Celular, Eletro, Mala)')
-  assert.deepEqual(forpaper, ['forpaper', 'Mercado Livre', '3', 'Mala', '10', brl(1000), brl(100), '2', `${brl(150)}*`, '15,00%', '42.5%'])
+  assert.deepEqual(mega, ['mega', 'Shopee', '2', 'Celular Eletro', '316', brl(340373.63), brl(1077.13), '5', brl(8430.57), '2,48%', '25,2%'],
+    'o exemplo do pedido (Tipo em Celular, Eletro, Mala); % Investimento = investimento ÷ faturamento, 2 casas')
+  assert.deepEqual(forpaper, ['forpaper', 'Mercado Livre', '3', 'Mala', '10', brl(1000), brl(100), '2', `${brl(150)}*`, '15,00%', '-5,0%'])
   assert.deepEqual(vita, ['vita', 'Mercado Livre', '1', '—', '0', brl(0), brl(0), '—', brl(0), '—', '—'],
     'conta fora da grade: "—"; investimento zero é dado (R$ 0,00), mas % sem faturamento é "—"')
-  assert.deepEqual(orfa, ['Sem cadastro (999)', '—', '—', '—', '1', brl(20), brl(20), '—', '—', '—', '—'])
-  assert.match(html, /title="gasto guardado desde 15\/11" data-investimento>R\$[^<]*<span class="text-muted-foreground" data-parcial>\*<\/span>/)
-  // Revisão (24/11): o número é só de Ads — a comissão de afiliados não tem
-  // coleta ainda; o balão da coluna avisa (a ajuda aprovada fica como está).
-  assert.match(html, /title="Gasto em Ads no período\. A comissão de afiliados ainda não entra \(o DaVinci não a coleta\)\. — = sem dado\.">Investimento<\/th>/)
-  assert.match(html, /title="Sem dado de gasto em Ads nesta conta no período\." data-investimento>/)
-  assert.doesNotMatch(html, /Ads ou afiliados/)
+  assert.deepEqual(orfa, ['Sem cadastro (999)', '—', '—', '—', '1', brl(20), brl(20), '—', '—', '—', '50,0%'])
+  // M-36: o balão de cada conta — "Afiliados R$ X + Ads R$ Y" e, embaixo,
+  // desde quando há dado (o "*") e até quando vão as semanas fechadas.
+  const balao = (trecho, attr = 'data-investimento') => {
+    const m = trecho.match(new RegExp(`title="([^"]*)" ${attr}>`))
+    assert.ok(m, `balão ${attr}`)
+    return m[1].replace(/\u00a0/g, ' ').replace(/&quot;/g, '"')
+  }
+  assert.match(html, /data-investimento>R\$[^<]*<span class="text-muted-foreground" data-parcial>\*<\/span>/)
+  assert.match(html, /title="Afiliados \+ Ads, do Marketing, no período\. Passe o mouse na conta para ver as duas partes\. — = sem dado\.">Investimento<\/th>/,
+    'a dica do cabeçalho diz afiliados + Ads, do Marketing')
+  assert.doesNotMatch(html, /Ads ou afiliados|afiliados ainda não entra|o DaVinci não a coleta/)
   const tr = (loja) => html.match(new RegExp(`<tr\\b[^>]*data-linha-faturamento>(?:(?!</tr>)[\\s\\S])*?>${loja}</td>[\\s\\S]*?</tr>`))[0]
+  assert.equal(balao(tr('mega')), `Afiliados ${brl(5711.94)} + Ads ${brl(2718.63)}\nsemanas fechadas até 21/11 (a semana atual entra quando fechar)`,
+    'o exemplo do pedido: "Afiliados R$ X + Ads R$ Y"')
+  assert.equal(balao(tr('forpaper')), `Afiliados — + Ads ${brl(150)}\ndado guardado desde 15/11`,
+    'ML: afiliados não coletados ("—"); o período começa antes do 1º dia guardado')
+  assert.equal(balao(tr('vita')), `Afiliados — + Ads ${brl(0)}`, 'Ads zero é dado')
+  assert.equal(balao(tr('Sem cadastro \\(999\\)')), 'Sem dado de afiliados nem de Ads no Marketing para esta conta no período.')
   // M-35: Pendências numa grade de 2 colunas (cartão 7px | número 2,4em,
   // 6px entre elas), o lugar do cartão reservado mesmo sem cartão — cartões e
   // números ficam um embaixo do outro de linha para linha.
@@ -284,9 +316,36 @@ async function principal() {
   // M-35: Ticket médio com a mesma letra do Faturamento (font-medium, à direita, tabular-nums).
   assert.equal((tr('mega').match(/<td class="border border-border px-2 py-1 text-xs text-right tabular-nums font-medium">R\$/g) || []).length, 2,
     'Faturamento e Ticket médio com o mesmo peso')
-  // Total: soma o que está na tela.
-  assert.deepEqual(rodape(html), ['Total', '', '327', brl(341393.63), brl(341393.63 / 327), '7', `${brl(150)}*`,
-    `${(150 / 341393.63 * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`, ''])
+  // M-37: a Margem — 1 casa, negativa em vermelho, "—" cinza, o balão com a
+  // conta do pedido e, embaixo, o que explica o Ads ou o "—".
+  const tdMargem = (trecho) => trecho.match(/<td\b[^>]*data-margem\b[^>]*>/)[0]
+  assert.match(html, /title="Margem real da Conciliação: \(sobrou de todos os pedidos − Ads\) ÷ custo\. Passe o mouse na conta para ver a conta\. — = fora da Conciliação\.">Margem<\/th>/)
+  assert.doesNotMatch(html, /aba Contas, da menor à maior|10\.2% – 55\.3%/, 'a faixa da aba Contas saiu da coluna')
+  assert.equal(balao(tr('mega'), 'data-margem'),
+    `Sobrou ${brl(73017.55)} − Ads ${brl(2718.63)} ÷ custo ${brl(278695)} · 397 pedidos: 172 pagos, 182 com valor previsto, `
+    + '33 cancelados, 10 sem valor de venda\nAds das semanas fechadas até 21/11 (a semana atual entra quando fechar)',
+    'o balão do pedido')
+  assert.doesNotMatch(tdMargem(tr('mega')), /text-red-600|text-muted-foreground/)
+  assert.match(tdMargem(tr('forpaper')), /class="[^"]*text-red-600[^"]*"/, 'negativa em vermelho')
+  assert.equal(balao(tr('forpaper'), 'data-margem'),
+    `Sobrou ${brl(100)} − Ads ${brl(150)} ÷ custo ${brl(1000)} · 10 pedidos: 6 pagos, 3 com valor previsto, 1 cancelados, 0 sem valor de venda`)
+  assert.match(tdMargem(tr('vita')), /class="[^"]*text-muted-foreground[^"]*"/)
+  assert.equal(balao(tr('vita'), 'data-margem'), 'Conta fora da Conciliação.')
+  assert.equal(balao(tr('Sem cadastro \\(999\\)'), 'data-margem'),
+    `Sobrou ${brl(10)} − Ads ${brl(0)} ÷ custo ${brl(20)} · 2 pedidos: 1 pagos, 0 com valor previsto, 0 cancelados, 1 sem valor de venda\n`
+    + 'sem dado de Ads no Marketing: conta R$ 0,00', 'Ads sem dado conta zero e o balão diz')
+  // Total: soma o que está na tela. Margem = (Σ sobrou − Σ Ads) ÷ Σ custo =
+  // (73.127,55 − 2.868,63) ÷ 279.715,00 = 25,1%.
+  assert.deepEqual(rodape(html), ['Total', '', '327', brl(341393.63), brl(341393.63 / 327), '7', `${brl(8580.57)}*`,
+    `${(8580.57 / 341393.63 * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`, '25,1%'],
+    'Total: soma dos investimentos e % sobre o faturamento total; a Margem com as somas')
+  assert.equal(balao(rodapeHtml, 'data-margem-total'),
+    `Sobrou ${brl(73127.55)} − Ads ${brl(2868.63)} ÷ custo ${brl(279715)} · 409 pedidos: 179 pagos, 185 com valor previsto, `
+    + '34 cancelados, 11 sem valor de venda\nConta sem dado de Ads no Marketing entra com R$ 0,00.\n'
+    + 'Alguma conta só tem o Ads das semanas fechadas da Conferência (a semana atual entra quando fechar).')
+  assert.equal(balao(rodapeHtml, 'data-investimento-total'),
+    `Afiliados ${brl(5711.94)} + Ads ${brl(2868.63)}\nAlguma conta só tem dado depois do início do período.\n`
+    + 'Alguma conta só tem as semanas fechadas da Conferência (a semana atual entra quando fechar).')
 
   // As pendências: uma grade e uma conferência por categoria, uma vez só.
   const doPreco = adm.chamadas.filter((u) => u.startsWith('/api/pricing/'))
@@ -303,6 +362,7 @@ async function principal() {
   assert.deepEqual(linhas(html).map((l) => l[0]), ['mega'])
   assert.deepEqual(rodape(html).slice(0, 4), ['Total', '', '316', brl(340373.63)])
   assert.equal(rodape(html)[5], '5')
+  assert.equal(rodape(html).at(-1), '25,2%', 'a Margem do Total segue a busca')
   assert.match(html, />1 contas<\/span>/)
   adm.state.busca = ''
   adm.state.alternarFiltro('equipe', '102', false)
@@ -387,6 +447,59 @@ async function principal() {
     ['/api/faturamento', ...Array(3).fill('/api/pricing/conferencia'), ...Array(3).fill('/api/pricing/grid')],
     'Atualizar relê o faturamento e as pendências')
 
+  // ---------------------------------------------------------------- Margem "—" (M-37)
+  // Período que começa antes do início da Conciliação (24/10/2026): "—" em
+  // todas, o balão diz o início, e o Total fica "—" contando quem ficou fora.
+  const antesDoInicio = (m) => m && { ...m, valor: null, antes_do_inicio: true }
+  adm.state.data = { ...RESPOSTA, itens: RESPOSTA.itens.map((it) => ({ ...it, margem: antesDoInicio(it.margem) })) }
+  html = await adm.html()
+  assert.deepEqual(linhas(html).map((l) => l.at(-1)), ['—', '—', '—', '—'])
+  assert.equal(balao(tr('mega'), 'data-margem'), 'A Conciliação começa em 24/10/2026. Escolha um período a partir dessa data.')
+  assert.equal(rodape(html).at(-1), '—')
+  assert.equal(balao(html.match(/<tfoot\b[^>]*>([\s\S]*?)<\/tfoot>/)[1], 'data-margem-total'),
+    '3 conta(s) fora: a Conciliação começa em 24/10/2026.')
+  // Só uma fora: o Total segue com as outras e avisa. Conta na Conciliação sem
+  // pedido no período: "—" na célula e fica fora do Total, com o Ads dela
+  // (exemplo aprovado de nov/2026: Total 24,0% com Ads R$ 35.011,50).
+  const itens = structuredClone(RESPOSTA.itens)
+  itens[1].margem = antesDoInicio(itens[1].margem)
+  itens[3].margem = { valor: null, sobrou: 0, ads: 60, ads_com_dado: true, ads_ate: null, custo: 0, pedidos: 0, pagos: 0,
+    previstos: 0, cancelados: 0, sem_valor: 0, inicio: '2026-10-24', antes_do_inicio: false }
+  adm.state.data = { ...RESPOSTA, itens }
+  html = await adm.html()
+  assert.deepEqual(linhas(html).map((l) => l.at(-1)), ['25,2%', '—', '—', '—'])
+  assert.equal(balao(tr('Sem cadastro \\(999\\)'), 'data-margem'),
+    `Sobrou ${brl(0)} − Ads ${brl(60)} ÷ custo ${brl(0)} · 0 pedidos: 0 pagos, 0 com valor previsto, 0 cancelados, 0 sem valor de venda\n`
+    + 'nenhum pedido na Conciliação no período')
+  // (73.017,55 − 2.718,63) ÷ 278.695,00 = 25,2% — os R$ 60 da conta sem pedido não entram.
+  assert.equal(rodape(html).at(-1), '25,2%')
+  assert.equal(balao(html.match(/<tfoot\b[^>]*>([\s\S]*?)<\/tfoot>/)[1], 'data-margem-total'),
+    `Sobrou ${brl(73017.55)} − Ads ${brl(2718.63)} ÷ custo ${brl(278695)} · 397 pedidos: 172 pagos, 182 com valor previsto, `
+    + '33 cancelados, 10 sem valor de venda\n'
+    + 'Alguma conta só tem o Ads das semanas fechadas da Conferência (a semana atual entra quando fechar).\n'
+    + '1 conta(s) fora: a Conciliação começa em 24/10/2026.\n'
+    + '1 conta(s) sem pedido no período ficam fora (o Ads delas também).')
+  // Só a conta sem pedido filtrada: o Total fica "—" e diz por quê.
+  adm.state.busca = 'Sem cadastro'
+  html = await adm.html()
+  assert.equal(rodape(html).at(-1), '—')
+  assert.equal(balao(html.match(/<tfoot\b[^>]*>([\s\S]*?)<\/tfoot>/)[1], 'data-margem-total'),
+    '1 conta(s) sem pedido no período ficam fora (o Ads delas também).')
+  adm.state.busca = ''
+  // Negativa no Total também fica vermelha; arredondada a zero, não.
+  itens[0].margem = { ...itens[0].margem, sobrou: 0, valor: -2718.63 / 278695 }
+  itens[3].margem = null
+  adm.state.data = { ...RESPOSTA, itens }
+  html = await adm.html()
+  assert.equal(linhas(html)[0].at(-1), '-1,0%')
+  assert.match(html.match(/<tfoot\b[^>]*>([\s\S]*?)<\/tfoot>/)[1], /class="[^"]*text-red-600[^"]*"[^>]*data-margem-total>-1,0%/)
+  itens[0].margem = { ...itens[0].margem, valor: -0.0004 }
+  adm.state.data = { ...RESPOSTA, itens }
+  html = await adm.html()
+  assert.equal(linhas(html)[0].at(-1), '0,0%', 'sem "-0,0%"')
+  assert.doesNotMatch(tdMargem(tr('mega')), /text-red-600/)
+  await adm.state.load()
+
   // ---------------------------------------------------------------- erros e estados
   adm.falha.precos = new Error('rede')
   await adm.state.carregarPendencias()
@@ -415,7 +528,7 @@ async function principal() {
   html = await vendedor.html()
   assert.deepEqual(cabecalho(html), ['Conta', 'Plataforma', 'Equipe', 'Tipo', 'Pedidos', 'Faturamento', 'Ticket médio',
     'Pendências', 'Investimento', '% Investimento'], 'sem a coluna Margem')
-  assert.doesNotMatch(html, /data-coluna-so-admin|data-margem|55\.3%/)
+  assert.doesNotMatch(html, /data-coluna-so-admin|data-margem|25,2%|Sobrou|Conciliação/)
   assert.equal(linhas(html)[0][7], '5')
   assert.deepEqual(caixas(menu(html, 'equipes'), 'equipe'), [['102', true]], 'só as equipes que o servidor manda')
   assert.equal(rodape(html).length, 8, "o Total sem a célula da Margem")

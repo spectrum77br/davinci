@@ -158,6 +158,36 @@ Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da pl
   Às 10:20 de terça só havia até domingo; os afiliados de ontem saem por volta de 12:10–12:50.
 - POST levam `x-csrftoken` (cookie `csrftoken`); as rotas levam `SPC_CDS` e `SPC_CDS_VER=2`.
 
+### 6.1 Dia a dia de afiliados e de Ads (desde 24/11/2026, pedido M-36 item 6)
+
+Cada semana da coleta da Shopee guarda também o investimento **de cada dia**, para o Faturamento
+(Tabela de Preços) somar um mês exato em vez de ratear a semana que cruza o mês:
+
+```
+semanas[i].dias = [{"dia": "2026-11-16", "afiliados": 15.13, "ads": 7.0}, …]   # um por dia da semana
+semanas[i].dias_motivos = ["Ads: …"]   # por que um lado ficou null (vazio quando está tudo certo)
+```
+
+- **Nenhuma chamada nova à Shopee.** Afiliados: os itens de `seller_daily → data.list` (antes só
+  serviam para o último dia publicado), campo `dis_seller_commission` de cada dia. Ads: os blocos de
+  `get_time_graph → report_by_time` (96 por dia), que antes eram apagados na página; agora a página
+  manda só a hora e o custo de cada bloco (~30 KB na semana).
+- `afiliados` = parcela do **Invest. afiliados**; `ads` = parcela do **Invest. Ads** (R$). Os dias
+  com número somam **exatamente** o total da semana que a Conferência mostra (o executor reparte os
+  centavos; o servidor confere de novo e anula o lado que não fecha).
+- `null` = a Shopee não devolveu o dia: afiliados ainda não publicados (o último dia de S1 quando a
+  coleta seguiu com "afiliados só até…"), seção da semana que falhou, ou formato que o executor não
+  reconheceu / soma que não fechou — esses dois com o motivo em `dias_motivos`. Dia sem linha de
+  afiliados até o último dia publicado é 0 (a lista só traz dia com venda); dia sem gasto de Ads é 0.
+- Os nomes dos campos do dia (`dis_seller_commission`, a hora e o custo de cada bloco) **não foram
+  conferidos ao vivo**: o executor tenta alguns nomes e só aceita quando a soma fecha com o total.
+  Se não reconhecer, o lado fica `null` com o motivo (e os nomes dos campos que vieram) em
+  `dias_motivos` e no log do executor — a Conferência não muda. Para conferir numa loja:
+  `npm start -- --teste-conferencia <perfil>` mostra "dia a dia: afiliados 7/7 dias · Ads 7/7 dias".
+- O relatório (tela, Excel, CSV, MD, HTML, Threema) **não lê** `dias`, e os motivos ficam fora dos
+  avisos. Coleta de antes de 24/11 não tem `dias`. Um `dias` torto é descartado pelo servidor
+  (`dados.limpar_dias`) sem recusar a loja.
+
 ## 7. Como roda
 
 1. **Servidor (worker)**: segunda e quarta 16:30 UTC (= 13:30 BRT), se `CONFERENCIA_SHOPEE_CRON=true`, cria a

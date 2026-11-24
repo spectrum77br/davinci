@@ -40,10 +40,25 @@ Definições fixadas com o operador:
   loja) — a quem não é ADM a resposta sai SEM o campo. Como cada conta se liga
   à loja: services/faturamento_contas.py. As regras de quais pedidos entram e
   de quem vê quais lojas não mudaram.
+- M-36 (24/11/2026, prévia aprovada em 24/11): o `investimento` passou a ser
+  afiliados + Ads do Marketing, com os pedaços ao lado (`investimento_
+  afiliados`, `investimento_ads` — a Margem da M-37 usa só o de Ads): o Ads
+  por dia de marketing_gasto_dia quando a loja tem (ML), senão as coletas
+  semanais da Conferência (Shopee: afiliados + Ads), ligadas à loja pela chave
+  interna da conta. `investimento_ate`: até onde vão as semanas fechadas da
+  Conferência quando param antes do fim do período. Regras em
+  services/faturamento_contas.py e services/faturamento_conferencia.py.
+- M-37 (24/11/2026, prévia aprovada em 24/11): a `margem` (só ADM) deixou de
+  ser a faixa da aba Contas e virou a margem real da Conciliação: (Σ sobrou de
+  todos os pedidos − Ads) ÷ Σ custo, pela data do pedido, nos dias do filtro.
+  Cada pedido vai para a loja do Bling dele (bling_id) — a órfã "Sem
+  cadastro" também ganha a dela —, e o Ads é o pedaço de Ads do Investimento
+  acima (sem reler o Marketing). Regras em services/faturamento_margem.py.
 """
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
@@ -58,9 +73,10 @@ from app.db import get_session
 from app.deps.auth import require_permission, user_scope
 from app.deps.team_scope import nome_da_equipe
 from app.models import BlingOrder, StoreInfo, User, UserRole
-from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut, MargemFaixa
+from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut, MargemReal
 from app.services import departamento as dep_svc
 from app.services import faturamento_contas as contas_svc
+from app.services import faturamento_margem as margem_svc
 from app.services.store_departments import resolve_store_departments
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
@@ -155,38 +171,92 @@ def _dias_do_periodo(start: datetime, end: datetime) -> tuple[date, date]:
     return start.date(), (end - timedelta(microseconds=1)).date()
 
 
+def _reais(v: Decimal | None) -> float | None:
+    return None if v is None else float(round(v, 2))
+
+
+def _margem_real(
+    pedidos: margem_svc.PedidosDaLoja, inv: contas_svc.Investimento | None, inicio: date
+) -> MargemReal:
+    """M-37: a Margem da linha. Ads = SÓ o pedaço de Ads do Investimento da
+    M-36 (sem dado = 0); os afiliados já saem do sobrou de cada pedido."""
+    m = margem_svc.margem(pedidos, inv.ads if inv is not None else None, inicio)
+    return MargemReal(
+        valor=None if m.valor is None else float(m.valor),
+        sobrou=float(round(m.sobrou, 2)),
+        ads=float(round(m.ads, 2)),
+        ads_com_dado=m.ads_com_dado,
+        ads_ate=inv.ate if inv is not None and m.ads_com_dado else None,
+        custo=float(round(m.custo, 2)),
+        pedidos=pedidos.pedidos,
+        pagos=pedidos.pagos,
+        previstos=pedidos.previstos,
+        cancelados=pedidos.cancelados,
+        sem_valor=pedidos.sem_valor,
+        inicio=pedidos.inicio,
+        antes_do_inicio=m.antes_do_inicio,
+    )
+
+
 async def _colunas_m22(
     session: AsyncSession,
     itens: list[FaturamentoLinha],
     equipe_da_loja: dict[str, int | None],
+    bling_da_loja: dict[str, str | None],
     start: datetime,
     end: datetime,
     *,
     admin: bool,
 ) -> None:
     """Preenche as colunas da M-22 nas linhas de loja cadastrada (a órfã fica
-    sem conta, sem investimento e sem margem)."""
+    sem conta e sem investimento). A Margem (M-37, só ADM) vem da Conciliação
+    pela loja do Bling, então a órfã "Sem cadastro (id)" também tem a dela."""
     integ_por_loja = await contas_svc.integracoes_das_lojas(session)
     contas_preco = await contas_svc.contas_preco_das_lojas(session, integ_por_loja)
     contas_ads = await contas_svc.contas_ads_das_lojas(session, integ_por_loja)
+    contas_conferencia = await contas_svc.contas_conferencia_das_lojas(session, integ_por_loja)
     inicio, fim = _dias_do_periodo(start, end)
-    investimentos = await contas_svc.investimento_das_lojas(session, contas_ads, inicio, fim)
+    investimentos = await contas_svc.investimento_das_lojas(
+        session, contas_ads, inicio, fim, contas_conferencia
+    )
+    pedidos_conciliacao: dict[str, margem_svc.PedidosDaLoja] = {}
+    if admin:
+        # A loja do Bling de cada linha: a cadastrada pelo bling_store_id; a
+        # órfã é o próprio id ("sem-loja" = pedido sem loja: nada a ligar).
+        bling_das_linhas = {
+            it.store_id: (
+                bling_da_loja.get(it.store_id)
+                if it.store_id in equipe_da_loja
+                else (it.store_id if it.store_id != "sem-loja" else None)
+            )
+            for it in itens
+        }
+        pedidos_conciliacao = await margem_svc.pedidos_das_lojas(
+            session,
+            inicio,
+            fim,
+            {k: str(v).strip() for k, v in bling_das_linhas.items() if v and str(v).strip()},
+            integ_por_loja,
+        )
     for it in itens:
-        if it.store_id not in equipe_da_loja:
-            continue  # órfã ("Sem cadastro")
+        cadastrada = it.store_id in equipe_da_loja
+        inv = investimentos.get(UUID(it.store_id)) if cadastrada else None
+        pedidos = pedidos_conciliacao.get(it.store_id)
+        if admin and pedidos is not None:
+            it.margem = _margem_real(pedidos, inv, inicio)
+        if not cadastrada:
+            continue  # órfã ("Sem cadastro"): sem conta nem investimento
         loja = UUID(it.store_id)
         it.equipe = equipe_da_loja[it.store_id]
         contas = contas_preco.get(loja, [])
         it.contas_preco = sorted(str(c.id) for c in contas)
-        inv = investimentos.get(loja)
         if inv is not None and inv.total is not None:
             it.investimento = float(round(inv.total, 2))
+            it.investimento_afiliados = _reais(inv.afiliados)
+            it.investimento_ads = _reais(inv.ads)
             it.investimento_desde = inv.desde
             it.investimento_parcial = inv.parcial
-        if admin:
-            faixa = contas_svc.faixa_de_margem(contas)
-            if faixa is not None:
-                it.margem = MargemFaixa(min=float(faixa[0]), max=float(faixa[1]))
+            it.investimento_ate = inv.ate
 
 
 @router.get("", response_model=FaturamentoEquipesOut)
@@ -386,7 +456,8 @@ async def list_faturamento(
     itens.sort(key=lambda x: (-x.faturamento, (x.loja or "").lower()))
 
     admin = user.role == UserRole.ADMIN
-    await _colunas_m22(session, itens, equipe_da_loja, start, end, admin=admin)
+    bling_da_loja = {str(s.id): s.bling_store_id for s in stores}
+    await _colunas_m22(session, itens, equipe_da_loja, bling_da_loja, start, end, admin=admin)
 
     out = FaturamentoEquipesOut(
         itens=itens,
@@ -400,8 +471,9 @@ async def list_faturamento(
     )
     if admin:
         return out
-    # A Margem é só do administrador (M-22): para os outros o campo nem vai na
-    # resposta (o mesmo critério de ADM da Tabela de Preços: role == admin).
+    # A Margem é só do administrador (M-22; continua na M-37): para os outros o
+    # campo nem vai na resposta (o mesmo critério de ADM da Tabela de Preços:
+    # role == admin) e a Conciliação nem é lida.
     return JSONResponse(
         out.model_dump(mode="json", exclude={"itens": {"__all__": {"margem"}}})
     )
