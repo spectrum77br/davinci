@@ -455,7 +455,7 @@ function dataDM(iso: string | null | undefined): string {
   return `${d}/${m}`
 }
 function tituloInvestimento(r: FaturamentoLinha): string | undefined {
-  if (r.investimento == null) return 'Sem dado de gasto em Ads ou afiliados nesta conta no período.'
+  if (r.investimento == null) return 'Sem dado de gasto em Ads nesta conta no período.'
   return r.investimento_parcial ? `gasto guardado desde ${dataDM(r.investimento_desde)}` : undefined
 }
 function tituloPendencias(p: number | null): string {
@@ -703,7 +703,7 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Faturamento</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Ticket médio</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24" title="Cartões vermelhos da conta na Tabela de Preços (Celular, Eletro e Mala).">Pendências</th>
-            <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" title="Gasto em Ads e afiliados no período. — = sem dado.">Investimento</th>
+            <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" title="Gasto em Ads no período. A comissão de afiliados ainda não entra (o DaVinci não a coleta). — = sem dado.">Investimento</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border whitespace-nowrap">% Investimento</th>
             <th v-if="isAdmin" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[110px]" data-coluna-so-admin="margem" title="Margens da conta cadastradas na aba Contas, da menor à maior.">Margem</th>
           </tr>

@@ -263,6 +263,11 @@ async function principal() {
     'conta fora da grade: "—"; investimento zero é dado (R$ 0,00), mas % sem faturamento é "—"')
   assert.deepEqual(orfa, ['Sem cadastro (999)', '—', '—', '—', '1', brl(20), brl(20), '—', '—', '—', '—'])
   assert.match(html, /title="gasto guardado desde 15\/11" data-investimento>R\$[^<]*<span class="text-muted-foreground" data-parcial>\*<\/span>/)
+  // Revisão (24/11): o número é só de Ads — a comissão de afiliados não tem
+  // coleta ainda; o balão da coluna avisa (a ajuda aprovada fica como está).
+  assert.match(html, /title="Gasto em Ads no período\. A comissão de afiliados ainda não entra \(o DaVinci não a coleta\)\. — = sem dado\.">Investimento<\/th>/)
+  assert.match(html, /title="Sem dado de gasto em Ads nesta conta no período\." data-investimento>/)
+  assert.doesNotMatch(html, /Ads ou afiliados/)
   const tr = (loja) => html.match(new RegExp(`<tr\\b[^>]*data-linha-faturamento>(?:(?!</tr>)[\\s\\S])*?>${loja}</td>[\\s\\S]*?</tr>`))[0]
   assert.match(tr('mega'), /<span class="block h-\[10px\] w-\[7px\] rotate-12 rounded-\[1px\] bg-red-600 shadow-sm" aria-hidden="true" data-cartao><\/span> 5/, 'o cartãozinho vermelho + número')
   assert.doesNotMatch(tr('vita'), /data-cartao/)
