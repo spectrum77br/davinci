@@ -371,6 +371,33 @@ async def test_investimento_sem_dia_guardado_e_none_e_dia_zero_e_zero(
     assert linhas[str(c.mega_ml.id)]["investimento"] is None, "01/07 fica fora de [30/06, 01/07)"
 
 
+@pytest.mark.asyncio
+async def test_sem_a_tabela_do_historico_a_aba_abre_com_investimento_sem_dado(
+    db: AsyncSession,
+    client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+):
+    """Revisão (24/11/2026): código novo no ar antes da 0506 (o deploy não roda
+    migration, e ela já falhou calada) não pode derrubar a aba inteira — só a
+    coluna Investimento fica "—"; pedidos, faturamento e o resto seguem."""
+    c = await _cenario(db)
+    auth_as(await _usuario(db, role=UserRole.ADMIN, equipes=None))
+    await db.execute(text("ALTER TABLE marketing_gasto_dia RENAME TO marketing_gasto_dia_fora"))
+    await db.commit()
+    try:
+        r = await client.get("/api/faturamento", params=JUNHO)
+    finally:
+        await db.execute(text("ALTER TABLE marketing_gasto_dia_fora RENAME TO marketing_gasto_dia"))
+        await db.commit()
+    assert r.status_code == 200, r.text
+    linhas = _por_loja(r.json())
+    assert {it["investimento"] for it in r.json()["itens"]} == {None}
+    shopee = linhas[str(c.mega_shopee.id)]
+    assert (shopee["pedidos"], shopee["faturamento"]) == (1, 1000.0)
+    assert shopee["margem"] == {"min": 0.102, "max": 0.553}
+    assert linhas[str(c.mega_ml.id)]["contas_preco"] == sorted([str(c.p_ml.id), str(c.p_ml_cat.id)])
+
+
 # ── gravação do histórico ─────────────────────────────────────────────────────
 
 

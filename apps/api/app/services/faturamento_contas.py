@@ -30,12 +30,16 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
+import structlog
 from sqlalchemy import func, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.team_scope import _chave_da_conta
 from app.models import Integration, MarketingAccount, MarketingGastoDia, PricingAccount, StoreInfo
 from app.models.pricing import CANAL_CATALOGO
+
+logger = structlog.get_logger()
 
 _MARGENS = ("margin1", "margin2", "margin3", "margin4", "margin5")
 
@@ -188,28 +192,39 @@ async def investimento_das_lojas(
     soma = func.coalesce(MarketingGastoDia.gasto_ads, 0) + func.coalesce(
         MarketingGastoDia.gasto_afiliados, 0
     )
-    no_periodo = dict(
-        (
-            await session.execute(
-                select(MarketingGastoDia.marketing_account_id, func.sum(soma))
-                .where(
-                    MarketingGastoDia.marketing_account_id.in_(todas),
-                    MarketingGastoDia.dia >= inicio,
-                    MarketingGastoDia.dia <= fim,
-                )
-                .group_by(MarketingGastoDia.marketing_account_id)
+    try:
+        # SAVEPOINT: sem a migration 0506 (código no ar antes dela — o deploy
+        # não roda migration) a tabela não existe; aí só o Investimento fica
+        # "—" e a aba (pedidos, faturamento) abre normal.
+        async with session.begin_nested():
+            no_periodo = dict(
+                (
+                    await session.execute(
+                        select(MarketingGastoDia.marketing_account_id, func.sum(soma))
+                        .where(
+                            MarketingGastoDia.marketing_account_id.in_(todas),
+                            MarketingGastoDia.dia >= inicio,
+                            MarketingGastoDia.dia <= fim,
+                        )
+                        .group_by(MarketingGastoDia.marketing_account_id)
+                    )
+                ).all()
             )
-        ).all()
-    )
-    primeiro_dia = dict(
-        (
-            await session.execute(
-                select(MarketingGastoDia.marketing_account_id, func.min(MarketingGastoDia.dia))
-                .where(MarketingGastoDia.marketing_account_id.in_(todas))
-                .group_by(MarketingGastoDia.marketing_account_id)
+            primeiro_dia = dict(
+                (
+                    await session.execute(
+                        select(
+                            MarketingGastoDia.marketing_account_id,
+                            func.min(MarketingGastoDia.dia),
+                        )
+                        .where(MarketingGastoDia.marketing_account_id.in_(todas))
+                        .group_by(MarketingGastoDia.marketing_account_id)
+                    )
+                ).all()
             )
-        ).all()
-    )
+    except ProgrammingError as e:
+        logger.warning("faturamento_investimento_sem_historico", erro=str(e)[:300])
+        return {}
     out: dict[UUID, Investimento] = {}
     for loja, contas in contas_ads.items():
         com_dado = [c for c in contas if c in no_periodo]
