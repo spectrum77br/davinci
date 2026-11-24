@@ -269,8 +269,21 @@ async function principal() {
   assert.match(html, /title="Sem dado de gasto em Ads nesta conta no período\." data-investimento>/)
   assert.doesNotMatch(html, /Ads ou afiliados/)
   const tr = (loja) => html.match(new RegExp(`<tr\\b[^>]*data-linha-faturamento>(?:(?!</tr>)[\\s\\S])*?>${loja}</td>[\\s\\S]*?</tr>`))[0]
-  assert.match(tr('mega'), /<span class="block h-\[10px\] w-\[7px\] rotate-12 rounded-\[1px\] bg-red-600 shadow-sm" aria-hidden="true" data-cartao><\/span> 5/, 'o cartãozinho vermelho + número')
+  // M-35: Pendências numa grade de 2 colunas (cartão 7px | número 2,4em,
+  // 6px entre elas), o lugar do cartão reservado mesmo sem cartão — cartões e
+  // números ficam um embaixo do outro de linha para linha.
+  const grade = '<span class="inline-grid grid-cols-\\[7px_2\\.4em\\] items-center gap-x-\\[6px\\]">'
+  assert.match(tr('mega'), new RegExp(`data-pendencias>${grade}<span class="block h-\\[10px\\] w-\\[7px\\] rotate-12 rounded-\\[1px\\] bg-red-600 shadow-sm" aria-hidden="true" data-cartao></span><span class="text-left">5</span></span>`),
+    'o cartãozinho vermelho na coluna dele + número à esquerda na coluna ao lado')
   assert.doesNotMatch(tr('vita'), /data-cartao/)
+  assert.match(tr('vita'), new RegExp(`data-pendencias>${grade}<span aria-hidden="true"></span><span class="text-left text-muted-foreground">—</span></span>`),
+    'sem cartão: o lugar dele fica vazio e o "—" fica na coluna dos números')
+  const rodapeHtml = html.match(/<tfoot\b[^>]*>([\s\S]*?)<\/tfoot>/)[1]
+  assert.match(rodapeHtml, new RegExp(`${grade}<span class="block h-\\[10px\\] w-\\[7px\\] rotate-12 rounded-\\[1px\\] bg-red-600 shadow-sm" aria-hidden="true" data-cartao></span><span class="text-left">7</span></span>`),
+    'a linha Total usa a mesma grade')
+  // M-35: Ticket médio com a mesma letra do Faturamento (font-medium, à direita, tabular-nums).
+  assert.equal((tr('mega').match(/<td class="border border-border px-2 py-1 text-xs text-right tabular-nums font-medium">R\$/g) || []).length, 2,
+    'Faturamento e Ticket médio com o mesmo peso')
   // Total: soma o que está na tela.
   assert.deepEqual(rodape(html), ['Total', '', '327', brl(341393.63), brl(341393.63 / 327), '7', `${brl(150)}*`,
     `${(150 / 341393.63 * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`, ''])

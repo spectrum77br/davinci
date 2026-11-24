@@ -737,13 +737,16 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
             </td>
             <td class="border border-border px-2 py-1 text-xs text-center tabular-nums">{{ fmtInt(r.pedidos) }}</td>
             <td class="border border-border px-2 py-1 text-xs text-right tabular-nums font-medium">{{ fmtBRL(r.faturamento) }}</td>
-            <td class="border border-border px-2 py-1 text-xs text-right tabular-nums">{{ fmtBRL(r.ticket_medio) }}</td>
+            <td class="border border-border px-2 py-1 text-xs text-right tabular-nums font-medium">{{ fmtBRL(r.ticket_medio) }}</td>
+            <!-- Pendências em grade de 2 colunas (cartão | número): o lugar do
+                 cartão fica reservado mesmo sem cartão, para os cartões e os
+                 números ficarem um embaixo do outro em todas as linhas. -->
             <td class="border border-border px-2 py-1 text-xs text-center tabular-nums" :title="tituloPendencias(pendenciasDe(r))" data-pendencias>
-              <span v-if="pendenciasEstado === 'ok' && (pendenciasDe(r) ?? 0) > 0" class="inline-flex items-center gap-1">
-                <span class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm" aria-hidden="true" data-cartao />
-                {{ textoPendencias(pendenciasDe(r)) }}
+              <span class="inline-grid grid-cols-[7px_2.4em] items-center gap-x-[6px]">
+                <span v-if="pendenciasEstado === 'ok' && (pendenciasDe(r) ?? 0) > 0" class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm" aria-hidden="true" data-cartao />
+                <span v-else aria-hidden="true" />
+                <span class="text-left" :class="{ 'text-muted-foreground': ['—', '…'].includes(textoPendencias(pendenciasDe(r))) }">{{ textoPendencias(pendenciasDe(r)) }}</span>
               </span>
-              <span v-else :class="{ 'text-muted-foreground': textoPendencias(pendenciasDe(r)) !== '0' }">{{ textoPendencias(pendenciasDe(r)) }}</span>
             </td>
             <td class="border border-border px-2 py-1 text-xs text-right tabular-nums" :title="tituloInvestimento(r)" data-investimento>
               <template v-if="r.investimento != null">{{ fmtBRL(r.investimento) }}<span v-if="r.investimento_parcial" class="text-muted-foreground" data-parcial>*</span></template>
@@ -761,11 +764,11 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
             <td class="border border-border px-2 py-1 text-xs text-right tabular-nums">{{ fmtBRL(total.faturamento) }}</td>
             <td class="border border-border px-2 py-1 text-xs text-right tabular-nums">{{ fmtBRL(total.ticket) }}</td>
             <td class="border border-border px-2 py-1 text-xs text-center tabular-nums" :title="tituloPendencias(total.pendencias)">
-              <span v-if="pendenciasEstado === 'ok' && (total.pendencias ?? 0) > 0" class="inline-flex items-center gap-1">
-                <span class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm" aria-hidden="true" data-cartao />
-                {{ textoPendencias(total.pendencias) }}
+              <span class="inline-grid grid-cols-[7px_2.4em] items-center gap-x-[6px]">
+                <span v-if="pendenciasEstado === 'ok' && (total.pendencias ?? 0) > 0" class="block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 shadow-sm" aria-hidden="true" data-cartao />
+                <span v-else aria-hidden="true" />
+                <span class="text-left">{{ textoPendencias(total.pendencias) }}</span>
               </span>
-              <span v-else>{{ textoPendencias(total.pendencias) }}</span>
             </td>
             <td class="border border-border px-2 py-1 text-xs text-right tabular-nums" :title="total.parcial ? 'Alguma conta só tem o gasto guardado depois do início do período.' : undefined">
               <template v-if="total.investimento != null">{{ fmtBRL(total.investimento) }}<span v-if="total.parcial" class="text-muted-foreground">*</span></template>
