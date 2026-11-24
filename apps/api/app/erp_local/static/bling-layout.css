@@ -235,4 +235,7 @@ body.embedded[data-screen=products] header #refresh{font-family:ui-sans-serif,sy
 .catalog-bar .catalog-bar-options label{display:flex;align-items:center;gap:8px;margin:0;padding:4px;border-radius:4px;font-size:14px;line-height:20px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
 .catalog-bar .catalog-bar-options label:hover{background:rgba(243,244,246,.5)}
 .catalog-bar .catalog-bar-options input[type=checkbox]{width:16px;height:16px;min-height:16px;margin:0;flex:none}
+.catalog-bar-selection{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 4px 0 10px;border:1px solid rgb(191,219,254);border-radius:8px;background:rgb(239,246,255);color:rgb(29,78,216);font-size:12px;line-height:16px;font-weight:500;white-space:nowrap}
+.catalog-bar .catalog-bar-selection button{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;min-height:20px;padding:0;border:0;border-radius:4px;background:none;color:inherit;font:inherit;font-size:14px;line-height:1;box-shadow:none}
+.catalog-bar .catalog-bar-selection button:hover{background:rgb(219,234,254);filter:none}
 @media print{.catalog-bar{display:none!important}}

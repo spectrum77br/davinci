@@ -1198,6 +1198,29 @@ test('M-30 revisão: a tag ou categoria nova de Cadastros › Produtos chega sem
  input.blur();assert.deepEqual(menuLabels(d,'tag'),['.sp','.us','.zz','Sem tag']);
 });
 
+test('M-30 revisão: a seleção de várias páginas sai de uma vez pelo × da barra, como antes',async()=>{
+ // O "Selecionados: N cadastros ×" morava na linha que o pedido tirou; a seleção continua
+ // "funcionando como hoje" (item 9): o × vai para o fim da barra, só quando há seleção.
+ const rows=Array.from({length:150},(_,i)=>({sku:`s${i}.sp`,name:'Produto '+i,kind:'simple',position:i,components:[],price:'1',balances:[{depot:'geral',physical:'1',reserved:'0',available:'1'}],details:{version:0,status:'active'}}));
+ const {dom,document:d}=await barPage(null,rows);
+ const chip=()=>d.querySelector('#catalog-search [data-product-selection-clear]');
+ assert.equal(chip(),null,'sem seleção, a barra é só Buscar | Estoque | Tags | Categoria | Situação');
+ const all=()=>{const box=d.getElementById('products-all');box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
+ all();
+ d.querySelector('[data-catalog-offset="100"]').click();
+ const one=d.querySelector('[data-product-select]');one.checked=true;one.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+ assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^101 selecionados/);
+ assert.equal(chip().closest('.catalog-bar-selection').textContent.replace('×','').trim(),'Selecionados: 101 cadastros');
+ assert.equal(chip().getAttribute('aria-label'),'Limpar seleção');
+ chip().click();
+ assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^0 selecionados/);
+ assert.equal(chip(),null);assert.ok([...d.querySelectorAll('[data-product-select]')].every(i=>!i.checked));
+ assert.equal(d.querySelector('[data-product-delete]').disabled,true);
+ // Um só: singular.
+ const first=d.querySelector('[data-product-select]');first.checked=true;first.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+ assert.equal(chip().closest('.catalog-bar-selection').textContent.replace('×','').trim(),'Selecionados: 1 cadastro');
+});
+
 test('M-30: the example of the request (2.753 products, base of 23/11) counts the same on the bar',async()=>{
  // A base sintética com a distribuição que o pedido conferiu: o que a barra conta tem de bater.
  const spread=(pairs)=>pairs.flatMap(([value,n])=>Array(n).fill(value));

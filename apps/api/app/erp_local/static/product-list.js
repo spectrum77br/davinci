@@ -82,7 +82,12 @@ function catalogFilterMenu(key){
 }
 function productFilterBar(){
  if(catalogListsFor!==stateAt)loadCatalogLists();
- return `<form id="catalog-search" class="catalog-bar" role="search"><label class="catalog-bar-search">${catalogBarIcons.search}<input name="query" value="${esc(catalogQuery)}" placeholder="Buscar por SKU ou nome..." aria-label="Buscar por SKU ou nome" autocomplete="off"></label>${['stock','tag','category','situation'].map(catalogFilterMenu).join('')}</form>`;
+ return `<form id="catalog-search" class="catalog-bar" role="search"><label class="catalog-bar-search">${catalogBarIcons.search}<input name="query" value="${esc(catalogQuery)}" placeholder="Buscar por SKU ou nome..." aria-label="Buscar por SKU ou nome" autocomplete="off"></label>${['stock','tag','category','situation'].map(catalogFilterMenu).join('')}${productSelectionChip()}</form>`;
+}
+// A seleção vale entre páginas; o × tira tudo de uma vez, como o chip da linha que o pedido tirou.
+function productSelectionChip(){
+ const n=productSelection.size;
+ return n?`<span class="catalog-bar-selection">Selecionados: ${n} cadastro${n>1?'s':''}<button type="button" data-product-selection-clear aria-label="Limpar seleção">×</button></span>`:'';
 }
 // Fechar sem redesenhar: o mesmo clique ainda segue para o que foi clicado fora da caixinha.
 function closeCatalogMenu(){catalogMenu='';document.querySelector('[data-catalog-menu-box]')?.remove();document.querySelectorAll('[data-catalog-menu]').forEach(b=>b.setAttribute('aria-expanded','false'));}
@@ -113,6 +118,7 @@ document.addEventListener('click',async e=>{
  const none=e.target.closest('[data-catalog-none]');
  if(none){catalogUnchecked[none.dataset.catalogNone]=new Set(catalogFilterOptions(none.dataset.catalogNone).map(([v])=>v));catalogFilterChanged();return;}
  if(catalogMenu&&!e.target.closest('.catalog-bar-filter'))closeCatalogMenu();
+ if(e.target.closest('[data-product-selection-clear]')){productSelection.clear();render();return;}
  const density=e.target.closest('[data-product-density]');if(density){catalogDensity=density.dataset.productDensity;render();return;}
  if(e.target.closest('[data-more-actions]')){moreActionsOpen=!e.target.closest('details').open;return;}
  if(e.target.closest('[data-price-adjust-open]')){priceAdjustOpen=true;render();document.getElementById('price-adjust')?.scrollIntoView?.({block:'nearest'});return;}
