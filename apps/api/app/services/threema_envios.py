@@ -33,10 +33,12 @@ Linha de comando (no container da API):
         [--aplicar] [--sobrescrever]
     python -m app.services.threema_envios conferir [--fatia F1] [--chaves a,b]
 
-`semear` sem `--aplicar` só imprime o plano (IDs mascarados). `conferir`
-compara o legado com o Cadastro, chave por chave, e sai com 1 se houver
-diferença — é o portão antes e depois de publicar cada fatia, e a saída é o
-roteiro para refazer à mão numa reversão.
+`semear` sem `--aplicar` só imprime o plano (IDs mascarados) e roda com o
+código DA fatia (publicada, ou a imagem nova num container avulso), nunca
+com o de antes: a regra da semente pode mudar na própria fatia (ver
+`semear`). `conferir` compara o legado com o Cadastro, chave por chave, e
+sai com 1 se houver diferença — é o portão de cada fatia, depois da semente,
+e a saída é o roteiro para refazer à mão numa reversão.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import delete, func, literal_column, or_, select, text, tuple_, update
+from sqlalchemy import delete, exists, func, literal_column, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -291,10 +293,12 @@ def _lista_vazia_desliga(d: EnvioDef) -> bool:
     robô, a chave da conferência no .env) nem para o usuário pelo nome (o 12:
     "thatcher" sem Threema é falha, não desligado).
 
-    No Cadastro, `ativo` NULL vale ligado — e ligado sem ninguém grava o
-    registro `ok=false` e acende o sino dos admins a cada rodada. Por isso a
-    semente grava `ativo=false` quando a lista de hoje sai vazia, e a
-    conferência trata o legado vazio desses envios como desligado."""
+    No Cadastro, ligado sem ninguém grava o registro `ok=false` e acende o
+    sino dos admins a cada rodada. Por isso a semente grava `ativo=false`
+    quando a lista de hoje sai vazia, a conferência trata o legado vazio
+    desses envios como desligado e, para a semente rodada com um código que
+    ainda não conhecia a regra (`ativo` NULL e nenhuma linha), o
+    `_interruptor_cadastro` também lê desligado."""
     if d.interruptor != "proprio" or d.legado.interruptor_env:
         return False
     if d.legado.envs:
@@ -660,15 +664,41 @@ class _Lido:
     avisos: tuple[str, ...] = ()
 
 
+async def _sem_linha_padrao(session: AsyncSession, chave: str) -> bool:
+    """A lista padrão do envio não tem NENHUMA linha (nem grupo)."""
+    return not (
+        await session.execute(
+            select(
+                exists().where(
+                    ThreemaEnvioDestinatario.envio_chave == chave,
+                    ThreemaEnvioDestinatario.logistica_status_id.is_(None),
+                )
+            )
+        )
+    ).scalar_one()
+
+
 async def _interruptor_cadastro(d: EnvioDef, linha: ThreemaEnvio, session: AsyncSession) -> bool:
     """Liga/desliga do envio migrado: `proprio` = a coluna `ativo` (NULL =
-    a chave do .env de hoje, se houver, senão ligado); `robo_modo` e
-    `robo_config` leem direto da fonte que já existe (a tela grava lá)."""
+    o interruptor de hoje: a chave do .env, se houver, senão ligado);
+    `robo_modo` e `robo_config` leem direto da fonte que já existe (a tela
+    grava lá).
+
+    NULL no envio cujo desligado de hoje é a lista vazia
+    (`_lista_vazia_desliga`) e SEM NENHUMA linha de quem recebe = desligado,
+    o mesmo desligado de hoje. É o que fica de uma semente rodada com o
+    código de antes da regra (a da F1 não conhecia a linha do Informar
+    vazia; a de antes da revisão da F1 não gravava `ativo`): sem isto, o
+    envio ficaria ligado com ninguém e acenderia o sino dos admins a cada
+    rodada, o que hoje não acontece. Lista com gente que não vale (suspenso,
+    grupo vazio) continua ligada: é o "ninguém válido", com sino."""
     if d.interruptor == "proprio":
         if linha.ativo is not None:
             return bool(linha.ativo)
         if d.legado.interruptor_env:
             return bool(getattr(get_settings(), d.legado.interruptor_env, False))
+        if _lista_vazia_desliga(d) and await _sem_linha_padrao(session, d.chave):
+            return False
         return True
     return await _interruptor_legado(d, session)
 
@@ -1116,8 +1146,20 @@ async def semear(
     sobrescrever: bool = False,
 ) -> ResultadoSemente:
     """Semeia o Cadastro das chaves da fatia a partir de `legado(chave)` — a
-    mesma função do envio. Roda ANTES de publicar a fatia (com as chaves
-    ainda `migrado=False`). Sem `aplicar` não grava nada (só o plano).
+    mesma função do envio. Sem `aplicar` não grava nada (só o plano).
+
+    Roda com o código DA FATIA, nunca com o de antes: a regra da semente pode
+    mudar na própria fatia (a F2 passou a desligar a linha do Informar vazia
+    de envio automático e a tirar do grupo a lista que nasce desligada; com o
+    código da F1, a linha `denuncia_robo` vazia recusava a F2 inteira pelo
+    grupo "IA de Chamado"). Do jeito de sempre:
+      1. publicar a fatia — chave migrada sem semente usa o legado exato, e a
+         lista antiga já está congelada (o PUT do Informar responde 410);
+      2. `semear --fatia Fn` (plano), depois `--aplicar` (sem
+         `--sobrescrever`);
+      3. `conferir --fatia Fn` com 0 diferenças.
+    (Também serve rodar 2 e 3 num container avulso da imagem nova antes de
+    trocar os serviços: o código velho não lê o Cadastro dessas chaves.)
 
     - Item 1: uma lista por regra com 👤 (com ou sem mensagem); a padrão é o
       THREEMA_RECIPIENTS de hoje.
@@ -1131,7 +1173,8 @@ async def semear(
       sem entrar no grupo dele; com gente, `ativo` NULL. Carimba
       `semeado_em`.
     - Chave já semeada fica como está (rodar duas vezes não muda nada), a
-      menos de `sobrescrever` — que só vale para chave ainda não migrada.
+      menos de `sobrescrever` — que só vale para chave ainda não migrada no
+      código em execução; chave migrada se acerta na tela.
     Commit fica com quem chama. Erros levantam CadastroError com o resultado
     em `.args[1]`."""
     if fatia not in FATIAS or fatia == "mac":

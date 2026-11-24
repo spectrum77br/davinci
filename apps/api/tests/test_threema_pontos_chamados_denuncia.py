@@ -622,6 +622,44 @@ async def test_gerente_perde_a_edicao_mas_segue_vendo_quem_recebe(
     assert r.status_code == 200 and r.json()["nomes"] == ["joana c9d"]
 
 
+@pytest.mark.usefixtures("limpar_ouvidoria")
+async def test_atalho_do_relatorio_desligado_diz_que_e_o_robo_e_mostra_a_lista(
+    db, client, auth_as, make_user
+):
+    """Revisão da F2: com o robô do relatório desligado em Ouvidoria › Robôs
+    (`ativo` NULL no Cadastro), o atalho não diz "Desligado em Cadastros" (o
+    Cairo nem tem acesso a Cadastros): diz que é o robô e mostra quem está
+    na lista (quem recebe ao religar), só nomes. Desligado no Cadastro, diz
+    que foi lá e por quem."""
+    _admin, joana, _ = await _pessoas(db)
+    await semeado(db, RELATORIO, joana)
+    await _modo_relatorio(db, "desligado")
+    auth_as(await make_user(email=GERENTE, role=UserRole.USER))
+    r = await client.get(f"/api/threema/envios/{RELATORIO}/quem-recebe")
+    assert r.status_code == 200, r.text
+    q = r.json()
+    assert (q["ativo"], q["nomes"], q["receberia"]) == (False, [], ["joana c9d"])
+    assert "Ouvidoria › Robôs" in q["desligado"] and "Cadastros" not in q["desligado"]
+    assert "TSTJ0006" not in r.text
+    # ligado, a lista é a mesma
+    await _modo_relatorio(db, "ligado")
+    q = (await client.get(f"/api/threema/envios/{RELATORIO}/quem-recebe")).json()
+    assert (q["ativo"], q["nomes"], q["receberia"], q["desligado"]) == (
+        True,
+        ["joana c9d"],
+        ["joana c9d"],
+        None,
+    )
+    # o robô de Denúncia desligado no Cadastro pelo admin
+    await semeado(db, ROBO, joana)
+    auth_as(await make_user(role=UserRole.ADMIN))
+    r = await client.patch(f"/api/threema/envios/{ROBO}", json={"ativo": False})
+    assert r.status_code == 200, r.text
+    q = (await client.get(f"/api/threema/envios/{ROBO}/quem-recebe")).json()
+    assert (q["ativo"], q["receberia"]) == (False, ["joana c9d"])
+    assert q["desligado"].startswith("Desligado em Cadastros › Envios Threema por "), q
+
+
 # ─────────────────────────────────────────────── a semente da fatia
 
 

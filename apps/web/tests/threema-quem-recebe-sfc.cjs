@@ -132,9 +132,20 @@ const leve = (extra = {}) => ({
   // ---------------------------------------------------------------- lib
   {
     assert.deepEqual(lib.situacaoQuemRecebe(leve()), { tipo: 'ok', texto: 'joana, harry potter' })
+    // a API de antes (sem `desligado`/`receberia`): a frase fixa
     assert.deepEqual(lib.situacaoQuemRecebe(leve({ ativo: false, nomes: [] })), {
       tipo: 'desligado', texto: 'Desligado em Cadastros › Envios Threema: não sai para ninguém.',
     })
+    // revisão da F2: quem desliga vem do servidor (o robô, o .env ou o
+    // Cadastro) e a lista aparece mesmo desligado (quem recebe ao religar)
+    const doRobo = "Desligado: o robô 'Relatório da Denúncia' não está ligado em Ouvidoria › Robôs."
+    assert.deepEqual(lib.situacaoQuemRecebe(leve({ ativo: false, nomes: [], desligado: doRobo, receberia: ['Cairo', 'Roma'] })), {
+      tipo: 'desligado', texto: `${doRobo} Na lista (recebem ao religar): Cairo, Roma.`,
+    })
+    assert.deepEqual(lib.situacaoQuemRecebe(leve({ ativo: false, nomes: [], desligado: doRobo, receberia: [] })), {
+      tipo: 'desligado', texto: doRobo,
+    })
+    assert.equal(lib.podeEnviarAgora(leve({ ativo: false, receberia: ['Cairo'] })), false, 'desligado com lista não envia')
     assert.deepEqual(lib.situacaoQuemRecebe(leve({ ninguem: true, nomes: [] })), {
       tipo: 'ninguem', texto: 'Ninguém recebe: este aviso não está saindo.',
     })
@@ -200,6 +211,17 @@ const leve = (extra = {}) => ({
     let html = await m.html()
     assert.match(html, /data-situacao="desligado"[^>]*>[\s\S]*Desligado em Cadastros › Envios Threema: não sai para ninguém\./)
     assert.match(html, /class="[^"]*text-amber-700[^"]*"[^>]*data-situacao="desligado"/, 'âmbar')
+    // o motivo do servidor (o .env da Conferência do ML) e quem está na lista
+    const env = 'Desligado: CONFERENCIA_ML_THREEMA está desligado no .env do servidor.'
+    const d = montar('../components/ThreemaQuemRecebe.vue', {
+      props: { chave: 'marketing.conferencia_ml' },
+      admin: false,
+      responder: () => leve({ chave: 'marketing.conferencia_ml', ativo: false, nomes: [], desligado: env, receberia: ['Cairo', 'harry potter'] }),
+    })
+    await d.montar()
+    html = await d.html()
+    assert.match(html, /data-situacao="desligado"[^>]*>[\s\S]*CONFERENCIA_ML_THREEMA está desligado no \.env do servidor\. Na lista \(recebem ao religar\): Cairo, harry potter\./)
+    assert.ok(!/Desligado em Cadastros/.test(html), 'não manda o Cairo para Cadastros')
     const n = montar('../components/ThreemaQuemRecebe.vue', {
       props: { chave: 'logistica.informar' },
       responder: () => leve({ ninguem: true, nomes: [], avisos: ['joana está suspensa'] }),

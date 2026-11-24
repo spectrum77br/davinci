@@ -47,10 +47,28 @@ from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
 pytestmark = pytest.mark.usefixtures("limpar_ouvidoria")
 
 
-def _codigo_antes_da(monkeypatch, fatia: str) -> None:
-    """A semente roda com o código de ANTES da fatia (§3.4 do desenho): as
-    chaves dela ainda `migrado=False` — é o que deixa o `--sobrescrever`."""
+def _desmigrar_fatia(monkeypatch, fatia: str) -> None:
+    """As chaves da fatia com `migrado=False` (como no código em que ainda não
+    foram publicadas) — é o que deixa o `--sobrescrever`. A regra da semente
+    continua a de AGORA: para simular o código de antes de verdade, use
+    `codigo_da_f1`."""
     desmigrar(monkeypatch, *(d.chave for d in ENVIOS if d.fatia == fatia and d.migrado))
+
+
+def regra_da_f1(d) -> bool:
+    """O `_lista_vazia_desliga` do código da F1 (commit 0f965b23): só a lista
+    do .env; a linha do Informar vazia de envio automático ainda não."""
+    return d.interruptor == "proprio" and bool(d.legado.envs) and not d.legado.interruptor_env
+
+
+def codigo_da_f1(monkeypatch) -> None:
+    """O código da F1 rodando a semente da F2 (o procedimento antigo do
+    desenho: "antes de publicar, com o código antigo"): as chaves da F2 ainda
+    não migradas E a regra da lista vazia da F1 (sem ela, a semente não
+    desliga a linha do Informar vazia e não tira a lista vazia do grupo). Use
+    num `monkeypatch.context()` para voltar ao código da F2 depois."""
+    _desmigrar_fatia(monkeypatch, "F2")
+    monkeypatch.setattr(threema_envios, "_lista_vazia_desliga", regra_da_f1)
 
 
 async def _semear(db, fatia, **kw):
@@ -280,7 +298,7 @@ async def test_sobrescrever_recusado_em_chave_migrada(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_sobrescrever_refaz_a_semente_velha(db, monkeypatch):
     await montar(db, monkeypatch)
-    _codigo_antes_da(monkeypatch, "F1")
+    _desmigrar_fatia(monkeypatch, "F1")
     await _semear(db, "F1", aplicar=True)
     # o .env mudou depois da semente: a semente envelheceu
     monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", ID["joana"])
@@ -298,7 +316,7 @@ async def test_sobrescrever_refaz_a_semente_velha(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_sobrescrever_nao_refaz_grupo_usado_por_outra_fatia(db, monkeypatch):
     await montar(db, monkeypatch)
-    _codigo_antes_da(monkeypatch, "F1")
+    _desmigrar_fatia(monkeypatch, "F1")
     await _semear(db, "F1", aplicar=True)
     await _semear(db, "F4", aplicar=True)  # item 1 usa "Avisos gerais" também
     monkeypatch.setattr(get_settings(), "threema_recipients", ID["joana"])
@@ -437,7 +455,7 @@ async def test_env_vazio_nasce_desligado_e_o_sobrescrever_acompanha_a_lista(db, 
     volta a NULL (o interruptor de hoje). Envio de outra fonte (o usuário pelo
     nome) não é tocado mesmo vazio."""
     await montar(db, monkeypatch, variante="vazias")
-    _codigo_antes_da(monkeypatch, "F1")
+    _desmigrar_fatia(monkeypatch, "F1")
     chave = K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING
     res = await _semear(db, "F1", aplicar=True)
     planos = {p.chave: p for p in res.planos}
@@ -471,9 +489,9 @@ async def test_linha_do_informar_vazia_de_envio_automatico_nasce_desligada(db, m
     """F2: a linha do Informar vazia (ou ausente) de um envio AUTOMÁTICO é o
     desligado de hoje (`if not recipients: return`, calado): a semente grava
     `ativo=false` e a conferência dá igual. O botão (manual) vazio não: a lista
-    vazia dele é o 422 do "Enviar agora", e o envio fica `ativo` NULL."""
+    vazia dele é o 422 do "Enviar agora", e o envio fica `ativo` NULL. A
+    semente roda com o código da F2 (o procedimento do `semear`)."""
     await montar(db, monkeypatch, variante="vazias")
-    _codigo_antes_da(monkeypatch, "F2")
     chaves = [
         K.LOGISTICA_INFORMAR,
         K.LOGISTICA_AMAZON_INFORMAR,
@@ -514,11 +532,18 @@ async def test_linha_do_informar_vazia_de_envio_automatico_nasce_desligada(db, m
     await db.commit()
     (item,) = await threema_envios.conferir(db, chaves=[K.LOGISTICA_AMAZON_PRAZOS])
     assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("diferente", True, False)
-    # e o contrário: Cadastro ligado sem ninguém com a linha vazia é diferença
+    # `ativo` NULL sem nenhuma linha (a semente de um código que ainda não
+    # conhecia a regra) também é o desligado de hoje: igual
     row.recipients = ""
     await db.commit()
     linha = await db.get(ThreemaEnvio, K.LOGISTICA_AMAZON_PRAZOS, populate_existing=True)
     linha.ativo = None
+    await db.commit()
+    (item,) = await threema_envios.conferir(db, chaves=[K.LOGISTICA_AMAZON_PRAZOS])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("igual", False, False)
+    # e o contrário: Cadastro ligado (de verdade) sem ninguém com a linha
+    # vazia é diferença
+    linha.ativo = True
     await db.commit()
     saida: list[str] = []
     assert (
@@ -538,7 +563,6 @@ async def test_lista_vazia_que_nasce_desligada_nao_entra_no_grupo(db, monkeypatc
     reserva), o 44 nasce desligado e FORA do grupo — sem "pessoas diferentes"
     parando a semente — e o 15 fica no grupo com a lista dele."""
     await montar(db, monkeypatch, variante="vazias")
-    _codigo_antes_da(monkeypatch, "F2")
     chaves = [K.CHAMADOS_IA_PARADA, K.DENUNCIA_ROBO_PRECISA_ALGUEM]
     res = await _semear(db, "F2", chaves=chaves, aplicar=True)
     planos = {p.chave: p for p in res.planos}
@@ -564,3 +588,102 @@ async def test_lista_vazia_que_nasce_desligada_nao_entra_no_grupo(db, monkeypatc
     itens = await threema_envios.conferir(db, chaves=chaves)
     assert [(x.chave, x.situacao) for x in itens] == [(c, "igual") for c in chaves]
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variante", ["cheio", "reservas", "vazias"])
+async def test_semente_da_f2_com_o_codigo_da_f2_confere_em_todas_as_variantes(
+    db, monkeypatch, variante
+):
+    """O procedimento (docstring do `semear`): publicar a F2 — chave migrada
+    sem semente usa o legado exato — e semear com o código DELA, sem
+    `--sobrescrever`; o `conferir --fatia F2` dá 0 diferenças. O prazo de
+    resposta das Devoluções (a linha `devolucoes_auto` não existe ou está
+    vazia em todas as variantes, como em produção) nasce desligado."""
+    await montar(db, monkeypatch, variante=variante)
+    antes = await threema_envios.conferir(db, fatia="F2")
+    assert {x.situacao for x in antes} == {"sem_semente"}
+    assert all(x.migrado for x in antes)
+    res = await _semear(db, "F2", aplicar=True)
+    assert {p.situacao for p in res.planos} == {"semear"}
+    saida: list[str] = []
+    assert await threema_envios.executar(["conferir", "--fatia", "F2"], saida.append) == 0, saida
+    linha = await db.get(ThreemaEnvio, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, populate_existing=True)
+    assert linha.ativo is False
+    # rodar de novo (sem --sobrescrever) não muda nada
+    antes = await _contagem(db)
+    res = await _semear(db, "F2", aplicar=True)
+    assert {p.situacao for p in res.planos} == {"ja_semeado"}
+    assert await _contagem(db) == antes
+
+
+@pytest.mark.asyncio
+async def test_semente_da_f2_com_o_codigo_da_f1_nao_deixa_o_item_10_ligado_sem_ninguem(
+    db, monkeypatch
+):
+    """Revisão da F2: a semente rodada com o código da F1 (o procedimento
+    antigo) passa no portão de antes de publicar, mas deixa o prazo de
+    resposta das Devoluções (10) `ativo` NULL e sem ninguém — a regra da F1
+    não conhecia a linha do Informar vazia. Com o código da F2, NULL sem
+    nenhuma linha é o desligado de hoje: a conferência continua igual e o
+    resolver diz desligado (sem registro nem sino a cada rodada)."""
+    await montar(db, monkeypatch)
+    chave = K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA
+    with monkeypatch.context() as m:
+        codigo_da_f1(m)
+        await _semear(db, "F2", aplicar=True)
+        antes = await threema_envios.conferir(db, fatia="F2")
+        assert {x.situacao for x in antes} == {"igual"}
+    linha = await db.get(ThreemaEnvio, chave, populate_existing=True)
+    assert linha.ativo is None
+    linhas = (
+        (
+            await db.execute(
+                select(ThreemaEnvioDestinatario).where(
+                    ThreemaEnvioDestinatario.envio_chave == chave
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert linhas == []
+    # publicada a F2: o conferir de depois também dá 0 diferenças
+    itens = await threema_envios.conferir(db, fatia="F2")
+    assert [(x.chave, x.situacao) for x in itens if x.situacao != "igual"] == []
+    item = next(x for x in itens if x.chave == chave)
+    assert (item.ativo_legado, item.ativo_cadastro, item.desligado_pela_lista) == (
+        False,
+        False,
+        True,
+    )
+    threema_envios.limpar_cache()
+    r = await threema_envios.resolver(chave, session=db)
+    assert (r.via, r.ativo, r.ids, r.motivo) == ("cadastro", False, (), threema_envios.DESLIGADO)
+    # o código da F2 por cima não muda a semente já feita (ja_semeado), e
+    # continua desligado
+    res = await _semear(db, "F2", aplicar=True)
+    assert {p.situacao for p in res.planos} == {"ja_semeado"}
+
+
+@pytest.mark.asyncio
+async def test_semente_da_f2_com_o_codigo_da_f1_e_a_linha_da_denuncia_vazia_e_recusada(
+    db, monkeypatch
+):
+    """Com a linha `denuncia_robo` salva vazia (o 44 não cai na reserva
+    `chamados_ia`), o código da F1 junta o 15 e o 44 no grupo "IA de
+    Chamado" com pessoas diferentes e RECUSA a fatia inteira (nada é
+    gravado). Com o código da F2 (o procedimento), a mesma semente passa e
+    confere."""
+    await montar(db, monkeypatch, variante="vazias")
+    antes = await _contagem(db)
+    with monkeypatch.context() as m:
+        codigo_da_f1(m)
+        with pytest.raises(threema_envios.CadastroError) as erro:
+            await threema_envios.semear(db, fatia="F2", aplicar=True)
+        await db.rollback()
+    erros = erro.value.args[1].erros
+    assert any(G_IA_CHAMADO in e and K.DENUNCIA_ROBO_PRECISA_ALGUEM in e for e in erros), erros
+    assert await _contagem(db) == antes
+    await _semear(db, "F2", aplicar=True)
+    itens = await threema_envios.conferir(db, fatia="F2")
+    assert [(x.chave, x.situacao) for x in itens if x.situacao != "igual"] == []

@@ -247,7 +247,9 @@ async def test_sino_quebrado_nao_derruba_o_envio(db, monkeypatch):
     chave = K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING
     migrar(monkeypatch, chave)
     await _usuario(db, "admin", "TSTA0001", role=UserRole.ADMIN)
-    await semeado(db, chave)  # semeado sem ninguém
+    # ligado de verdade sem ninguém (NULL sem nenhuma linha seria o desligado
+    # de hoje deste envio: a lista do .env vazia)
+    await semeado(db, chave, ativo=True)
 
     async def _quebra(*a, **kw):
         raise RuntimeError("alerts fora")
@@ -313,10 +315,15 @@ _USOS_DO_NUCLEO = {
         "_regras_com_pessoa",
         # Só LÊ a conversa de verdade de um remetente (monta o cliente, não envia).
         "canal",
+        # O atalho (quem recebe leve, revisão da F2): a lista de quem receberia
+        # com o envio desligado e o texto do desligado pela lista vazia.
+        "_ler_cadastro",
+        "_lista_vazia_desliga",
     },
     "services/threema_envios_edicao.py": {
         "sincronizar",
-        "_interruptor_legado",
+        # O liga/desliga efetivo é o mesmo do envio (revisão da F2).
+        "_interruptor_cadastro",
         "_dedupe",
         "enviar",
         "limpar_cache",

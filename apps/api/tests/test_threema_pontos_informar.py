@@ -775,3 +775,101 @@ async def test_quem_foi_suspenso_depois_da_semente_para_de_receber(
     for chave in (K.LOGISTICA_INFORMAR, K.CONTROLE_ESTOQUE_INFORMAR):
         leg = await threema_envios.legado(chave, session=db)
         assert ID["heisenberg"] in leg.ids, chave
+
+
+# ─────────────────────────────────────────────── revisão da F2
+
+
+async def test_aba_velha_resalva_sem_mudanca_e_o_enviar_agora_segue(db, client, auth_as, make_user):
+    """O modal de antes da publicação (aba aberta) salva a seleção antes do
+    "Enviar agora" e, no 410, para com "Não consegui salvar o cadastro." sem
+    mandar. O PUT que só repete a lista congelada responde 200 sem gravar
+    (o POST /enviar segue e manda pelo Cadastro); mudar algo continua 410.
+    Na aba Amazon o modal antigo mostrava a união das duas listas e gravava
+    essa união nas duas: o gerente também segue enviando."""
+    admin, joana, _ = await _pessoas(db)
+    await _linha_informar(db, "logistica", ID["harry"])
+    await semeado(db, K.LOGISTICA_INFORMAR, joana)
+    auth_as(admin)
+    r = await client.put("/api/informar/logistica", json={"recipients": [ID["harry"].lower()]})
+    assert r.status_code == 200, r.text
+    assert r.json()["recipients"] == [ID["harry"]]
+    r = await _botao(client, "logistica")
+    assert r.status_code == 200, r.text
+    assert _envios() == [(K.LOGISTICA_INFORMAR, "cadastro", "logistica", ["TSTJ0006"])]
+    for recipients in ([ID["harry"], ID["joana"]], [], [ID["joana"]]):
+        r = await client.put("/api/informar/logistica", json={"recipients": recipients})
+        assert r.status_code == 410, (recipients, r.text)
+    r = await client.get("/api/informar/logistica")
+    assert r.json()["recipients"] == [ID["harry"]], "a lista antiga não mudou"
+    # aba Amazon, com o gerente
+    await _linha_informar(db, "logistica_amazon", ID["harry"])
+    await _linha_informar(db, "logistica_amazon_auto", ID["londres"])
+    await semeado(db, K.LOGISTICA_AMAZON_INFORMAR, joana)
+    await semeado(db, K.LOGISTICA_AMAZON_PRAZOS, joana)
+    auth_as(await make_user(email=GERENTE, role=UserRole.USER))
+    uniao = [ID["harry"], ID["londres"]]
+    for contexto in ("logistica_amazon", "logistica_amazon_auto"):
+        r = await client.put(f"/api/informar/{contexto}", json={"recipients": uniao})
+        assert r.status_code == 200, (contexto, r.text)
+    _Fake.envios = []
+    r = await _botao(client, "logistica_amazon")
+    assert r.status_code == 200, r.text
+    assert _envios() == [
+        (K.LOGISTICA_AMAZON_INFORMAR, "cadastro", "logistica_amazon", ["TSTJ0006"])
+    ]
+    assert (await client.get("/api/informar/logistica_amazon")).json()["recipients"] == [
+        ID["harry"]
+    ]
+    assert (await client.get("/api/informar/logistica_amazon_auto")).json()["recipients"] == [
+        ID["londres"]
+    ]
+    r = await client.put(
+        "/api/informar/logistica_amazon_auto", json={"recipients": [*uniao, ID["joana"]]}
+    )
+    assert r.status_code == 410, r.text
+
+
+@pytest.mark.usefixtures("limpar_ouvidoria")
+async def test_semente_com_o_codigo_da_f1_o_prazo_de_resposta_fica_calado_ate_ter_alguem(
+    db, monkeypatch, client, auth_as, make_user
+):
+    """Revisão da F2: a semente da F2 rodada com o código da F1 deixa o 10
+    `ativo` NULL e sem ninguém (a linha `devolucoes_auto` não existe em
+    produção). Com o código da F2, NULL sem nenhuma linha é o desligado de
+    hoje: as rodadas com prazo devido não mandam, não gravam registro, não
+    acendem o sino e não carimbam. O atalho diz por quê. Quando o admin põe
+    alguém na lista, o envio liga (NULL = o interruptor de hoje) e o
+    pendente sai."""
+    from tests.test_threema_semente import codigo_da_f1
+
+    c = await montar(db, monkeypatch)
+    chave = K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA
+    with monkeypatch.context() as m:
+        codigo_da_f1(m)
+        await threema_envios.semear(db, fatia="F2", aplicar=True)
+        await db.commit()
+    assert (await db.get(ThreemaEnvio, chave, populate_existing=True)).ativo is None
+    caso = await _caso_devolucao(db)
+    for _ in range(2):  # as rodadas de :10 e :40
+        resumo = await _prazo_resposta(db)
+        assert (resumo["devidos"], resumo.get("desligado"), resumo["enviados"]) == (1, 1, 0)
+    assert await _carimbo(db, caso) is None
+    assert _Fake.envios == []
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+    auth_as(await make_user(role=UserRole.ADMIN))
+    q = (await client.get(f"/api/threema/envios/{chave}/quem-recebe")).json()
+    assert (q["ativo"], q["ninguem"], q["receberia"]) == (False, False, [])
+    assert "lista em Cadastros › Envios Threema estiver vazia" in q["desligado"]
+    # a resposta do PATCH mostra o canal de cada remetente (o fake não tem)
+    monkeypatch.setattr(_Fake, "disabled", False, raising=False)
+    monkeypatch.setattr(_Fake, "canal", None, raising=False)
+    r = await client.patch(
+        f"/api/threema/envios/{chave}",
+        json={"destinatarios": [{"tipo": "usuario", "id": str(c.usuarios["harry"].id)}]},
+    )
+    assert r.status_code == 200, r.text
+    resumo = await _prazo_resposta(db)
+    assert resumo["enviados"] == 1
+    assert _envios() == [(chave, "cadastro", "devolucoes", [ID["harry"]])]
+    assert await _carimbo(db, caso) is not None

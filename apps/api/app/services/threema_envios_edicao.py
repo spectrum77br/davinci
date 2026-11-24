@@ -31,7 +31,6 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.models import (
     LogisticaStatus,
     OuvidoriaRobo,
@@ -156,13 +155,9 @@ def _exige_editavel(d: EnvioDef) -> None:
 
 
 async def _ativo_efetivo(session: AsyncSession, d: EnvioDef, linha: ThreemaEnvio) -> bool:
-    if d.interruptor == "proprio":
-        if linha.ativo is not None:
-            return bool(linha.ativo)
-        if d.legado.interruptor_env:
-            return bool(getattr(get_settings(), d.legado.interruptor_env, False))
-        return True
-    return await threema_envios._interruptor_legado(d, session)
+    # A mesma regra do envio (inclusive o NULL sem nenhuma linha = desligado
+    # nos envios cujo desligado de hoje é a lista vazia).
+    return await threema_envios._interruptor_cadastro(d, linha, session)
 
 
 async def _gravar_ativo(

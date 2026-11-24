@@ -433,9 +433,13 @@ async def test_so_admin_ve_e_altera_quem_recebe(db, client, auth_as, make_user):
     r = await ta.enviar_pendente(db, ex, AGORA)
     assert r["enviado"] is True
     assert _envios() == [(SHOPEE, "cadastro", "chamados", ["TSTH0002"])]
-    # a do ML continua com a lista dela (e desligada: a chave do .env do ML)
+    # a do ML continua com a lista dela (e desligada: a chave do .env do ML).
+    # O atalho diz que quem desliga é o .env (não o Cadastro) e quem está na
+    # lista (revisão da F2: antes, "Desligado em Cadastros" e nenhum nome)
     q = (await client.get(f"/api/threema/envios/{ML}/quem-recebe")).json()
     assert q["ativo"] is False
+    assert "CONFERENCIA_ML_THREEMA" in q["desligado"] and "Cadastros" not in q["desligado"]
+    assert (q["nomes"], q["receberia"]) == ([], ["joana c9e"])
     linhas_ml = (
         await db.execute(
             select(ThreemaEnvioDestinatario.user_id).where(

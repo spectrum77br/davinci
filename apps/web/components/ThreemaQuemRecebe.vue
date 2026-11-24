@@ -3,7 +3,8 @@
 // Cadastros › Envios Threema (tarefa 16, F2). Mostra só os NOMES (a rota leve
 // `GET /api/threema/envios/{chave}/quem-recebe` nunca traz o ID), com a porta
 // que o catálogo declara para o envio (a mesma do botão daquele painel):
-// "Quem recebe: A, B", o desligado (âmbar), o "ninguém recebe" (vermelho), o
+// "Quem recebe: A, B", o desligado (âmbar, com quem desliga — o robô, o .env
+// ou o Cadastro — e quem está na lista), o "ninguém recebe" (vermelho), o
 // "usando a configuração antiga" (emergência) e quem ficou de fora.
 //
 // Só admin muda quem recebe (decisão do dono, 23/11/2026): o admin vê o link

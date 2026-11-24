@@ -43,7 +43,9 @@ aparecer informar na aba margem").
 Cadastros › Envios Threema (tarefa 16, F2): quando TODOS os envios que leem
 a lista de um contexto já leem o Cadastro (`migrado=True` no catálogo), quem
 recebe passa a ser escolhido só lá, só por admin. O PUT daquele contexto
-responde 410 (uma aba velha aberta não grava sem efeito), o GET continua
+responde 410 (uma aba velha aberta não grava sem efeito; o PUT que só repete
+a lista congelada — o "Enviar agora" do modal antigo salva antes de mandar —
+responde 200 sem gravar, para o envio seguir), o GET continua
 mostrando a lista antiga (congelada, é a reserva de emergência) e o
 "Enviar agora" manda pelo núcleo do Cadastro (`threema_envios.enviar`), para
 quem pode usar o botão hoje: desligado ou ninguém para receber → 422, como a
@@ -165,6 +167,44 @@ def _lista_no_cadastro(contexto: str) -> list[EnvioDef]:
     antiga não muda mais nada); vazio enquanto algum ainda a lê."""
     envios = _envios_da_lista(contexto)
     return envios if envios and all(d.migrado for d in envios) else []
+
+
+# O modal antigo (`contextoAuto`) mostrava UMA lista com a união dos dois
+# cadastros e gravava essa mesma lista nos dois (InformarThreemaModal.vue de
+# antes da F2).
+_PAR_DO_MODAL_ANTIGO = {
+    "margem": "margem_auto",
+    "margem_auto": "margem",
+    "devolucoes": "devolucoes_auto",
+    "devolucoes_auto": "devolucoes",
+    "logistica_amazon": "logistica_amazon_auto",
+    "logistica_amazon_auto": "logistica_amazon",
+}
+
+
+async def _lista_congelada(session: AsyncSession, contexto: str) -> list[str]:
+    """A lista antiga do contexto, como o GET a mostra."""
+    if contexto == _CONTEXTO_ROBO_MARGEM:
+        robo = await session.get(OuvidoriaRobo, _ROBO_MARGEM)
+        return threema.parse_recipients(robo.threema_recipients if robo else "")
+    row = await _config_row(session, contexto)
+    return threema.parse_recipients(row.recipients if row else "")
+
+
+async def _resalvar_sem_mudanca(
+    session: AsyncSession, contexto: str, recebidos: list[str]
+) -> list[str] | None:
+    """A lista congelada do contexto quando o PUT só repete o que o GET
+    mostrou (None se mudou algo). É o "Enviar agora" do modal antigo — uma
+    aba aberta antes da publicação —, que salva a seleção antes de mandar:
+    sem mudança, responder 200 deixa ele seguir para o POST /enviar (que já
+    manda pelo Cadastro) em vez de parar num 410 que ele não mostra."""
+    atual = await _lista_congelada(session, contexto)
+    conjuntos = [set(atual)]
+    par = _PAR_DO_MODAL_ANTIGO.get(contexto)
+    if par is not None:
+        conjuntos.append(set(atual) | set(await _lista_congelada(session, par)))
+    return atual if set(recebidos) in conjuntos else None
 
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
@@ -292,11 +332,21 @@ async def put_config(
     """Salva quem recebe o relatório deste contexto. Aceita só IDs que existem
     no diretório (cadastro de usuários + `.env` legado; o modal manda os
     marcados). Contexto cujos envios já leem o Cadastro: 410 (quem recebe é
-    escolhido em Cadastros › Envios Threema, só por admin)."""
+    escolhido em Cadastros › Envios Threema, só por admin) — fora o PUT que
+    só repete a lista congelada (o "Enviar agora" do modal antigo salva
+    antes de mandar): 200 sem gravar nada."""
     contexto = _valida_contexto(contexto)
     _exige_acesso(user, contexto)
     no_cadastro = _lista_no_cadastro(contexto)
     if no_cadastro:
+        recebidos = threema.parse_recipients(",".join(body.recipients))
+        atual = await _resalvar_sem_mudanca(session, contexto, recebidos)
+        if atual is not None:
+            # Nada muda (a lista antiga fica congelada): 200 sem gravar.
+            logger.info("informar_config_sem_mudanca_no_cadastro", contexto=contexto)
+            return InformarConfigOut(
+                contexto=contexto, recipients=atual, destinatarios=await _diretorio(session)
+            )
         logger.info("informar_config_recusada_no_cadastro", contexto=contexto)
         raise HTTPException(
             status.HTTP_410_GONE,

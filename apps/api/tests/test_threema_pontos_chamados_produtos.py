@@ -310,12 +310,23 @@ async def test_soma_familia_semeada_com_o_env_vazio_nasce_desligada_e_sem_sino(
     assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
 
 
-async def test_conferir_acusa_soma_familia_ligada_sem_ninguem(db):
-    """Semente sem o desligado (a de antes desta correção, ou `ativo` mexido à
-    mão): o portão da fatia tem de mostrar a diferença — com o .env vazio o
-    legado está desligado, e o Cadastro ligado sem ninguém acende o sino."""
+async def test_conferir_acusa_soma_familia_ligada_sem_ninguem(db, monkeypatch, make_user):
+    """Semente sem o desligado (a de antes desta correção): `ativo` NULL sem
+    nenhuma linha é o desligado de hoje deste envio (revisão da F2,
+    `_interruptor_cadastro`) — igual ao legado, calado, sem registro nem sino.
+    Ligado à mão sem ninguém, o portão da fatia tem de mostrar a diferença:
+    com o .env vazio o legado está desligado, e o Cadastro ligado sem ninguém
+    acende o sino."""
     chave = K.PRODUTOS_VIGIA_SOMA_FAMILIA
-    await semeado(db, chave)  # semeado sem ninguém, `ativo` NULL (= ligado)
+    await _pessoas(db)  # há admin para receber o sino, se ele acendesse
+    await semeado(db, chave)  # semeado sem ninguém, `ativo` NULL
+    (item,) = await threema_envios.conferir(db, chaves=[chave])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("igual", False, False)
+    resumo = await _soma_familia(db, monkeypatch, make_user)
+    assert resumo["atrasados"] == 1 and resumo["aviso"] == "envio_desligado"
+    assert _Fake.envios == []
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+    await _ligar(db, chave, True)
     (item,) = await threema_envios.conferir(db, chaves=[chave])
     assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("diferente", False, True)
     assert item.so_no_legado == [] and item.so_no_cadastro == []

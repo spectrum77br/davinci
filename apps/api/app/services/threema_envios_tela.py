@@ -463,7 +463,11 @@ async def _deps(session: AsyncSession, b: _Base, d: EnvioDef) -> list[dict]:
     return out
 
 
-def _texto_desligado(d: EnvioDef, linha: ThreemaEnvio | None) -> str:
+def _texto_desligado(d: EnvioDef, linha: ThreemaEnvio | None, *, atalho: bool = False) -> str:
+    """Por que o envio está desligado e quem desliga. `atalho`: o texto vai
+    para os painéis de origem (fora desta tela), então diz onde fica o
+    Cadastro."""
+    cadastro = " em Cadastros › Envios Threema" if atalho else ""
     if d.interruptor == "robo_modo":
         robo = ouvidoria.ROBOS.get(d.interruptor_alvo or "")
         base = (
@@ -473,15 +477,21 @@ def _texto_desligado(d: EnvioDef, linha: ThreemaEnvio | None) -> str:
     elif d.interruptor == "robo_config":
         base = "Desligado: a caixinha 'avisar margem alta' do Robô da Margem está desmarcada"
     elif linha is not None and linha.ativo is False:
-        base = "Desligado"
+        base = f"Desligado{cadastro}"
         if linha.ativo_alterado_por:
             base += f" por {linha.ativo_alterado_por}"
         if linha.ativo_alterado_em:
             base += f" em {linha.ativo_alterado_em.astimezone(threema_envios._FUSO):%d/%m %H:%M}"
     elif d.legado.interruptor_env:
         base = f"Desligado: {d.legado.interruptor_env.upper()} está desligado no .env do servidor"
+    elif linha is not None and linha.ativo is None and threema_envios._lista_vazia_desliga(d):
+        # `_interruptor_cadastro`: NULL sem nenhuma linha = o desligado de hoje.
+        base = (
+            f"Desligado enquanto a lista{cadastro} estiver vazia (como antes: lista "
+            "vazia = desligado); escolha quem recebe para ligar"
+        )
     else:
-        base = "Desligado"
+        base = f"Desligado{cadastro}"
     efeito = AO_DESLIGAR.get(d.ao_desligar, "")
     return f"{base} ({efeito})." if efeito else f"{base}."
 
@@ -1335,10 +1345,26 @@ def _uso_pessoa(d: EnvioDef, via: str, unico: bool, grupo: str | None) -> dict:
 
 
 async def quem_recebe_leve(session: AsyncSession, chave: str) -> dict:
-    """Só os nomes (sem ID), para o atalho dos painéis de origem."""
+    """Só os nomes (sem ID), para o atalho dos painéis de origem.
+
+    Desligado: `desligado` diz por quê e quem desliga (o robô na Ouvidoria, a
+    chave do .env, o Cadastro — `_texto_desligado`) e `receberia` traz quem
+    está na lista e receberia ao religar (o resolver não devolve ninguém
+    com o envio desligado)."""
     d = _envio(chave)
     b = await _carregar_base(session)
     quem = await _quem(session, b, d)
+    nomes = [n["nome"] for n in quem.nomes]
+    desligado: str | None = None
+    receberia = nomes
+    if not quem.ativo and d.gerenciado:
+        linha = b.linhas.get(d.chave)
+        desligado = _texto_desligado(d, linha, atalho=True)
+        if quem.via == "cadastro" and d.onde_roda == "servidor":
+            lido = await threema_envios._ler_cadastro(
+                d, None, session, olhar_emergencia=False, so_lista=True
+            )
+            receberia = [n["nome"] for n in _nomes_dos_destinos(lido.destinos)]
     return {
         "chave": d.chave,
         "nome": d.nome,
@@ -1348,8 +1374,10 @@ async def quem_recebe_leve(session: AsyncSession, chave: str) -> dict:
         "via": quem.via,
         "usa_configuracao_antiga": quem.via == "legado",
         "ninguem": d.gerenciado and d.onde_roda == "servidor" and quem.ativo and not quem.nomes,
-        "nomes": [n["nome"] for n in quem.nomes],
+        "nomes": nomes,
         "avisos": quem.avisos,
+        "desligado": desligado,
+        "receberia": receberia,
     }
 
 

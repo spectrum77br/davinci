@@ -468,6 +468,11 @@ export type QuemRecebeLeve = {
   ninguem: boolean
   nomes: string[]
   avisos: string[]
+  // Desligado: por quê e quem desliga (o robô em Ouvidoria › Robôs, a chave
+  // do .env, o Cadastro). Ausente na API de antes (aba aberta na publicação).
+  desligado?: string | null
+  // Quem está na lista e receberia (ao religar, se desligado).
+  receberia?: string[]
 }
 
 /** O envio na tela de Cadastros › Envios Threema (abre a gaveta dele). */
@@ -475,9 +480,15 @@ export function linkDoEnvio(chave: string): string {
   return `/envios-threema?envio=${encodeURIComponent(chave)}`
 }
 
-/** A linha do atalho: os nomes, o desligado (âmbar) ou o ninguém (vermelho). */
+/** A linha do atalho: os nomes, o desligado (âmbar) ou o ninguém (vermelho).
+ *  O desligado diz quem desliga (o robô, o .env ou o Cadastro, pelo
+ *  servidor) e quem receberia ao religar. */
 export function situacaoQuemRecebe(q: QuemRecebeLeve): { tipo: 'ok' | 'desligado' | 'ninguem'; texto: string } {
-  if (!q.ativo) return { tipo: 'desligado', texto: 'Desligado em Cadastros › Envios Threema: não sai para ninguém.' }
+  if (!q.ativo) {
+    const porque = q.desligado || 'Desligado em Cadastros › Envios Threema: não sai para ninguém.'
+    const lista = q.receberia?.length ? ` Na lista (recebem ao religar): ${q.receberia.join(', ')}.` : ''
+    return { tipo: 'desligado', texto: porque + lista }
+  }
   if (q.ninguem || !q.nomes.length) return { tipo: 'ninguem', texto: 'Ninguém recebe: este aviso não está saindo.' }
   return { tipo: 'ok', texto: q.nomes.join(', ') }
 }
