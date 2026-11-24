@@ -197,6 +197,36 @@ def converter(bind) -> None:
             """
         )
     )
+    marcar_antigos_lidos_para_admins(bind)
+
+
+def marcar_antigos_lidos_para_admins(bind) -> None:
+    """Decisão do dono (24/11/2026): o administrador passa a ver os alertas
+    compartilhados (ADM sem destinatário e os de equipe), uns 18.800 que nunca
+    foram dele. Para o sino não abrir em "99+", os ANTIGOS que não eram dele
+    entram como lidos para ele. O que era dele (ele era o dono do alerta ou de
+    uma cópia da mesma `dedupe_key`) mantém o lido/não lido de antes. Nada é
+    apagado; o downgrade ignora estas linhas (só devolve o lido do dono)."""
+    s = SCHEMA
+    bind.execute(
+        sa.text(
+            f"""
+            INSERT INTO {s}.alerta_leituras (user_id, alert_id, lido_em)
+            SELECT u.id, a.id, now()
+              FROM {s}.users u
+              JOIN {s}.alerts a
+                ON a.user_id IS NULL
+               AND a.duplicado_de IS NULL
+               AND a.escopo IN ('adm', 'equipe')
+             WHERE u.role::text = 'admin'
+               AND NOT EXISTS (
+                     SELECT 1 FROM {s}.alerts c
+                      WHERE (c.id = a.id OR c.duplicado_de = a.id)
+                        AND c.payload->>'{CHAVE_DONO_ANTES}' = u.id::text)
+            ON CONFLICT DO NOTHING
+            """
+        )
+    )
 
 
 def desfazer(bind) -> None:

@@ -686,7 +686,15 @@ async def test_migration_0505_converte_e_o_downgrade_desfaz(db: AsyncSession):
         leituras = (
             await db.execute(text(f'SELECT user_id, alert_id FROM "{r}".alerta_leituras'))
         ).all()
-        assert set(leituras) == {(londres, ids["revisao"])}
+        # Decisão do dono (24/11): os compartilhados antigos que NÃO eram do
+        # administrador entram como lidos para ele; o que era dele (o "preco"
+        # do adm_a) continua como estava (não lido).
+        compartilhados = ("revisao", "falha_sem_vinculo", "banido_vinculo_apagado", "bling")
+        assert set(leituras) == (
+            {(londres, ids["revisao"])}
+            | {(adm_a, ids[n]) for n in compartilhados}
+            | {(adm_b, ids[n]) for n in (*compartilhados, "preco")}
+        )
 
         # O que a cerca nova exige já vale.
         for sql in (
