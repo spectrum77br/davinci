@@ -1071,8 +1071,8 @@ const barRows=[
  {sku:'e.del.sp',name:'Excluído',kind:'simple',position:6,components:[],price:'1',balances:[],details:{version:3,status:'deleted'}},
 ];
 const barCategories=[{id:'c1',name:'Celular',path:'Celular',status:'active'},{id:'c2',name:'Celular Kit',path:'Celular Kit',status:'active'},{id:'c3',name:'MALA',path:'MALA',status:'active'},{id:'c4',name:'Velha',path:'Velha',status:'active'}];
-async function barPage(lists){
- const context=await setup({products:barRows,categories:barCategories});
+async function barPage(lists,products=barRows){
+ const context=await setup({products,categories:barCategories});
  const {dom}=context,before=dom.window.fetch;context.asked=[];
  dom.window.fetch=async(url,options)=>{if(String(url)==='/api/produto-cadastros/listas'){context.asked.push([url,options]);return lists?{ok:true,status:200,json:async()=>lists}:{ok:false,status:404,json:async()=>({})};}return before(url,options);};
  context.document.querySelector('nav [data-page=products]').click();await new Promise(r=>setTimeout(r,0));
@@ -1165,6 +1165,37 @@ test('M-30: lists from Cadastros › Produtos, live search, selection and closin
  assert.equal(barButton(d,'stock').getAttribute('aria-expanded'),'false');
  openMenu(d,'stock');d.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(d.querySelector('.catalog-bar-menu'),null);
  assert.deepEqual(listed(d),['dg105.sp']);assert.equal(barButton(d,'stock').textContent.trim(),'Estoque (1)');
+});
+
+test('M-30 revisão: a tag ou categoria nova de Cadastros › Produtos chega sem clicar em Atualizar',async()=>{
+ // O quadro fica carregado enquanto a pessoa anda pelo DaVinci (ErpTelas.vue, v-show). O admin
+ // cadastra '.us' em Cadastros › Produtos e volta: a lista nova vem com o state seguinte (o de
+ // cada minuto no modo consulta, ou o Atualizar) e também quando a pessoa volta ao quadro (foco).
+ const lists={categorias:['Celular'],tags_envio:['.sp']};
+ const {dom,document:d,asked}=await barPage(lists,[...barRows,{sku:'n1.us',name:'Nova',kind:'simple',position:7,components:[],price:'1',balances:[{depot:'geral',physical:'1',reserved:'0',available:'1'}],details:{version:0,status:'active'}}]);
+ assert.equal(asked.length,1);
+ assert.deepEqual(menuLabels(d,'tag'),['.sp','Sem tag']);
+ onlyThese(dom,d,'tag',['Sem tag']);assert.ok(listed(d).includes('n1.us'),'antes da tag existir, n1.us é Sem tag');allOf(d,'tag');
+ lists.tags_envio=['.sp','.us'];
+ await dom.window.eval('refresh()');await new Promise(r=>setTimeout(r,0));
+ assert.equal(asked.length,2,'um state novo lê as listas de novo');
+ assert.deepEqual(menuLabels(d,'tag'),['.sp','.us','Sem tag']);
+ onlyThese(dom,d,'tag',['Sem tag']);assert.ok(!listed(d).includes('n1.us'),'com a tag cadastrada, n1.us sai de Sem tag');
+ onlyThese(dom,d,'tag',['.us']);assert.deepEqual(listed(d),['n1.us']);allOf(d,'tag');
+ // Voltar ao quadro (foco na janela dele) também lê; sem mudança, não redesenha.
+ lists.categorias=['Celular','Nova'];
+ dom.window.dispatchEvent(new dom.window.Event('focus'));await new Promise(r=>setTimeout(r,0));
+ assert.equal(asked.length,3);
+ assert.deepEqual(menuLabels(d,'category'),['Celular','Nova','Sem categoria']);
+ const box=d.querySelector('[data-catalog-menu-box="category"]');
+ dom.window.dispatchEvent(new dom.window.Event('focus'));await new Promise(r=>setTimeout(r,0));
+ assert.equal(asked.length,4);assert.equal(d.querySelector('[data-catalog-menu-box="category"]'),box,'lista igual: a tela não é redesenhada');
+ // Quem está digitando na busca não perde o campo: a lista nova fica para o próximo desenho.
+ lists.tags_envio=['.sp','.us','.zz'];
+ const input=d.querySelector('#catalog-search [name=query]');input.focus();
+ dom.window.dispatchEvent(new dom.window.Event('focus'));await new Promise(r=>setTimeout(r,0));
+ assert.equal(asked.length,5);assert.equal(d.activeElement,input);
+ input.blur();assert.deepEqual(menuLabels(d,'tag'),['.sp','.us','.zz','Sem tag']);
 });
 
 test('M-30: the example of the request (2.753 products, base of 23/11) counts the same on the bar',async()=>{

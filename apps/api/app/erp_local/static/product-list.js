@@ -12,17 +12,24 @@ const catalogFilterLabels={stock:'Estoque',tag:'Tags',category:'Categoria',situa
 // As listas oficiais moram no DaVinci (Cadastros › Produtos). O ERP abre no mesmo endereço, atrás do
 // mesmo login, então a tela as lê direto da API principal com o cookie da pessoa (só leitura). Sem
 // resposta (ERP aberto fora do DaVinci, API fora do ar), valem as listas iniciais do pedido.
+// Lidas de novo a cada state novo (o de cada minuto no modo consulta e o Atualizar) e quando a
+// pessoa volta ao quadro (foco): o quadro fica carregado enquanto ela anda pelo DaVinci, e a tag ou
+// categoria cadastrada lá tem de aparecer aqui. Redesenha só se a lista mudou e ninguém digita.
 const catalogListDefaults={categorias:['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit'],tags_envio:['.cd','.ci','.pi','.ra','.sa','.sp']};
-let catalogLists=null,catalogListsAsked=false;
+let catalogLists=null,catalogListsFor;
 async function loadCatalogLists(){
- catalogListsAsked=true;
+ catalogListsFor=stateAt;
+ let next;
  try{
   const r=await fetch('/api/produto-cadastros/listas',{credentials:'same-origin',headers:{Accept:'application/json'}});
   const d=r.ok?await r.json():null;
-  if(d&&Array.isArray(d.categorias)&&Array.isArray(d.tags_envio))catalogLists={categorias:d.categorias.map(String),tags_envio:d.tags_envio.map(String)};
+  if(d&&Array.isArray(d.categorias)&&Array.isArray(d.tags_envio))next={categorias:d.categorias.map(String),tags_envio:d.tags_envio.map(String)};
  }catch(_){}
- if(catalogLists&&page==='products'&&!editingProduct)render();
+ if(!next||JSON.stringify(next)===JSON.stringify(catalogLists))return;
+ catalogLists=next;
+ if(page==='products'&&!editingProduct&&!document.activeElement?.matches?.('#catalog-search [name=query]'))render();
 }
+window.addEventListener('focus',()=>{if(page==='products'&&state)loadCatalogLists();});
 // Em ordem alfabética; guardadas até a lista mudar (o filtro passa por milhares de produtos).
 let catalogSorted={},catalogSortedFrom;
 function catalogListOf(key){
@@ -74,7 +81,7 @@ function catalogFilterMenu(key){
  return `<div class="catalog-bar-filter"><button type="button" class="catalog-bar-button" data-catalog-menu="${key}" aria-haspopup="true" aria-expanded="${open}">${esc(catalogFilterLabel(key))}${catalogBarIcons.down}</button>${menu}</div>`;
 }
 function productFilterBar(){
- if(!catalogListsAsked)loadCatalogLists();
+ if(catalogListsFor!==stateAt)loadCatalogLists();
  return `<form id="catalog-search" class="catalog-bar" role="search"><label class="catalog-bar-search">${catalogBarIcons.search}<input name="query" value="${esc(catalogQuery)}" placeholder="Buscar por SKU ou nome..." aria-label="Buscar por SKU ou nome" autocomplete="off"></label>${['stock','tag','category','situation'].map(catalogFilterMenu).join('')}</form>`;
 }
 // Fechar sem redesenhar: o mesmo clique ainda segue para o que foi clicado fora da caixinha.
@@ -99,7 +106,6 @@ function openProductDialog(id,label,body){
  if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');return dialog;
 }
 document.addEventListener('click',async e=>{
- if(e.target.closest('#refresh,#rail-refresh'))catalogListsAsked=false;
  const menu=e.target.closest('[data-catalog-menu]');
  if(menu){catalogMenu=catalogMenu===menu.dataset.catalogMenu?'':menu.dataset.catalogMenu;render();return;}
  const all=e.target.closest('[data-catalog-all]');
