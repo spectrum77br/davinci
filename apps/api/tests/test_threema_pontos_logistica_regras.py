@@ -250,6 +250,58 @@ async def test_botao_da_regra_manda_pela_lista_da_regra_para_quem_tem_edit(
     assert (await client.post(url)).status_code == 403
 
 
+async def test_aba_velha_segue_enviando_pela_rota_do_seletor_de_antes(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """A aba aberta antes da F4 (revisão F4): o modal velho chama GET
+    /api/logistica/threema/destinatarios ao clicar em Enviar. Sem a rota
+    (404), regra sem 👤 ficava com "Nenhum destinatário configurado" e o
+    Enviar travado. A rota fica, só com o item do Cadastro (sem ID do
+    Threema, nem com o .env cheio): o modal velho o marca, o POST leva
+    `recipients` e a mensagem vai para quem recebe a regra no Cadastro, com
+    aviso. O "Salvar" do 👤 velho é ignorado com aviso."""
+    _admin, joana, harry, _sumido = await _pessoas(db)
+    sem_pessoa = await _regra(db, MELI_A)
+    com_pessoa = await _regra(db, MELI_B, pessoa=ID["heisenberg"])
+    await semeado(db, CHAVE, harry)
+    await semeado(db, CHAVE, joana, regra=com_pessoa.id)
+    # o .env de antes cheio: a rota NÃO o devolve
+    monkeypatch.setattr(get_settings(), "threema_recipients", "TSTL0001,TSTE0003")
+    monkeypatch.setattr(get_settings(), "threema_recipient_names", "TSTL0001:londres")
+    seletor = "/api/logistica/threema/destinatarios"
+    auth_as(await make_user(role=UserRole.USER, permissions={}))
+    assert (await client.get(seletor)).status_code == 403
+    await _operador(make_user, auth_as, edit=False)  # a porta de antes: ver a Logística
+    r = await client.get(seletor)
+    assert r.status_code == 200, r.text
+    itens = r.json()
+    assert len(itens) == 1 and "Cadastros › Envios Threema" in itens[0]["nome"]
+    for rid in ("TSTL0001", "TSTE0003", "TSTJ0006", "TSTH0002", "londres"):
+        assert rid not in r.text
+    assert not threema.threema_id_valido(itens[0]["id"]), "não é um ID do Threema"
+    # o que o modal velho faz com ela (pages/logistica.vue de bda84917):
+    # regra sem 👤 → marca o item; regra com 👤 → marca o 👤 salvo
+    await _operador(make_user, auth_as)
+    for regra, marcados, quem in (
+        (sem_pessoa, [itens[0]["id"]], ["TSTH0002"]),
+        (com_pessoa, [ID["heisenberg"]], ["TSTJ0006"]),
+    ):
+        _Fake.envios = []
+        r = await client.post(
+            f"/api/logistica/status/{regra.id}/enviar-threema", json={"recipients": marcados}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["sent"] == quem and r.json()["failed"] == []
+        assert "Cadastros › Envios Threema" in r.json()["avisos"][0]
+        assert _envios() == [(CHAVE, str(regra.id), "cadastro", "logistica", quem)]
+    # o "Salvar" do 👤 velho com o item marcado: ignorado, com aviso
+    r = await client.patch(
+        f"/api/logistica/status/{sem_pessoa.id}", json={"threema_recipients": itens[0]["id"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["threema_recipients"] is None and r.json()["avisos"]
+
+
 async def test_botao_da_linha_manda_pela_regra_casada_e_carimba(db, client, make_user, auth_as):
     _admin, joana, harry, _sumido = await _pessoas(db)
     regra = await _regra(db)
@@ -499,16 +551,26 @@ async def test_quem_recebe_por_regra_so_nomes_com_a_porta_da_logistica(
     assert str(sem_nada.id) not in regras
     assert regras[str(propria.id)] == {
         "propria": True,
+        "lista_da_regra_sem_ninguem": False,
+        "antiga": False,
         "ativo": True,
         "nomes": ["joana c11"],
         "ninguem": False,
         "avisos": [],
     }
     assert regras[str(padrao.id)]["propria"] is False
+    assert regras[str(padrao.id)]["lista_da_regra_sem_ninguem"] is False
     assert regras[str(padrao.id)]["nomes"] == ["harry c11"]
-    # lista própria sem ninguém válido: vale a padrão, com o aviso
+    # lista própria sem ninguém válido: quem recebe é a PADRÃO, e a tela diz
+    # "lista padrão" (não "lista própria da regra"), com o aviso (revisão F4)
     assert regras[str(torta.id)]["nomes"] == ["harry c11"]
+    assert regras[str(torta.id)]["propria"] is False
+    assert regras[str(torta.id)]["lista_da_regra_sem_ninguem"] is True
     assert any("vale a lista padrão" in a for a in regras[str(torta.id)]["avisos"])
+    # e é o mesmo do envio de verdade: vai para a padrão
+    res = await threema_envios.resolver(CHAVE, escopo=torta.id)
+    assert res.ids == ("TSTH0002",) and res.caiu_na_padrao is True
+    assert (await threema_envios.resolver(CHAVE, escopo=propria.id)).caiu_na_padrao is False
     # sem semente (ou na emergência): o 👤 da regra e o .env
     await db.execute(
         update(ThreemaEnvio).where(ThreemaEnvio.chave == CHAVE).values(semeado_em=None)
@@ -518,11 +580,15 @@ async def test_quem_recebe_por_regra_so_nomes_com_a_porta_da_logistica(
     q = (await client.get(url)).json()
     assert q["usa_configuracao_antiga"] is True
     assert q["regras"][str(propria.id)]["propria"] is True
+    assert q["regras"][str(propria.id)]["antiga"] is True  # a tela diz "👤 de antes"
     assert q["regras"][str(propria.id)]["nomes"] == ["Sem nome (TS…)"]  # o 👤 de antes
+    assert q["padrao"]["antiga"] is True
     # a regra sem mensagem cuja lista só existe no Cadastro some (o 👤 dela é vazio)
     assert str(so_pessoa.id) not in q["regras"]
     assert q["regras"][str(torta.id)] == {
         "propria": False,
+        "lista_da_regra_sem_ninguem": False,
+        "antiga": True,
         "ativo": True,
         "nomes": [],
         "ninguem": True,

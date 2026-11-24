@@ -480,7 +480,8 @@ class StatusJuntarOut(BaseModel):
 
 
 class ThreemaDestinatarioOut(BaseModel):
-    """Um destinatário do Threema pro seletor do front (`id` + `nome`)."""
+    """Um item do seletor do 👤 da tela de antes da F4 (`id` + `nome`). Desde a
+    tarefa 16 a rota devolve só o item do Cadastro, sem ID do Threema."""
 
     id: str
     nome: str

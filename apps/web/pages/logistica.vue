@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck, PackageX } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
-import { CHAVE_MENSAGEM_REGRA, linkDaRegra, quemRecebeDaRegra, textoVaiPara, type QuemRecebeRegras } from '~/lib/enviosThreema'
+import { AVISO_CONFIGURACAO_ANTIGA_DA_REGRA, CHAVE_MENSAGEM_REGRA, linkDaRegra, quemRecebeDaRegra, textoVaiPara, type QuemRecebeRegras } from '~/lib/enviosThreema'
 import type { FlexPedidoSemPeca } from '~/components/LogisticaFlexPedidosSemPeca.vue'
 
 definePageMeta({
@@ -2446,11 +2446,14 @@ const threemaModal = reactive({
   status: null as LogisticaStatus | null,
   sending: false,
 })
-// "Vai para: A, B (lista própria da regra)" do modal de envio.
+// Quem recebe a regra do modal (null = não carregou: o servidor decide).
+const threemaQuemDoModal = computed(() =>
+  threemaModal.status ? quemRecebeDaRegra(threemaRegras.value, threemaModal.status.id) : null,
+)
+// "Vai para: A, B (lista própria da regra)" do modal de envio (na
+// configuração antiga, "👤 de antes" / "lista do servidor").
 const threemaVaiPara = computed(() =>
-  threemaModal.status
-    ? textoVaiPara(quemRecebeDaRegra(threemaRegras.value, threemaModal.status.id))
-    : null,
+  threemaModal.status ? textoVaiPara(threemaQuemDoModal.value) : null,
 )
 
 async function enviarThreema(s: LogisticaStatus) {
@@ -5124,6 +5127,14 @@ async function aplicarStatusBling(c: Logistica) {
           :data-vai-para="threemaVaiPara.tipo"
         >
           {{ threemaVaiPara.texto }}
+        </p>
+        <!-- emergência ou sem semente: mexer no Cadastro não muda este envio -->
+        <p
+          v-if="threemaQuemDoModal?.antiga"
+          class="text-xs font-medium text-amber-700 dark:text-amber-400"
+          data-configuracao-antiga
+        >
+          {{ AVISO_CONFIGURACAO_ANTIGA_DA_REGRA }}
         </p>
         <p class="text-xs text-muted-foreground">
           <template v-if="isAdmin">

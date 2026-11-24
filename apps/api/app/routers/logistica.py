@@ -117,6 +117,7 @@ from app.schemas.logistica import (
     StatusRepetidasOut,
     SugestaoIn,
     SugestaoOut,
+    ThreemaDestinatarioOut,
 )
 from app.services import (
     chamados_melhor_envio_abrir,
@@ -839,6 +840,29 @@ async def patch_status(
     await session.commit()
     s = await _load_status(session, s.id)
     return _to_status_out(s, avisos)
+
+
+# O item único da rota de antes do seletor (abaixo): não é ID do Threema (não
+# tem o formato), só a chave do quadradinho da tela de antes.
+_DESTINATARIO_DA_TELA_ANTIGA = ThreemaDestinatarioOut(
+    id="CADASTRO-ENVIOS-THREEMA",
+    nome="Quem recebe a regra em Cadastros › Envios Threema",
+)
+
+
+@router.get("/threema/destinatarios", response_model=list[ThreemaDestinatarioOut])
+async def threema_destinatarios(
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> list[ThreemaDestinatarioOut]:
+    """O seletor do 👤 da tela de ANTES da F4 (tarefa 16, revisão F4): a aba
+    aberta antes da publicação ainda chama esta rota ao clicar em Enviar.
+    Sem ela (404), o modal velho dizia "Nenhum destinatário configurado" e
+    travava o Enviar das regras sem 👤. Agora devolve um item só, sem ID do
+    Threema: o modal velho o marca, o POST leva `recipients` e o envio ignora
+    a escolha com aviso (vai para quem recebe a regra no Cadastro); o
+    "Salvar" do 👤 velho também é ignorado com aviso. A tela nova não usa.
+    Sai junto com as fontes antigas, 30 dias depois da F4."""
+    return [_DESTINATARIO_DA_TELA_ANTIGA]
 
 
 @router.post("/status/{status_id}/enviar-threema", response_model=EnviarThreemaOut)

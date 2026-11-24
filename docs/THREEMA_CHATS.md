@@ -146,7 +146,10 @@ coisas separadas:
   Status da Logística, Margem, Denúncia, Conferência): mostram quem recebe, só
   com nomes, e o link de editar para o admin. O "Enviar agora" continua para
   quem já podia usar o botão. As rotas que gravavam as listas antigas
-  respondem 410 ou ignoram o campo com aviso.
+  respondem 410 ou ignoram o campo com aviso. O seletor do 👤 de antes da
+  aba Status (`GET /api/logistica/threema/destinatarios`) fica até a limpeza
+  das fontes antigas, só com o item do Cadastro (sem ID): a aba aberta antes
+  da publicação segue enviando, para quem recebe a regra no Cadastro.
 - **Travas**: `apps/api/tests/test_threema_estatico.py` recusa `send_to_all`
   fora do núcleo, leitura das listas do `.env` fora do legado, chave fora do
   catálogo (no servidor e no front) e envio do servidor que não leia o

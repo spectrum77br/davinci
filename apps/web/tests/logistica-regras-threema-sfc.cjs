@@ -15,6 +15,10 @@
 //    o modal de envio mostra "vai para…" sem escolha avulsa e o POST não
 //    manda destinatários; nada grava mais o 👤 (PATCH nem seletor do .env);
 //    o formulário de regra nova diz que vale a lista padrão.
+//  - revisão F4: lista da regra sem ninguém válido diz "lista padrão" (é ela
+//    que recebe), e a configuração antiga (emergência ou sem semente) aparece
+//    como "configuração antiga" / "👤 de antes", sem mandar escolher no
+//    Cadastro quando ninguém recebe.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -103,6 +107,20 @@ const todas = (extra = {}) => ({
     assert.equal(lib.textoVaiPara(da({ ninguem: true, nomes: [] })).tipo, 'ninguem')
     assert.match(lib.textoVaiPara(da({ nomes: [] })).texto, /^Ninguém recebe: esta mensagem não sai\./)
     assert.equal(lib.textoVaiPara(null).tipo, 'desconhecido', 'sem a lista quem decide é o servidor')
+    // revisão F4: a lista da regra sem ninguém válido → quem recebe é a padrão
+    const caiu = da({ propria: false, lista_da_regra_sem_ninguem: true, nomes: ['churchill', 'londres'], avisos: ['cairo sa está suspenso', 'ninguém válido na lista da regra: vale a lista padrão do envio'] })
+    assert.deepEqual(lib.textoVaiPara(caiu), { tipo: 'ok', texto: 'Vai para: churchill, londres (lista padrão: ninguém válido na lista da regra).' })
+    assert.ok(!/lista própria/.test(lib.textoVaiPara(caiu).texto))
+    // revisão F4: a configuração antiga (emergência ou sem semente)
+    assert.deepEqual(lib.textoVaiPara(da({ antiga: true, nomes: ['joana'] })),
+      { tipo: 'ok', texto: 'Vai para: joana (👤 de antes da regra, configuração antiga).' })
+    assert.deepEqual(lib.textoVaiPara(da({ antiga: true, propria: false, nomes: ['londres'] })),
+      { tipo: 'ok', texto: 'Vai para: londres (lista do servidor, configuração antiga).' })
+    const antigaNinguem = lib.textoVaiPara(da({ antiga: true, propria: false, ninguem: true, nomes: [] }))
+    assert.equal(antigaNinguem.tipo, 'ninguem')
+    assert.match(antigaNinguem.texto, /pela configuração antiga \(o 👤 da regra e a lista do servidor estão vazios\)/)
+    assert.ok(!/Cadastros › Envios Threema/.test(antigaNinguem.texto), 'na configuração antiga o Cadastro não resolve')
+    assert.match(lib.AVISO_CONFIGURACAO_ANTIGA_DA_REGRA, /^Usando a configuração antiga/)
   }
 
   // ---------------------------------------------------------------- ThreemaRegraQuemRecebe: estático
@@ -137,6 +155,38 @@ const todas = (extra = {}) => ({
     assert.ok(!/data-etiqueta/.test(html))
     html = await renderizar({ regraId: REGRA, quem: null }, { admin: false })
     assert.match(html, />—</, 'não carregou: só o traço')
+  }
+
+  // ---------------------------------------------------------------- revisão F4: lista da regra sem ninguém válido
+  {
+    const caiu = da({ propria: false, lista_da_regra_sem_ninguem: true, nomes: ['churchill', 'londres'], avisos: ['ninguém válido na lista da regra: vale a lista padrão do envio'] })
+    const html = await renderizar({ regraId: REGRA, quem: caiu })
+    const etiquetas = [...html.matchAll(/<span[^>]*data-etiqueta[^>]*>([^<]*)<\/span>/g)].map((m) => m[1])
+    assert.deepEqual(etiquetas, ['churchill', 'londres'])
+    assert.match(html, /<span[^>]*data-padrao[^>]*>\(padrão\)<\/span>/, 'quem recebe é a padrão')
+    assert.match(html, /title="Recebem: churchill, londres \(lista padrão: ninguém válido na lista da regra\)\.\nninguém válido na lista da regra: vale a lista padrão do envio\n/)
+    assert.ok(!/lista própria/.test(html))
+    assert.ok(!/data-antiga/.test(html))
+  }
+
+  // ---------------------------------------------------------------- revisão F4: configuração antiga
+  {
+    let html = await renderizar({ regraId: REGRA, quem: da({ antiga: true, nomes: ['joana'] }) })
+    assert.match(html, /<span[^>]*data-antiga[^>]*>configuração antiga<\/span>/, 'o selo âmbar')
+    assert.match(html, /class="[^"]*text-amber-800[^"]*"[^>]*data-antiga/)
+    assert.match(html, /<span[^>]*data-pessoa-antiga[^>]*>\(👤 de antes\)<\/span>/)
+    assert.match(html, /title="Recebem: joana \(👤 de antes da regra, configuração antiga\)\.\nUsando a configuração antiga/)
+    assert.ok(!/lista própria/.test(html), 'o 👤 congelado não é "lista própria"')
+    html = await renderizar({ regraId: REGRA, quem: da({ antiga: true, propria: false, nomes: ['londres'] }) }, { admin: false })
+    assert.match(html, /data-padrao/)
+    assert.match(html, /data-antiga/)
+    assert.match(html, /\(lista do servidor, configuração antiga\)/)
+    html = await renderizar({ regraId: REGRA, quem: da({ antiga: true, propria: false, ninguem: true, nomes: [] }) })
+    assert.match(html, /data-situacao="ninguem"/)
+    assert.match(html, /title="Ninguém recebe esta mensagem pela configuração antiga/)
+    // fora da configuração antiga: sem selo
+    html = await renderizar({ regraId: REGRA, quem: da() })
+    assert.ok(!/data-antiga|data-pessoa-antiga|configuração antiga/.test(html))
   }
 
   // ---------------------------------------------------------------- pages/logistica.vue
@@ -178,6 +228,10 @@ const todas = (extra = {}) => ({
     assert.match(modal, /<NuxtLink\s+v-if="threemaModal\.status"\s+:to="linkDaRegra\(threemaModal\.status\.id\)"/)
     assert.match(modal, /<template v-if="isAdmin">/, 'o link só para admin')
     assert.match(modal, /Só admin muda quem recebe/)
+    // revisão F4: na configuração antiga o modal avisa (mexer no Cadastro não muda o envio)
+    assert.match(modal, /<p\s+v-if="threemaQuemDoModal\?\.antiga"[\s\S]*?data-configuracao-antiga\s*>\s*\{\{ AVISO_CONFIGURACAO_ANTIGA_DA_REGRA \}\}/)
+    assert.match(script, /const threemaQuemDoModal = computed\(\(\) =>\s*threemaModal\.status \? quemRecebeDaRegra\(threemaRegras\.value, threemaModal\.status\.id\) : null,/)
+    assert.match(script, /const threemaVaiPara = computed\(\(\) =>\s*threemaModal\.status \? textoVaiPara\(threemaQuemDoModal\.value\) : null,/)
     // a regra nova: vale a lista padrão
     assert.match(tpl, /data-quem-recebe-nova>\s*Vai para a lista padrão da Mensagem da regra\./)
     // o servidor diz por que não mandou (ninguém recebe)

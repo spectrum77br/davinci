@@ -144,6 +144,10 @@ class Resolucao:
     avisos: tuple[str, ...] = ()
     escopo: str | None = None
     fonte: str | None = None
+    # Item 1: a regra tem lista própria no Cadastro, mas ninguém dela vale
+    # (suspenso, sem Threema...): quem recebe é a lista PADRÃO do envio. A
+    # tela diz "lista padrão", não "lista própria" (tarefa 16, revisão F4).
+    caiu_na_padrao: bool = False
 
 
 class CadastroError(RuntimeError):
@@ -684,6 +688,8 @@ class _Lido:
     ativo: bool = True
     destinos: tuple[Destino, ...] = ()
     avisos: tuple[str, ...] = ()
+    # a lista da regra tem linhas, mas ninguém válido: valeu a padrão
+    caiu_na_padrao: bool = False
 
 
 async def _sem_linha_padrao(session: AsyncSession, chave: str) -> bool:
@@ -761,16 +767,22 @@ async def _ler_cadastro(
     avisos: list[str] = []
     regra = _uuid(escopo) if d.escopo_tipo == "regra_status" else None
     exp = _Expansao()
+    caiu_na_padrao = False
     if regra is not None:
         exp = await _expandir(session, await _linhas_destinatario(session, d.chave, regra))
         avisos.extend(exp.avisos)
         if exp.linhas and not exp.destinos:
+            caiu_na_padrao = True
             avisos.append("ninguém válido na lista da regra: vale a lista padrão do envio")
     if not exp.destinos:
         exp = await _expandir(session, await _linhas_destinatario(session, d.chave, None))
         avisos.extend(exp.avisos)
     return _Lido(
-        semeado=True, ativo=ativo_, destinos=tuple(exp.destinos), avisos=tuple(_dedupe(avisos))
+        semeado=True,
+        ativo=ativo_,
+        destinos=tuple(exp.destinos),
+        avisos=tuple(_dedupe(avisos)),
+        caiu_na_padrao=caiu_na_padrao,
     )
 
 
@@ -860,6 +872,7 @@ async def resolver(
             motivo=None if lido.destinos else NINGUEM_VALIDO,
             avisos=lido.avisos,
             escopo=esc,
+            caiu_na_padrao=lido.caiu_na_padrao,
         )
     _CACHE[(chave, esc)] = (time.monotonic(), res)
     return res

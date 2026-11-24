@@ -2,14 +2,22 @@
 // Quem recebe a Mensagem Threema de UMA regra da aba Status da Logística —
 // as etiquetas de leitura no lugar do 👤 (tarefa 16, F4/C11). Só os NOMES
 // (a rota leve `…/quem-recebe/regras` nunca traz o ID): a lista própria da
-// regra ou, sem ela, a lista padrão do envio ("padrão"); "ninguém recebe" em
-// vermelho; quem ficou de fora no title.
+// regra ou, sem ela, a lista padrão do envio ("padrão" — também quando
+// ninguém da lista da regra vale); "ninguém recebe" em vermelho; quem ficou
+// de fora no title. Na configuração antiga (emergência ou sem semente), o
+// selo âmbar "configuração antiga": o que se muda no Cadastro não vale ainda.
 //
 // Só admin muda quem recebe (decisão do dono, 23/11/2026): o admin vê o link
 // para a regra em Cadastros › Envios Threema; os demais, a frase no title.
 import { computed } from 'vue'
 import { ExternalLink, UserRound } from 'lucide-vue-next'
-import { linkDaRegra, type QuemRecebeDaRegra } from '~/lib/enviosThreema'
+import {
+  AVISO_CONFIGURACAO_ANTIGA_DA_REGRA,
+  linkDaRegra,
+  origemDaRegra,
+  textoNinguemDaRegra,
+  type QuemRecebeDaRegra,
+} from '~/lib/enviosThreema'
 
 const props = defineProps<{
   regraId: string
@@ -20,16 +28,18 @@ const props = defineProps<{
 const isAdmin = useIsAdmin()
 
 const ninguem = computed(() => !!props.quem && (props.quem.ninguem || !props.quem.nomes.length))
+const antiga = computed(() => !!props.quem?.antiga)
 const link = computed(() => linkDaRegra(props.regraId))
 const dica = computed(() => {
   const partes: string[] = []
   if (props.quem) {
     partes.push(
       ninguem.value
-        ? 'Ninguém recebe a Mensagem Threema desta regra: ela não sai.'
-        : `Recebem: ${props.quem.nomes.join(', ')} (${props.quem.propria ? 'lista própria da regra' : 'lista padrão do envio'}).`,
+        ? textoNinguemDaRegra(props.quem)
+        : `Recebem: ${props.quem.nomes.join(', ')} (${origemDaRegra(props.quem)}).`,
     )
     partes.push(...props.quem.avisos)
+    if (antiga.value) partes.push(AVISO_CONFIGURACAO_ANTIGA_DA_REGRA)
   }
   partes.push(
     isAdmin.value
@@ -61,7 +71,13 @@ const dica = computed(() => {
           data-etiqueta
         >{{ n }}</span>
         <span v-if="!quem.propria" class="text-[10px] text-muted-foreground/70" data-padrao>(padrão)</span>
+        <span v-else-if="antiga" class="text-[10px] text-muted-foreground/70" data-pessoa-antiga>(👤 de antes)</span>
       </template>
+      <span
+        v-if="antiga"
+        class="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300"
+        data-antiga
+      >configuração antiga</span>
       <span
         v-if="quem.avisos.length"
         class="text-amber-700 dark:text-amber-400"

@@ -568,10 +568,17 @@ export function configSemCadastro<T>(config: Record<string, T>, r: Pick<RoboThre
 export const CHAVE_MENSAGEM_REGRA = 'logistica.mensagem_regra'
 
 /** Quem recebe a Mensagem Threema de UMA regra (só nomes, nunca o ID):
- *  `propria` = a regra tem lista própria no Cadastro (na configuração
- *  antiga, o 👤); senão vale a lista padrão do envio. */
+ *  `propria` = quem recebe é a lista própria da regra no Cadastro (na
+ *  configuração antiga, o 👤); senão vale a lista padrão do envio.
+ *  `lista_da_regra_sem_ninguem` = a regra tem lista própria, mas ninguém
+ *  dela vale (suspenso, sem Threema): os `nomes` são os da lista PADRÃO.
+ *  `antiga` = quem recebe vem da configuração antiga (emergência ligada ou
+ *  envio sem semente): mudar o Cadastro não muda este envio enquanto ela
+ *  valer. (Os dois opcionais: servidor de antes da revisão da F4.) */
 export type QuemRecebeDaRegra = {
   propria: boolean
+  lista_da_regra_sem_ninguem?: boolean
+  antiga?: boolean
   ativo: boolean
   nomes: string[]
   ninguem: boolean
@@ -603,6 +610,25 @@ export function quemRecebeDaRegra(q: QuemRecebeRegras | null | undefined, regraI
   return q.regras[regraId] || q.padrao
 }
 
+/** De onde vêm os nomes da regra, em frase curta (as etiquetas e o
+ *  "vai para…"): a lista própria, a padrão (também quando ninguém da lista
+ *  da regra vale) ou, na configuração antiga, o 👤 de antes / a lista do
+ *  servidor. */
+export function origemDaRegra(r: QuemRecebeDaRegra): string {
+  if (r.antiga) return r.propria ? '👤 de antes da regra, configuração antiga' : 'lista do servidor, configuração antiga'
+  if (r.propria) return 'lista própria da regra'
+  if (r.lista_da_regra_sem_ninguem) return 'lista padrão: ninguém válido na lista da regra'
+  return 'lista padrão'
+}
+
+/** Ninguém recebe a regra: a frase (a mesma do servidor ao recusar). Na
+ *  configuração antiga mexer no Cadastro não resolve. */
+export function textoNinguemDaRegra(r: QuemRecebeDaRegra): string {
+  return r.antiga
+    ? 'Ninguém recebe esta mensagem pela configuração antiga (o 👤 da regra e a lista do servidor estão vazios): ela não sai.'
+    : 'Ninguém recebe: esta mensagem não sai. Quem recebe se escolhe em Cadastros › Envios Threema (só admin).'
+}
+
 /** O "vai para…" do botão Enviar da regra (não há mais escolha avulsa: só
  *  admin escolhe quem recebe, em Cadastros › Envios Threema). */
 export function textoVaiPara(r: QuemRecebeDaRegra | null): { tipo: 'ok' | 'ninguem' | 'desconhecido'; texto: string } {
@@ -613,7 +639,13 @@ export function textoVaiPara(r: QuemRecebeDaRegra | null): { tipo: 'ok' | 'ningu
     }
   }
   if (r.ninguem || !r.nomes.length) {
-    return { tipo: 'ninguem', texto: 'Ninguém recebe: esta mensagem não sai. Quem recebe se escolhe em Cadastros › Envios Threema (só admin).' }
+    return { tipo: 'ninguem', texto: textoNinguemDaRegra(r) }
   }
-  return { tipo: 'ok', texto: `Vai para: ${r.nomes.join(', ')} (${r.propria ? 'lista própria da regra' : 'lista padrão'}).` }
+  return { tipo: 'ok', texto: `Vai para: ${r.nomes.join(', ')} (${origemDaRegra(r)}).` }
 }
+
+/** A configuração antiga vale para a regra (emergência ou sem semente): o
+ *  aviso do modal e do title das etiquetas. */
+export const AVISO_CONFIGURACAO_ANTIGA_DA_REGRA =
+  'Usando a configuração antiga (emergência ligada ou envio ainda sem semente): '
+  + 'o que se muda em Cadastros › Envios Threema só vale quando ela deixar de valer.'

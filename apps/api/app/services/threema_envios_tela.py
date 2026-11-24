@@ -1408,7 +1408,14 @@ def _leve_da_resolucao(res: threema_envios.Resolucao, *, propria: bool) -> dict:
     destinos = list({x.id: x for x in res.destinos}.values())
     nomes = [n["nome"] for n in _nomes_dos_destinos(destinos)]
     return {
-        "propria": propria,
+        # a lista própria da regra é quem recebe (na configuração antiga, o 👤)
+        "propria": propria and not res.caiu_na_padrao,
+        # a regra tem lista própria, mas ninguém dela vale: quem recebe é a
+        # lista PADRÃO (os `nomes`), e a tela diz isso
+        "lista_da_regra_sem_ninguem": propria and res.caiu_na_padrao,
+        # quem recebe vem da configuração antiga (emergência ou sem semente):
+        # mudar o Cadastro não muda este envio enquanto ela valer
+        "antiga": res.via == "legado",
         "ativo": res.ativo,
         "nomes": nomes,
         "ninguem": res.ativo and not nomes,
@@ -1425,7 +1432,9 @@ async def quem_recebe_regras(session: AsyncSession, chave: str) -> dict:
     `regras`: {id: …} das regras com Mensagem Threema ou com lista própria (no
     Cadastro; na configuração antiga — emergência ou sem semente —, o 👤).
     Regra com lista própria em que ninguém vale usa a padrão, com o aviso do
-    núcleo. Mesma resolução do envio (`threema_envios.resolver`)."""
+    núcleo: `propria=False` e `lista_da_regra_sem_ninguem=True` (a tela diz
+    "lista padrão", não "lista própria"). `antiga`: a resolução veio da
+    configuração antiga. Mesma resolução do envio (`threema_envios.resolver`)."""
     d = _envio(chave)
     if d.escopo_tipo != "regra_status":
         raise TelaError(422, "sem_regras", "Este envio não tem lista por regra.")
