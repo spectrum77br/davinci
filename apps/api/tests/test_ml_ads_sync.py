@@ -811,7 +811,7 @@ async def test_backfill_apply_grava_o_historico_m22_e_simulacao_nao(
     )
     db.add(acc)
     await db.flush()
-    db.add(MarketingGastoDia(  # o zero da coleta antiga copiado pela 0506
+    db.add(MarketingGastoDia(  # o zero da coleta antiga copiado pela 0507
         marketing_account_id=acc.id, dia=INICIO, gasto_ads=Decimal("0"),
         origem="marketing_metrics",
     ))

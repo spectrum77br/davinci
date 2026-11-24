@@ -268,7 +268,7 @@ class MarketingMetric(Base, TimestampMixin):
 
 
 class MarketingGastoDia(Base):
-    """Gasto de um dia de uma conta de Ads (M-22, 24/11/2026, migration 0506).
+    """Gasto de um dia de uma conta de Ads (M-22, 24/11/2026, migration 0507).
 
     Pedido do dono: a coluna Investimento da aba Faturamento soma o gasto de
     Ads (e, um dia, a comissão de afiliados) da conta no PERÍODO filtrado. O
@@ -283,7 +283,7 @@ class MarketingGastoDia(Base):
       coleta lê afiliados): fica NULL até existir uma; a coleta de Ads nunca
       mexe nela.
     - `origem`: quem gravou — 'ml_ads', 'shopee_ads' ou 'marketing_metrics'
-      (a cópia que a 0506 fez das linhas diárias que já existiam).
+      (a cópia que a 0507 fez das linhas diárias que já existiam).
     Sem linha no dia = sem dado (a tela mostra "—", nunca R$ 0,00 inventado).
     """
 

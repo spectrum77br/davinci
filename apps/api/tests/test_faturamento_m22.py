@@ -11,7 +11,7 @@ Cobre:
   * investimento sem dia guardado = None ("—"), nunca 0; dia com gasto 0 = 0;
   * a gravação do histórico (upsert, afiliados intocado, falha não derruba a
     coleta) e a Shopee chamando a gravação;
-  * a migration 0506 (estrutura igual ao modelo, cópia das linhas diárias do
+  * a migration 0507 (estrutura igual ao modelo, cópia das linhas diárias do
     Marketing, downgrade).
 """
 
@@ -56,7 +56,7 @@ from app.services.marketing import shopee_sync
 PERM = {"faturamento": {"view": True, "edit": False, "delete": False}}
 JUNHO = {"start": "2026-06-01T00:00:00", "end": "2026-07-01T00:00:00"}
 _MIGRATION = (
-    Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0506_marketing_gasto_dia.py"
+    Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0507_marketing_gasto_dia.py"
 )
 
 
@@ -400,7 +400,7 @@ async def test_sem_a_tabela_do_historico_a_aba_abre_com_investimento_sem_dado(
     client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
-    """Revisão (24/11/2026): código novo no ar antes da 0506 (o deploy não roda
+    """Revisão (24/11/2026): código novo no ar antes da 0507 (o deploy não roda
     migration, e ela já falhou calada) não pode derrubar a aba inteira — só a
     coluna Investimento fica "—"; pedidos, faturamento e o resto seguem."""
     c = await _cenario(db)
@@ -506,11 +506,11 @@ def test_shopee_grava_o_historico_junto_da_linha_diaria():
     )
 
 
-# ── migration 0506 ────────────────────────────────────────────────────────────
+# ── migration 0507 ────────────────────────────────────────────────────────────
 
 
 def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0506", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0507", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -545,19 +545,27 @@ async def _estrutura(db: AsyncSession, schema: str, tabela: str) -> dict[str, li
 
 
 @pytest.mark.asyncio
-async def test_migration_0506_cria_o_que_o_modelo_declara_copia_e_o_downgrade_desfaz(
+async def test_migration_0507_cria_o_que_o_modelo_declara_copia_e_o_downgrade_desfaz(
     db: AsyncSession,
 ):
     mod = _carregar()
+    # 0507 depois da 0506 do main (devolução/fraude, 24/11): uma ponta só.
     assert (mod.revision, mod.down_revision) == (
-        "0506_marketing_gasto_dia",
-        "0505_alertas_por_equipe",
+        "0507_marketing_gasto_dia",
+        "0506_devolucao_fraude_reabre_negociacao",
     )
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    raiz = Path(__file__).resolve().parent.parent
+    cfg = Config(str(raiz / "alembic.ini"))
+    cfg.set_main_option("script_location", str(raiz / "alembic"))
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0507_marketing_gasto_dia"]
     schema_model = Base.metadata.schema
-    r = f"{schema_model}_mig0506"
+    r = f"{schema_model}_mig0507"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{r}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{r}"'))
-    # Só o que a 0506 toca, como na produção.
+    # Só o que a 0507 toca, como na produção.
     await db.execute(
         text(
             f'CREATE TABLE "{r}".marketing_accounts (id uuid PRIMARY KEY,'

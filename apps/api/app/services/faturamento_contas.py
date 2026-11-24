@@ -190,7 +190,7 @@ async def investimento_das_lojas(
         MarketingGastoDia.gasto_afiliados, 0
     )
     try:
-        # SAVEPOINT: sem a migration 0506 (código no ar antes dela — o deploy
+        # SAVEPOINT: sem a migration 0507 (código no ar antes dela — o deploy
         # não roda migration) a tabela não existe; aí só o Investimento fica
         # "—" e a aba (pedidos, faturamento) abre normal.
         async with session.begin_nested():

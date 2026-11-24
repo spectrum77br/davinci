@@ -1,4 +1,4 @@
-"""Histórico diário do gasto de Ads por conta (M-22, 24/11/2026, migration 0506).
+"""Histórico diário do gasto de Ads por conta (M-22, 24/11/2026, migration 0507).
 
 A coluna Investimento da aba Faturamento soma o gasto da conta no PERÍODO, e o
 `marketing_accounts.spend_today` é sobrescrito a cada coleta. Toda coleta que
@@ -36,8 +36,8 @@ logger = structlog.get_logger()
 
 ORIGEM_ML = "ml_ads"
 ORIGEM_SHOPEE = "shopee_ads"
-# A cópia que a migration 0506 fez das linhas diárias que já existiam.
-ORIGEM_COPIA_0506 = "marketing_metrics"
+# A cópia que a migration 0507 fez das linhas diárias que já existiam.
+ORIGEM_COPIA_0507 = "marketing_metrics"
 
 _CENTAVO = Decimal("0.01")
 

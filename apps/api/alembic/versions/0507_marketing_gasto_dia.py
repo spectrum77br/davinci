@@ -38,8 +38,8 @@ DOWNGRADE: apaga a tabela (o `marketing_metrics` não é tocado).
 segurando a tabela deixaria a migration na fila e a coleta parada atrás dela.
 Com o limite, a migration desiste em 5 s e é só rodar de novo.
 
-Revision ID: 0506_marketing_gasto_dia
-Revises: 0505_alertas_por_equipe
+Revision ID: 0507_marketing_gasto_dia
+Revises: 0506_devolucao_fraude_reabre_negociacao
 """
 
 # ruff: noqa: S608 — SQL montado só com nomes fixos desta migration (schema), sem entrada de fora
@@ -51,8 +51,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0506_marketing_gasto_dia"
-down_revision: str | None = "0505_alertas_por_equipe"
+revision: str = "0507_marketing_gasto_dia"
+down_revision: str | None = "0506_devolucao_fraude_reabre_negociacao"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
