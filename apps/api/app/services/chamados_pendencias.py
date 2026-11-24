@@ -74,7 +74,19 @@ HUMANO = frozenset({
     "devolucao_sem_claim",
 })
 
+# 24/11/2026 (303453 e 307730, TikTok Poofy): a API não contesta, mas a IA de
+# Chamado contesta na TELA (Suporte ao vendedor). Se ela já analisou o caso depois
+# que a abertura travou, ela assumiu: o "precisa de gente" no Threema era alarme
+# falso. Sem análise dela depois, o aviso continua.
+IA_ASSUME = frozenset({
+    "tiktok_quick_refund",
+})
+
 _TEXTO_ROTA = {
+    "tiktok_quick_refund": (
+        "a TikTok já fez o reembolso rápido e não deixa recusar o pacote pela API — "
+        "contestar pelo Suporte ao vendedor, na tela"
+    ),
     "devolucao_sem_return": (
         "a Shopee/TikTok não tem devolução (return) pra este pedido, então não dá pra "
         "contestar pela API — tem que abrir na tela da plataforma"
@@ -128,6 +140,22 @@ async def _valor(session: AsyncSession, ch: Chamado) -> float | None:
     return float(dev.custo_produto) if dev and dev.custo_produto else None
 
 
+async def _ia_assumiu(session: AsyncSession, ch: Chamado, desde: datetime) -> bool:
+    """A IA de Chamado analisou o caso depois que a abertura travou (ver `IA_ASSUME`)."""
+    achou = (
+        await session.execute(
+            select(ChamadoMensagem.id)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.tipo == "analise",
+                ChamadoMensagem.created_at > desde,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return achou is not None
+
+
 async def _ja_carimbado(session: AsyncSession, ch: Chamado, erro: str | None) -> bool:
     marca = f"{MARCA} ({(erro or 'sem motivo').strip()})"
     achou = (
@@ -174,6 +202,8 @@ async def varrer(
         limite = TOLERANCIA_ESPERA if rota == "espera" else TOLERANCIA
         if agora - presa_desde < limite:
             continue
+        if (msg.erro or "").strip() in IA_ASSUME and await _ia_assumiu(session, ch, presa_desde):
+            rota = "acompanha"  # a IA já cuida na tela
         resumo[rota] = resumo.get(rota, 0) + 1
         if rota == "acompanha" or await _ja_carimbado(session, ch, msg.erro):
             continue

@@ -289,3 +289,43 @@ async def test_limite_de_linhas_e_por_conversa(db, threema_separado):
     assert "DEV14" in textos["*DEVOL01"] and "DEV15" not in textos["*DEVOL01"]
     assert textos["*DEVOL01"].endswith("\n…")
     assert "GERAL01" in textos["*GLOBAL1"] and not textos["*GLOBAL1"].endswith("\n…")
+
+
+async def _analise_da_ia(db, ch: Chamado, *, horas_atras: int) -> None:
+    quando = datetime.now(UTC) - timedelta(hours=horas_atras)
+    db.add(ChamadoMensagem(
+        chamado_id=ch.id, direcao="sistema", tipo="analise", canal="robo",
+        texto="Análise da IA de Chamado: Feito na tela, ticket aberto no suporte.",
+        autor_nome="IA de Chamado", status="registrada", created_at=quando, updated_at=quando,
+    ))
+    await db.flush()
+
+
+async def test_reembolso_rapido_que_a_ia_ja_assumiu_nao_avisa(db, monkeypatch):
+    """303453/307730 (24/11/2026): a TikTok fez o reembolso rápido, a API não
+    contesta, mas a IA de Chamado já abriu ticket no suporte depois disso. O
+    "precisa de gente" no Threema era alarme falso."""
+    enviados = _sem_threema(monkeypatch)
+    ch = await _caso(db, pedido="303453", erro="tiktok_quick_refund", status="falhou",
+                     plataforma="tiktok", horas=20)
+    await _analise_da_ia(db, ch, horas_atras=10)
+
+    r = await svc.varrer(db)
+
+    assert r["acompanha"] == 1 and r["humano"] == 0 and r["novo"] == 0
+    assert not [n for n in await _notas(db, ch) if svc.MARCA in n]
+    assert enviados == []
+
+
+async def test_reembolso_rapido_sem_a_ia_continua_avisando(db, monkeypatch):
+    """Sem análise da IA depois que a abertura travou, ninguém cuidou: avisa."""
+    enviados = _sem_threema(monkeypatch)
+    ch = await _caso(db, pedido="307730", erro="tiktok_quick_refund", status="falhou",
+                     plataforma="tiktok", horas=20)
+    await _analise_da_ia(db, ch, horas_atras=30)  # análise velha, antes de travar
+
+    r = await svc.varrer(db)
+
+    assert r["humano"] == 1 and r["novo"] == 1
+    assert any(svc.MARCA in n and "Precisa de gente" in n for n in await _notas(db, ch))
+    assert enviados and "307730" in enviados[0] and "reembolso rápido" in enviados[0]
