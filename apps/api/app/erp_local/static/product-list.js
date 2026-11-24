@@ -1,44 +1,87 @@
 'use strict';
-const blankCatalogFilters={situation:'latest',stock:'',images:'',tag:'',category:'',ncm:'',classification:'',type:'T',brand:'',supplier:'',supplier_code:''};
-let catalogFilters={...blankCatalogFilters},catalogFilterOpen=false,catalogDensity='images',priceAdjustOpen=false,moreActionsOpen=false;
-const productSituations={latest:'Últimos Incluídos',active:'Ativos',inactive:'Inativos',deleted:'Excluídos'};
-const productStockFilters={Z:'Igual à zero',N:'Menor que zero',P:'Maior que zero'};
-const productTypeFilters={T:'Todos',E:'Produtos com composição',SC:'Produtos sem composição',P:'Produtos',PS:'Produtos simples',S:'Serviços'};
+// M-30 (Produtos 2, 24/11/2026): no lugar do funil, uma barra só — Buscar | Estoque | Tags |
+// Categoria | Situação — no visual e no jeito dos filtros Plataforma/Contas da Tabela de Preços:
+// caixas de marcar, "Marcar todas · Limpar", "(N)" com filtro parcial e tudo marcado = sem filtro.
+// Cada filtro guarda o que foi DESMARCADO; cada opção é uma fatia (todo produto cai em uma), então
+// tudo marcado mostra a lista de antes: ativos e inativos, últimos incluídos primeiro, sem os
+// excluídos. Tags e Categoria vêm de Cadastros › Produtos do DaVinci (M-29).
+let catalogDensity='images',priceAdjustOpen=false,moreActionsOpen=false;
+let catalogUnchecked={stock:new Set(),tag:new Set(),category:new Set(),situation:new Set()},catalogMenu='';
+const CATALOG_NONE='__sem';
+const catalogFilterLabels={stock:'Estoque',tag:'Tags',category:'Categoria',situation:'Situação'};
+// As listas oficiais moram no DaVinci (Cadastros › Produtos). O ERP abre no mesmo endereço, atrás do
+// mesmo login, então a tela as lê direto da API principal com o cookie da pessoa (só leitura). Sem
+// resposta (ERP aberto fora do DaVinci, API fora do ar), valem as listas iniciais do pedido.
+const catalogListDefaults={categorias:['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit'],tags_envio:['.cd','.ci','.pi','.ra','.sa','.sp']};
+let catalogLists=null,catalogListsAsked=false;
+async function loadCatalogLists(){
+ catalogListsAsked=true;
+ try{
+  const r=await fetch('/api/produto-cadastros/listas',{credentials:'same-origin',headers:{Accept:'application/json'}});
+  const d=r.ok?await r.json():null;
+  if(d&&Array.isArray(d.categorias)&&Array.isArray(d.tags_envio))catalogLists={categorias:d.categorias.map(String),tags_envio:d.tags_envio.map(String)};
+ }catch(_){}
+ if(catalogLists&&page==='products'&&!editingProduct)render();
+}
+// Em ordem alfabética; guardadas até a lista mudar (o filtro passa por milhares de produtos).
+let catalogSorted={},catalogSortedFrom;
+function catalogListOf(key){
+ if(catalogSortedFrom!==catalogLists){catalogSorted={};catalogSortedFrom=catalogLists;}
+ return catalogSorted[key]??=[...(catalogLists?.[key]??catalogListDefaults[key])].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+}
+let catalogCategoryNames=new Map(),catalogCategoryFrom;
+function catalogCategoryNamesOf(){
+ if(catalogCategoryFrom!==state.categories){catalogCategoryFrom=state.categories;catalogCategoryNames=new Map((state.categories||[]).map(c=>[c.id,c.name]));}
+ return catalogCategoryNames;
+}
 const productStatusOf=p=>p.details?.status||'active';
 const hasComposition=p=>p.kind==='kit'||!!p.structure?.components?.length;
 function productAvailable(p){const rows=(p.balances||[]).filter(b=>b.in_total!==false);return !rows.length||rows.some(b=>b.available===null)?null:rows.reduce((sum,b)=>sum+Number(b.available),0);}
-function productFilterMatches(p){
- const f=catalogFilters,status=productStatusOf(p),stock=productAvailable(p),tags=p.details?.tags||[],text=v=>String(v||'').toLowerCase();
- if(f.situation==='deleted'?status!=='deleted':status==='deleted'||f.situation!=='latest'&&status!==f.situation)return false;
- if(f.stock&&(stock===null||(f.stock==='Z'?stock!==0:f.stock==='N'?stock>=0:stock<=0)))return false;
- if(f.images&&(f.images==='S')!==!!p.images?.rows?.length)return false;
- if(f.tag&&(f.tag==='sem'?tags.length>0:!tags.includes(f.tag)))return false;
- if(f.category&&p.category?.id!==f.category)return false;
- if(f.ncm&&(f.ncm==='with')!==!!p.tax?.data?.ncm)return false;
- if(f.classification&&p.tax?.data?.item_type!==f.classification)return false;
- const service=p.kind==='service';
- if(f.type==='E'&&!hasComposition(p)||f.type==='SC'&&hasComposition(p)||f.type==='P'&&service||f.type==='PS'&&(service||hasComposition(p))||f.type==='S'&&!service)return false;
- if(f.brand&&!text(p.details?.brand).includes(text(f.brand)))return false;
- const suppliers=p.suppliers?.rows||[];
- if(f.supplier&&!suppliers.some(r=>text(r.contact?.name).includes(text(f.supplier))))return false;
- if(f.supplier_code&&!suppliers.some(r=>text(r.code).includes(text(f.supplier_code))))return false;
+function catalogFilterOptions(key){
+ if(key==='stock')return [['N','Menor que zero'],['P','Maior que zero'],['Z','Igual a zero']];
+ if(key==='situation')return [['active','Ativo'],['inactive','Inativo']];
+ if(key==='tag')return [...catalogListOf('tags_envio').map(t=>[t,t]),[CATALOG_NONE,'Sem tag']];
+ return [...catalogListOf('categorias').map(c=>[c,c]),[CATALOG_NONE,'Sem categoria']];
+}
+// Em que fatia de cada filtro o produto cai. Estoque: o número da coluna Estoque; sem número (—,
+// como serviço) conta como zero. Tag: o fim do SKU (dg105.sp e dg105.sp+a001.sp têm .sp). Categoria:
+// a que o produto já tem na base do ERP, pelo nome; nome fora da lista = Sem categoria.
+function productFilterKeys(p,key,categoryNames){
+ if(key==='stock'){const stock=productAvailable(p);return [stock<0?'N':stock>0?'P':'Z'];}
+ if(key==='situation')return [productStatusOf(p)];
+ if(key==='tag'){const sku=String(p.sku).toLowerCase(),hits=catalogListOf('tags_envio').filter(t=>t&&sku.endsWith(t.toLowerCase()));return hits.length?hits:[CATALOG_NONE];}
+ const name=String(categoryNames.get(p.category?.id)||'').toLowerCase(),hit=name&&catalogListOf('categorias').find(c=>c.toLowerCase()===name);
+ return [hit||CATALOG_NONE];
+}
+function productFilterMatches(p,categoryNames=catalogCategoryNamesOf()){
+ if(productStatusOf(p)==='deleted')return false;
+ for(const key of Object.keys(catalogUnchecked)){
+  const off=catalogUnchecked[key];
+  if(off.size&&!productFilterKeys(p,key,categoryNames).some(k=>!off.has(k)))return false;
+ }
  return true;
 }
-function sortCatalog(rows){return catalogFilters.situation==='latest'?[...rows].sort((a,b)=>(b.position||0)-(a.position||0)):rows;}
+function sortCatalog(rows){return [...rows].sort((a,b)=>(b.position||0)-(a.position||0));}
 const catalogTagOptions=()=>[...new Set(state.products.flatMap(p=>p.details?.tags||[]))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
-function productFilterPanel(){
- const f=catalogFilters,choice=(name,label,choices,blank)=>`<label>${label}<select name="${name}">${blank===undefined?'':`<option value="">${blank}</option>`}${Object.entries(choices).map(([id,t])=>`<option value="${esc(id)}" ${f[name]===id?'selected':''}>${esc(t)}</option>`).join('')}</select></label>`,field=(name,label)=>`<label>${label}<input name="${name}" value="${esc(f[name])}"></label>`;
- const categories=Object.fromEntries((state.categories||[]).slice().sort((a,b)=>a.path.localeCompare(b.path,'pt-BR')).map(c=>[c.id,c.path]));
- return `<form id="catalog-filter" class="catalog-filter"><div class="catalog-filter-head"><strong>${icon('filter')} Filtrar</strong><button type="button" class="filter-close" data-catalog-filter-toggle aria-label="Fechar filtros">×</button></div>${choice('situation','Situação',productSituations)}${choice('stock','Estoque',productStockFilters,'Selecione uma opção')}${choice('images','Imagens',{S:'Sim',N:'Não'},'Selecione uma opção')}${choice('tag','Tags',{sem:'Sem Tag',...Object.fromEntries(catalogTagOptions().map(t=>[t,t]))},'Todos')}${choice('category','Categoria',categories,'Todas')}${choice('ncm','NCM',{without:'Sem NCM',with:'Com NCM'},'Selecione uma opção')}${choice('classification','Classificação',productTaxTypes,'Todas')}${choice('type','Tipo',productTypeFilters)}${field('brand','Marca')}${field('supplier','Fornecedor')}${field('supplier_code','Cód fornecedor')}<button class="secondary">Filtrar</button></form>`;
+const catalogBarIcons={search:'<svg class="catalog-bar-lupa" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',down:'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>'};
+function catalogFilterLabel(key){
+ const options=catalogFilterOptions(key),checked=options.filter(([v])=>!catalogUnchecked[key].has(v)).length;
+ return checked<options.length?`${catalogFilterLabels[key]} (${checked})`:catalogFilterLabels[key];
 }
-function productFilterChips(){
- const f=catalogFilters,chips=[`<span>Situação: ${esc(productSituations[f.situation])}</span>`];
- const named={stock:['Estoque',productStockFilters],images:['Imagens',{S:'Sim',N:'Não'}],ncm:['NCM',{without:'Sem NCM',with:'Com NCM'}],classification:['Classificação',productTaxTypes],type:['Tipo',productTypeFilters]};
- for(const [key,[label,choices]] of Object.entries(named))if(f[key]&&f[key]!==blankCatalogFilters[key])chips.push(`<span>${label}: ${esc(choices[f[key]]||f[key])}<button type="button" data-catalog-filter-clear="${key}" aria-label="Remover filtro ${label}">×</button></span>`);
- for(const [key,label] of [['tag','Tag'],['brand','Marca'],['supplier','Fornecedor'],['supplier_code','Cód fornecedor']])if(f[key])chips.push(`<span>${label}: ${esc(f[key]==='sem'?'Sem Tag':f[key])}<button type="button" data-catalog-filter-clear="${key}" aria-label="Remover filtro ${label}">×</button></span>`);
- if(f.category)chips.push(`<span>Categoria: ${esc((state.categories||[]).find(c=>c.id===f.category)?.path||f.category)}<button type="button" data-catalog-filter-clear="category" aria-label="Remover filtro Categoria">×</button></span>`);
- if(productSelection.size)chips.push(`<span>Selecionados: ${productSelection.size} cadastro${productSelection.size>1?'s':''}<button type="button" data-product-selection-clear aria-label="Limpar seleção">×</button></span>`);
- return `<div class="catalog-chips">${chips.join('')}<button type="button" class="link-action inline" data-catalog-filter-reset>Limpar</button></div>`;
+function catalogFilterMenu(key){
+ const off=catalogUnchecked[key],open=catalogMenu===key;
+ const menu=open?`<div class="catalog-bar-menu" data-catalog-menu-box="${key}" role="group" aria-label="${catalogFilterLabels[key]}"><div class="catalog-bar-menu-head"><button type="button" data-catalog-all="${key}">Marcar todas</button><span aria-hidden="true">·</span><button type="button" data-catalog-none="${key}">Limpar</button></div><div class="catalog-bar-options">${catalogFilterOptions(key).map(([v,t])=>`<label><input type="checkbox" data-catalog-option="${key}" value="${esc(v)}" ${off.has(v)?'':'checked'}>${esc(t)}</label>`).join('')}</div></div>`:'';
+ return `<div class="catalog-bar-filter"><button type="button" class="catalog-bar-button" data-catalog-menu="${key}" aria-haspopup="true" aria-expanded="${open}">${esc(catalogFilterLabel(key))}${catalogBarIcons.down}</button>${menu}</div>`;
+}
+function productFilterBar(){
+ if(!catalogListsAsked)loadCatalogLists();
+ return `<form id="catalog-search" class="catalog-bar" role="search"><label class="catalog-bar-search">${catalogBarIcons.search}<input name="query" value="${esc(catalogQuery)}" placeholder="Buscar por SKU ou nome..." aria-label="Buscar por SKU ou nome" autocomplete="off"></label>${['stock','tag','category','situation'].map(catalogFilterMenu).join('')}</form>`;
+}
+// Fechar sem redesenhar: o mesmo clique ainda segue para o que foi clicado fora da caixinha.
+function closeCatalogMenu(){catalogMenu='';document.querySelector('[data-catalog-menu-box]')?.remove();document.querySelectorAll('[data-catalog-menu]').forEach(b=>b.setAttribute('aria-expanded','false'));}
+function catalogFilterChanged(focus){
+ catalogOffset=0;productSelection.clear();render();
+ if(focus)[...document.querySelectorAll(`[data-catalog-option="${focus[0]}"]`)].find(i=>i.value===focus[1])?.focus();
 }
 function priceAdjustPanel(){
  const filtered=catalogMatches().length,selected=productSelection.size;
@@ -56,11 +99,14 @@ function openProductDialog(id,label,body){
  if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');return dialog;
 }
 document.addEventListener('click',async e=>{
- if(e.target.closest('[data-catalog-filter-toggle]')){catalogFilterOpen=!catalogFilterOpen;render();return;}
- const clear=e.target.closest('[data-catalog-filter-clear]');
- if(clear){catalogFilters[clear.dataset.catalogFilterClear]=blankCatalogFilters[clear.dataset.catalogFilterClear];catalogOffset=0;render();return;}
- if(e.target.closest('[data-catalog-filter-reset]')){catalogFilters={...blankCatalogFilters};catalogQuery='';catalogOffset=0;productSelection.clear();render();return;}
- if(e.target.closest('[data-product-selection-clear]')){productSelection.clear();render();return;}
+ if(e.target.closest('#refresh,#rail-refresh'))catalogListsAsked=false;
+ const menu=e.target.closest('[data-catalog-menu]');
+ if(menu){catalogMenu=catalogMenu===menu.dataset.catalogMenu?'':menu.dataset.catalogMenu;render();return;}
+ const all=e.target.closest('[data-catalog-all]');
+ if(all){catalogUnchecked[all.dataset.catalogAll]=new Set();catalogFilterChanged();return;}
+ const none=e.target.closest('[data-catalog-none]');
+ if(none){catalogUnchecked[none.dataset.catalogNone]=new Set(catalogFilterOptions(none.dataset.catalogNone).map(([v])=>v));catalogFilterChanged();return;}
+ if(catalogMenu&&!e.target.closest('.catalog-bar-filter'))closeCatalogMenu();
  const density=e.target.closest('[data-product-density]');if(density){catalogDensity=density.dataset.productDensity;render();return;}
  if(e.target.closest('[data-more-actions]')){moreActionsOpen=!e.target.closest('details').open;return;}
  if(e.target.closest('[data-price-adjust-open]')){priceAdjustOpen=true;render();document.getElementById('price-adjust')?.scrollIntoView?.({block:'nearest'});return;}
@@ -78,9 +124,26 @@ document.addEventListener('click',async e=>{
  if(clone){const source=state.products.find(p=>p.sku===clone.dataset.productClone);openProductDialog('product-clone-dialog','Clonar produto',`<form id="product-clone-form"><input type="hidden" name="source" value="${esc(source.sku)}"><p class="source-line">O cadastro é copiado sem GTIN, DUN nem estoque, para não confundir leituras e saldos.</p><label>Novo código (SKU)<input name="new_sku" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._+\\-]*"></label><label>Nome<input name="name" required maxlength="120" value="${esc(source.name)}"></label><div class="form-footer"><button type="button" class="secondary" data-dialog-close>Cancelar</button><button>Clonar</button></div></form>`);return;}
  if(e.target.closest('[data-dialog-close]'))e.target.closest('dialog').remove();
 });
+document.addEventListener('change',e=>{
+ const option=e.target.closest('[data-catalog-option]');if(!option)return;
+ const key=option.dataset.catalogOption,off=new Set(catalogUnchecked[key]);
+ if(option.checked)off.delete(option.value);else off.add(option.value);
+ catalogUnchecked[key]=off;catalogFilterChanged([key,option.value]);
+});
+// Busca enquanto digita, como na Tabela de Preços; Enter continua valendo (app.js, catalog-search).
+let catalogTyping=0;
+document.addEventListener('input',e=>{
+ if(!e.target.matches?.('#catalog-search [name=query]'))return;
+ clearTimeout(catalogTyping);const value=e.target.value;
+ catalogTyping=setTimeout(()=>{
+  if(catalogQuery===value)return;
+  catalogQuery=value;catalogOffset=0;render();
+  const box=document.querySelector('#catalog-search [name=query]');if(box){box.focus();box.setSelectionRange?.(value.length,value.length);}
+ },250);
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&catalogMenu)closeCatalogMenu();});
 document.addEventListener('submit',async e=>{
  const id=e.target.getAttribute('id');
- if(id==='catalog-filter'){e.preventDefault();catalogFilters={...blankCatalogFilters,...Object.fromEntries(new FormData(e.target))};catalogOffset=0;productSelection.clear();render();}
  if(id==='price-adjust'){
   e.preventDefault();const f=Object.fromEntries(new FormData(e.target)),skus=f.scope==='selected'?[...productSelection]:catalogMatches().map(p=>p.sku);
   if(skus.length>1000){message('Refine os filtros: o reajuste aceita até 1.000 produtos por vez.',true);return;}

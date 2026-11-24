@@ -206,3 +206,24 @@ body.consulta .extra{display:none!important}
 #product-edit-form .consulta-note{color:#0f5132;font-weight:600;margin-right:auto}
 /* Inside DaVinci ("Produtos 2", "Pedidos 2"): the screen without the ERP's own menus. */
 body.embedded .sidebar,body.embedded .erp-topbar,body.embedded footer,body.embedded #back{display:none!important}body.embedded .workspace{margin-left:0;width:100%}body.embedded #action-rail{top:79px}body.embedded .abertura{display:none!important}
+/* M-30 (Produtos 2): barra Buscar | Estoque | Tags | Categoria | Situação no visual dos filtros
+   Plataforma/Contas da Tabela de Preços do DaVinci (fonte do DaVinci, 28px de altura, caixinha com
+   "Marcar todas · Limpar" e uma caixa de marcar por opção). No lugar do funil e do painel Filtrar. */
+.catalog-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";color:rgb(15,23,42)}
+.catalog-bar .catalog-bar-search{position:relative;display:block;flex:1 1 0%;min-width:200px;max-width:384px;margin:0;font-size:14px;font-weight:400;color:inherit}
+.catalog-bar .catalog-bar-lupa{position:absolute;left:8px;top:50%;transform:translateY(-50%);color:rgb(107,114,128);pointer-events:none}
+.catalog-bar .catalog-bar-search input{width:100%;height:28px;min-height:28px;padding:0 8px 0 28px;border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,42);font:inherit;font-size:14px;line-height:20px;box-shadow:none}
+.catalog-bar .catalog-bar-search input::placeholder{color:rgb(156,163,175)}
+.catalog-bar .catalog-bar-search input:focus{border-color:rgb(147,197,253);box-shadow:0 0 0 1px rgb(147,197,253)}
+.catalog-bar-filter{position:relative}
+.catalog-bar .catalog-bar-button{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;min-height:28px;padding:0 10px;border:1px solid rgb(229,231,235);border-radius:8px;background:#fff;color:rgb(15,23,42);font:inherit;font-size:12px;line-height:16px;font-weight:500;white-space:nowrap;box-shadow:none}
+.catalog-bar .catalog-bar-button:hover{background:rgb(243,244,246);filter:none}
+.catalog-bar-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:70;width:256px;max-width:calc(100vw - 16px);padding:8px;border:1px solid rgb(229,231,235);border-radius:8px;background:#fff;box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1)}
+.catalog-bar-menu-head{display:flex;align-items:center;gap:8px;padding:0 4px 4px;font-size:12px;line-height:16px;color:rgb(107,114,128)}
+.catalog-bar .catalog-bar-menu-head button{padding:0;border:0;border-radius:0;background:none;color:rgb(29,78,216);font:inherit;font-size:12px;line-height:16px;font-weight:400;box-shadow:none}
+.catalog-bar .catalog-bar-menu-head button:hover{text-decoration:underline;filter:none}
+.catalog-bar-options{max-height:288px;overflow-y:auto;border-top:1px solid rgb(229,231,235);padding-top:4px}
+.catalog-bar .catalog-bar-options label{display:flex;align-items:center;gap:8px;margin:0;padding:4px;border-radius:4px;font-size:14px;line-height:20px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
+.catalog-bar .catalog-bar-options label:hover{background:rgba(243,244,246,.5)}
+.catalog-bar .catalog-bar-options input[type=checkbox]{width:16px;height:16px;min-height:16px;margin:0;flex:none}
+@media print{.catalog-bar{display:none!important}}

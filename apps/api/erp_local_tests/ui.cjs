@@ -1051,18 +1051,147 @@ const catalogRows=[
 ];
 const listed=d=>[...d.querySelectorAll('[data-product-select]')].map(i=>i.dataset.productSelect);
 async function catalogPage(overrides={}){const context=await setup({products:catalogRows,categories:[{id:'c1',path:'Malas',status:'active'}],...overrides});context.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};context.document.querySelector('nav [data-page=products]').click();return context;}
-function filterBy(dom,d,values){if(!d.querySelector('#catalog-filter'))d.querySelector('[data-catalog-filter-toggle]').click();for(const [k,v] of Object.entries(values))d.querySelector(`#catalog-filter [name=${k}]`).value=v;d.querySelector('#catalog-filter').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));}
+// M-30: the bar's helpers. Open a menu, the labels of its options, check exactly these options.
+const barButton=(d,key)=>d.querySelector(`[data-catalog-menu="${key}"]`);
+function openMenu(d,key){if(!d.querySelector(`[data-catalog-menu-box="${key}"]`))barButton(d,key).click();return d.querySelector(`[data-catalog-menu-box="${key}"]`);}
+const menuLabels=(d,key)=>[...openMenu(d,key).querySelectorAll('label')].map(l=>l.textContent.trim());
+function onlyThese(dom,d,key,labels){
+ openMenu(d,key).querySelector(`[data-catalog-none="${key}"]`).click();
+ for(const label of labels){const box=[...openMenu(d,key).querySelectorAll('label')].find(l=>l.textContent.trim()===label).querySelector('input');box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));}
+}
+function allOf(d,key){openMenu(d,key).querySelector(`[data-catalog-all="${key}"]`).click();}
+function searchFor(dom,d,text){const form=d.querySelector('#catalog-search');form.querySelector('[name=query]').value=text;form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));}
 
-test('product filters mirror the observed panel and hide removed items by default',async()=>{
- const {dom,document:d}=await catalogPage();
- assert.deepEqual(listed(d),['d.serv','c.kit','b.zero','a.ativo']);
- const cases=[[{situation:'deleted'},['e.del']],[{situation:'inactive'},['b.zero']],[{situation:'active'},['a.ativo','c.kit','d.serv']],[{stock:'Z'},['b.zero']],[{stock:'P'},['c.kit','a.ativo']],[{images:'S'},['a.ativo']],[{tag:'MALA'},['a.ativo']],[{tag:'sem'},['d.serv','c.kit','b.zero']],[{category:'c1'},['a.ativo']],[{ncm:'with'},['a.ativo']],[{classification:'00'},['a.ativo']],[{type:'E'},['c.kit']],[{type:'S'},['d.serv']],[{type:'PS'},['b.zero','a.ativo']],[{brand:'sorr'},['a.ativo']],[{supplier:'um'},['a.ativo']],[{supplier_code:'f1'},['a.ativo']]];
- for(const [values,expected] of cases){
-  d.querySelector('[data-catalog-filter-reset]').click();filterBy(dom,d,values);
-  const got=listed(d);assert.deepEqual([...got].sort(),[...expected].sort(),JSON.stringify(values));
+const barRows=[
+ {sku:'dg105.sp',name:'Celular A',kind:'simple',position:1,components:[],price:'10',balances:[{depot:'geral',physical:'5',reserved:'0',available:'5'}],details:{version:1,status:'active'},category:{id:'c1'}},
+ {sku:'dg105.sp+a001.sp',name:'Kit A',kind:'kit',position:2,components:[{sku:'dg105.sp',quantity:'1'}],price:'20',balances:[{depot:'geral',physical:'0',reserved:null,available:'0'}],details:{version:0,status:'active'},category:{id:'c2'}},
+ {sku:'a001.pi',name:'Mala B',kind:'simple',position:3,components:[],price:'30',balances:[{depot:'geral',physical:'0',reserved:'2',available:'-2'}],details:{version:0,status:'inactive'},category:{id:'c3'}},
+ {sku:'x.semtag',name:'Conserto',kind:'service',position:4,components:[],price:'40',balances:[],details:{version:0,status:'active'}},
+ {sku:'v.cat',name:'Coisa velha',kind:'simple',position:5,components:[],price:'50',balances:[{depot:'geral',physical:'3',reserved:'0',available:'3'}],details:{version:0,status:'active',gtin:'7891234567895'},category:{id:'c4'}},
+ {sku:'e.del.sp',name:'Excluído',kind:'simple',position:6,components:[],price:'1',balances:[],details:{version:3,status:'deleted'}},
+];
+const barCategories=[{id:'c1',name:'Celular',path:'Celular',status:'active'},{id:'c2',name:'Celular Kit',path:'Celular Kit',status:'active'},{id:'c3',name:'MALA',path:'MALA',status:'active'},{id:'c4',name:'Velha',path:'Velha',status:'active'}];
+async function barPage(lists){
+ const context=await setup({products:barRows,categories:barCategories});
+ const {dom}=context,before=dom.window.fetch;context.asked=[];
+ dom.window.fetch=async(url,options)=>{if(String(url)==='/api/produto-cadastros/listas'){context.asked.push([url,options]);return lists?{ok:true,status:200,json:async()=>lists}:{ok:false,status:404,json:async()=>({})};}return before(url,options);};
+ context.document.querySelector('nav [data-page=products]').click();await new Promise(r=>setTimeout(r,0));
+ return context;
+}
+const railCount=d=>d.querySelector('#action-rail .rail-info strong').textContent;
+
+test('M-30: one bar — search, Estoque, Tags, Categoria, Situação — and nothing of the old funnel',async()=>{
+ const {document:d,asked}=await barPage();
+ const bar=d.querySelector('#catalog-search.catalog-bar');assert.ok(bar);
+ assert.equal(bar.querySelector('[name=query]').placeholder,'Buscar por SKU ou nome...');
+ assert.ok(bar.querySelector('.catalog-bar-search svg.catalog-bar-lupa'),'lupa à esquerda');
+ assert.deepEqual([...bar.querySelectorAll('[data-catalog-menu]')].map(b=>b.textContent.trim()),['Estoque','Tags','Categoria','Situação']);
+ for(const gone of ['[data-catalog-filter-toggle]','#catalog-filter','.catalog-filter','.catalog-chips','[aria-label="Filtro de período"]','.filter-caption','[data-catalog-filter-reset]'])assert.equal(d.querySelector(gone),null,gone);
+ assert.doesNotMatch(d.getElementById('content').textContent,/Últimos Incluídos|Excluídos|Filtrar/);
+ // Tudo marcado = a lista de hoje: ativos e inativos, últimos incluídos primeiro, sem os excluídos.
+ assert.deepEqual(listed(d),['v.cat','x.semtag','a001.pi','dg105.sp+a001.sp','dg105.sp']);
+ assert.equal(railCount(d),'5');
+ // As listas de Tags e Categoria vêm do DaVinci; sem resposta, as do pedido.
+ assert.equal(asked.length,1);assert.equal(asked[0][1].credentials,'same-origin');
+ assert.deepEqual(menuLabels(d,'stock'),['Menor que zero','Maior que zero','Igual a zero']);
+ assert.deepEqual(menuLabels(d,'tag'),['.cd','.ci','.pi','.ra','.sa','.sp','Sem tag']);
+ assert.deepEqual(menuLabels(d,'category'),['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit','Sem categoria']);
+ assert.deepEqual(menuLabels(d,'situation'),['Ativo','Inativo']);
+ const box=openMenu(d,'situation');
+ assert.deepEqual([...box.querySelectorAll('.catalog-bar-menu-head button')].map(b=>b.textContent),['Marcar todas','Limpar']);
+ assert.ok([...box.querySelectorAll('input[type=checkbox]')].every(i=>i.checked),'tudo marcado ao abrir');
+ assert.equal(d.querySelectorAll('.catalog-bar-menu').length,1,'uma caixinha aberta por vez');
+});
+
+test('M-30: each filter by checkboxes, the count on the button, and all of them with the search',async()=>{
+ const {dom,document:d}=await barPage();
+ const cases=[
+  ['stock',['Menor que zero'],['a001.pi']],
+  ['stock',['Maior que zero'],['v.cat','dg105.sp']],
+  ['stock',['Igual a zero'],['x.semtag','dg105.sp+a001.sp']],
+  ['tag',['.sp'],['dg105.sp+a001.sp','dg105.sp']],
+  ['tag',['.pi'],['a001.pi']],
+  ['tag',['Sem tag'],['v.cat','x.semtag']],
+  ['category',['Celular'],['dg105.sp']],
+  ['category',['Mala'],['a001.pi']],
+  ['category',['Sem categoria'],['v.cat','x.semtag']],
+  ['category',['Celular','Celular Kit'],['dg105.sp+a001.sp','dg105.sp']],
+  ['situation',['Inativo'],['a001.pi']],
+  ['situation',['Ativo'],['v.cat','x.semtag','dg105.sp+a001.sp','dg105.sp']],
+ ];
+ for(const [key,labels,expected] of cases){
+  onlyThese(dom,d,key,labels);
+  assert.deepEqual(listed(d),expected,`${key}: ${labels}`);
+  assert.equal(barButton(d,key).textContent.trim(),`${{stock:'Estoque',tag:'Tags',category:'Categoria',situation:'Situação'}[key]} (${labels.length})`);
+  assert.equal(railCount(d),String(expected.length),'Quantidade de Produtos acompanha o filtro');
+  allOf(d,key);assert.equal(barButton(d,key).textContent.trim(),{stock:'Estoque',tag:'Tags',category:'Categoria',situation:'Situação'}[key]);
  }
- d.querySelector('[data-catalog-filter-reset]').click();assert.equal(listed(d).length,4);
- assert.match(d.querySelector('.catalog-chips').textContent,/Últimos Incluídos/);
+ // Limpar tudo num filtro = nada passa.
+ openMenu(d,'tag').querySelector('[data-catalog-none="tag"]').click();assert.deepEqual(listed(d),[]);assert.equal(barButton(d,'tag').textContent.trim(),'Tags (0)');allOf(d,'tag');
+ // Somam entre si e com a busca.
+ onlyThese(dom,d,'situation',['Ativo']);onlyThese(dom,d,'tag',['.sp']);
+ assert.deepEqual(listed(d),['dg105.sp+a001.sp','dg105.sp']);
+ searchFor(dom,d,'a001');assert.deepEqual(listed(d),['dg105.sp+a001.sp']);
+ searchFor(dom,d,'celular');assert.deepEqual(listed(d),['dg105.sp']);
+ allOf(d,'situation');allOf(d,'tag');
+ // Nome, SKU e (como antes) GTIN.
+ searchFor(dom,d,'7891234567895');assert.deepEqual(listed(d),['v.cat']);
+ searchFor(dom,d,'MALA b');assert.deepEqual(listed(d),['a001.pi']);
+ searchFor(dom,d,'');assert.equal(listed(d).length,5);
+});
+
+test('M-30: lists from Cadastros › Produtos, live search, selection and closing the menu',async()=>{
+ const {dom,document:d,asked}=await barPage({categorias:['Mala','Celular','Nova'],tags_envio:['.us','.sp']});
+ assert.equal(asked.length,1);
+ assert.deepEqual(menuLabels(d,'tag'),['.sp','.us','Sem tag'],'ordem alfabética, Sem tag por último');
+ assert.deepEqual(menuLabels(d,'category'),['Celular','Mala','Nova','Sem categoria']);
+ // Celular Kit saiu da lista oficial: o kit cai em Sem categoria (o produto não perde nada no ERP).
+ onlyThese(dom,d,'category',['Sem categoria']);assert.deepEqual(listed(d),['v.cat','x.semtag','dg105.sp+a001.sp']);
+ onlyThese(dom,d,'tag',['Sem tag']);assert.deepEqual(listed(d),['v.cat','x.semtag'],'.pi não está mais na lista');
+ // Seleção: filtrar limpa a seleção; "todos" marca só os filtrados.
+ const all=d.getElementById('products-all');all.checked=true;all.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+ assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^2 selecionados/);
+ allOf(d,'tag');
+ assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^0 selecionados/);
+ allOf(d,'category');
+ // Busca enquanto digita, sem perder o campo.
+ const input=d.querySelector('#catalog-search [name=query]');input.focus();input.value='dg105';input.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+ await new Promise(r=>setTimeout(r,320));
+ assert.deepEqual(listed(d),['dg105.sp+a001.sp','dg105.sp']);
+ assert.equal(d.activeElement,d.querySelector('#catalog-search [name=query]'));assert.equal(d.activeElement.value,'dg105');
+ // Fecha clicando fora e com Esc; a escolha continua.
+ onlyThese(dom,d,'stock',['Maior que zero']);assert.ok(d.querySelector('[data-catalog-menu-box="stock"]'));
+ d.querySelector('.product-list table').click();assert.equal(d.querySelector('.catalog-bar-menu'),null);
+ assert.equal(barButton(d,'stock').getAttribute('aria-expanded'),'false');
+ openMenu(d,'stock');d.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(d.querySelector('.catalog-bar-menu'),null);
+ assert.deepEqual(listed(d),['dg105.sp']);assert.equal(barButton(d,'stock').textContent.trim(),'Estoque (1)');
+});
+
+test('M-30: the example of the request (2.753 products, base of 23/11) counts the same on the bar',async()=>{
+ // A base sintética com a distribuição que o pedido conferiu: o que a barra conta tem de bater.
+ const spread=(pairs)=>pairs.flatMap(([value,n])=>Array(n).fill(value));
+ const status=spread([['inactive',249],['active',2504]]);
+ const stock=spread([['0',976],['3',1777]]);
+ const category=spread([['Celular Kit',1346],['Mala Kit',584],['Mala',441],['Celular',178],['Acessórios',46],['Insumos',42],['Eletro',19],[null,97]]);
+ const ending=spread([['.pi',705],['.sp',639],['.ci',133],['.ra',120],['.cd',38],['.sa',8],['',1110]]);
+ assert.deepEqual([status,stock,category,ending].map(a=>a.length),[2753,2753,2753,2753]);
+ const ids=Object.fromEntries(['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit'].map((n,i)=>[n,'k'+i]));
+ // Misturado (passos diferentes) para nenhuma fatia coincidir com outra.
+ const products=Array.from({length:2753},(_,i)=>({sku:`p${i}${ending[(i*7)%2753]}`,name:'Produto '+i,kind:'simple',position:i,components:[],price:'1',balances:[{depot:'geral',physical:stock[(i*11)%2753],reserved:'0',available:stock[(i*11)%2753]}],details:{version:0,status:status[(i*13)%2753]},...(category[(i*17)%2753]?{category:{id:ids[category[(i*17)%2753]]}}:{})}));
+ const categories=Object.entries(ids).map(([name,id])=>({id,name,path:name,status:'active'}));
+ const {dom,document:d}=await setup({products,categories});
+ d.querySelector('nav [data-page=products]').click();await new Promise(r=>setTimeout(r,0));
+ const counted=(key,label)=>{onlyThese(dom,d,key,[label]);const n=railCount(d);allOf(d,key);return n;};
+ assert.equal(railCount(d),'2753');
+ assert.deepEqual([counted('situation','Inativo'),counted('situation','Ativo')],['249','2504']);
+ assert.deepEqual([counted('stock','Igual a zero'),counted('stock','Maior que zero'),counted('stock','Menor que zero')],['976','1777','0']);
+ assert.deepEqual([counted('category','Celular'),counted('category','Sem categoria'),counted('category','Eletro Kit')],['178','97','0']);
+ assert.deepEqual([counted('tag','.sp'),counted('tag','.pi'),counted('tag','Sem tag')],['639','705','1110']);
+});
+
+test('product list keeps the low-stock hint and leaves deleted products out',async()=>{
+ const {document:d}=await catalogPage();
+ assert.deepEqual(listed(d),['d.serv','c.kit','b.zero','a.ativo']);
  assert.match(d.querySelector('tr td small.stock-low')?.textContent||d.querySelector('.stock-low').textContent,/Abaixo do mínimo/);
 });
 
@@ -1070,7 +1199,7 @@ test('batch dialogs send only selected products and removal waits for confirmati
  const {dom,document:d,requests}=await catalogPage();
  const pick=sku=>{const box=d.querySelector(`[data-product-select="${sku}"]`);box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
  pick('a.ativo');pick('b.zero');
- assert.match(d.querySelector('.catalog-chips').textContent,/Selecionados: 2 cadastros/);
+ assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^2 selecionados/);
  d.querySelector('[data-product-status-batch]').click();
  const status=d.querySelector('#product-status-form');status.querySelector('[name=status]').value='inactive';status.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
  assert.equal(requests[0].kind,'product.batch');assert.deepEqual(requests[0].payload,{items:[{sku:'a.ativo',version:1},{sku:'b.zero',version:0}],status:'inactive'});
@@ -1085,14 +1214,14 @@ test('batch dialogs send only selected products and removal waits for confirmati
 
 test('price adjustment applies to filtered or selected rows and never offers publication',async()=>{
  const {dom,document:d,requests}=await catalogPage();
- filterBy(dom,d,{brand:'sorriso'});
+ searchFor(dom,d,'mala azul');
  d.querySelector('[data-price-adjust-open]').click();
  const form=d.querySelector('#price-adjust');assert.equal(form.querySelector('[name=scope][value=selected]').disabled,true);assert.equal(form.querySelector('.price-adjust-actions [disabled]').textContent,'Sincronizar com loja virtual');
  form.querySelector('[name=amount]').value='12.5';form.querySelector('[name=mode]').value='percent';form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
  assert.deepEqual(requests[0],{...requests[0],kind:'product.price_adjust'});assert.deepEqual(requests[0].payload,{items:[{sku:'a.ativo',version:1}],action:'increase',mode:'percent',amount:'12.5'});
 });
 
-test('service forms hide stock and physical blocks but keep values and restore is explicit',async()=>{
+test('service forms hide stock and physical blocks but keep values, and deleted products stay out',async()=>{
  const {dom,document:d,requests}=await catalogPage();
  d.querySelector('[data-edit-product="d.serv"]').click();
  assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('.product-grid[data-physical-only]').hidden,true);
@@ -1103,9 +1232,8 @@ test('service forms hide stock and physical blocks but keep values and restore i
  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
  assert.equal(requests[0].payload.type,'service');assert.equal(requests[0].payload.data.brand,'Sorriso');
  d.querySelector('#product-edit-cancel')?.click();
- filterBy(dom,d,{situation:'deleted'});assert.equal(d.querySelector('[data-edit-product="e.del"]'),null);
- d.querySelector('[data-product-restore="e.del"]').click();await new Promise(r=>setImmediate(r));
- assert.equal(requests.at(-1).kind,'product.restore');assert.deepEqual(requests.at(-1).payload.items,[{sku:'e.del',version:3}]);
+ // M-30: "Excluídos" saiu da Situação; o excluído nunca aparece na lista.
+ assert.equal(d.querySelector('[data-product-select="e.del"]'),null);assert.equal(d.querySelector('[data-product-restore]'),null);
 });
 
 test('clone keeps the typed code and opens the new register after confirmation',async()=>{
