@@ -278,6 +278,21 @@ MIGRADOS = [
     K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
     # F1/C8c: Produtos (item 24)
     K.PRODUTOS_VIGIA_SOMA_FAMILIA,
+    # F3/C10a: o aviso das pendências de cada robô da Ouvidoria (29 a 33 e 35
+    # a 42; o do Robô da Margem, 34, vai com a Margem na C10b)
+    K.OUVIDORIA_VIGIA_IMPORTACAO,
+    K.OUVIDORIA_VIGIA_CREDENCIAIS,
+    K.OUVIDORIA_VIGIA_INGEST_BLING,
+    K.OUVIDORIA_VIGIA_CORREIOS,
+    K.OUVIDORIA_VIGIA_MARKETING_COMANDOS,
+    K.OUVIDORIA_VIGIA_ROBO_MELHORENVIO,
+    K.OUVIDORIA_VIGIA_ROBO_LEITURA,
+    K.OUVIDORIA_VIGIA_ETIQUETAS,
+    K.OUVIDORIA_VIGIA_NOTA_CHEIA,
+    K.OUVIDORIA_VIGIA_CONCILIACAO,
+    K.OUVIDORIA_ROBO_JURIDICO,
+    K.OUVIDORIA_VIGIA_FLEX,
+    K.OUVIDORIA_CHAMADO_FRETE_ML,
     # F2/C9d: relatório da Denúncia e robô de Denúncia precisa de alguém (43
     # e 44, junto com o 15 por causa da reserva `chamados_ia`)
     K.DENUNCIA_RELATORIO_DIARIO,
@@ -303,8 +318,9 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     (C8a), `test_threema_pontos_estoque_nf` (C8b),
     `test_threema_pontos_chamados_produtos` (C8c),
     `test_threema_pontos_informar` (C9a, C9b e C9c),
-    `test_threema_pontos_chamados_denuncia` (C9d) e
-    `test_threema_pontos_conferencia` (C9e)."""
+    `test_threema_pontos_chamados_denuncia` (C9d),
+    `test_threema_pontos_conferencia` (C9e) e
+    `test_threema_pontos_ouvidoria` (C10a)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
@@ -356,6 +372,9 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
         K.MARKETING_CONFERENCIA_SHOPEE: "descarta",
         K.MARKETING_CONFERENCIA_ML: "descarta",
         K.MARKETING_CONFERENCIA_AMAZON: "descarta",
+        # 29 a 42 (menos o 34): o `avisar_pendentes` desligado não carimba as
+        # ocorrências; ao religar, as pendentes saem numa mensagem só
+        **{c: "acumula" for c in MIGRADOS if c.startswith("ouvidoria.")},
     }
 
 

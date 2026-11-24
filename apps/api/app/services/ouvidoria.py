@@ -32,7 +32,9 @@ dele (ex.: `vigia_importacao.py`), que só faz:
 3. **Aviso é por robô, não por ocorrência.** Uma mensagem no Threema com
    tudo que está pendente daquele robô; re-aviso a cada `reaviso_horas`
    enquanto persistir. Falha no envio não carimba — retenta no próximo tick.
-   Modo `silencioso` registra e cala; `desligado` nem roda.
+   Modo `silencioso` registra e cala; `desligado` nem roda. Quem recebe, o
+   re-aviso (gravado aqui no robô) e o liga/desliga do aviso são editados
+   em Cadastros › Envios Threema, só por admin (tarefa 16, F3/C10a).
 
 Quem chama commita (os robôs rodam dentro de `session_scope`). A exceção é
 `Rodada.__aexit__`, que commita sozinho pra rodada com erro não se perder no
@@ -63,7 +65,7 @@ from app.models import (
     OuvidoriaRobo,
     OuvidoriaRodada,
 )
-from app.services import threema, threema_registro
+from app.services import threema
 
 logger = structlog.get_logger()
 
@@ -1148,7 +1150,13 @@ class Rodada:
 
 def destinatarios(robo: OuvidoriaRobo | None, chave: str) -> tuple[list[str], str | None]:
     """(IDs, origem). Override da tela → env do robô → OUVIDORIA geral.
-    Origem 'robo' | 'env' | 'geral' | None — a tela mostra de onde veio."""
+    Origem 'robo' | 'env' | 'geral' | None — a tela mostra de onde veio.
+
+    Desde a F3/C10a (tarefa 16) é só a CONFIGURAÇÃO ANTIGA: o aviso dos robôs
+    lê Cadastros › Envios Threema (`avisar_pendentes`), e esta lista fica
+    congelada como reserva de emergência e fonte da semente
+    (`threema_envios.legado`, `Legado.robo` no catálogo). O aviso do Robô da
+    Margem (C10b) e a tela antiga ainda a leem."""
     if robo is not None:
         ids = threema.parse_recipients(robo.threema_recipients)
         if ids:
@@ -1262,37 +1270,68 @@ async def avisar_pendentes(
     `ligado`. Sucesso carimba `avisada_em` (1º aviso) ou `reavisada_em`;
     falha no envio (ou sem destinatário) não carimba nada — o próximo tick
     tenta de novo. Devolve {"avisadas": n} (+ "motivo" quando não mandou).
-    Flush, sem commit."""
+    Flush, sem commit.
+
+    Quem recebe e o liga/desliga do aviso vêm de Cadastros › Envios Threema
+    (tarefa 16, F3/C10a): cada robô é um envio (`ouvidoria.<robô>`, com o
+    remetente do robô no catálogo) e o modo do robô continua valendo antes
+    (o "depende de"). O envio do robô que ainda não migrou (o Robô da Margem,
+    C10b) segue a lista "Avisar" de antes pelo mesmo caminho (o `resolver`
+    devolve a configuração antiga exata).
+
+    * Envio desligado no Cadastro: `envio_desligado`, sem carimbo — as
+      pendências se acumulam e, ao religar, saem numa mensagem só (o
+      `acumula` do catálogo).
+    * Ninguém pela configuração antiga (não migrado, emergência ou sem
+      semente, com a lista vazia): `sem_destinatarios`, calado, como antes.
+    * Ninguém válido no Cadastro, com pendência: o núcleo grava o registro
+      `ok=false` e acende o sino dos admins; sem carimbo (sai quando a lista
+      for acertada)."""
     agora = _agora(agora)
     robo = await session.get(OuvidoriaRobo, robo_chave)
     if robo is None:
         return {"avisadas": 0, "motivo": "robo_nao_cadastrado"}
     if robo.modo != "ligado":
         return {"avisadas": 0, "motivo": f"modo_{robo.modo}"}
-    alvos, _origem = destinatarios(robo, robo_chave)
-    if not alvos:
+    # Import tardio: o catálogo e o núcleo dos envios leem o ROBOS deste módulo.
+    from app.services import threema_envios
+    from app.services.threema_catalogo import chave_ouvidoria
+
+    chave = chave_ouvidoria(robo_chave)
+    if chave is None:
+        # O Relatório da Denúncia tem envio próprio (denuncia_relatorio_threema).
+        logger.warning("ouvidoria_aviso_sem_envio", robo=robo_chave)
+        return {"avisadas": 0, "motivo": "sem_envio"}
+    quem = await threema_envios.resolver(chave, session=session)
+    if not quem.ativo:
+        return {"avisadas": 0, "motivo": "envio_desligado"}
+    if not quem.ids and quem.motivo != threema_envios.NINGUEM_VALIDO:
         return {"avisadas": 0, "motivo": "sem_destinatarios"}
     pendentes = await pendentes_de_aviso(session, robo, agora)
     if not pendentes:
         return {"avisadas": 0}
     texto = texto_aviso(robo.nome, pendentes, link=link_painel(robo_chave))
-    # Import tardio: o catálogo dos envios lê o ROBOS deste módulo.
-    from app.services.threema_catalogo import chave_ouvidoria
-
     try:
-        # O assunto vem do CATÁLOGO (RoboDef), não da linha do banco: é
-        # ele que sabe de qual conversa do Threema o robô faz parte.
-        contexto = (ROBOS[robo_chave].contexto if robo_chave in ROBOS else "") or None
-        # Registro: cada robô é um envio próprio (`ouvidoria.<chave>`).
-        with threema_registro.envio(chave_ouvidoria(robo_chave)):
-            resultado = await threema.ThreemaClient(contexto=contexto).send_to_all(
-                texto, recipients=alvos
-            )
+        # O remetente vem do CATÁLOGO (o `contexto` do RoboDef, copiado no
+        # envio do Cadastro), não da linha do banco: é ele que sabe de qual
+        # conversa do Threema o robô faz parte.
+        resultado = await threema_envios.enviar(chave, texto, session=session)
     except Exception as e:  # noqa: BLE001 — aviso é best-effort; sem carimbo retenta
         logger.warning("ouvidoria_threema_falhou", robo=robo_chave, err=str(e)[:200])
         return {"avisadas": 0, "motivo": "threema_falhou", "erro": str(e)[:200]}
-    if not (resultado or {}).get("sent"):
-        logger.warning("ouvidoria_threema_ninguem_recebeu", robo=robo_chave, **(resultado or {}))
+    if resultado.get("motivo") == threema_envios.DESLIGADO:
+        # Desligado entre a leitura de cima e o envio.
+        return {"avisadas": 0, "motivo": "envio_desligado"}
+    if resultado.get("motivo"):
+        # Ninguém válido no Cadastro: registro `ok=false` e sino já feitos.
+        return {"avisadas": 0, "motivo": "ninguem_valido"}
+    if not resultado.get("sent"):
+        logger.warning(
+            "ouvidoria_threema_ninguem_recebeu",
+            robo=robo_chave,
+            falhados=len(resultado.get("failed") or []),
+            via=resultado.get("via"),
+        )
         return {"avisadas": 0, "motivo": "threema_falhou"}
     for o in pendentes:
         if o.avisada_em is None:

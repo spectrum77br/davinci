@@ -52,6 +52,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada
 from app.routers import ouvidoria as router_mod
 from app.services import ouvidoria as svc
+from app.services.threema_catalogo import K
+from tests.test_threema_resolver import desmigrar
 
 pytestmark = pytest.mark.asyncio
 
@@ -994,7 +996,11 @@ async def test_router_permissoes(client, make_user, auth_as, db):
     assert (await client.post(f"/api/ouvidoria/robos/{ROBO}/rodar")).status_code == 403
 
 
-async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
+async def test_router_robos_lista_e_patch(client, make_user, auth_as, db, monkeypatch):
+    # O PATCH da lista e do re-aviso de um robô cujo aviso ainda não lê o
+    # Cadastro (o vigia antes da F3/C10a; o migrado tem a bateria dele em
+    # test_threema_pontos_ouvidoria).
+    desmigrar(monkeypatch, K.OUVIDORIA_VIGIA_IMPORTACAO)
     await _robo(db, threema_recipients="ABCDEFGH")
     async with svc.Rodada(db, ROBO) as r:
         r.resumo = "10 pedidos conferidos · 1 nova · 0 conta falhou"
@@ -1079,10 +1085,14 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     assert det["contas"] == []
 
 
-async def test_router_cadastra_contato_avulso_do_threema(client, make_user, auth_as, db):
+async def test_router_cadastra_contato_avulso_do_threema(
+    client, make_user, auth_as, db, monkeypatch
+):
     """Vinicius, 22/09/2026: o "roma" (VBS64V3S) precisa receber aviso e não
     tem login no DaVinci. Cadastrado na própria tela, ele entra no seletor,
-    dá pra escolher pelo NOME no campo do robô, e sai por ali mesmo."""
+    dá pra escolher pelo NOME no campo do robô, e sai por ali mesmo. (O
+    campo do robô vale para o robô que ainda não lê o Cadastro, F3/C10a.)"""
+    desmigrar(monkeypatch, K.OUVIDORIA_VIGIA_IMPORTACAO)
     await _robo(db)
     await db.commit()
     editor = await make_user(email="eduardo@davinci-test.com", permissions=_perms(edit=True))

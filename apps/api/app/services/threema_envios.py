@@ -288,10 +288,15 @@ def _lista_vazia_desliga(d: EnvioDef) -> bool:
     Vale para a lista do .env e para a linha do Informar de um envio
     AUTOMÁTICO (F2: os prazos da Amazon, o prazo de resposta das Devoluções,
     a IA de Chamado parada e o robô da Denúncia — linha vazia ou ausente =
-    ninguém, calado). Não vale para o botão (`manual`: a lista vazia é o 422
-    do botão, não um desligado), para o liga/desliga de outra fonte (o modo do
-    robô, a chave da conferência no .env) nem para o usuário pelo nome (o 12:
-    "thatcher" sem Threema é falha, não desligado).
+    ninguém, calado), e para o aviso das pendências de cada robô da Ouvidoria
+    (F3: `avisar_pendentes` sem ninguém na lista "Avisar", no .env do robô e
+    no OUVIDORIA geral voltava `sem_destinatarios`, calado; o modo do robô é
+    o "depende de", lido antes). Não vale para o botão (`manual`: a lista
+    vazia é o 422 do botão, não um desligado), para o liga/desliga de outra
+    fonte (o modo do robô do relatório da Denúncia, a chave da conferência no
+    .env) nem para o usuário pelo nome (o 12: "thatcher" sem Threema é falha,
+    não desligado). Os avisos da Margem que leem a lista do Robô da Margem
+    (25 a 27) também não: são da C10b.
 
     No Cadastro, ligado sem ninguém grava o registro `ok=false` e acende o
     sino dos admins a cada rodada. Por isso a semente grava `ativo=false`
@@ -303,12 +308,18 @@ def _lista_vazia_desliga(d: EnvioDef) -> bool:
         return False
     if d.legado.envs:
         return True
+    if d.legado.robo:
+        return chave_ouvidoria(d.legado.robo) == d.chave
     return bool(d.legado.informar) and d.frequencia_tipo != "manual"
 
 
 def _lista_de_hoje(d: EnvioDef) -> str:
     """De onde vem a lista que, vazia, é o desligado de hoje (textos)."""
-    return "do .env" if d.legado.envs else "do Informar"
+    if d.legado.envs:
+        return "do .env"
+    if d.legado.robo:
+        return "do robô na Ouvidoria"
+    return "do Informar"
 
 
 async def _ids_legado(d: EnvioDef, escopo: str | None, session: AsyncSession):

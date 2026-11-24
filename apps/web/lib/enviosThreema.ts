@@ -499,3 +499,65 @@ export function situacaoQuemRecebe(q: QuemRecebeLeve): { tipo: 'ok' | 'desligado
 export function podeEnviarAgora(q: QuemRecebeLeve | null): boolean {
   return !q || situacaoQuemRecebe(q).tipo === 'ok'
 }
+
+// ─── a tela dos robôs da Ouvidoria (pages/ouvidoria/robos.vue, F3/C10a) ───
+
+/** Contatos externos do Cadastro: quem recebe aviso sem login no DaVinci. */
+export const LINK_CONTATOS_EXTERNOS = '/envios-threema?aba=contatos'
+
+/** O que a tela dos robôs lê do aviso de cada robô (GET /api/ouvidoria/robos). */
+export type RoboThreema = {
+  modo: string
+  reaviso_horas: number
+  threema_destinatarios: { id: string; nome: string }[]
+  // `ouvidoria.<robô>` (null no Relatório da Denúncia, que tem envio próprio)
+  threema_envio?: string | null
+  // o aviso já lê Cadastros › Envios Threema (ausente na API de antes)
+  threema_migrado?: boolean
+  // cadastro | cache | legado (a configuração antiga: emergência, sem semente)
+  threema_via?: string | null
+  threema_ativo?: boolean | null
+  // chave da config → envio do Cadastro que a governa (só leitura na tela)
+  config_no_cadastro?: Record<string, string>
+}
+
+/** O aviso deste robô já lê Cadastros › Envios Threema: quem recebe e o
+ *  re-aviso só o admin muda, lá. */
+export function roboNoCadastro(r: RoboThreema): boolean {
+  return !!r.threema_migrado && !!r.threema_envio
+}
+
+/** A coluna "Avisa" do robô ligado cujo aviso já lê o Cadastro. */
+export function avisaRoboCadastro(r: RoboThreema): { linha1: string; linha2: string; title: string } {
+  if (r.threema_ativo === false) {
+    return {
+      linha1: 'Desligado',
+      linha2: 'em Cadastros › Envios Threema',
+      title: 'O aviso deste robô está desligado em Cadastros › Envios Threema (só admin liga). '
+        + 'As pendências ficam guardadas e saem juntas ao religar.',
+    }
+  }
+  const nomes = (r.threema_destinatarios || []).map((d) => d.nome || d.id)
+  const antiga = r.threema_via === 'legado'
+  if (!nomes.length) {
+    return antiga
+      ? { linha1: 'Ninguém', linha2: 'configuração antiga vazia', title: 'Usando a configuração antiga, que está vazia: o aviso não sai.' }
+      : {
+          linha1: 'Ninguém',
+          linha2: 'ninguém válido no Cadastro',
+          title: 'Ninguém da lista em Cadastros › Envios Threema tem Threema válido e ativo: o aviso não está saindo (os admins foram avisados).',
+        }
+  }
+  return {
+    linha1: `Threema · ${nomes.length} ${nomes.length === 1 ? 'pessoa' : 'pessoas'}`,
+    linha2: `re-aviso ${r.reaviso_horas} h`,
+    title: `${nomes.join(', ')} (${antiga ? 'configuração antiga' : 'Cadastros › Envios Threema'})`,
+  }
+}
+
+/** A config que o PATCH dos robôs manda, sem as chaves que o Cadastro
+ *  governa (o servidor ignoraria, com aviso). */
+export function configSemCadastro<T>(config: Record<string, T>, r: Pick<RoboThreema, 'config_no_cadastro'>): Record<string, T> {
+  const fora = r.config_no_cadastro || {}
+  return Object.fromEntries(Object.entries(config).filter(([k]) => !(k in fora)))
+}

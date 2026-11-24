@@ -11,7 +11,6 @@ import {
   ExternalLink,
   Loader2,
   Play,
-  Plus,
   Radar,
   RotateCcw,
   Search,
@@ -20,9 +19,15 @@ import {
   Trash2,
   UserRound,
   Wrench,
-  X,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
+import {
+  LINK_CONTATOS_EXTERNOS,
+  avisaRoboCadastro,
+  configSemCadastro,
+  linkDoEnvio,
+  roboNoCadastro,
+} from '~/lib/enviosThreema'
 import { PLATAFORMAS, plataformaInfo } from '~/components/OuvidoriaPlataforma.vue'
 import type { ModoRobo } from '~/components/OuvidoriaModoToggle.vue'
 
@@ -62,10 +67,24 @@ type Robo = {
   // Override dos destinatários do Threema (texto cru salvo na tela); vazio =
   // padrão do .env. Os IDs efetivos, já com nome, vêm resolvidos em
   // `threema_destinatarios`, e `threema_origem` diz de onde saíram
-  // (robo = override | env = variável do robô | geral = fallback | null).
+  // (robo = override | env = variável do robô | geral = fallback |
+  // cadastro = Cadastros › Envios Threema, só nomes | null).
   threema_recipients: string | null
   threema_destinatarios: { id: string; nome: string }[]
-  threema_origem: 'robo' | 'env' | 'geral' | null
+  threema_origem: 'robo' | 'env' | 'geral' | 'cadastro' | null
+  // Tarefa 16, F3/C10a — "só ADM altera quem recebe": o aviso do robô que já
+  // lê Cadastros › Envios Threema (`threema_migrado`) tem quem recebe e o
+  // re-aviso editados lá (o envio `threema_envio`); aqui é só leitura, com o
+  // atalho. `threema_ativo` = o aviso ligado no Cadastro; `threema_via`
+  // (cadastro | cache | legado) diz se vale a configuração antiga.
+  threema_envio?: string | null
+  threema_migrado?: boolean
+  threema_via?: string | null
+  threema_ativo?: boolean | null
+  // Chave da config → envio do Cadastro que passou a editá-la (só leitura).
+  config_no_cadastro?: Record<string, string>
+  // PATCH: o que o servidor ignorou porque o Cadastro é quem edita.
+  avisos?: string[]
   reaviso_horas: number
   // Parâmetros efetivos do robô (padrão do catálogo por baixo do que está
   // salvo) — mostrados na linha expandida.
@@ -177,6 +196,7 @@ const RESUMO_VAZIO: Resumo = {
 const { api } = useApi()
 const toasts = useToasts()
 const canEdit = useCan('ouvidoria', 'edit')
+const isAdmin = useIsAdmin()
 const route = useRoute()
 const router = useRouter()
 
@@ -529,6 +549,7 @@ const ORIGEM_THREEMA: Record<string, string> = {
   robo: 'destinatários deste robô',
   env: 'variável do robô no .env',
   geral: 'padrão geral do sistema',
+  cadastro: 'Cadastros › Envios Threema',
 }
 function nomesDestinatarios(r: Robo): string {
   return (r.threema_destinatarios || []).map((d) => d.nome || d.id).join(', ')
@@ -536,6 +557,8 @@ function nomesDestinatarios(r: Robo): string {
 function avisaDe(r: Robo): { linha1: string; linha2: string; title: string } {
   if (r.modo === 'desligado') return { linha1: '—', linha2: '', title: '' }
   if (r.modo === 'silencioso') return { linha1: 'Ninguém (silencioso)', linha2: 'registra, não avisa', title: '' }
+  // F3/C10a: quem recebe vem de Cadastros › Envios Threema (só nomes).
+  if (roboNoCadastro(r)) return avisaRoboCadastro(r)
   const n = (r.threema_destinatarios || []).length
   if (!n) return { linha1: 'Ninguém', linha2: 'sem destinatário no Threema', title: 'Nenhum destinatário configurado — nem no robô, nem no .env. Abra a linha e clique em Editar.' }
   return {
@@ -648,7 +671,10 @@ function configLinhas(r: Robo): { chave: string; label: string; valor: string }[
 
 // ── Editar configuração (PATCH /robos/{chave}) ──────────────────────────────
 // Só re-aviso, destinatários e as chaves simples do config. Objetos/listas
-// dentro do config ficam como estão (mandados de volta sem mexer).
+// dentro do config ficam como estão (mandados de volta sem mexer). No robô
+// cujo aviso já lê Cadastros › Envios Threema (F3/C10a), quem recebe, o
+// re-aviso e a chave da config que o Cadastro governa ficam só leitura, com
+// o link (só admin muda, lá) — e não vão no PATCH.
 type EditForm = {
   reaviso_horas: number
   // IDs marcados no seletor de pessoas (a tela mostra o nome; o ID vai por baixo).
@@ -660,12 +686,14 @@ const editForm = ref<EditForm>({ reaviso_horas: 24, threema_ids: [], config: {} 
 const salvandoEdicao = ref(false)
 
 // Quem pode receber aviso (usuários ativos com Threema em Admin › Usuários +
-// apelidos do .env). Carregado ao abrir a edição — é o mesmo seletor do
-// botão Informar: caixinha por pessoa, nunca ID digitado à mão (21/09:
-// Vinicius digitou "cairo sa" no campo de texto e a API recusou).
-// `origem` diz de onde a pessoa veio: usuario (cadastro em Usuários), contato
-// (avulso, cadastrado aqui) ou env (lista antiga do servidor). Só o avulso a
-// tela deixa remover — os outros somem mudando a origem deles.
+// contatos externos + apelidos do .env). Carregado ao abrir a edição do robô
+// que ainda não lê o Cadastro — é o mesmo seletor do botão Informar:
+// caixinha por pessoa, nunca ID digitado à mão (21/09: Vinicius digitou
+// "cairo sa" no campo de texto e a API recusou). `origem` diz de onde a
+// pessoa veio: usuario (cadastro em Usuários), contato (contato externo) ou
+// env (lista antiga do servidor). Contato externo novo (quem não tem login)
+// se cadastra em Cadastros › Envios Threema › Contatos externos (só admin,
+// F3/C10a; antes era aqui mesmo, no seletor).
 type Destinatario = { id: string; nome: string; origem?: 'usuario' | 'contato' | 'env' | null }
 const diretorio = ref<Destinatario[]>([])
 const diretorioCarregado = ref(false)
@@ -684,56 +712,6 @@ function nomeDe(id: string): string {
 function pessoaMarcada(id: string): boolean {
   return editForm.value.threema_ids.includes(id)
 }
-// Contato avulso do Threema: quem recebe aviso e não tem login no DaVinci
-// (Vinicius, 22/09/2026: o "roma", VBS64V3S). Cadastrado aqui mesmo, no
-// seletor, porque é onde a falta aparece.
-const novoContatoNome = ref('')
-const novoContatoId = ref('')
-const salvandoContato = ref(false)
-
-async function adicionarContato() {
-  const nome = novoContatoNome.value.trim()
-  const id = novoContatoId.value.trim().toUpperCase()
-  if (!nome || !id) {
-    toasts.warning('Preencha o nome e o ID do Threema')
-    return
-  }
-  salvandoContato.value = true
-  try {
-    diretorio.value = await api<Destinatario[]>('/api/ouvidoria/threema/destinatarios', {
-      method: 'POST',
-      body: { id, nome },
-    })
-    diretorioCarregado.value = true
-    // Já marca: quem cadastrou está justamente escolhendo essa pessoa.
-    if (!editForm.value.threema_ids.includes(id)) alternarPessoa(id)
-    novoContatoNome.value = ''
-    novoContatoId.value = ''
-    toasts.success(`${nome} entrou na lista`, 'falta salvar o robô pra ele passar a receber')
-  } catch (e: any) {
-    toasts.error('Não deu pra cadastrar o contato', apiError(e))
-  } finally {
-    salvandoContato.value = false
-  }
-}
-
-async function removerContato(d: Destinatario) {
-  if (!confirm(`Tirar "${d.nome}" da lista de quem pode receber aviso?`)) return
-  salvandoContato.value = true
-  try {
-    diretorio.value = await api<Destinatario[]>(
-      `/api/ouvidoria/threema/destinatarios/${encodeURIComponent(d.id)}`,
-      { method: 'DELETE' },
-    )
-    if (editForm.value.threema_ids.includes(d.id)) alternarPessoa(d.id)
-    toasts.success(`${d.nome} saiu da lista`)
-  } catch (e: any) {
-    toasts.error('Não deu pra remover o contato', apiError(e))
-  } finally {
-    salvandoContato.value = false
-  }
-}
-
 function alternarPessoa(id: string) {
   const ids = editForm.value.threema_ids
   editForm.value = {
@@ -753,17 +731,23 @@ function mesmaLista(a: string[], b: string[]): boolean {
 
 function abrirEdicao(r: Robo) {
   const config: EditForm['config'] = {}
-  for (const [k, v] of Object.entries(r.config || {})) {
+  for (const [k, v] of Object.entries(configSemCadastro(r.config || {}, r))) {
     if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') config[k] = v
   }
+  const noCadastro = roboNoCadastro(r)
   editForm.value = {
     reaviso_horas: r.reaviso_horas,
-    threema_ids: (r.threema_destinatarios || []).map((d) => d.id),
+    // No Cadastro a lista daqui não vale (e os IDs vêm mascarados).
+    threema_ids: noCadastro ? [] : (r.threema_destinatarios || []).map((d) => d.id),
     config,
   }
   seletorAberto.value = false
   editando.value = r.chave
-  if (!diretorioCarregado.value) void loadDiretorio()
+  if (!noCadastro && !diretorioCarregado.value) void loadDiretorio()
+}
+// Valor da chave da config que o Cadastro governa (só leitura na edição).
+function valorConfig(r: Robo, k: string): string {
+  return configLinhas(r).find((l) => l.chave === k)?.valor ?? '—'
 }
 function tipoCampo(v: string | number | boolean): 'number' | 'checkbox' | 'text' {
   if (typeof v === 'number') return 'number'
@@ -774,28 +758,34 @@ function setConfig(k: string, v: string | number | boolean) {
   editForm.value = { ...editForm.value, config: { ...editForm.value.config, [k]: v } }
 }
 async function salvarEdicao(r: Robo) {
+  const noCadastro = roboNoCadastro(r)
   const reaviso = Number(editForm.value.reaviso_horas)
-  if (!Number.isFinite(reaviso) || reaviso < 1) {
+  if (!noCadastro && (!Number.isFinite(reaviso) || reaviso < 1)) {
     toasts.warning('Re-aviso precisa ser um número de horas (mínimo 1)')
     return
   }
+  // A API substitui a config inteira — manda a efetiva com as alterações por
+  // cima (objetos/listas seguem intactos), sem as chaves do Cadastro.
+  const body: Record<string, unknown> = {
+    config: configSemCadastro({ ...(r.config || {}), ...editForm.value.config }, r),
+  }
+  if (!noCadastro) {
+    body.reaviso_horas = reaviso
+    // Lista igual ao fallback (.env) → manda "" e o robô continua seguindo
+    // o padrão do sistema; diferente → vira override deste robô.
+    body.threema_recipients = mesmaLista(editForm.value.threema_ids, idsPadrao(r))
+      ? ''
+      : editForm.value.threema_ids.join(', ')
+  }
   salvandoEdicao.value = true
   try {
-    await api(`/api/ouvidoria/robos/${encodeURIComponent(r.chave)}`, {
+    const salvo = await api<Robo>(`/api/ouvidoria/robos/${encodeURIComponent(r.chave)}`, {
       method: 'PATCH',
-      body: {
-        reaviso_horas: reaviso,
-        // Lista igual ao fallback (.env) → manda "" e o robô continua seguindo
-        // o padrão do sistema; diferente → vira override deste robô.
-        threema_recipients: mesmaLista(editForm.value.threema_ids, idsPadrao(r))
-          ? ''
-          : editForm.value.threema_ids.join(', '),
-        // A API substitui a config inteira — manda a efetiva com as
-        // alterações por cima (objetos/listas seguem intactos).
-        config: { ...(r.config || {}), ...editForm.value.config },
-      },
+      body,
     })
     toasts.success('Configuração salva', r.nome)
+    // O que o servidor não gravou porque o Cadastro é quem edita.
+    for (const aviso of salvo?.avisos || []) toasts.warning(aviso)
     editando.value = null
     await Promise.all([loadRobos(), loadDetalhe(r.chave)])
   } catch (e: any) {
@@ -1296,19 +1286,46 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                         <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
                           <template v-for="l in configLinhas(r)" :key="l.chave">
                             <span class="text-muted-foreground">{{ l.label }}</span>
-                            <span>{{ l.valor }}</span>
+                            <span>
+                              {{ l.valor }}
+                              <!-- Chave que o Cadastro governa (o "avisar margem alta" quando o 27 migrar). -->
+                              <template v-if="(r.config_no_cadastro || {})[l.chave]">
+                                ·
+                                <NuxtLink v-if="isAdmin" :to="linkDoEnvio((r.config_no_cadastro || {})[l.chave])" class="text-primary hover:underline" :data-config-cadastro="l.chave">muda em Cadastros › Envios Threema</NuxtLink>
+                                <span v-else class="text-muted-foreground" :data-config-cadastro="l.chave">só admin muda (Cadastros › Envios Threema)</span>
+                              </template>
+                            </span>
                           </template>
                           <span class="text-muted-foreground">Re-aviso</span>
-                          <span>a cada {{ r.reaviso_horas }} h enquanto persistir</span>
-                          <span class="text-muted-foreground">Avisar</span>
                           <span>
-                            <template v-if="r.modo === 'silencioso'">ninguém (silencioso)</template>
-                            <template v-else-if="(r.threema_destinatarios || []).length">
-                              Threema: {{ nomesDestinatarios(r) }}
-                              <span class="text-muted-foreground"> · {{ ORIGEM_THREEMA[r.threema_origem || ''] || 'origem desconhecida' }}</span>
+                            a cada {{ r.reaviso_horas }} h enquanto persistir
+                            <!-- F3/C10a: o re-aviso do robô migrado é mudado no Cadastro (só admin). -->
+                            <template v-if="roboNoCadastro(r)">
+                              ·
+                              <NuxtLink v-if="isAdmin" :to="linkDoEnvio(r.threema_envio || '')" class="text-primary hover:underline" data-reaviso-cadastro>muda em Cadastros › Envios Threema</NuxtLink>
+                              <span v-else class="text-muted-foreground" data-reaviso-cadastro>só admin muda (Cadastros › Envios Threema)</span>
                             </template>
-                            <template v-else><span class="text-red-600 dark:text-red-400">ninguém — sem destinatário no Threema</span></template>
                           </span>
+                          <!-- F3/C10a: quem recebe o aviso do robô migrado vem do Cadastro
+                               (o atalho, só nomes; só admin edita, lá). -->
+                          <div v-if="roboNoCadastro(r)" class="col-span-2 my-1" :data-avisar-cadastro="r.threema_envio">
+                            <p v-if="r.modo !== 'ligado'" class="mb-1 text-[11px] text-muted-foreground">
+                              {{ r.modo === 'silencioso' ? 'Robô em silencioso: registra e não avisa.' : 'Robô desligado: não roda sozinho.' }}
+                              A lista abaixo vale quando ele for ligado.
+                            </p>
+                            <ThreemaQuemRecebe :chave="r.threema_envio || ''" titulo="Quem recebe os avisos deste robô" />
+                          </div>
+                          <template v-else>
+                            <span class="text-muted-foreground">Avisar</span>
+                            <span>
+                              <template v-if="r.modo === 'silencioso'">ninguém (silencioso)</template>
+                              <template v-else-if="(r.threema_destinatarios || []).length">
+                                Threema: {{ nomesDestinatarios(r) }}
+                                <span class="text-muted-foreground"> · {{ ORIGEM_THREEMA[r.threema_origem || ''] || 'origem desconhecida' }}</span>
+                              </template>
+                              <template v-else><span class="text-red-600 dark:text-red-400">ninguém — sem destinatário no Threema</span></template>
+                            </span>
+                          </template>
                           <span class="text-muted-foreground">Modo</span>
                           <span>
                             {{ r.modo }}
@@ -1352,103 +1369,94 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                               @input="setConfig(String(k), tipoCampo(v) === 'number' ? Number(($event.target as HTMLInputElement).value) : ($event.target as HTMLInputElement).value)"
                             />
                           </template>
-                          <label class="text-muted-foreground" :for="`reaviso-${r.chave}`">Re-aviso (h)</label>
-                          <input
-                            :id="`reaviso-${r.chave}`"
-                            v-model.number="editForm.reaviso_horas"
-                            type="number"
-                            min="1"
-                            class="h-7 w-24 rounded border bg-background px-2 text-xs"
-                          />
-                          <label class="text-muted-foreground">Threema</label>
-                          <div class="relative w-full max-w-[420px]">
-                            <button
-                              type="button"
-                              class="flex min-h-7 w-full flex-wrap items-center gap-1 rounded border bg-background px-2 py-1 text-left text-xs hover:bg-muted/50"
-                              :title="seletorAberto ? 'Fechar' : 'Escolher quem recebe os avisos'"
-                              @click="seletorAberto = !seletorAberto"
-                            >
-                              <template v-if="editForm.threema_ids.length">
-                                <span
-                                  v-for="id in editForm.threema_ids"
-                                  :key="id"
-                                  class="inline-flex items-center rounded-full border bg-card px-2 py-0.5 text-[11px]"
-                                  :title="id"
-                                >{{ nomeDe(id) }}</span>
-                              </template>
-                              <span v-else class="text-muted-foreground">ninguém — clique pra escolher</span>
-                              <ChevronDown class="ml-auto size-3.5 shrink-0 text-muted-foreground" :class="seletorAberto ? 'rotate-180' : ''" />
-                            </button>
-                            <div
-                              v-if="seletorAberto"
-                              class="absolute left-0 top-full z-30 mt-1 w-full rounded-md border bg-card p-1 shadow-lg"
-                            >
-                              <div v-if="!diretorioCarregado" class="px-2 py-1.5 text-xs text-muted-foreground">carregando…</div>
-                              <template v-else>
-                                <div v-if="!diretorio.length" class="px-2 py-1.5 text-xs text-muted-foreground">
-                                  Ninguém com Threema ainda — cadastre abaixo, ou preencha o campo Threema da pessoa em Usuários.
-                                </div>
-                                <label
-                                  v-for="d in diretorio"
-                                  :key="d.id"
-                                  class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-muted"
-                                >
-                                  <input type="checkbox" class="size-3.5" :checked="pessoaMarcada(d.id)" @change="alternarPessoa(d.id)" />
-                                  <span>{{ d.nome }}</span>
-                                  <span class="ml-auto font-mono text-[10px] text-muted-foreground">{{ d.id }}</span>
-                                  <!-- Só o contato avulso sai por aqui; usuário e .env vêm de outro lugar. -->
-                                  <button
-                                    v-if="d.origem === 'contato'"
-                                    type="button"
-                                    class="shrink-0 text-muted-foreground hover:text-destructive disabled:opacity-50"
-                                    :disabled="salvandoContato"
-                                    title="Tirar este contato da lista"
-                                    @click.prevent.stop="removerContato(d)"
+                          <!-- Chave da config que o Cadastro governa: só leitura, com o link. -->
+                          <template v-for="(envio, k) in (r.config_no_cadastro || {})" :key="`cad-${k}`">
+                            <span class="text-muted-foreground">{{ configLabel(r, String(k)) }}</span>
+                            <span :data-config-cadastro="k">
+                              {{ valorConfig(r, String(k)) }} ·
+                              <NuxtLink v-if="isAdmin" :to="linkDoEnvio(envio)" class="text-primary hover:underline">muda em Cadastros › Envios Threema</NuxtLink>
+                              <span v-else class="text-muted-foreground">só admin muda (Cadastros › Envios Threema)</span>
+                            </span>
+                          </template>
+                          <template v-if="roboNoCadastro(r)">
+                            <!-- F3/C10a: re-aviso e quem recebe só no Cadastro (só admin). -->
+                            <span class="text-muted-foreground">Re-aviso</span>
+                            <span data-reaviso-cadastro>
+                              a cada {{ r.reaviso_horas }} h ·
+                              <NuxtLink v-if="isAdmin" :to="linkDoEnvio(r.threema_envio || '')" class="text-primary hover:underline">muda em Cadastros › Envios Threema</NuxtLink>
+                              <span v-else class="text-muted-foreground">só admin muda (Cadastros › Envios Threema)</span>
+                            </span>
+                            <span class="text-muted-foreground">Threema</span>
+                            <span data-threema-cadastro>
+                              quem recebe é escolhido em
+                              <NuxtLink v-if="isAdmin" :to="linkDoEnvio(r.threema_envio || '')" class="text-primary hover:underline">Cadastros › Envios Threema</NuxtLink>
+                              <template v-else>Cadastros › Envios Threema (só admin)</template>
+                            </span>
+                          </template>
+                          <template v-else>
+                            <label class="text-muted-foreground" :for="`reaviso-${r.chave}`">Re-aviso (h)</label>
+                            <input
+                              :id="`reaviso-${r.chave}`"
+                              v-model.number="editForm.reaviso_horas"
+                              type="number"
+                              min="1"
+                              class="h-7 w-24 rounded border bg-background px-2 text-xs"
+                            />
+                            <label class="text-muted-foreground">Threema</label>
+                            <div class="relative w-full max-w-[420px]">
+                              <button
+                                type="button"
+                                class="flex min-h-7 w-full flex-wrap items-center gap-1 rounded border bg-background px-2 py-1 text-left text-xs hover:bg-muted/50"
+                                :title="seletorAberto ? 'Fechar' : 'Escolher quem recebe os avisos'"
+                                @click="seletorAberto = !seletorAberto"
+                              >
+                                <template v-if="editForm.threema_ids.length">
+                                  <span
+                                    v-for="id in editForm.threema_ids"
+                                    :key="id"
+                                    class="inline-flex items-center rounded-full border bg-card px-2 py-0.5 text-[11px]"
+                                    :title="id"
+                                  >{{ nomeDe(id) }}</span>
+                                </template>
+                                <span v-else class="text-muted-foreground">ninguém — clique pra escolher</span>
+                                <ChevronDown class="ml-auto size-3.5 shrink-0 text-muted-foreground" :class="seletorAberto ? 'rotate-180' : ''" />
+                              </button>
+                              <div
+                                v-if="seletorAberto"
+                                class="absolute left-0 top-full z-30 mt-1 w-full rounded-md border bg-card p-1 shadow-lg"
+                              >
+                                <div v-if="!diretorioCarregado" class="px-2 py-1.5 text-xs text-muted-foreground">carregando…</div>
+                                <template v-else>
+                                  <div v-if="!diretorio.length" class="px-2 py-1.5 text-xs text-muted-foreground">
+                                    Ninguém com Threema ainda — cadastre abaixo, ou preencha o campo Threema da pessoa em Usuários.
+                                  </div>
+                                  <label
+                                    v-for="d in diretorio"
+                                    :key="d.id"
+                                    class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-muted"
                                   >
-                                    <X class="size-3" />
-                                  </button>
-                                </label>
-                                <!-- Contato de quem não tem login no DaVinci: nome + ID, sem deploy. -->
-                                <div class="mt-1 border-t px-2 pt-1.5">
-                                  <div class="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Não está na lista?</div>
-                                  <div class="flex items-center gap-1">
-                                    <input
-                                      v-model="novoContatoNome"
-                                      class="h-7 min-w-0 flex-1 rounded border bg-background px-1.5 text-xs"
-                                      placeholder="nome (ex. roma)"
-                                      @keydown.enter.prevent="adicionarContato"
-                                    />
-                                    <input
-                                      v-model="novoContatoId"
-                                      class="h-7 w-24 rounded border bg-background px-1.5 font-mono text-xs uppercase"
-                                      placeholder="VBS64V3S"
-                                      maxlength="8"
-                                      @keydown.enter.prevent="adicionarContato"
-                                    />
-                                    <button
-                                      type="button"
-                                      class="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-[11px] hover:bg-muted disabled:opacity-50"
-                                      :disabled="salvandoContato"
-                                      @click="adicionarContato"
-                                    >
-                                      <Loader2 v-if="salvandoContato" class="size-3 animate-spin" />
-                                      <Plus v-else class="size-3" />
-                                      cadastrar
+                                    <input type="checkbox" class="size-3.5" :checked="pessoaMarcada(d.id)" @change="alternarPessoa(d.id)" />
+                                    <span>{{ d.nome }}</span>
+                                    <span class="ml-auto font-mono text-[10px] text-muted-foreground">{{ d.id }}</span>
+                                  </label>
+                                  <!-- Quem não tem login no DaVinci: contato externo, no Cadastro (só admin). -->
+                                  <div class="mt-1 border-t px-2 pt-1.5 text-[10px] text-muted-foreground" data-contatos-externos>
+                                    <div class="mb-1 uppercase tracking-wider">Não está na lista?</div>
+                                    Quem não tem login no DaVinci entra como contato externo em
+                                    <NuxtLink v-if="isAdmin" :to="LINK_CONTATOS_EXTERNOS" class="text-primary hover:underline">Cadastros › Envios Threema › Contatos externos</NuxtLink>
+                                    <template v-else>Cadastros › Envios Threema › Contatos externos (só admin)</template>.
+                                    Quem tem login aparece sozinho ao preencher o campo Threema em Usuários.
+                                  </div>
+                                  <div class="mt-1 flex items-center justify-between border-t px-2 pt-1.5 text-[11px] text-muted-foreground">
+                                    <span>{{ editForm.threema_ids.length }} {{ editForm.threema_ids.length === 1 ? 'pessoa' : 'pessoas' }}</span>
+                                    <button type="button" class="hover:text-foreground" @click="editForm = { ...editForm, threema_ids: idsPadrao(r) }; seletorAberto = false">
+                                      voltar ao padrão do sistema
                                     </button>
                                   </div>
-                                  <div class="mt-1 text-[10px] text-muted-foreground">
-                                    O ID do Threema tem 8 letras/números. Quem tem login no DaVinci aparece sozinho ao preencher o campo Threema em Usuários.
-                                  </div>
-                                </div>
-                                <div class="mt-1 flex items-center justify-between border-t px-2 pt-1.5 text-[11px] text-muted-foreground">
-                                  <span>{{ editForm.threema_ids.length }} {{ editForm.threema_ids.length === 1 ? 'pessoa' : 'pessoas' }}</span>
-                                  <button type="button" class="hover:text-foreground" @click="editForm = { ...editForm, threema_ids: idsPadrao(r) }; seletorAberto = false">
-                                    voltar ao padrão do sistema
-                                  </button>
-                                </div>
-                              </template>
+                                </template>
+                              </div>
                             </div>
-                          </div>
+                          </template>
                         </div>
                         <div class="flex items-center gap-1.5">
                           <button

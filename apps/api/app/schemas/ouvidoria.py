@@ -59,6 +59,23 @@ class RoboOut(BaseModel):
     threema_recipients: str | None = None
     threema_destinatarios: list[DestinatarioOut] = []
     threema_origem: str | None = None
+    # Tarefa 16, F3/C10a: o envio do aviso deste robô em Cadastros › Envios
+    # Threema (`ouvidoria.<robô>`; None no Relatório da Denúncia, que tem
+    # envio próprio) e se ele já lê o Cadastro. Migrado: quem recebe e o
+    # re-aviso são editados lá (só admin); `threema_destinatarios` traz os
+    # nomes do Cadastro (ID mascarado) com `threema_origem` "cadastro" —
+    # na configuração antiga (emergência, sem semente) a lista de sempre —,
+    # `threema_via` diz de onde veio (cadastro | cache | legado) e
+    # `threema_ativo` se o aviso está ligado no Cadastro.
+    threema_envio: str | None = None
+    threema_migrado: bool = False
+    threema_via: str | None = None
+    threema_ativo: bool | None = None
+    # Chave da config → envio do Cadastro que passou a editá-la (o "avisar
+    # margem alta" quando o item 27 migrar): só leitura aqui.
+    config_no_cadastro: dict[str, str] = {}
+    # PATCH: o que foi ignorado porque o Cadastro é quem edita.
+    avisos: list[str] = []
     reaviso_horas: int
     # Config efetiva (padrão do catálogo por baixo do que está salvo).
     config: dict = {}

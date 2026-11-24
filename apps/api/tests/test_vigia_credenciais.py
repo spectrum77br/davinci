@@ -84,6 +84,9 @@ async def _limpa_ouvidoria(db: AsyncSession):
 class _Threema:
     enviados: list[tuple[str, list[str]]] = []
 
+    def __init__(self, *args, **kwargs) -> None:
+        """Aceita `contexto=` como o cliente de verdade (o remetente do robô)."""
+
     async def send_to_all(self, texto: str, recipients=None) -> dict:
         self.enviados.append((texto, list(recipients or [])))
         return {"sent": list(recipients or []), "failed": []}

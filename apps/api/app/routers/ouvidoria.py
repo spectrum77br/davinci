@@ -10,6 +10,14 @@ Recurso de permissão: `ouvidoria` (view lê; edit muda modo/destinatários,
 roda agora, trata/ignora/reabre). As regras vivem em `services/ouvidoria`;
 aqui é leitura + os botões.
 
+Tarefa 16, F3/C10a — "só ADM altera quem recebe" (decisão do dono, 23/11):
+o aviso de cada robô que já lê Cadastros › Envios Threema (`threema_migrado`)
+tem quem recebe e o re-aviso editados lá, só por admin. O PATCH daqui IGNORA
+`threema_recipients` e `reaviso_horas` desses robôs (e a chave da config que
+o Cadastro passou a governar, `config_no_cadastro`), com um aviso em
+`avisos` — não 422: a aba aberta antes da publicação continua salvando o
+resto. A lista "Avisar" fica congelada como reserva de emergência.
+
 `RUNNERS` é o registro "chave do robô → função que roda uma varredura". O
 import é tardio de propósito: o serviço de cada robô puxa clients de
 marketplace, Bling, etc., e o router não pode custar isso no boot da API.
@@ -47,7 +55,8 @@ from app.schemas.ouvidoria import (
     StatusFiltro,
 )
 from app.services import ouvidoria as svc
-from app.services import threema
+from app.services import threema, threema_envios
+from app.services.threema_catalogo import CATALOGO, ENVIOS, EnvioDef, chave_ouvidoria
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/ouvidoria", tags=["ouvidoria"])
@@ -125,8 +134,62 @@ async def _nomes_threema(session: AsyncSession) -> dict[str, str]:
     return {d["id"]: d["nome"] for d in await threema.diretorio(session)}
 
 
-def _robo_out(robo: OuvidoriaRobo, contagens: dict, agora: datetime, nomes: dict[str, str]) -> dict:
+def _envio_do_robo(robo_chave: str) -> EnvioDef | None:
+    """O envio de Cadastros › Envios Threema que já manda o aviso deste robô
+    (`ouvidoria.<robô>` com `migrado=True`, tarefa 16, F3/C10a), ou None
+    (o robô ainda segue a lista "Avisar" daqui)."""
+    chave = chave_ouvidoria(robo_chave)
+    d = CATALOGO.get(chave) if chave else None
+    return d if d is not None and d.migrado else None
+
+
+def config_no_cadastro(robo_chave: str) -> dict[str, str]:
+    """Chave da config do robô → envio do Cadastro que passou a editá-la: o
+    liga/desliga gravado direto na caixinha do robô (`interruptor=
+    "robo_config"`, o "avisar margem alta" do item 27), quando esse envio já
+    migrou. A tela mostra só leitura, com o link; o PATCH ignora."""
+    out: dict[str, str] = {}
+    # Pelo CATALOGO (a mesma fonte do `resolver`), na ordem do catálogo.
+    for d in (CATALOGO[e.chave] for e in ENVIOS):
+        if d.interruptor == "robo_config" and d.migrado and d.interruptor_alvo:
+            robo, _, campo = d.interruptor_alvo.partition(".")
+            if robo == robo_chave:
+                out[campo] = d.chave
+    return out
+
+
+async def _quem_recebe(
+    session: AsyncSession, robos: list[OuvidoriaRobo]
+) -> dict[str, threema_envios.Resolucao]:
+    """Quem recebe AGORA o aviso de cada robô migrado, pelo Cadastro (com os
+    nomes). O robô não migrado não entra: a lista dele é a de sempre."""
+    out = {}
+    for r in robos:
+        d = _envio_do_robo(r.chave)
+        if d is not None:
+            out[r.chave] = await threema_envios.quem_recebe(d.chave, session=session)
+    return out
+
+
+def _robo_out(
+    robo: OuvidoriaRobo,
+    contagens: dict,
+    agora: datetime,
+    nomes: dict[str, str],
+    quem: threema_envios.Resolucao | None = None,
+    avisos: list[str] | None = None,
+) -> dict:
     ids, origem = svc.destinatarios(robo, robo.chave)
+    destinatarios = [DestinatarioOut(id=i, nome=nomes.get(i, i)) for i in ids]
+    migrado = _envio_do_robo(robo.chave) is not None
+    if migrado and quem is not None and quem.via in ("cadastro", "cache"):
+        # Quem recebe é o do Cadastro: só nomes (o ID vai mascarado). Na
+        # configuração antiga (emergência, sem semente) a lista é a de sempre.
+        destinatarios = [
+            DestinatarioOut(id=threema_envios.mascara(x.id), nome=x.nome or "Sem nome")
+            for x in quem.destinos
+        ]
+        origem = "cadastro"
     c = contagens.get(robo.chave) or {}
     return {
         "chave": robo.chave,
@@ -141,8 +204,14 @@ def _robo_out(robo: OuvidoriaRobo, contagens: dict, agora: datetime, nomes: dict
         "arquivado_em": robo.arquivado_em,
         "arquivado_por": robo.arquivado_por,
         "threema_recipients": robo.threema_recipients,
-        "threema_destinatarios": [DestinatarioOut(id=i, nome=nomes.get(i, i)) for i in ids],
+        "threema_destinatarios": destinatarios,
         "threema_origem": origem,
+        "threema_envio": chave_ouvidoria(robo.chave),
+        "threema_migrado": migrado,
+        "threema_via": quem.via if migrado and quem is not None else None,
+        "threema_ativo": quem.ativo if migrado and quem is not None else None,
+        "config_no_cadastro": config_no_cadastro(robo.chave),
+        "avisos": list(avisos or []),
         "reaviso_horas": robo.reaviso_horas,
         "config": svc.config_do_robo(robo, robo.chave),
         "config_rotulos": svc.rotulos_config(robo.chave),
@@ -187,7 +256,8 @@ async def listar_robos(
     )
     contagens = await svc.contagens_por_robo(session, agora)
     nomes = await _nomes_threema(session)
-    return [RoboOut(**_robo_out(r, contagens, agora, nomes)) for r in robos]
+    quem = await _quem_recebe(session, list(robos))
+    return [RoboOut(**_robo_out(r, contagens, agora, nomes, quem.get(r.chave))) for r in robos]
 
 
 @router.get("/robos/{chave}", response_model=RoboDetalheOut)
@@ -228,8 +298,9 @@ async def detalhe_robo(
         .scalars()
         .all()
     )
+    quem = await _quem_recebe(session, [robo])
     return RoboDetalheOut(
-        **_robo_out(robo, contagens, agora, await _nomes_threema(session)),
+        **_robo_out(robo, contagens, agora, await _nomes_threema(session), quem.get(chave)),
         rodadas=[
             RodadaOut(
                 id=r.id,
@@ -334,8 +405,15 @@ async def editar_robo(
 ) -> RoboOut:
     """Modo, destinatários, re-aviso, config e a lixeira do painel. Mudança de
     modo carimba quem e quando (a tela mostra "desligado por Fulano em 21/09
-    16:10"); `arquivado` idem."""
+    16:10"); `arquivado` idem.
+
+    Robô cujo aviso já lê Cadastros › Envios Threema (F3/C10a): quem recebe,
+    o re-aviso e a chave da config que o Cadastro governa são IGNORADOS (só
+    admin muda, lá), com um aviso em `avisos` quando o valor mandado mudaria
+    algo — o resto do corpo (modo, config, lixeira) é gravado normalmente."""
     robo = await _get_robo(session, chave)
+    migrado = _envio_do_robo(chave) is not None
+    governadas = config_no_cadastro(chave)
     # Valida tudo antes de gravar qualquer coisa: a tela manda o objeto
     # inteiro, e uma tolerância de 100000 min (dedo a mais) ou um texto no
     # lugar do número mudaria o robô calado — ver `Parametro` no serviço.
@@ -344,11 +422,12 @@ async def editar_robo(
         # A tela manda pessoas (nome ou ID); nome vira ID pelo diretório.
         destinatarios = (
             svc.resolver_destinatarios(body.threema_recipients, await threema.diretorio(session))
-            if body.threema_recipients is not None
+            if body.threema_recipients is not None and not migrado
             else None
         )
     except svc.OuvidoriaError as e:
         raise _erro(e) from e
+    avisos, ignorados = await _ignorados_pelo_cadastro(session, robo, body, config, governadas)
     if body.modo is not None and body.modo != robo.modo:
         robo.modo = body.modo
         robo.modo_alterado_por = _autor(user)
@@ -362,19 +441,72 @@ async def editar_robo(
         robo.arquivado_em = agora if body.arquivado else None
         robo.arquivado_por = _autor(user) if body.arquivado else None
         logger.info("ouvidoria_arquivado", robo=chave, arquivado=body.arquivado, por=_autor(user))
-    if body.threema_recipients is not None:
+    if body.threema_recipients is not None and not migrado:
         robo.threema_recipients = destinatarios
-    if body.reaviso_horas is not None:
+    if body.reaviso_horas is not None and not migrado:
         robo.reaviso_horas = body.reaviso_horas
     if config is not None:
+        config = {k: v for k, v in config.items() if k not in governadas}
         # Mescla por cima do que está salvo: chave conhecida que a tela não
         # mandou não some (cairia no padrão sem ninguém perceber).
         robo.config = {**(robo.config or {}), **config}
+    if ignorados:
+        logger.info("ouvidoria_patch_ignorado", robo=chave, campos=ignorados, por=_autor(user))
     await session.commit()
     await session.refresh(robo)
     agora = datetime.now(UTC)
     contagens = await svc.contagens_por_robo(session, agora)
-    return RoboOut(**_robo_out(robo, contagens, agora, await _nomes_threema(session)))
+    quem = await _quem_recebe(session, [robo])
+    return RoboOut(
+        **_robo_out(robo, contagens, agora, await _nomes_threema(session), quem.get(chave), avisos)
+    )
+
+
+_CADASTRO = "Cadastros › Envios Threema (só admin)"
+
+
+async def _ignorados_pelo_cadastro(
+    session: AsyncSession,
+    robo: OuvidoriaRobo,
+    body: RoboPatch,
+    config: dict | None,
+    governadas: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """(avisos, campos) do que o PATCH não grava porque o Cadastro é quem
+    edita: só avisa quando o valor mandado mudaria algo (a aba aberta antes
+    da publicação manda a lista e o re-aviso de sempre junto com o resto)."""
+    avisos: list[str] = []
+    campos: list[str] = []
+    if _envio_do_robo(robo.chave) is not None:
+        if body.threema_recipients is not None:
+            try:
+                nova = svc.resolver_destinatarios(
+                    body.threema_recipients, await threema.diretorio(session)
+                )
+            except svc.OuvidoriaError:
+                nova = "<inválida>"
+            if (nova or None) != (robo.threema_recipients or None):
+                campos.append("threema_recipients")
+                avisos.append(
+                    f"Quem recebe os avisos deste robô agora é escolhido em {_CADASTRO}: "
+                    "a lista mandada não foi gravada."
+                )
+        if body.reaviso_horas is not None and body.reaviso_horas != robo.reaviso_horas:
+            campos.append("reaviso_horas")
+            avisos.append(
+                f"O re-aviso deste robô agora é mudado em {_CADASTRO}: o valor mandado "
+                "não foi gravado."
+            )
+    atual = svc.config_do_robo(robo, robo.chave)
+    rotulos = svc.rotulos_config(robo.chave)
+    for k in governadas:
+        if config is not None and k in config and config[k] != atual.get(k):
+            campos.append(f"config.{k}")
+            avisos.append(
+                f"'{rotulos.get(k, k)}' agora é mudado em {_CADASTRO}: o valor mandado "
+                "não foi gravado."
+            )
+    return avisos, campos
 
 
 async def _rodada_em_andamento(session: AsyncSession, chave: str) -> bool:

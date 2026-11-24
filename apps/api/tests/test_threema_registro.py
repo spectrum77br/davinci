@@ -379,7 +379,9 @@ _CHAVES_DINAMICAS = {
     # O "Enviar agora" do Informar migrado (F2): a chave do contexto, que a
     # rota tira do mesmo `_CHAVE_ENVIO`.
     ("routers/informar.py", "chave"),
-    ("services/ouvidoria.py", "chave_ouvidoria(robo_chave)"),
+    # O aviso das pendências dos robôs da Ouvidoria (F3/C10a): a chave do robô
+    # (`chave_ouvidoria`, o mapa robô → chave tem teste próprio).
+    ("services/ouvidoria.py", "chave"),
     ("services/conferencia_shopee/threema_aviso.py", "chave"),
     # O núcleo do Cadastro (C5): `enviar(chave, …)` valida a chave no catálogo.
     ("services/threema_envios.py", "chave"),
@@ -610,6 +612,12 @@ def test_envio_migrado_so_sai_pelo_cadastro():
     # A Conferência manda pelo Cadastro com a chave da plataforma (F2/C9e;
     # conferida pelo caminho real em `test_threema_pontos_conferencia`).
     pelo_cadastro |= {c for c in threema_aviso.CHAVE_ENVIO.values() if c in migrados}
+    # O aviso dos robôs da Ouvidoria manda pelo Cadastro com a chave do robô
+    # (F3/C10a; conferido pelo caminho real em `test_threema_pontos_ouvidoria`).
+    from app.services import ouvidoria
+    from app.services.threema_catalogo import chave_ouvidoria
+
+    pelo_cadastro |= {c for r in ouvidoria.ROBOS if (c := chave_ouvidoria(r)) in migrados}
     assert pelo_cadastro == migrados
 
 
@@ -676,8 +684,6 @@ _MARCAS = {
         "K.MARGEM_REAVALIACAO",
     ): 1,
     ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
-    # 29 a 42 (um envio por robô; o mapa robô → chave tem teste próprio)
-    ("services/ouvidoria.py", "avisar_pendentes", "chave_ouvidoria(robo_chave)"): 1,
     # o núcleo do Cadastro (C5): forcar_para e lista resolvida
     ("services/threema_envios.py", "enviar", "chave"): 2,
 }
@@ -735,6 +741,10 @@ _PELO_CADASTRO = {
     # F2/C9e: a Conferência (45 a 47, a chave da plataforma; o mapa plataforma
     # → chave tem teste próprio)
     ("services/conferencia_shopee/threema_aviso.py", "enviar_pendente", "chave"): 1,
+    # F3/C10a: o aviso das pendências de cada robô da Ouvidoria (29 a 42, a
+    # chave do robô; o 34, ainda não migrado, sai pela configuração antiga
+    # exata pelo mesmo caminho)
+    ("services/ouvidoria.py", "avisar_pendentes", "chave"): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }

@@ -521,10 +521,19 @@ _REPETICOES = {
 }
 
 
+# O robô cujo aviso migra com a Margem (F3/C10b, item 34): até lá, o aviso
+# dele segue a lista "Avisar" do robô.
+_ROBO_DA_C10B = "vigia_margem"
+
+
 def _ouvidoria() -> list[EnvioDef]:
     """Itens 29 a 42: um envio por robô da Ouvidoria (o aviso das ocorrências
     pendentes, `ouvidoria.avisar_pendentes`). O remetente é o `contexto` do
-    robô no catálogo da Ouvidoria."""
+    robô no catálogo da Ouvidoria.
+
+    F3/C10a: todos leem o Cadastro, menos o do Robô da Margem (34, C10b).
+    Quem vê a tela dos robôs (`ouvidoria:view`) vê quem recebe (só nomes),
+    como via a lista "Avisar" antes; só admin altera."""
     out = []
     for chave, robo in ROBOS.items():
         if chave == _ROBO_COM_ENVIO_PROPRIO:
@@ -548,7 +557,9 @@ def _ouvidoria() -> list[EnvioDef]:
                 ),
                 depende_de=(_dep_robo(chave),),
                 ao_desligar="acumula",
+                leitura="perm:ouvidoria:view",
                 fatia="F3",
+                migrado=chave != _ROBO_DA_C10B,
             )
         )
     return out

@@ -305,6 +305,14 @@ _USOS_DO_NUCLEO = {
     # (`ativo`, também no varredor do worker), quem recebe lido antes de
     # montar a mensagem, o canal do remetente e o envio um por vez.
     "services/conferencia_shopee/threema_aviso.py": {"enviar", "resolver", "canal", "ativo"},
+    # F3/C10a: o aviso das pendências de cada robô da Ouvidoria (29 a 42): o
+    # liga/desliga e quem recebe lidos antes das pendências (desligado não
+    # carimba; a configuração antiga vazia fica calada) e o envio pelo núcleo
+    # (o robô ainda não migrado, o 34, sai pela configuração antiga exata).
+    "services/ouvidoria.py": {"enviar", "resolver"},
+    # A tela dos robôs (F3/C10a): quem recebe o aviso de cada robô migrado,
+    # pelo Cadastro (só nomes, o ID mascarado). Não manda nada.
+    "routers/ouvidoria.py": {"quem_recebe", "mascara"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {

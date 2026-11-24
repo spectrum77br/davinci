@@ -13,8 +13,8 @@ envio capturado.
 
 Envio MIGRADO (o ponto passou a ler o Cadastro): a montagem antiga saiu do
 código e fica aqui como CÓPIA CONGELADA do ponto antes do commit da fatia
-(`_ANTES_DA_F1`, `_ANTES_DA_F2`). É ela que o `legado` tem de continuar
-reproduzindo — é a reserva de emergência e a fonte da semente.
+(`_ANTES_DA_F1`, `_ANTES_DA_F2`, `_ANTES_DA_F3`). É ela que o `legado` tem
+de continuar reproduzindo — é a reserva de emergência e a fonte da semente.
 
 Três cenários (`threema_cadastro_apoio`): o "cheio", parecido com produção,
 o "reservas", com as fontes principais vazias, e o "vazias", com toda linha
@@ -210,7 +210,39 @@ _ANTES_DA_F2 = {
         lambda db: _linha(db, "conferencia_shopee"),
     ),
 }
-_ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2}
+
+
+def _robo_antes_da_f3(robo: str):
+    """ouvidoria.avisar_pendentes antes da F3/C10a: `ouvidoria.destinatarios`
+    — a lista "Avisar" do robô na tela; sem ela, o .env do robô; sem esse, o
+    OUVIDORIA_THREEMA_RECIPIENTS geral. (A função continua no código como
+    a configuração antiga; a cópia congela o que ela fazia.)"""
+
+    async def _hoje(db) -> list[str]:
+        row = await db.get(OuvidoriaRobo, robo)
+        if row is not None:
+            ids = P(row.threema_recipients)
+            if ids:
+                return ids
+        s = get_settings()
+        d = ouvidoria.ROBOS.get(robo)
+        if d is not None and d.env_threema_recipients:
+            ids = P(getattr(s, d.env_threema_recipients, None))
+            if ids:
+                return ids
+        return P(s.ouvidoria_threema_recipients)
+
+    return _hoje
+
+
+# Cópias congeladas dos pontos que a F3 migrou: o aviso das pendências de cada
+# robô da Ouvidoria (C10a, itens 29 a 33 e 35 a 42).
+_ANTES_DA_F3 = {
+    c: _robo_antes_da_f3(r)
+    for r in ouvidoria.ROBOS
+    if (c := chave_ouvidoria(r)) is not None and CATALOGO[c].migrado
+}
+_ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2, **_ANTES_DA_F3}
 
 
 def _conferencia_ligada_antes_da_f2(chave: str) -> bool:
@@ -518,7 +550,7 @@ async def test_botao_da_regra_pela_rota_de_verdade(
 
 def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
     """Todo envio migrado tem a cópia do ponto de antes (`_ANTES_DA_F1`,
-    `_ANTES_DA_F2`), e o ponto não monta mais a lista: a expressão antiga
+    `_ANTES_DA_F2`, `_ANTES_DA_F3`), e o ponto não monta mais a lista: a expressão antiga
     saiu do código (no Informar ela fica só para os contextos não migrados:
     a rota manda o migrado pelo Cadastro, conferido pela rota de verdade em
     `test_threema_pontos_informar`)."""
@@ -562,6 +594,13 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         assert "parse_recipients" not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
+    # F3/C10a: o aviso dos robôs não monta mais a lista (o `destinatarios`
+    # fica no módulo só como a configuração antiga) nem cria o cliente
+    import inspect
+
+    aviso = inspect.getsource(ouvidoria.avisar_pendentes)
+    for expressao in ("destinatarios(", "send_to_all", "ThreemaClient", "parse_recipients"):
+        assert expressao not in aviso, expressao
     # F2/C9e: o liga/desliga da Conferência (as chaves do .env) só no catálogo
     # e no núcleo — nem o ponto nem o varredor do worker leem mais
     for arquivo in ("services/conferencia_shopee/threema_aviso.py", "worker.py"):
