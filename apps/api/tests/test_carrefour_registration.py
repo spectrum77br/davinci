@@ -16,6 +16,7 @@ from app.models import (
     CadastroTipo,
     Company,
     Integration,
+    IntegrationPlatform,
     PricingAccount,
     StoreInfo,
     UserRole,
@@ -43,6 +44,43 @@ async def test_carrefour_store_info_create_edit_list_without_automatic_integrati
     assert store["has_integration"] is False
     assert await db.scalar(select(func.count()).select_from(Integration)) == 0
     assert await db.scalar(select(func.count()).select_from(PricingAccount)) == 0
+
+
+async def test_store_integration_badge_uses_saved_link_and_legacy_name_match(
+    client, db, make_user, auth_as,
+):
+    user = await make_user(role=UserRole.ADMIN)
+    auth_as(user)
+    integration = Integration(
+        user_id=user.id, platform=IntegrationPlatform.CARREFOUR,
+        name="Carrefour Poofy", credentials=b"test",
+    )
+    db.add(integration)
+    await db.commit()
+    integration_id = str(integration.id)
+
+    response = await client.post("/api/pricing/store-info", json={
+        "platform": "carrefour", "account_name": "Poofy",
+    })
+    assert response.status_code == 201, response.text
+    store_id = response.json()["id"]
+    path = f"/api/pricing/store-info/{store_id}"
+
+    response = await client.patch(path, json={"integration_id": integration_id})
+    assert response.status_code == 200, response.text
+    assert response.json()["has_integration"] is True
+    stores = (await client.get("/api/pricing/store-info")).json()
+    store = next(row for row in stores if row["id"] == store_id)
+    assert store["integration_id"] == integration_id
+    assert store["has_integration"] is True
+
+    response = await client.patch(path, json={"integration_id": None})
+    assert response.status_code == 200, response.text
+    assert response.json()["has_integration"] is False
+
+    response = await client.patch(path, json={"account_name": "carrefour poofy"})
+    assert response.status_code == 200, response.text
+    assert response.json()["has_integration"] is True
 
 
 async def test_carrefour_account_in_company_and_cadastro_grids_with_resource_reservations(

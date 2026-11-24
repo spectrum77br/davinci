@@ -2677,7 +2677,7 @@ def _store_info_out(
     row: StoreInfo,
     departments: list[str] | None = None,
     has_pricing: bool | None = None,
-    has_integration: bool | None = None,
+    integration_name_match: bool = False,
 ) -> StoreInfoOut:
     out = StoreInfoOut.model_validate(row)
     out.has_password = bool(row.password_enc)
@@ -2685,12 +2685,8 @@ def _store_info_out(
     # Manual tags classify a store without creating a price table. Only
     # departments derived from pricing accounts contribute to this badge.
     out.has_pricing = bool(has_pricing) if has_pricing is not None else bool(departments)
-    # `has_integration` is the strict (lower(name), platform) match against the
-    # `integrations` table. Falls back to the legacy FK if the caller didn't
-    # compute the strict variant.
-    out.has_integration = (
-        bool(has_integration) if has_integration is not None else (row.integration_id is not None)
-    )
+    # Older store records can still be identified by account name and platform.
+    out.has_integration = row.integration_id is not None or integration_name_match
     return out
 
 
@@ -2718,7 +2714,7 @@ async def list_store_info(
     ).scalars().all()
     classifications = await resolve_store_departments(session, user, rows)
 
-    # has_integration: strict (lower(name), platform) match against integrations.
+    # Legacy fallback for stores identified by account name and platform.
     # Both store_info.platform and integrations.platform use short codes (ml,
     # shopee, …) so no alias translation is needed here.
     integ_rows = (
@@ -2739,7 +2735,7 @@ async def list_store_info(
         out_list.append(
             _store_info_out(
                 r, classification.departments,
-                has_pricing=classification.has_pricing, has_integration=has_integ,
+                has_pricing=classification.has_pricing, integration_name_match=has_integ,
             )
         )
     return out_list
@@ -2848,7 +2844,7 @@ async def patch_store_info(
         row,
         departments=depts,
         has_pricing=has_pricing,
-        has_integration=has_integ,
+        integration_name_match=has_integ,
     )
 
 
@@ -2958,7 +2954,7 @@ async def unarchive_store_info(
         integration_id=str(integ.id) if integ else None,
     )
     return _store_info_out(
-        row, departments=depts, has_pricing=has_pricing, has_integration=has_integ
+        row, departments=depts, has_pricing=has_pricing, integration_name_match=has_integ
     )
 
 
@@ -3055,7 +3051,7 @@ async def set_store_info_department(
         await session.refresh(info)
         depts, has_pricing, has_integ = await _compute_store_info_badges(session, user, info)
         return _store_info_out(
-            info, departments=depts, has_pricing=has_pricing, has_integration=has_integ
+            info, departments=depts, has_pricing=has_pricing, integration_name_match=has_integ
         )
     row = await _ensure_store_pricing_account(session, user, info, sid, body.department)
     await session.commit()
