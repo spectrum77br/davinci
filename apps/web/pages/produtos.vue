@@ -518,8 +518,8 @@ const marketplaceIntegrationsSorted = computed(() =>
 // Quem tem leitor em cada botão (o servidor monta a lista de verdade; aqui é
 // só para a prévia mostrar as mesmas contas). Atualizar lê a LISTA de
 // anúncios; Vincular lê os anúncios ao vivo para ligar ao produto.
-const PLATAFORMAS_ATUALIZAR = ['ml', 'shopee', 'tiktok', 'magalu', 'carrefour']
-const PLATAFORMAS_VINCULAR = ['ml', 'shopee', 'tiktok', 'amazon', 'magalu']
+const PLATAFORMAS_ATUALIZAR = ['ml', 'shopee', 'tiktok', 'magalu', 'carrefour', 'temu']
+const PLATAFORMAS_VINCULAR = ['ml', 'shopee', 'tiktok', 'amazon', 'magalu', 'temu']
 const contasVincular = computed(() =>
   marketplaceIntegrationsSorted.value.filter((i) => PLATAFORMAS_VINCULAR.includes(i.platform)))
 type GrupoContas = { platform: string; label: string; nomes: string[] }
@@ -2137,8 +2137,8 @@ function atualizarSemLeitura(job: any): string[] {
   const s = atualizarResultado(job).sem_leitura
   return Array.isArray(s) ? s.map((p: string) => nomePlataforma(p)) : []
 }
-// "Sem leitura da lista": só a Amazon tem os vínculos lidos no Vincular; Temu
-// e outras não têm leitor nenhum.
+// "Sem leitura da lista": só a Amazon tem os vínculos lidos no Vincular; as
+// outras que aparecerem aqui não têm leitor nenhum.
 function atualizarSemLeituraTexto(job: any): string | null {
   const s = atualizarResultado(job).sem_leitura
   const lista: string[] = Array.isArray(s) ? s : []

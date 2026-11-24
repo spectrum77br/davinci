@@ -55,6 +55,17 @@ const stores = ref<Store[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const testingId = ref<string | null>(null)
+// Temu: resumo do último "testar" OK, mostrado no próprio cartão (loja,
+// validade e aviso de permissões). Só campos que o servidor já libera: nunca
+// token nem segredo. Fica até o próximo teste da conta (some ao recarregar).
+type TemuTesteResumo = { texto: string; avisos: string[]; pronto: boolean }
+const temuTeste = ref<Record<string, TemuTesteResumo>>({})
+function resumoTesteTemu(info: Record<string, any> | null | undefined): TemuTesteResumo {
+  const partes = [`Teste OK: loja ${info?.mall_id || '(não informada)'}`]
+  if (info?.expira_em_texto) partes.push(`token vale até ${info.expira_em_texto}`)
+  const avisos = Array.isArray(info?.avisos) ? info!.avisos.filter((a: unknown) => typeof a === 'string' && a) : []
+  return { texto: partes.join('; ') + '.', avisos, pronto: info?.pronto_para_estoque === true }
+}
 // Cooldown CF do Bling por integração (epoch de fim). Enquanto ativo o
 // botão "testar" fica desabilitado com contagem regressiva — não adianta
 // bater na API (re-armaria o cooldown).
@@ -163,7 +174,7 @@ async function testIntegration(i: Integration) {
     const r = await api<{
       ok: boolean; detail: string | null
       code?: string; ttl_seconds?: number; retry_after_epoch?: number
-      info?: { cached?: boolean; checked_at?: number } | null
+      info?: { cached?: boolean; checked_at?: number; [k: string]: any } | null
     }>(
       `/api/integrations/${i.id}/test`,
       { method: 'POST' }
@@ -177,6 +188,12 @@ async function testIntegration(i: Integration) {
         delete checks[i.id]
       }
       carrefourChecks.value = checks
+    }
+    if (i.platform === 'temu') {
+      const resumos = { ...temuTeste.value }
+      if (r.ok) resumos[i.id] = resumoTesteTemu(r.info)
+      else delete resumos[i.id]
+      temuTeste.value = resumos
     }
     if (r.code === 'bling_cf_cooldown_active' && r.retry_after_epoch) {
       cooldownUntil.value = { ...cooldownUntil.value, [i.id]: r.retry_after_epoch }
@@ -302,7 +319,7 @@ async function toggleTemuStockWrite(i: Integration) {
     await refresh()
   } catch (e: any) {
     const code = e?.data?.detail?.code
-    error.value = (code && TEMU_WRITE_ERRORS[code]) || code || 'Não foi possível alterar o envio.'
+    error.value = `${i.name}: ${(code && TEMU_WRITE_ERRORS[code]) || code || 'Não foi possível alterar o envio.'}`
   } finally {
     temuWriteId.value = null
   }
@@ -444,6 +461,17 @@ const tab = ref<'integracoes' | 'automacoes'>(
             Estoque: {{ i.temu_stock_write_enabled ? 'envio habilitado' : 'envio desativado (só lê e vincula)' }}.
             Preços: ainda não enviados (falta a liberação da Temu).
           </p>
+          <div v-if="i.platform === 'temu' && temuTeste[i.id]" class="text-xs space-y-0.5">
+            <p class="text-green-600">{{ temuTeste[i.id]!.texto }}</p>
+            <p v-for="(a, k) in temuTeste[i.id]!.avisos" :key="k" class="text-amber-600">Atenção: {{ a }}</p>
+            <p v-if="!i.temu_stock_write_enabled" class="text-muted-foreground">
+              {{ temuTeste[i.id]!.pronto
+                ? 'Pronta para ligar o envio de estoque.'
+                : (temuTeste[i.id]!.avisos.length
+                  ? 'Ainda não dá para ligar o envio de estoque (veja o aviso acima).'
+                  : 'Ainda não dá para ligar o envio de estoque (a Temu não informou a loja).') }}
+            </p>
+          </div>
           <div v-if="i.platform === 'carrefour'" class="text-xs text-muted-foreground">
             <template v-if="carrefourWrites[i.id]">
               {{ carrefourWrites[i.id]!.linked }} anúncios vinculados ·
@@ -492,7 +520,9 @@ const tab = ref<'integracoes' | 'automacoes'>(
                 : OAUTH_AUTHORIZE_LABELS[i.platform] }}
             </Button>
             <Button
-              v-if="canEdit && i.platform !== 'bling' && (i.platform !== 'carrefour' || i.carrefour_stock_write_enabled)"
+              v-if="canEdit && i.platform !== 'bling'
+                && (i.platform !== 'carrefour' || i.carrefour_stock_write_enabled)
+                && (i.platform !== 'temu' || i.temu_stock_write_enabled)"
               size="sm"
               :variant="i.vacation_mode ? 'default' : 'outline'"
               :disabled="vacationId === i.id"

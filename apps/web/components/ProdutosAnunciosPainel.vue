@@ -26,7 +26,7 @@ const emit = defineEmits<{ (e: 'mudou'): void }>()
 
 type Integration = {
   id: string
-  platform: 'bling' | 'ml' | 'shopee' | 'amazon' | 'carrefour'
+  platform: 'bling' | 'ml' | 'shopee' | 'amazon' | 'carrefour' | 'tiktok' | 'magalu' | 'temu'
   name: string
   store_id: string | null
 }
@@ -108,6 +108,7 @@ const PLATFORM_LABEL: Record<string, string> = {
   // Desde 17/11/2026 o "Atualizar" lê também a lista do TikTok e da Magalu.
   tiktok: 'TikTok',
   magalu: 'Magalu',
+  temu: 'Temu',
 }
 
 const STATUS_LABEL: Record<Listing['status'], string> = {
@@ -354,6 +355,7 @@ defineExpose({ openImport, refreshAll, importableIntegrations })
         <option value="tiktok">TikTok</option>
         <option value="magalu">Magalu</option>
         <option value="carrefour">Carrefour</option>
+        <option value="temu">Temu</option>
         <option value="bling">Bling</option>
       </select>
       <select
