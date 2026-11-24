@@ -452,7 +452,7 @@ TABELAS: dict[str, str] = {
     "chamado_mensagem": "Mensagem do chamado",
     "tarefas": "Tarefa",
     "imobilizado": "Item do imobilizado",
-    # M-29 (24/11/2026, migration 0507): Cadastros › Produtos.
+    # M-29 (24/11/2026, migration 0508): Cadastros › Produtos.
     "produto_cadastro_tipos": "Tipo (Cadastros › Produtos)",
     "produto_cadastros": "Categoria ou tag (Cadastros › Produtos)",
     "garantias": "Garantia",

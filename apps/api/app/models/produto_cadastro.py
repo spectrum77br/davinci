@@ -1,4 +1,4 @@
-"""Cadastros › Produtos: a LISTA OFICIAL de categorias e tags de envio (M-29, migration 0507).
+"""Cadastros › Produtos: a LISTA OFICIAL de categorias e tags de envio (M-29, migration 0508).
 
 Pedido M-29 do Harry (24/11/2026): uma tabela Tipo | Nome, com os tipos "Categoria" e
 "Tag de envio" no começo. Os filtros Tags e Categoria do Produtos 2 (M-30) leem esta lista.

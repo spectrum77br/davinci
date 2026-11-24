@@ -45,7 +45,7 @@ USO = {
 
 @pytest.fixture
 async def base(db):
-    """A tabela como a 0507 deixa: 2 tipos com chave e os 14 nomes."""
+    """A tabela como a 0508 deixa: 2 tipos com chave e os 14 nomes."""
     cat = ProdutoCadastroTipo(nome="Categoria", chave="categoria")
     tag = ProdutoCadastroTipo(nome="Tag de envio", chave="tag_envio")
     db.add_all([cat, tag])

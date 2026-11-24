@@ -1,4 +1,4 @@
-"""A 0507 cria Cadastros › Produtos igual ao model e com os dados do pedido M-29 (24/11/2026).
+"""A 0508 cria Cadastros › Produtos igual ao model e com os dados do pedido M-29 (24/11/2026).
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela migration. Aqui a
 migration roda de verdade num schema rascunho e o catálogo — colunas, constraints e índices,
@@ -22,13 +22,13 @@ from sqlalchemy.exc import IntegrityError
 from app.models import Base
 
 _MIGRATION = (
-    Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0507_produto_cadastros.py"
+    Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0508_produto_cadastros.py"
 )
 TABELAS = ("produto_cadastro_tipos", "produto_cadastros")
 
 
 def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0507", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0508", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -77,16 +77,33 @@ async def _catalogo(db, schema: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_0507_cria_igual_ao_model_com_os_dados_do_pedido_e_desce(db):
+async def test_0508_cria_igual_ao_model_com_os_dados_do_pedido_e_desce(db):
     mod = _carregar()
-    assert mod.revision == "0507_produto_cadastros"
-    assert mod.down_revision == "0506_marketing_gasto_dia"
+    assert mod.revision == "0508_produto_cadastros"
+    # Depois da 0507 do M-22, que vem depois da 0506 da Fraude do main (24/11): uma ponta só, a
+    # nossa. Com duas pontas o `alembic upgrade head` do deploy recusa.
+    assert mod.down_revision == "0507_marketing_gasto_dia"
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    raiz = Path(__file__).resolve().parent.parent
+    cfg = Config(str(raiz / "alembic.ini"))
+    cfg.set_main_option("script_location", str(raiz / "alembic"))
+    roteiro = ScriptDirectory.from_config(cfg)
+    assert roteiro.get_heads() == ["0508_produto_cadastros"]
+    caminho = [r.revision for r in roteiro.walk_revisions("base", "0508_produto_cadastros")]
+    assert caminho[:4] == [
+        "0508_produto_cadastros",
+        "0507_marketing_gasto_dia",
+        "0506_devolucao_fraude_reabre_negociacao",
+        "0505_alertas_por_equipe",
+    ]
     from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO
 
     assert [c for c, _t, _n in mod.INICIAIS] == [CHAVE_CATEGORIA, CHAVE_TAG_ENVIO]
 
     modelo = Base.metadata.schema
-    rascunho = f"{modelo}_m0507"
+    rascunho = f"{modelo}_m0508"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
     await db.commit()

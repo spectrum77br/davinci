@@ -560,7 +560,11 @@ async def test_migration_0507_cria_o_que_o_modelo_declara_copia_e_o_downgrade_de
     raiz = Path(__file__).resolve().parent.parent
     cfg = Config(str(raiz / "alembic.ini"))
     cfg.set_main_option("script_location", str(raiz / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0507_marketing_gasto_dia"]
+    # Uma ponta só. A 0508 (M-29, Cadastros › Produtos) vem logo depois desta.
+    roteiro = ScriptDirectory.from_config(cfg)
+    assert len(roteiro.get_heads()) == 1
+    depois = roteiro.get_revision("0508_produto_cadastros")
+    assert depois.down_revision == "0507_marketing_gasto_dia"
     schema_model = Base.metadata.schema
     r = f"{schema_model}_mig0507"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{r}" CASCADE'))

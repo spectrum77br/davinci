@@ -18,11 +18,11 @@ DADOS INICIAIS (os do pedido):
 
 DOWNGRADE: apaga as duas tabelas (nada de fora aponta para elas).
 
-`SET LOCAL lock_timeout` como na 0505/0506: tabelas novas não travam ninguém, mas a regra da casa
+`SET LOCAL lock_timeout` como na 0505/0507: tabelas novas não travam ninguém, mas a regra da casa
 vale para toda migration — se algo segurar o catálogo, desiste em 5 s e é só rodar de novo.
 
-Revision ID: 0507_produto_cadastros
-Revises: 0506_marketing_gasto_dia
+Revision ID: 0508_produto_cadastros
+Revises: 0507_marketing_gasto_dia
 """
 
 # ruff: noqa: S608 — SQL montado só com nomes fixos desta migration (schema), sem entrada de fora
@@ -33,8 +33,9 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0507_produto_cadastros"
-down_revision: str | None = "0506_marketing_gasto_dia"
+revision: str = "0508_produto_cadastros"
+# Depois da 0507 do M-22 (gasto de Ads por dia), que vem depois da 0506 da Fraude do main.
+down_revision: str | None = "0507_marketing_gasto_dia"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
