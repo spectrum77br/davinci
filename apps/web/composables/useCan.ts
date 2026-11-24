@@ -47,6 +47,7 @@ export type Resource =
   | 'marcas'
   | 'redes_sociais'
   | 'email_padroes'
+  | 'cadastro_produtos'
   | 'ouvidoria'
   | 'denuncia'
   | 'usuarios'
@@ -150,6 +151,9 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
       // Cadastros, com Sincronizações e Alertas dentro. Sync Logs não está no
       // menu (só /sync-logs), mas é da mesma família.
       'integracoes', 'sincronizacoes', 'alertas', 'sync_logs',
+      // Produtos (M-29, 24/11/2026): a aba de categorias e tags de envio. Só o
+      // view vale; criar, editar e excluir são só de administrador.
+      'cadastro_produtos',
     ],
   },
   {
@@ -219,6 +223,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   marcas: 'Marcas',
   redes_sociais: 'Redes Sociais',
   email_padroes: 'E-mails (padrões)',
+  cadastro_produtos: 'Produtos — categorias e tags de envio (ver; criar, editar e excluir só admin)',
   ouvidoria: 'Robôs (Ouvidoria)',
   denuncia: 'Denúncia (Anúncios, Denúncias, Casos)',
   usuarios: 'Usuários',

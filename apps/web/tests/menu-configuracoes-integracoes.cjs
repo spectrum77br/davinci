@@ -43,9 +43,11 @@ const rotulos = (tabs) => tabs.map((t) => t.label)
   assert.deepEqual(rotulos(nav.TABS_INTEGRACOES), ['Integrações', 'Sincronizações', 'Alertas', 'Histórico'])
   assert.deepEqual(nav.TABS_INTEGRACOES.map((t) => t.resource ?? t.soComChave),
     ['integracoes', 'sincronizacoes', 'alertas', 'historico'], 'mesmas permissões de antes')
-  const ultima = nav.TABS_CADASTROS.at(-1)
-  assert.equal(ultima.label, 'Integrações', 'Integrações é a última aba de Cadastros')
-  assert.equal(ultima.abas, nav.TABS_INTEGRACOES)
+  // M-29 (24/11/2026): a aba Produtos entrou DEPOIS de Integrações.
+  const [integracoes, produtos] = nav.TABS_CADASTROS.slice(-2)
+  assert.equal(integracoes.label, 'Integrações', 'Integrações é a penúltima aba de Cadastros')
+  assert.equal(integracoes.abas, nav.TABS_INTEGRACOES)
+  assert.deepEqual([produtos.label, produtos.to, produtos.resource], ['Produtos', '/cadastro-produtos', 'cadastro_produtos'])
   assert.deepEqual(rotulos(nav.TABS_CONFIGURACOES), ['Configurações', 'Usuários', 'Faturas'])
   const [cfg, usu, fat] = nav.TABS_CONFIGURACOES
   assert.equal(cfg.resource, 'configuracoes')
@@ -215,7 +217,8 @@ const rotas = (m) => m.visibleSections.value.flatMap((s) => s.items.map((i) => i
   can(exp, require, () => ({ user: null }))
   assert.equal(exp.RESOURCE_GROUPS.find((g) => g.label === 'Sistema'), undefined)
   const cadastros = exp.RESOURCE_GROUPS.find((g) => g.label === 'Cadastros').resources
-  assert.deepEqual(cadastros.slice(-4), ['integracoes', 'sincronizacoes', 'alertas', 'sync_logs'])
+  // M-29: `cadastro_produtos` (a aba Produtos, depois de Integrações) fecha o grupo.
+  assert.deepEqual(cadastros.slice(-5), ['integracoes', 'sincronizacoes', 'alertas', 'sync_logs', 'cadastro_produtos'])
   assert.deepEqual(exp.RESOURCE_GROUPS.find((g) => g.label === 'Admin').resources, ['usuarios', 'permissoes', 'configuracoes'])
 
   const nomes = fs.readFileSync(path.resolve(__dirname, '../../api/app/historico/nomes.py'), 'utf8')
