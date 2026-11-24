@@ -357,7 +357,18 @@ function alternarFiltro(f: Filtro, valor: string, marcado: boolean) {
   alvo.value = novo
 }
 function marcarTodas(f: Filtro, marcar: boolean) {
-  const opcoes = f === 'plataforma' ? plataformaOptions.value : f === 'conta' ? contaOptions.value : equipeOptions.value
+  if (f === 'conta') {
+    // Como o marcarContas da Tabela: valem para a lista que está à vista (com
+    // busca, só as encontradas); as outras ficam como estavam.
+    const novo = new Set(contasDesmarcadas.value)
+    for (const o of contaOptionsBuscadas.value) {
+      if (marcar) novo.delete(o.value)
+      else novo.add(o.value)
+    }
+    contasDesmarcadas.value = novo
+    return
+  }
+  const opcoes = f === 'plataforma' ? plataformaOptions.value : equipeOptions.value
   conjunto(f).value = marcar ? new Set() : new Set(opcoes.map((o) => o.value))
 }
 

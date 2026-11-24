@@ -306,7 +306,21 @@ async function principal() {
   adm.state.marcarTodas('conta', true)
   adm.state.buscaContas = 'for'
   assert.deepEqual(caixas(menu(await adm.html(), 'contas'), 'conta').map(([v]) => v), ['forpaper'])
+  // Revisão (24/11): como na Tabela, "Marcar todas · Limpar" do Contas ▾ com
+  // busca valem só para as contas encontradas.
+  adm.state.marcarTodas('conta', false)
+  html = await adm.html()
+  assert.deepEqual(linhas(html).map((l) => l[0]), ['mega', 'vita', 'Sem cadastro (999)'], 'Limpar com busca: só a encontrada sai')
+  assert.match(html, /Contas \(3\)/)
+  adm.state.buscaContas = 'mega'
+  adm.state.marcarTodas('conta', false)
+  adm.state.buscaContas = 'for'
+  adm.state.marcarTodas('conta', true)
+  html = await adm.html()
+  assert.deepEqual(linhas(html).map((l) => l[0]), ['forpaper', 'vita', 'Sem cadastro (999)'], 'Marcar todas com busca: só a encontrada volta')
   adm.state.buscaContas = ''
+  adm.state.marcarTodas('conta', true)
+  assert.equal(linhas(await adm.html()).length, 4)
 
   // ---------------------------------------------------------------- Período e Atualizar
   const antes = adm.chamadas.length
