@@ -43,6 +43,7 @@ from app.services.marketing.alerts import (
     record_sync_success,
 )
 from app.services.marketing.bling_revenue import BlingRevenue, get_bling_revenue
+from app.services.marketing.gasto_dia import ORIGEM_SHOPEE, gravar_gasto_dos_dias
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.shopee_ads import (
     CampaignInfo,
@@ -294,6 +295,14 @@ async def sync_shopee_integration(
     # ─── daily metrics — one row per day in the window ───────────────────
     if daily:
         await _upsert_daily_metrics(session, account_id=account.id, rows=daily)
+        # M-22 (24/11/2026): o gasto de cada dia também no histórico por dia
+        # (Investimento do Faturamento).
+        await gravar_gasto_dos_dias(
+            session,
+            account_id=account.id,
+            dias=[(d.day, d.spend) for d in daily],
+            origem=ORIGEM_SHOPEE,
+        )
 
     # ─── campaigns + per-campaign rollup (last N days) ───────────────────
     # Per-campaign revenue is also GMV-based: Bling doesn't tag pedidos

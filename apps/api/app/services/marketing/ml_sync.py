@@ -59,6 +59,7 @@ from app.services.marketing.alerts import (
     record_sync_success,
 )
 from app.services.marketing.bling_revenue import BlingRevenue, get_bling_revenue
+from app.services.marketing.gasto_dia import ORIGEM_ML, gravar_gasto_dos_dias
 from app.services.ml_ads import (
     ML_ADS_MAX_DIAS,
     MLAdsClient,
@@ -592,6 +593,14 @@ async def sync_ml_integration(
     _marcar_estado(account, SYNC_OK, None, agora_utc)
 
     await _upsert_campaigns(session, account_id=account.id, campaigns=campaigns)
+    # M-22 (24/11/2026): o gasto de cada dia da janela também no histórico
+    # por dia (Investimento do Faturamento) — o mesmo número da linha diária.
+    await gravar_gasto_dos_dias(
+        session,
+        account_id=account.id,
+        dias=[(date.fromisoformat(p["dia"]), p["depois"]["spend"]) for p in plano],
+        origem=ORIGEM_ML,
+    )
 
     integration.last_ads_sync_at = agora_utc
     integration.last_error = None

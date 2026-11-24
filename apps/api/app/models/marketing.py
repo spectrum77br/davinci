@@ -8,7 +8,7 @@ vertical instead of treating the whole shop as one bucket.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -16,6 +16,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -263,6 +265,46 @@ class MarketingMetric(Base, TimestampMixin):
         Integer, nullable=False, default=50, server_default=text("50")
     )
 
+
+
+class MarketingGastoDia(Base):
+    """Gasto de um dia de uma conta de Ads (M-22, 24/11/2026, migration 0506).
+
+    Pedido do dono: a coluna Investimento da aba Faturamento soma o gasto de
+    Ads (e, um dia, a comissão de afiliados) da conta no PERÍODO filtrado. O
+    `marketing_accounts.spend_today` é sobrescrito a cada coleta; aqui fica uma
+    linha por (conta, dia), gravada (upsert) por toda coleta que escreve o
+    `spend_today` (services/marketing/gasto_dia.py): ML (os 7 dias da janela)
+    e Shopee (os dias da resposta). A Amazon fica de fora: a coleta dela soma a
+    janela de 7 dias inteira num número só — não é o gasto de um dia.
+
+    - `gasto_ads`: R$ gasto em Ads no dia (como a plataforma devolveu).
+    - `gasto_afiliados`: comissão de afiliados do dia. SEM FONTE hoje (nenhuma
+      coleta lê afiliados): fica NULL até existir uma; a coleta de Ads nunca
+      mexe nela.
+    - `origem`: quem gravou — 'ml_ads', 'shopee_ads' ou 'marketing_metrics'
+      (a cópia que a 0506 fez das linhas diárias que já existiam).
+    Sem linha no dia = sem dado (a tela mostra "—", nunca R$ 0,00 inventado).
+    """
+
+    __tablename__ = "marketing_gasto_dia"
+    __table_args__ = (
+        CheckConstraint("gasto_ads >= 0", name="gasto_ads"),
+        CheckConstraint("gasto_afiliados >= 0", name="gasto_afiliados"),
+    )
+
+    marketing_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    dia: Mapped[date] = mapped_column(Date, primary_key=True)
+    gasto_ads: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    gasto_afiliados: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    origem: Mapped[str] = mapped_column(Text, nullable=False)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
 
 class MarketingDecision(Base, TimestampMixin):
     __tablename__ = "marketing_decisions"

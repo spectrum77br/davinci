@@ -97,6 +97,10 @@ async def sync_amazon_integration(
         round(spend / account_revenue * 100, 2) if account_revenue > 0 else None
     )
 
+    # M-22 (24/11/2026): aqui NÃO se grava o histórico por dia
+    # (marketing_gasto_dia, Investimento do Faturamento): `spend` é a soma da
+    # janela de 7 dias inteira (o relatório não separa por dia), não o gasto
+    # de um dia — gravá-lo como o dia de hoje inventaria número.
     account = await _upsert_account(
         session,
         integration=integration,

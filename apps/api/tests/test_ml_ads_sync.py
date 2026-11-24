@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -37,6 +38,7 @@ from app.models.marketing import (
     MarketingAccount,
     MarketingCampaign,
     MarketingDecision,
+    MarketingGastoDia,
     MarketingMetric,
 )
 from app.services.marketing.bling_revenue import BlingRevenue
@@ -672,6 +674,53 @@ async def test_adota_conta_orfa_com_o_mesmo_nome(db, make_user, fake_ml, bling):
     assert orfa.integration_id == integ.id
     n = (await db.execute(select(func.count()).select_from(MarketingAccount))).scalar_one()
     assert n == 1
+
+
+async def _historico(db, account_id) -> dict[date, MarketingGastoDia]:
+    rows = (
+        await db.execute(
+            select(MarketingGastoDia).where(MarketingGastoDia.marketing_account_id == account_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    return {r.dia: r for r in rows}
+
+
+async def test_sync_grava_o_gasto_de_cada_dia_no_historico_m22(db, make_user, fake_ml, bling):
+    """M-22 (24/11/2026): a coleta grava também o gasto de cada dia da janela em
+    marketing_gasto_dia (Investimento do Faturamento) — o mesmo número da linha
+    diária; rodar de novo atualiza, não duplica; afiliados fica sem dado."""
+    integ = await _integracao(db, make_user)
+    assert (await ml_sync_mod.sync_ml_integration(db, integ.id, agora=AGORA))["status"] == "ok"
+    acc = (await db.execute(
+        select(MarketingAccount).where(MarketingAccount.integration_id == integ.id)
+    )).scalar_one()
+    linhas = await _linhas(db, acc.id)
+    hist = await _historico(db, acc.id)
+    assert sorted(hist) == sorted(linhas) == [INICIO + timedelta(days=i) for i in range(7)]
+    for dia, linha in linhas.items():
+        assert hist[dia].gasto_ads == Decimal(str(round(linha.spend, 2))), dia
+        assert hist[dia].origem == "ml_ads"
+        assert hist[dia].gasto_afiliados is None
+    assert hist[INICIO].gasto_ads == Decimal("95.12")
+
+    fake_ml.diario = (200, {"paging": {"total": 1}, "results": [
+        {"date": "2026-10-06", "cost": 99.99, "prints": 1, "clicks": 1, "total_amount": 10.0},
+    ]})
+    assert (await ml_sync_mod.sync_ml_integration(db, integ.id, agora=AGORA))["status"] == "ok"
+    hist = await _historico(db, acc.id)
+    assert len(hist) == 7
+    assert hist[date(2026, 10, 6)].gasto_ads == Decimal("99.99")
+    assert hist[INICIO].gasto_ads == Decimal("95.12")  # o ML não trouxe: mantém
+
+    # A simulação não grava no histórico.
+    acc_id = acc.id  # o rollback da simulação expira os objetos
+    fake_ml.diario = (200, {"paging": {"total": 1}, "results": [
+        {"date": "2026-10-06", "cost": 1.0, "prints": 1, "clicks": 1, "total_amount": 1.0},
+    ]})
+    r = await ml_sync_mod.sync_ml_integration(db, integ.id, simular=True, agora=AGORA)
+    assert r["status"] == "ok"
+    assert (await _historico(db, acc_id))[date(2026, 10, 6)].gasto_ads == Decimal("99.99")
 
 
 async def test_simulacao_do_sync_nao_grava_nada(db, make_user, fake_ml, bling):
