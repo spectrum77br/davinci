@@ -149,12 +149,14 @@ async def _amazon_auto_antes_da_f2(db) -> list[str]:
 
 
 # Cópias congeladas dos pontos que a F2 migrou. O "Enviar agora" dos Informar
-# migrados (C9a) lia a linha do contexto na rota (`_config_row` + a expressão
+# migrados (C9a e C9b) lia a linha do contexto na rota (`_config_row` + a expressão
 # de `_EXPRESSOES`, que continua lá para os contextos ainda não migrados).
 _ANTES_DA_F2 = {
     K.LOGISTICA_INFORMAR: lambda db: _informar(db, "logistica"),
     K.LOGISTICA_AMAZON_INFORMAR: lambda db: _informar(db, "logistica_amazon"),
     K.LOGISTICA_AMAZON_PRAZOS: _amazon_auto_antes_da_f2,
+    # C9b
+    K.CONTROLE_ESTOQUE_INFORMAR: lambda db: _informar(db, "controle_estoque"),
 }
 _ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2}
 
@@ -177,7 +179,6 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         K.DEVOLUCOES_INFORMAR: lambda: _informar(db, "devolucoes"),
         K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
         K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda: chamados_juridico.recipients_juridico(db),
-        K.CONTROLE_ESTOQUE_INFORMAR: lambda: _informar(db, "controle_estoque"),
         K.MARGEM_PEDIDO_SEGURADO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_REAVALIACAO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_MARGEM_ALTA: lambda: margem_auto_hold._recipients_margem_auto(db),

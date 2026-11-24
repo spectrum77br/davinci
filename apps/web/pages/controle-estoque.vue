@@ -3693,11 +3693,13 @@ async function conferirTodos() {
       </div>
     </div>
 
-    <!-- Modal do botão INFORMAR (admin-only) -->
+    <!-- Modal do botão INFORMAR (admin-only). Atalho de Cadastros › Envios
+         Threema (tarefa 16, F2): quem recebe se escolhe lá. -->
     <InformarThreemaModal
       :open="informarEstoqueOpen"
       contexto="controle_estoque"
-      descricao="Manda via Threema os pedidos movidos pra Aguardando Cancelamento por falta de estoque (que ainda estão nessa situação). A seleção de destinatários fica salva."
+      chave="controle_estoque.informar"
+      descricao="Manda via Threema os pedidos movidos pra Aguardando Cancelamento por falta de estoque (que ainda estão nessa situação)."
       @close="informarEstoqueOpen = false"
     />
 

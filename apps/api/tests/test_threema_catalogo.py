@@ -260,6 +260,8 @@ MIGRADOS = [
     # F1/C8c: Chamados (itens 13 e 14)
     K.CHAMADOS_TIKTOK_SO_REEMBOLSO,
     K.CHAMADOS_ABERTURAS_PRESAS,
+    # F2/C9b: Informar do Controle de Estoque (item 17)
+    K.CONTROLE_ESTOQUE_INFORMAR,
     # F1/C8b: Estoque e NF (itens 18 a 23)
     K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO,
     K.CONTROLE_ESTOQUE_NF_NEGATIVO_FORA_DO_LOTE,
@@ -285,11 +287,12 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`
     (C8a), `test_threema_pontos_estoque_nf` (C8b),
     `test_threema_pontos_chamados_produtos` (C8c) e
-    `test_threema_pontos_informar` (C9a)."""
+    `test_threema_pontos_informar` (C9a e C9b)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
         K.LOGISTICA_AMAZON_INFORMAR: "recusa",
+        K.CONTROLE_ESTOQUE_INFORMAR: "recusa",
         # os carimbos `aviso_*_at` só gravam o que saiu
         K.LOGISTICA_AMAZON_PRAZOS: "acumula",
         # o carimbo da ocorrência grave é gravado antes do aviso

@@ -248,8 +248,10 @@ async def test_informar_put_salva_so_ids_do_diretorio(
     )
     monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
     auth_as(admin)
+    # Um contexto cuja lista ainda vale (o do Controle de Estoque já é
+    # escolhido em Cadastros › Envios Threema: o PUT dele responde 410).
     r = await client.put(
-        "/api/informar/controle_estoque",
+        "/api/informar/margem",
         json={"recipients": ["aaaa1111", "ZZZZ9999"]},
     )
     assert r.status_code == 200

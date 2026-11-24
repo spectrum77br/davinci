@@ -1,10 +1,11 @@
-"""F2/C9a da tarefa 16: o Informar da Logística (item 2), o Informar da aba
-Amazon (3) e os prazos da Amazon (4) passam a ler o Cadastro (Cadastros ›
-Envios Threema). A lista do Informar (`threema_informar_config`) fica
-congelada como reserva de emergência e o PUT dela responde 410 — "só ADM
-altera quem recebe" (decisão do dono, 23/11): quem hoje marcava a lista no
-modal (o gerente, na aba Amazon) perde a edição, mas o "Enviar agora"
-continua para quem pode usar o botão hoje.
+"""F2/C9a e C9b da tarefa 16: o Informar da Logística (item 2), o Informar
+da aba Amazon (3), os prazos da Amazon (4) e o Informar do Controle de
+Estoque (17) passam a ler o Cadastro (Cadastros › Envios Threema). A lista
+do Informar (`threema_informar_config`) fica congelada como reserva de
+emergência e o PUT dela responde 410 — "só ADM altera quem recebe" (decisão
+do dono, 23/11): quem hoje marcava a lista no modal (o gerente, na aba
+Amazon) perde a edição, mas o "Enviar agora" continua para quem pode usar o
+botão hoje.
 
 Um teste por ponto, PELO CAMINHO REAL (a rota do botão e a rodada do robô; só
 o ThreemaClient é falso):
@@ -60,19 +61,26 @@ pytestmark = pytest.mark.asyncio
 
 GERENTE = "sa.geral@tutamail.com"
 
-# As chaves da C9a, o contexto do Informar de cada uma (a lista antiga) e o
-# remetente de HOJE (o `contexto` que o código passava ao ThreemaClient).
+# As chaves da C9a e da C9b, o contexto do Informar de cada uma (a lista
+# antiga) e o remetente de HOJE (o `contexto` que o código passava ao
+# ThreemaClient).
 REMETENTE_DE_HOJE = {
     K.LOGISTICA_INFORMAR: "logistica",
     K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon",
     K.LOGISTICA_AMAZON_PRAZOS: "logistica",
+    K.CONTROLE_ESTOQUE_INFORMAR: "controle_estoque",
 }
 LISTA_DE_HOJE = {
     K.LOGISTICA_INFORMAR: "logistica",
     K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon",
     K.LOGISTICA_AMAZON_PRAZOS: "logistica_amazon_auto",
+    K.CONTROLE_ESTOQUE_INFORMAR: "controle_estoque",
 }
-BOTOES = {K.LOGISTICA_INFORMAR: "logistica", K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon"}
+BOTOES = {
+    K.LOGISTICA_INFORMAR: "logistica",
+    K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon",
+    K.CONTROLE_ESTOQUE_INFORMAR: "controle_estoque",
+}
 MINHAS = list(REMETENTE_DE_HOJE)
 
 
@@ -145,7 +153,7 @@ def _envios() -> list[tuple]:
     return [(e["chave"], e["via"], e["contexto"], e["destinos"]) for e in _Fake.envios]
 
 
-def test_as_chaves_da_c9a_estao_migradas_com_o_remetente_de_hoje():
+def test_as_chaves_da_c9a_e_c9b_estao_migradas_com_o_remetente_de_hoje():
     for chave, remetente in REMETENTE_DE_HOJE.items():
         d = CATALOGO[chave]
         assert d.migrado and d.fatia == "F2", chave
@@ -321,7 +329,7 @@ async def test_put_da_lista_migrada_responde_410_e_o_get_mostra_a_antiga(
     admin = await make_user(role=UserRole.ADMIN)
     await _linha_informar(db, "logistica", ID["harry"])
     auth_as(admin)
-    for contexto in ("logistica", "logistica_amazon", "logistica_amazon_auto"):
+    for contexto in ("logistica", "logistica_amazon", "logistica_amazon_auto", "controle_estoque"):
         r = await client.put(f"/api/informar/{contexto}", json={"recipients": [ID["joana"]]})
         assert r.status_code == 410, (contexto, r.text)
         detalhe = r.json()["detail"]
@@ -393,10 +401,12 @@ async def test_gerente_perde_a_edicao_mas_segue_enviando_e_vendo_quem_recebe(
         q = r.json()
         assert q["nomes"] == ["joana c9a"] and q["usa_configuracao_antiga"] is False
         assert "TSTJ0006" not in r.text
-    # o Informar da Logística segue só de admin (botão e quem recebe)
-    assert (await _botao(client, "logistica")).status_code == 403
-    r = await client.get(f"/api/threema/envios/{K.LOGISTICA_INFORMAR}/quem-recebe")
-    assert r.status_code == 403
+    # os Informar da Logística e do Controle de Estoque seguem só de admin
+    # (botão e quem recebe)
+    for chave in (K.LOGISTICA_INFORMAR, K.CONTROLE_ESTOQUE_INFORMAR):
+        assert (await _botao(client, BOTOES[chave])).status_code == 403, chave
+        r = await client.get(f"/api/threema/envios/{chave}/quem-recebe")
+        assert r.status_code == 403, chave
     operador = await make_user(role=UserRole.USER, permissions={"logistica": {"edit": True}})
     auth_as(operador)
     assert (await _botao(client, "logistica_amazon")).status_code == 403
@@ -449,6 +459,7 @@ async def test_semente_confere_e_cada_ponto_manda_para_quem_o_legado_mandaria(
         assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
     if variante == "cheio":
         assert esperado[K.LOGISTICA_INFORMAR] == [ID["harry"], ID["heisenberg"]]
+        assert esperado[K.CONTROLE_ESTOQUE_INFORMAR] == [ID["harry"], ID["heisenberg"]]
         assert esperado[chave] == [ID["londres"], ID["harry"], ID["cairo_sa"]]
 
 
@@ -464,15 +475,18 @@ async def test_quem_foi_suspenso_depois_da_semente_para_de_receber(
     await db.commit()
     await _amazon_prazos(db)
     auth_as(await make_user(role=UserRole.ADMIN))
-    r = await _botao(client, "logistica")
-    assert r.status_code == 200, r.text
+    for contexto in ("logistica", "controle_estoque"):
+        r = await _botao(client, contexto)
+        assert r.status_code == 200, r.text
     assert [e["destinos"] for e in _Fake.envios] == [
         [ID["harry"], ID["cairo_sa"]],
         [ID["harry"], ID["cairo_sa"]],
+        [ID["harry"]],
         [ID["harry"]],
     ]
     # a lista antiga ainda mandaria para os dois
     leg = await threema_envios.legado(K.LOGISTICA_AMAZON_PRAZOS, session=db)
     assert ID["londres"] in leg.ids
-    leg = await threema_envios.legado(K.LOGISTICA_INFORMAR, session=db)
-    assert ID["heisenberg"] in leg.ids
+    for chave in (K.LOGISTICA_INFORMAR, K.CONTROLE_ESTOQUE_INFORMAR):
+        leg = await threema_envios.legado(chave, session=db)
+        assert ID["heisenberg"] in leg.ids, chave

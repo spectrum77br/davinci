@@ -230,9 +230,9 @@ _USOS_DO_NUCLEO = {
     "services/chamados_tiktok_reembolso.py": {"enviar"},
     "services/chamados_pendencias.py": {"enviar"},
     "services/vigia_estoque_familia.py": {"enviar"},
-    # F2/C9a: o "Enviar agora" dos Informar migrados (2 e 3; o portão lê o
-    # liga/desliga antes de montar o relatório) e os prazos da Amazon (4;
-    # lido antes do laço, para o desligado não carimbar nada)
+    # F2/C9a e C9b: o "Enviar agora" dos Informar migrados (2, 3 e 17; o
+    # portão lê o liga/desliga antes de montar o relatório) e os prazos da
+    # Amazon (4; lido antes do laço, para o desligado não carimbar nada)
     "routers/informar.py": {"enviar", "resolver"},
     "services/logistica_amazon_avisos.py": {"enviar", "resolver"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração

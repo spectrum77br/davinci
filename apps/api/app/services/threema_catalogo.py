@@ -404,7 +404,7 @@ def _servidor() -> list[EnvioDef]:
             "estoque que continuam lá no Bling.",
             "manual", "botão Informar › Enviar agora", "servidor", "controle_estoque",
             L(informar=("controle_estoque",)), ao_desligar="recusa", fatia="F2",
-            leitura="informar:controle_estoque",
+            leitura="informar:controle_estoque", migrado=True,
         ),
         E(
             K.CONTROLE_ESTOQUE_NF_SEM_ESTOQUE_MOVIDO, "Controle de Estoque", None,

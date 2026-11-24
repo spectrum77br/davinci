@@ -11,8 +11,8 @@
 //    de marcar, sem "Salvar" e sem PUT; o "Enviar agora" continua (o mesmo
 //    POST), para quando ninguém receberia e mostra o motivo do servidor; o
 //    modo antigo (os painéis ainda não migrados) continua igual;
-//  - os painéis migrados (Logística e aba Amazon) usam o atalho com as chaves
-//    do catálogo.
+//  - os painéis migrados (Logística, aba Amazon e Controle de Estoque) usam o
+//    atalho com as chaves do catálogo.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -325,7 +325,11 @@ const leve = (extra = {}) => ({
     const [amazon, geral] = modais
     assert.match(amazon, /contexto="logistica_amazon"\s+chave="logistica\.amazon_informar"\s+chave-auto="logistica\.amazon_prazos"/)
     assert.match(geral, /contexto="logistica"\s+chave="logistica\.informar"/)
-    for (const modal of modais) {
+    const estoque = fs.readFileSync(path.resolve(__dirname, '../pages/controle-estoque.vue'), 'utf8')
+    const modaisEstoque = estoque.match(/<InformarThreemaModal[\s\S]*?\/>/g)
+    assert.equal(modaisEstoque.length, 1)
+    assert.match(modaisEstoque[0], /contexto="controle_estoque"\s+chave="controle_estoque\.informar"/)
+    for (const modal of [...modais, ...modaisEstoque]) {
       assert.ok(!/contexto-auto|enviar-com-auto|A seleção/.test(modal), 'nada de lista para salvar')
       for (const [, chave] of modal.matchAll(/chave(?:-auto)?="([^"]+)"/g)) {
         assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)
