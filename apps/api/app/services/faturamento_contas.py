@@ -114,15 +114,12 @@ async def contas_preco_das_lojas(
 
 
 def faixa_de_margem(contas: Sequence[PricingAccount]) -> tuple[Decimal, Decimal] | None:
-    """A menor e a maior margem (margin1..5) das contas de KIT da loja — as
-    da aba Contas; a coluna de catálogo não guarda número (vem da base).
+    """A menor e a maior margem (margin1..5) de TODAS as contas de preço da
+    loja, as da aba Contas: as de kit e a margem própria da coluna de catálogo
+    (botão "% margens"; NULL nela = usa a da conta de kit, que já entra).
     Sem nenhuma margem preenchida: None."""
     valores = [
-        v
-        for c in contas
-        if c.canal != CANAL_CATALOGO
-        for v in (getattr(c, campo) for campo in _MARGENS)
-        if v is not None
+        v for c in contas for v in (getattr(c, campo) for campo in _MARGENS) if v is not None
     ]
     if not valores:
         return None

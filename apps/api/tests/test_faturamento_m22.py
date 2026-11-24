@@ -5,7 +5,7 @@ Cobre:
   * as colunas novas por loja: `equipe`, `contas_preco` (kit + catálogo, pela
     loja ou pela integração da loja), `investimento` do período (gasto guardado
     por dia; "parcial" quando o período começa antes do 1º dia guardado) e a
-    `margem` (menor/maior margin1..5 das contas de kit);
+    `margem` (menor/maior margin1..5 das contas de kit e do catálogo);
   * a `margem` NÃO vai na resposta a quem não é ADM (nem a chave);
   * a cerca de equipe e as regras de pedidos não mudaram;
   * investimento sem dia guardado = None ("—"), nunca 0; dia com gasto 0 = 0;
@@ -170,7 +170,7 @@ async def _cenario(db: AsyncSession) -> Cenario:
     )
     db.add_all([c.p_shopee_cel, c.p_shopee_ele, c.p_ml, c.p_forpaper])
     await db.flush()
-    # Coluna de catálogo: vai com a conta de kit (a margem dela não conta).
+    # Coluna de catálogo: vai com a conta de kit, com margem própria.
     c.p_ml_cat = conta(
         "mega", PricingPlatform.ML, ["0.9"] * 5, canal="catalogo", conta_base_id=c.p_ml.id
     )
@@ -256,7 +256,8 @@ async def test_colunas_novas_para_o_administrador(
     assert ml["equipe"] == 101
     # Sem store_info_id, pela integração da loja; o catálogo vai junto.
     assert ml["contas_preco"] == sorted([str(c.p_ml.id), str(c.p_ml_cat.id)])
-    assert ml["margem"] == {"min": 0.425, "max": 0.425}, "iguais: uma margem só (catálogo fora)"
+    # A margem própria do catálogo (botão "% margens" da aba Contas) entra.
+    assert ml["margem"] == {"min": 0.425, "max": 0.9}
     assert ml["investimento"] == 30.5
     assert ml["investimento_desde"] == "2026-05-20"
     assert ml["investimento_parcial"] is False
@@ -273,6 +274,28 @@ async def test_colunas_novas_para_o_administrador(
     assert vazia["margem"] is None
     assert vazia["investimento"] is None, "a conta de Ads arquivada não entra"
     assert vazia["equipe"] == 101
+
+
+def test_faixa_de_margem_inclui_a_margem_propria_do_catalogo():
+    """Revisão (24/11/2026): o pedido diz margin1..5 de TODAS as contas de preço
+    da loja; a coluna de catálogo guarda a margem própria dela (aba Contas ›
+    "% margens"). NULL na filha = usa a da base, que já está na conta."""
+    from app.models.pricing import CANAL_CATALOGO
+    from app.services.faturamento_contas import faixa_de_margem
+
+    def conta(margens, canal=None):
+        valores = {
+            f"margin{i + 1}": (Decimal(m) if m is not None else None) for i, m in enumerate(margens)
+        }
+        return PricingAccount(name="x", platform=PricingPlatform.ML, canal=canal, **valores)
+
+    kit = conta(["0.593", "0.8", "1.3", "1.3", "1.3"])
+    sem_propria = conta([None] * 5, canal=CANAL_CATALOGO)
+    propria = conta(["0.33", None, None, None, None], canal=CANAL_CATALOGO)
+    assert faixa_de_margem([kit]) == (Decimal("0.593"), Decimal("1.3"))
+    assert faixa_de_margem([kit, sem_propria]) == (Decimal("0.593"), Decimal("1.3"))
+    assert faixa_de_margem([kit, propria]) == (Decimal("0.33"), Decimal("1.3"))
+    assert faixa_de_margem([sem_propria]) is None
 
 
 @pytest.mark.asyncio
