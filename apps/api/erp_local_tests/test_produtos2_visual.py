@@ -10,6 +10,8 @@ from pathlib import Path
 
 STATIC = Path(__file__).resolve().parents[1] / "app" / "erp_local" / "static"
 TELA = "body.embedded[data-screen=products]"
+# O título "Produtos" da lista; o editor de produto (nome do produto no título) fica como era.
+TITULO = f"{TELA}:not([data-product-editor=true]) header h1"
 
 
 def _css():
@@ -26,7 +28,7 @@ def test_faixa_e_todas_as_lojas_somem_so_no_produtos_embutido():
 
 def test_titulo_abas_e_atualizar_com_as_letras_da_tabela_de_precos():
     css = _css()
-    assert f"{TELA} header h1{{font-family:ui-sans-serif,system-ui,sans-serif" in css
+    assert f"{TITULO}{{font-family:ui-sans-serif,system-ui,sans-serif" in css
     assert "font-size:22px;font-weight:600;letter-spacing:-.55px;color:rgb(15,23,41)" in css
     assert f"{TELA} #products-view-tabs{{gap:8px}}" in css
     assert (
@@ -44,3 +46,13 @@ def test_a_tela_ja_vem_marcada_na_abertura_embutida():
     # Sem isso a faixa apareceria por um instante antes do primeiro desenho.
     js = (STATIC / "navigation.js").read_text(encoding="utf-8")
     assert "document.body.classList.add('embedded');document.body.dataset.screen=page;" in js
+
+
+def test_o_titulo_do_editor_de_produto_continua_como_era():
+    # Revisão (24/11): `body.embedded[data-screen=products] header h1` (0,2,3) ganhava de
+    # `body[data-product-editor=true] header h1` (0,1,3, 20px) e o nome do produto no editor
+    # também ia para 22px/600. O pedido fala só do título "Produtos".
+    css = _css()
+    assert f"{TELA} header h1{{" not in css
+    editor = "body[data-product-editor=true] header h1"
+    assert f"{editor}{{font-size:20px;line-height:1.4;white-space:normal}}" in css

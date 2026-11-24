@@ -207,10 +207,11 @@ body.consulta .extra{display:none!important}
 /* Inside DaVinci ("Produtos 2", "Pedidos 2"): the screen without the ERP's own menus. */
 body.embedded .sidebar,body.embedded .erp-topbar,body.embedded footer,body.embedded #back{display:none!important}body.embedded .workspace{margin-left:0;width:100%}body.embedded #action-rail{top:79px}body.embedded .abertura{display:none!important}
 /* "Produtos 2" no DaVinci: sem a faixa do modo e sem o "Todas as lojas"; título, abas Produtos /
-   Anúncios e Atualizar com as letras da Tabela de Preços do DaVinci. Só nesta tela embutida. */
+   Anúncios e Atualizar com as letras da Tabela de Preços do DaVinci. Só nesta tela embutida. O
+   título do editor de produto (o nome do produto) fica como era: só o "Produtos" da lista muda. */
 body.embedded[data-screen=products] #environment,body.embedded[data-screen=products] #header-context{display:none!important}
 body.embedded[data-screen=products] #action-rail{top:50px}
-body.embedded[data-screen=products] header h1{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:22px;font-weight:600;letter-spacing:-.55px;color:rgb(15,23,41)}
+body.embedded[data-screen=products]:not([data-product-editor=true]) header h1{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:22px;font-weight:600;letter-spacing:-.55px;color:rgb(15,23,41)}
 body.embedded[data-screen=products] #products-view-tabs{gap:8px}
 body.embedded[data-screen=products] #products-view-tabs button{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:14px;font-weight:400;line-height:20px;padding:6px 12px;border-radius:8px;border:1px solid rgb(229,231,235);background:#fff;color:rgb(15,23,41)}
 body.embedded[data-screen=products] #products-view-tabs button.active{background:rgb(36,99,235);border-color:rgb(36,99,235);color:#fff}
