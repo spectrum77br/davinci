@@ -4,8 +4,10 @@ A coluna Investimento da aba Faturamento soma o gasto da conta no PERÍODO, e o
 `marketing_accounts.spend_today` é sobrescrito a cada coleta. Toda coleta que
 escreve o `spend_today` grava também aqui o gasto de cada dia que trouxe (upsert
 por conta + dia): o ML os 7 dias da janela (o mesmo número da linha diária do
-`marketing_metrics`) e a Shopee os dias da resposta. A Amazon não entra: a
-coleta dela soma a janela inteira num número só (não é o gasto de um dia).
+`marketing_metrics`) e a Shopee os dias da resposta. O backfill do ML
+(scripts/ml_ads_backfill.py --apply, até 90 dias) grava os dias que regrava.
+A Amazon não entra: a coleta dela soma a janela inteira num número só (não é
+o gasto de um dia).
 
 Afiliados: não há coleta. `gasto_afiliados` fica NULL e a gravação de Ads
 nunca mexe nela.

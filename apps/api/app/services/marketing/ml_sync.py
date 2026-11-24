@@ -776,6 +776,16 @@ async def _backfill_uma(
         integration_id=integration_id, nome=integration.name, ads=ads,
         inicio=inicio, fim=fim, hoje=fim, plano=plano,
     )
+    if not simular and account_id is not None:
+        # M-22 (revisão 24/11/2026): o que o backfill regrava vai também ao
+        # histórico por dia (Investimento do Faturamento), como na coleta —
+        # é ele que conserta os dias fora da janela de 7 dias.
+        await gravar_gasto_dos_dias(
+            session,
+            account_id=account_id,
+            dias=[(date.fromisoformat(p["dia"]), p["depois"]["spend"]) for p in plano],
+            origem=ORIGEM_ML,
+        )
     if simular:
         await session.rollback()
     else:

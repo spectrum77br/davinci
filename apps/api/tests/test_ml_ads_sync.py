@@ -797,6 +797,46 @@ async def test_backfill_e_idempotente(db, make_user, fake_ml, bling):
     assert linhas[INICIO].spend == 95.12
 
 
+async def test_backfill_apply_grava_o_historico_m22_e_simulacao_nao(
+    db, make_user, fake_ml, bling
+):
+    """Revisão M-22 (24/11/2026): o backfill (scripts/ml_ads_backfill.py
+    --apply) é o caminho que conserta os dias antigos — o que ele regrava no
+    marketing_metrics vai também ao marketing_gasto_dia (Investimento do
+    Faturamento), senão os dois divergem fora da janela de 7 dias da coleta."""
+    integ = await _integracao(db, make_user)
+    acc = MarketingAccount(
+        integration_id=integ.id, name=integ.name, platform="ml", department="mala",
+        acos_target=7.0, agent_enabled=False,
+    )
+    db.add(acc)
+    await db.flush()
+    db.add(MarketingGastoDia(  # o zero da coleta antiga copiado pela 0506
+        marketing_account_id=acc.id, dia=INICIO, gasto_ads=Decimal("0"),
+        origem="marketing_metrics",
+    ))
+    await db.commit()
+    acc_id = acc.id  # o rollback da simulação expira os objetos
+
+    r = await ml_sync_mod.backfill_ml_ads(db, dias=10, simular=True, agora=AGORA)
+    assert r[0]["status"] == "ok"
+    hist = await _historico(db, acc_id)
+    assert list(hist) == [INICIO] and hist[INICIO].gasto_ads == Decimal("0.00"), (
+        "a simulação não grava no histórico"
+    )
+
+    r = await ml_sync_mod.backfill_ml_ads(db, dias=10, simular=False, agora=AGORA)
+    assert r[0]["status"] == "ok", r
+    linhas = await _linhas(db, acc_id)
+    hist = await _historico(db, acc_id)
+    assert len(linhas) == 10
+    assert sorted(hist) == sorted(linhas)
+    for dia, linha in linhas.items():
+        assert hist[dia].gasto_ads == Decimal(str(round(linha.spend, 2))), dia
+        assert hist[dia].origem == "ml_ads"
+    assert hist[INICIO].gasto_ads == Decimal("95.12"), "o zero velho foi consertado"
+
+
 async def test_backfill_corrige_historico_inflado(db, make_user, fake_ml, bling):
     integ = await _integracao(db, make_user)
     acc = MarketingAccount(
