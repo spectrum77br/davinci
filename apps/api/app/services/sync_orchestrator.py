@@ -803,6 +803,31 @@ class SyncOrchestrator:
                     dedupe_key=f"requires_review:{link.id}",
                     **loja,
                 )
+        elif (
+            result.status == SyncStatus.SKIPPED
+            and (result.payload or {}).get("erro_de_conta") is True
+        ):
+            # Erro da CONTA (token vencido, permissão, IP fora da lista — hoje
+            # só a Temu marca): o vínculo não vira FATAL (sairia do webhook) e
+            # o aviso é UM por conta e por dia, não um por anúncio.
+            await emit_alert(
+                self.session,
+                user_id=self.user_id,
+                type=AlertType.SYNC_FAILURE,
+                severity=AlertSeverity.ERROR,
+                title=f"Conta {link.platform.value} sem acesso — envio de estoque parado",
+                message=(result.error_detail or result.error_code or "")[:500] or None,
+                payload={
+                    "integration_id": str(link.integration_id),
+                    "platform": link.platform.value,
+                    "error_code": result.error_code,
+                },
+                dedupe_key=(
+                    f"erro_conta:{link.integration_id}:{result.error_code}:"
+                    f"{datetime.now(UTC).date().isoformat()}"
+                ),
+                **loja,
+            )
         elif result.status == SyncStatus.FATAL:
             await emit_alert(
                 self.session,

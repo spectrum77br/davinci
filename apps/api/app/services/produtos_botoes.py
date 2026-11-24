@@ -79,6 +79,7 @@ PLATAFORMAS_LISTA = frozenset(
         IntegrationPlatform.TIKTOK,
         IntegrationPlatform.MAGALU,
         IntegrationPlatform.CARREFOUR,
+        IntegrationPlatform.TEMU,
     }
 )
 # Plataformas com leitor de vínculo (auto_link._ADAPTED_PLATFORMS sem o Bling).
@@ -89,6 +90,7 @@ PLATAFORMAS_VINCULO = frozenset(
         IntegrationPlatform.TIKTOK,
         IntegrationPlatform.AMAZON,
         IntegrationPlatform.MAGALU,
+        IntegrationPlatform.TEMU,
     }
 )
 # Listas que o robô do Flex lê (flex_motor.montar_anuncios: só ML e Shopee).

@@ -262,6 +262,7 @@ async def enqueue_import(
         raise HTTPException(404, detail={"code": "integration_not_found"})
     if integ.platform not in {
         IntegrationPlatform.ML, IntegrationPlatform.SHOPEE, IntegrationPlatform.CARREFOUR,
+        IntegrationPlatform.TEMU,
     }:
         raise HTTPException(
             501,

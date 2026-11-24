@@ -1176,22 +1176,11 @@ async def _dispatch_price_update_link(
                 price=price,
             )
         elif platform == IntegrationPlatform.TEMU:
-            product_sku_id = link.variation_id or link.external_id
-            try:
-                await client.update_price(
-                    product_sku_id=product_sku_id,
-                    price=price,
-                )
-                return SyncResult(
-                    status=SyncStatus.OK,
-                    payload={"product_sku_id": product_sku_id, "price": price},
-                )
-            except RuntimeError as e:
-                return SyncResult(
-                    status=SyncStatus.FATAL,
-                    error_code="temu_price_error",
-                    error_detail=str(e)[:500],
-                )
+            # Preço da Temu ainda não é enviado (a API de preço base exige
+            # whitelist): o cliente devolve SKIPPED sem chamar a Temu. Antes
+            # isto mandava centavos para uma API que a loja local não tem,
+            # com o skuId errado (variation_id era o armazém).
+            return await client.update_price(link=link, price=price)
         else:
             return SyncResult(
                 status=SyncStatus.FATAL,

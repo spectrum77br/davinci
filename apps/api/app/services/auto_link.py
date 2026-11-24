@@ -41,6 +41,7 @@ from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.temu import TemuClient
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -68,8 +69,10 @@ AUTOLINK_MAX_TRIES = 3
 # Espera (s) ANTES da 2ª e 3ª tentativas. Módulo-level p/ os testes zerarem.
 AUTOLINK_BACKOFF_SECONDS = [2.0, 5.0]
 
-# Plataformas com adapter direto de auto-link. As demais (ex.: TEMU) caem no
-# cron de listings e são contadas como `skipped`.
+# Plataformas com adapter direto de auto-link. As demais (ex.: Carrefour) caem
+# no cron de listings e são contadas como `skipped`. Temu entra em 24/11/2026
+# (loja local BR): lê os SKUs ao vivo e vincula por outSkuSn — o vínculo é
+# (goodsId, skuId). Vincular NÃO envia estoque (isso tem trava própria).
 _ADAPTED_PLATFORMS = {
     IntegrationPlatform.BLING,
     IntegrationPlatform.TIKTOK,
@@ -77,6 +80,7 @@ _ADAPTED_PLATFORMS = {
     IntegrationPlatform.SHOPEE,
     IntegrationPlatform.AMAZON,
     IntegrationPlatform.MAGALU,
+    IntegrationPlatform.TEMU,
 }
 
 
@@ -610,11 +614,14 @@ _MORTO_POR_STATUS = {
         "FREEZE": "produto congelado ou excluído no TikTok",
         "PLATFORM_DEACTIVATED": "produto desativado pelo TikTok",
     },
+    # TemuClient.list_listings: skuStatus Deleted → "closed".
+    IntegrationPlatform.TEMU: {"closed": "SKU excluído na Temu"},
 }
 _VIVO_POR_STATUS = {
     IntegrationPlatform.ML: {"active"},
     IntegrationPlatform.SHOPEE: {"active"},
     IntegrationPlatform.TIKTOK: {"ACTIVATE", "LIVE", "ACTIVE"},
+    IntegrationPlatform.TEMU: {"active"},
 }
 
 
@@ -945,6 +952,12 @@ def _amazon_client_for(integ: Integration, session: AsyncSession) -> AmazonClien
     return AmazonClient(creds, on_token_refresh=_persist_refresh)
 
 
+def _temu_client_for(integ: Integration) -> TemuClient:
+    # A Temu não renova token (autoriza de novo no Seller Center).
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    return TemuClient(creds)
+
+
 def _magalu_client_for(integ: Integration, session: AsyncSession) -> MagaluClient:
     creds = decrypt_json(integ.credentials) if integ.credentials else {}
 
@@ -1139,6 +1152,13 @@ async def _link_dispatch(
         )
     if platform == IntegrationPlatform.AMAZON:
         return await _link_amazon_integration(session, job_id, integ)
+    if platform == IntegrationPlatform.TEMU:
+        # Um registro por SKU: external_id = goodsId, variation_id = skuId,
+        # sku = outSkuSn (o SKU do vendedor). repoint como ML/Shopee/Magalu.
+        return await _link_via_listings(
+            session, job_id, integ, _temu_client_for(integ),
+            IntegrationPlatform.TEMU, repoint=True,
+        )
     return _stats(error=f"no_adapter:{platform.value}")
 
 
@@ -1257,7 +1277,7 @@ async def vincular_contas(
                 if integ is None:
                     return
                 if integ.platform not in _ADAPTED_PLATFORMS:
-                    # TEMU etc: sem adapter direto → cai no cron de listings.
+                    # Carrefour etc: sem adapter direto → cai no cron de listings.
                     summary["skipped"] += 1
                     if por_conta is not None:
                         por_conta[integ_id] = {"result": "deferred_to_listings_cron"}
@@ -1270,7 +1290,7 @@ async def vincular_contas(
                             "integration_name": integ.name,
                             "platform": integ.platform.value,
                             "result": "deferred_to_listings_cron",
-                            "note": "Temu auto-link uses listings_import cron",
+                            "note": "auto-link uses listings_import cron",
                         },
                     )
                     return

@@ -99,15 +99,16 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
     hint: {
       tone: 'temu',
       lines: [
-        '**Temu:** Obtenha as credenciais na Temu Open Platform (partner.temu.com).',
-        'Crie um app para obter App Key e App Secret. O Access Token é gerado via autorização. Região padrão: global.',
+        '**Temu:** App Key e App Secret ficam no app da loja em partner.temu.com.',
+        'O Access Token sai do Seller Center (Gerenciamento de autorização). Brasil usa a região global (padrão).',
+        'Salvar não envia estoque: o envio é ligado à parte pelo administrador em Integrações.',
       ],
     },
     fields: [
       { key: 'app_key', label: 'App Key', placeholder: 'App Key da Temu Open Platform', required: true },
       { key: 'app_secret', label: 'App Secret', type: 'password', required: true },
       { key: 'access_token', label: 'Access Token', placeholder: 'Token de acesso da API', required: true },
-      { key: 'region', label: 'Região', placeholder: 'global, us ou eu (padrão: global)' },
+      { key: 'region', label: 'Região', placeholder: 'global (Brasil), us ou eu — padrão: global' },
     ],
   },
   magalu: {
@@ -275,6 +276,8 @@ const CARREFOUR_ERRORS: Record<string, string> = {
   carrefour_shop_id_invalid: 'Informe o ID numérico da loja no Carrefour.',
   carrefour_shop_id_immutable: 'O ID da loja não pode ser alterado nesta integração.',
   carrefour_credentials_invalid: 'Confira os campos da integração Carrefour.',
+  temu_credentials_invalid: 'Confira os campos da integração Temu (App Key, App Secret, Access Token e Região).',
+  temu_region_invalid: 'Região da Temu inválida: use global (Brasil), us ou eu.',
 }
 
 async function submitForm() {

@@ -165,7 +165,7 @@ const integrationById = computed(() =>
   Object.fromEntries(integrations.value.map(i => [i.id, i])),
 )
 const importableIntegrations = computed(() =>
-  integrations.value.filter(i => i.platform === 'ml' || i.platform === 'shopee' || i.platform === 'carrefour'),
+  integrations.value.filter(i => ['ml', 'shopee', 'carrefour', 'temu'].includes(i.platform)),
 )
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 

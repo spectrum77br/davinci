@@ -227,8 +227,9 @@ async def test_atualizar_monta_as_contas_no_servidor(
     client: AsyncClient, db: AsyncSession, auth_as: Callable
 ):
     """Corpo vazio: o servidor escolhe. Entram ML/Shopee/TikTok/Magalu/
-    Carrefour não arquivadas; Amazon fica para o Vincular do fim; Temu e
-    Amazon aparecem como 'sem leitura'; arquivada e Bling ficam de fora."""
+    Carrefour/Temu não arquivadas (Temu desde 24/11/2026); Amazon fica para o
+    Vincular do fim e aparece como 'sem leitura'; arquivada e Bling ficam de
+    fora."""
     dono = await _dono(db)
     auth_as(dono)
     lidas = [
@@ -237,9 +238,9 @@ async def test_atualizar_monta_as_contas_no_servidor(
         await _conta(db, dono, IntegrationPlatform.TIKTOK, "tt-a"),
         await _conta(db, dono, IntegrationPlatform.MAGALU, "mg-a"),
         await _conta(db, dono, IntegrationPlatform.CARREFOUR, "cf-a"),
+        await _conta(db, dono, IntegrationPlatform.TEMU, "temu-a"),
     ]
     amazon = await _conta(db, dono, IntegrationPlatform.AMAZON, "amz-a")
-    await _conta(db, dono, IntegrationPlatform.TEMU, "temu-a")
     await _conta(db, dono, IntegrationPlatform.ML, "ml-arquivada", arquivada=True)
     await _conta(db, dono, IntegrationPlatform.BLING, "bling")
 
@@ -258,7 +259,7 @@ async def test_atualizar_monta_as_contas_no_servidor(
     assert job.payload["trigger"] == "botao_atualizar"
     assert sorted(job.payload["integration_ids"]) == sorted(str(c.id) for c in lidas)
     assert job.payload["vincular_amazon_ids"] == [str(amazon.id)]
-    assert job.payload["sem_leitura"] == ["amazon", "temu"]
+    assert job.payload["sem_leitura"] == ["amazon"]
 
 
 @pytest.mark.asyncio

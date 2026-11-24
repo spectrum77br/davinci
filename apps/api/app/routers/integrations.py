@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_active_user, require_permission
+from app.deps.auth import require_active_user, require_admin, require_permission
 from app.deps.team_scope import resolve_team_scope
 from app.historico.contexto import identificar_por_id
 from app.models import (
@@ -30,6 +30,7 @@ from app.schemas.integrations import (
     IntegrationOut,
     IntegrationPatch,
     OAuthStartOut,
+    TemuWritesIn,
     TestConnectionOut,
 )
 from app.security.cipher import decrypt_json, encrypt_json
@@ -38,6 +39,15 @@ from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.temu import (
+    CAMPOS_CREDENCIAL as TEMU_CAMPOS_CREDENCIAL,
+)
+from app.services.marketplaces.temu import (
+    REGIOES_VALIDAS as TEMU_REGIOES,
+)
+from app.services.marketplaces.temu import (
+    STOCK_WRITE_FLAG as TEMU_STOCK_WRITE_FLAG,
+)
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -84,6 +94,24 @@ def _validated_carrefour_credentials(credentials: dict, *, existing: dict | None
     if not existing or existing.get("api_key") != api_key:
         merged.pop("_carrefour_account_check", None)
     return merged
+
+
+def _validated_temu_credentials(credentials: dict, *, existing: dict | None = None) -> dict:
+    """Só os campos do formulário (app_key, app_secret, access_token, region).
+    A trava `_temu_stock_write_enabled` é do servidor: o formulário não a
+    grava nem a apaga (a que já existe é mantida na edição)."""
+    if not isinstance(credentials, dict) or set(credentials) - TEMU_CAMPOS_CREDENCIAL:
+        raise HTTPException(400, detail={"code": "temu_credentials_invalid"})
+    limpos: dict[str, str] = {}
+    for chave, valor in credentials.items():
+        if not isinstance(valor, str):
+            raise HTTPException(400, detail={"code": "temu_credentials_invalid"})
+        limpos[chave] = valor.strip()
+    if "region" in limpos:
+        limpos["region"] = limpos["region"].lower() or "global"
+        if limpos["region"] not in TEMU_REGIOES:
+            raise HTTPException(400, detail={"code": "temu_region_invalid"})
+    return {**(existing or {}), **limpos}
 
 
 def _validate_carrefour_store(platform: IntegrationPlatform, store: Store | None) -> None:
@@ -162,6 +190,7 @@ def _to_out(i: Integration, company_id: UUID | None, store_id: UUID | None = Non
         last_error=i.last_error,
         vacation_mode=i.vacation_mode,
         **write_flags,
+        temu_stock_write_enabled=_temu_stock_write_enabled(i),
         created_at=i.created_at,
         updated_at=i.updated_at,
     )
@@ -177,6 +206,12 @@ def _carrefour_write_flags(i: Integration) -> dict[str, bool]:
         "carrefour_stock_write_enabled": credentials.get("_carrefour_stock_write_enabled") is True,
         "carrefour_price_write_enabled": credentials.get("_carrefour_price_write_enabled") is True,
     }
+
+
+def _temu_stock_write_enabled(i: Integration) -> bool:
+    if i.platform != IntegrationPlatform.TEMU or not i.credentials:
+        return False
+    return decrypt_json(i.credentials).get(TEMU_STOCK_WRITE_FLAG) is True
 
 
 def _apply_carrefour_write_flags(i: Integration, data: dict) -> None:
@@ -233,6 +268,65 @@ async def carrefour_write_status(
         "blocked": last is not None and last.state == "uncertain",
         "last_error": last.last_error if last else None,
     }
+
+
+async def _temu_writes_status(session: AsyncSession, integration: Integration) -> dict:
+    from app.models import ProductLink
+
+    linked = await session.scalar(
+        select(func.count()).select_from(ProductLink)
+        .where(ProductLink.integration_id == integration.id)
+    )
+    return {
+        "stock_write_enabled": _temu_stock_write_enabled(integration),
+        "price_write_enabled": False,
+        "price_motivo": "preço da Temu ainda não liberado (falta a whitelist da Temu)",
+        "vacation_mode": integration.vacation_mode,
+        "linked": linked or 0,
+    }
+
+
+@router.get("/{integration_id}/temu-writes")
+async def temu_write_status(
+    integration_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_admin)],
+) -> dict:
+    integration = await session.get(Integration, integration_id)
+    if integration is None or integration.platform != IntegrationPlatform.TEMU:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    return await _temu_writes_status(session, integration)
+
+
+@router.put("/{integration_id}/temu-writes")
+async def temu_write_update(
+    integration_id: UUID,
+    body: TemuWritesIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_admin)],
+) -> dict:
+    """Liga/desliga o envio de ESTOQUE do DaVinci para esta conta Temu. Só
+    administrador. Desligado (padrão), o DaVinci lê e vincula, mas não envia."""
+    integration = await session.scalar(
+        select(Integration).where(
+            Integration.id == integration_id,
+            Integration.platform == IntegrationPlatform.TEMU,
+        ).with_for_update(key_share=True).execution_options(populate_existing=True)
+    )
+    if integration is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    credentials = decrypt_json(integration.credentials) if integration.credentials else {}
+    credentials[TEMU_STOCK_WRITE_FLAG] = body.stock_write_enabled is True
+    integration.credentials = encrypt_json(credentials)
+    await session.commit()
+    await session.refresh(integration)
+    logger.info(
+        "temu_envio_estoque_alterado",
+        integration_id=str(integration.id),
+        ligado=body.stock_write_enabled,
+        por=str(_u.id),
+    )
+    return await _temu_writes_status(session, integration)
 
 
 def _make_token_save_callback(session: AsyncSession, integ: Integration):
@@ -306,6 +400,8 @@ async def create_integration(
     credentials = body.credentials or {}
     if platform == IntegrationPlatform.CARREFOUR:
         credentials = _validated_carrefour_credentials(credentials)
+    elif platform == IntegrationPlatform.TEMU:
+        credentials = _validated_temu_credentials(credentials)
 
     integ = Integration(
         user_id=user.id,
@@ -363,6 +459,17 @@ async def patch_integration(
                 i.last_test_at = None
                 i.last_test_ok = None
                 i.last_error = None
+        elif i.platform == IntegrationPlatform.TEMU:
+            updated = _validated_temu_credentials(data["credentials"], existing=existing)
+            if any(
+                updated.get(k) != existing.get(k)
+                for k in ("app_key", "app_secret", "access_token", "region")
+            ):
+                # O teste anterior era de outra chave/token.
+                i.last_test_at = None
+                i.last_test_ok = None
+                i.last_error = None
+                i.token_expires_at = None
         else:
             updated = {**existing, **data["credentials"]}
         i.credentials = encrypt_json(updated)
@@ -445,6 +552,11 @@ async def test_integration(
                 detail="A chave do Carrefour mudou durante a verificação. Teste novamente.",
             )
     i.last_test_at = _connection_test_time(i.platform, result.info)
+    if i.platform == IntegrationPlatform.TEMU and isinstance(result.info, dict):
+        # A Temu não renova token: a validade lida aqui aparece no cartão.
+        epoch = result.info.get("expira_em_epoch")
+        if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > 0:
+            i.token_expires_at = datetime.fromtimestamp(epoch, tz=UTC)
     i.last_test_ok = result.ok
     i.last_error = None if result.ok else (result.detail or "")[:1000]
     await session.commit()

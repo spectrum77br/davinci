@@ -22,6 +22,7 @@ type Integration = {
   vacation_mode: boolean
   carrefour_stock_write_enabled?: boolean
   carrefour_price_write_enabled?: boolean
+  temu_stock_write_enabled?: boolean
   created_at: string
   updated_at: string
 }
@@ -72,6 +73,7 @@ const filter = ref('')
 
 const canEdit = useCan('integracoes', 'edit')
 const canDelete = useCan('integracoes', 'delete')
+const isAdmin = useIsAdmin()
 
 async function refresh() {
   loading.value = true
@@ -272,6 +274,29 @@ async function toggleCarrefourWrite(i: Integration, kind: 'stock' | 'price') {
   }
 }
 
+// Temu (24/11/2026): o envio de ESTOQUE do DaVinci para a conta nasce
+// desligado; só o administrador liga. Desligado, o DaVinci lê e vincula os
+// anúncios, mas não envia nada. Preço da Temu ainda não é enviado.
+const temuWriteId = ref<string | null>(null)
+async function toggleTemuStockWrite(i: Integration) {
+  const enabled = !i.temu_stock_write_enabled
+  if (enabled && !confirm(
+    `Ligar o envio de estoque do DaVinci para "${i.name}"?\n\n`
+    + 'A partir de agora, cada mudança de estoque dos produtos vinculados será enviada para a Temu. '
+    + 'Se o Bling também envia estoque para esta loja, desligue lá para não ter dois enviando.'
+  )) return
+  temuWriteId.value = i.id
+  error.value = null
+  try {
+    await api(`/api/integrations/${i.id}/temu-writes`, { method: 'PUT', body: { stock_write_enabled: enabled } })
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || 'Não foi possível alterar o envio.'
+  } finally {
+    temuWriteId.value = null
+  }
+}
+
 async function toggleVacation(i: Integration) {
   const turningOn = !i.vacation_mode
   if (turningOn && !confirm(
@@ -403,6 +428,10 @@ const tab = ref<'integracoes' | 'automacoes'>(
             Preços: {{ i.carrefour_price_write_enabled ? 'envio habilitado' : 'envio desativado' }}.
             As alterações ficam pendentes até a confirmação do Carrefour.
           </p>
+          <p v-if="i.platform === 'temu'" class="text-xs text-muted-foreground">
+            Estoque: {{ i.temu_stock_write_enabled ? 'envio habilitado' : 'envio desativado (só lê e vincula)' }}.
+            Preços: ainda não enviados (falta a liberação da Temu).
+          </p>
           <div v-if="i.platform === 'carrefour'" class="text-xs text-muted-foreground">
             <template v-if="carrefourWrites[i.id]">
               {{ carrefourWrites[i.id]!.linked }} anúncios vinculados ·
@@ -470,6 +499,15 @@ const tab = ref<'integracoes' | 'automacoes'>(
                 {{ i.carrefour_price_write_enabled ? 'Desativar envio de preços' : 'Habilitar envio de preços' }}
               </Button>
             </template>
+            <Button
+              v-if="isAdmin && i.platform === 'temu'"
+              size="sm"
+              variant="outline"
+              :disabled="temuWriteId === i.id"
+              @click="toggleTemuStockWrite(i)"
+            >
+              {{ temuWriteId === i.id ? '…' : (i.temu_stock_write_enabled ? 'Desativar envio de estoque' : 'Habilitar envio de estoque') }}
+            </Button>
             <Button v-if="canEdit" size="sm" variant="ghost" :aria-label="`Editar integração ${i.name}`" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />
             </Button>

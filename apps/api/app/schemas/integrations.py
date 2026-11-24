@@ -21,6 +21,7 @@ class IntegrationOut(BaseModel):
     vacation_mode: bool = False
     carrefour_stock_write_enabled: bool = False
     carrefour_price_write_enabled: bool = False
+    temu_stock_write_enabled: bool = False
     archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -40,6 +41,10 @@ class IntegrationPatch(BaseModel):
     vacation_mode: bool | None = None
     carrefour_stock_write_enabled: StrictBool | None = None
     carrefour_price_write_enabled: StrictBool | None = None
+
+
+class TemuWritesIn(BaseModel):
+    stock_write_enabled: StrictBool
 
 
 class TestConnectionOut(BaseModel):
