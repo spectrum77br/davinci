@@ -534,7 +534,8 @@ async def test_disabled_juridico_forwarding_stops_before_queries_or_chamado_muta
     session = Mock()
     recipients = AsyncMock(side_effect=AssertionError("destinatários não devem ser consultados"))
     dossier = AsyncMock(side_effect=AssertionError("dossiê não deve ser carregado"))
-    monkeypatch.setattr(chamados_juridico, "recipients_juridico", recipients)
+    # quem recebe vem do Cadastro (tarefa 16, F2/C9d): nem o resolver é lido
+    monkeypatch.setattr(chamados_juridico.threema_envios, "resolver", recipients)
     monkeypatch.setattr(chamados_juridico, "dados_dossie", dossier)
     chamado = SimpleNamespace(
         juridico_token=None,

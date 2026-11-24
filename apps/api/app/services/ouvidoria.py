@@ -457,16 +457,17 @@ ROBOS: dict[str, RoboDef] = {
     # Threema do relatório do dia da Denúncia (services/denuncia_relatorio_threema, worker
     # `denuncia_relatorio_fechar`). Entrou DESLIGADO: o relatório do dia continua sendo
     # fechado (Denúncia › Robô › Ocorrências e o Excel); só a mensagem para. Quem recebe
-    # continua sendo o cadastro da própria Denúncia, não o "Avisar" deste painel.
+    # não é o "Avisar" deste painel: é o envio "Relatório da Denúncia" de Cadastros › Envios
+    # Threema (tarefa 16, F2/C9d; antes, o cadastro da própria Denúncia).
     "denuncia_relatorio_threema": RoboDef(
         chave="denuncia_relatorio_threema",
         nome="Relatório da Denúncia",
         descricao=(
             "Manda no Threema, uma vez por dia a partir das 7h, o resumo do dia anterior do "
             "robô de Denúncia (anúncios novos, denúncias nas lojas, Anatel, respostas, "
-            "saíram do ar) com o link do Excel. Quem recebe é o cadastro de Denúncia › Robô › "
-            "Ocorrências. Desligado, o relatório continua sendo fechado e o Excel continua "
-            "existindo; só a mensagem não sai."
+            "saíram do ar) com o link do Excel. Quem recebe se escolhe em Cadastros › Envios "
+            "Threema (Relatório da Denúncia). Desligado, o relatório continua sendo fechado e "
+            "o Excel continua existindo; só a mensagem não sai."
         ),
         area="denuncia",
         cadencia_texto="1× por dia (a partir das 07:10)",

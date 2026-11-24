@@ -8,8 +8,10 @@ o aviso vai com um LINK do dossiê: página pública por token secreto com o
 cabeçalho do chamado, o histórico inteiro e todas as fotos (das mensagens, da
 réplica automática e da devolução). O chamado guarda quem/quando encaminhou
 (`juridico_*`), ganha um evento de sistema no histórico e passa a aparecer na
-aba Jurídico. Destinatários: cadastro Informar do contexto `juridico`
-(threema_informar_config).
+aba Jurídico. Destinatários: o envio "Encaminhar ao jurídico" de Cadastros ›
+Envios Threema (tarefa 16, F2/C9d; a semente copiou o cadastro Informar do
+contexto `juridico`, que fica congelado como reserva de emergência). Só admin
+altera quem recebe; o botão segue para quem pode editar chamados.
 """
 
 from __future__ import annotations
@@ -30,15 +32,16 @@ from app.models import (
     ChamadoMensagem,
     DevolucaoAnexo,
     Devolution,
-    ThreemaInformarConfig,
     User,
 )
 from app.services import chamados as chamados_svc
-from app.services import threema, threema_registro
+from app.services import threema, threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
+# A linha do Informar que era a lista do botão (hoje só a reserva de
+# emergência do Cadastro: o `Legado.informar` do envio, no catálogo).
 CONTEXTO = "juridico"
 SAO_PAULO = chamados_svc.SAO_PAULO
 
@@ -56,15 +59,6 @@ def _fmt(dt: datetime | None) -> str:
     if dt is None:
         return ""
     return dt.astimezone(SAO_PAULO).strftime("%d/%m/%Y %H:%M")
-
-
-async def recipients_juridico(session: AsyncSession) -> list[str]:
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == CONTEXTO)
-        )
-    ).scalar_one_or_none()
-    return threema.parse_recipients(row.recipients if row else "")
 
 
 async def dados_dossie(session: AsyncSession, ch: Chamado) -> dict:
@@ -262,31 +256,49 @@ def render_html(d: dict, *, link: str) -> str:
 async def encaminhar(
     session: AsyncSession, ch: Chamado, user: User, obs: str | None
 ) -> dict:
-    """Manda o aviso no Threema (destinatários do contexto `juridico`), carimba
-    o chamado e registra no histórico. Levanta ChamadoError sem destinatário /
-    sem Threema configurado ou com avisos jurídicos desativados. NÃO commita."""
-    client = threema.ThreemaClient(contexto="juridico")
-    if client.disabled:
+    """Manda o aviso no Threema (quem recebe o envio
+    `K.CHAMADOS_ENCAMINHAR_JURIDICO` em Cadastros › Envios Threema, remetente
+    "juridico"), carimba o chamado e registra no histórico. NÃO commita.
+
+    Levanta ChamadoError sem mexer no chamado (o token novo só entra nele
+    quando o aviso sai):
+    * `threema_juridico_desativado`: o canal `juridico` desligado no servidor
+      (o "depende de" do envio) — antes de ler qualquer coisa, como antes;
+    * `envio_desligado`: o envio desligado no Cadastro (o `recusa` do
+      catálogo);
+    * `sem_destinatarios`: ninguém pela configuração antiga (emergência ou
+      sem semente, com a linha vazia), calado como hoje; ou ninguém válido no
+      Cadastro — aí o núcleo grava o registro `ok=false` e acende o sino dos
+      admins;
+    * `threema_nao_configurado` / `threema_envio_falhou`: como antes."""
+    # O `client.disabled` de antes, lido sem criar o cliente aqui (o envio
+    # cria o dele, pelo núcleo).
+    if threema_envios.canal("juridico") == "desativado":
         raise chamados_svc.ChamadoError("threema_juridico_desativado")
-    recipients = await recipients_juridico(session)
-    if not recipients:
+    res = await threema_envios.resolver(K.CHAMADOS_ENCAMINHAR_JURIDICO, session=session)
+    if not res.ativo:
+        raise chamados_svc.ChamadoError("envio_desligado")
+    if not res.ids and res.motivo != threema_envios.NINGUEM_VALIDO:
         raise chamados_svc.ChamadoError("sem_destinatarios")
-    if not ch.juridico_token:
-        ch.juridico_token = novo_token()
-    link = link_dossie(ch.juridico_token)
+    token = ch.juridico_token or novo_token()
+    link = link_dossie(token)
     d = await dados_dossie(session, ch)
     quem = user.name or user.email
     texto = texto_threema(
         ch, link=link, n_msgs=len(d["mensagens"]), n_fotos=d["n_fotos"], quem=quem, obs=obs
     )
     try:
-        with threema_registro.envio(K.CHAMADOS_ENCAMINHAR_JURIDICO):
-            result = await client.send_to_all(texto, recipients)
+        result = await threema_envios.enviar(K.CHAMADOS_ENCAMINHAR_JURIDICO, texto, session=session)
     except threema.ThreemaConfigError as e:
         raise chamados_svc.ChamadoError("threema_nao_configurado") from e
+    if result.get("motivo") == threema_envios.DESLIGADO:
+        raise chamados_svc.ChamadoError("envio_desligado")
+    if result.get("motivo"):
+        raise chamados_svc.ChamadoError("sem_destinatarios")
     sent = [r for r in result.get("sent", []) if r not in result.get("failed", [])]
     if not sent:
         raise chamados_svc.ChamadoError("threema_envio_falhou")
+    ch.juridico_token = token
     ch.juridico_enviado_at = datetime.now(UTC)
     ch.juridico_enviado_por = user.id
     ch.juridico_obs = (obs or "").strip() or None

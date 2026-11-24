@@ -397,8 +397,9 @@ def _gateway(monkeypatch):
 async def test_envio_de_teste(db, monkeypatch, client, make_user, auth_as):
     c = await montar(db, monkeypatch)
     admin = await _admin(make_user, auth_as)
-    # o Informar da Logística antes da F2 (o teste não depende da fatia publicada)
-    desmigrar(monkeypatch, K.LOGISTICA_INFORMAR)
+    # o Informar da Logística e o Relatório da Denúncia antes da F2 (o teste
+    # não depende da fatia publicada)
+    desmigrar(monkeypatch, K.LOGISTICA_INFORMAR, K.DENUNCIA_RELATORIO_DIARIO)
     antes = await _legado_de_todos(db)
     # Envio que ainda usa a configuração antiga: nada sai (fase 1 sem envio novo).
     with respx.mock(base_url=threema.THREEMA_API_BASE, assert_all_called=False) as router:
@@ -585,6 +586,8 @@ async def test_contato_usado_pela_configuracao_antiga(db, monkeypatch, client, m
     """O Roma recebe HOJE pelo Correios da Ouvidoria e pelo relatório da
     Denúncia (listas antigas, com o ID). Fase 1, Cadastro vazio: a tela não
     pode dizer "não usado" — mostra o uso antigo e não deixa apagar."""
+    # o Relatório da Denúncia antes da F2/C9d (depois dela, o uso vem do Cadastro)
+    desmigrar(monkeypatch, K.DENUNCIA_RELATORIO_DIARIO)
     c = await montar(db, monkeypatch)
     await _admin(make_user, auth_as)
     r = await client.get("/api/threema/pessoas")

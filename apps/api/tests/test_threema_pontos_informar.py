@@ -517,7 +517,7 @@ def test_o_put_so_recusa_quando_todos_os_envios_da_lista_leem_o_cadastro(monkeyp
     """A lista do `chamados_ia` é lida pela IA de Chamado (15) e, de reserva,
     pelo robô da Denúncia (44); a do `margem_auto` é o Avisar do Robô da
     Margem (25 a 27 e o robô 34). Só quando todos migram o PUT recusa."""
-    from tests.test_threema_resolver import migrar
+    from tests.test_threema_resolver import desmigrar, migrar
 
     envios = {
         ctx: {d.chave for d in informar_router._envios_da_lista(ctx)}
@@ -532,6 +532,8 @@ def test_o_put_so_recusa_quando_todos_os_envios_da_lista_leem_o_cadastro(monkeyp
     }
     assert envios["logistica_amazon_auto"] == {K.LOGISTICA_AMAZON_PRAZOS}
     assert all(envios.values()), "toda lista do Informar é lida por algum envio"
+    # o código de antes da C9d (os dois ainda na configuração antiga)
+    desmigrar(monkeypatch, K.CHAMADOS_IA_PARADA, K.DENUNCIA_ROBO_PRECISA_ALGUEM)
     assert not informar_router._lista_no_cadastro("chamados_ia")
     migrar(monkeypatch, K.CHAMADOS_IA_PARADA)
     assert not informar_router._lista_no_cadastro("chamados_ia")

@@ -5,28 +5,38 @@ Mercado Livre e parou. O pedido do Cairo: "se travar não sou robô me avisa" �
 a mensagem vem pra ele. A IA não tenta passar CAPTCHA nem login (CLAUDE.md da
 IA): deixa a loja aberta naquela tela no Mac dos robôs (o mini da Makisa desde
 13/10/2026; antes o Mac Santiago), decide `humano` com
-`parado` ("captcha" | "login") e o DaVinci manda UM Threema pra quem está no
-cadastro `chamados_ia` (botão "quem recebe o aviso" na aba Chamados › IA de
-Chamado). A pessoa resolve na tela e manda a instrução "continua" no chamado.
+`parado` ("captcha" | "login") e o DaVinci manda UM Threema pra quem recebe
+o envio "IA de Chamado parada" em Cadastros › Envios Threema (tarefa 16,
+F2/C9d; a semente copiou o cadastro `chamados_ia` do Informar — o grupo "IA
+de Chamado", o mesmo do robô de Denúncia —, que fica congelado como reserva
+de emergência). O botão "quem recebe o aviso" da aba Chamados › IA de Chamado
+virou atalho: mostra quem recebe; só admin altera. A pessoa resolve na tela e
+manda a instrução "continua" no chamado.
 
 Canal do Threema: o de chamados (alias de `logistica` em services/threema).
-Falha no envio não derruba a decisão da IA — vira evento no histórico.
+Falha no envio não derruba a decisão da IA — vira evento no histórico. Envio
+desligado, ou ninguém para receber, também: o aviso daquela parada se perde
+(o `descarta` do catálogo) e o histórico do chamado diz por quê; no ninguém
+válido do Cadastro o núcleo grava o registro `ok=false` e acende o sino dos
+admins.
 """
 
 from __future__ import annotations
 
 import structlog
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import Chamado, ThreemaInformarConfig
+from app.models import Chamado
 from app.services import chamados as chamados_svc
-from app.services import threema, threema_registro
+from app.services import threema, threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
+# A linha do Informar que era a lista do aviso (hoje só a reserva de
+# emergência do Cadastro: o `Legado.informar` do envio, no catálogo; o robô
+# de Denúncia também a lê de reserva).
 CONTEXTO = "chamados_ia"
 
 MOTIVO = {
@@ -56,42 +66,55 @@ def texto(ch: Chamado, parado: str, resumo: str) -> str:
     return "\n".join(linhas)
 
 
-async def destinatarios(session: AsyncSession) -> list[str]:
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == CONTEXTO)
-        )
-    ).scalar_one_or_none()
-    return threema.parse_recipients(row.recipients if row else "")
-
-
 async def avisar(session: AsyncSession, ch: Chamado, parado: str, resumo: str) -> str:
     """Manda o Threema e registra o resultado no histórico do chamado. Devolve
     o resultado em texto de gente (vai de volta pra IA). NÃO commita."""
     motivo = MOTIVO.get(parado, parado)
-    client = threema.ThreemaClient(contexto="chamados")
-    alvos = await destinatarios(session)
-    if client.disabled:
+    # O `client.disabled` de antes: o canal do remetente desligado no servidor
+    # (THREEMA_CONTEXT_CHANNELS) — lido sem criar o cliente aqui.
+    if threema_envios.canal("chamados") == "desativado":
         resultado = "aviso não saiu: o Threema de chamados está desativado"
-    elif not alvos:
-        resultado = (
-            "aviso não saiu: ninguém cadastrado em 'quem recebe o aviso' (aba IA de Chamado)"
-        )
     else:
-        try:
-            with threema_registro.envio(K.CHAMADOS_IA_PARADA):
-                r = await client.send_to_all(texto(ch, parado, resumo), alvos)
-        except threema.ThreemaConfigError as e:
-            logger.warning("chamados_ia_aviso_sem_config", chamado_id=str(ch.id), erro=str(e))
-            r = {"sent": [], "failed": alvos}
-        nomes = {d["id"]: d["nome"] for d in await threema.diretorio(session)}
-        ok = [nomes.get(rid, rid) for rid in r["sent"]]
-        if ok:
-            resultado = f"aviso enviado no Threema pra {', '.join(ok)}"
-            if r["failed"]:
-                resultado += f" (falhou pra {', '.join(nomes.get(x, x) for x in r['failed'])})"
-        else:
-            resultado = "aviso não saiu: o envio no Threema falhou"
+        resultado = await _mandar(session, ch, texto(ch, parado, resumo))
     session.add(chamados_svc.registrar_sistema(ch, f"IA de Chamado parou {motivo} — {resultado}"))
     logger.info("chamados_ia_aviso", chamado_id=str(ch.id), parado=parado, resultado=resultado)
+    return resultado
+
+
+_DESLIGADO = "aviso não saiu: o aviso está desligado em Cadastros › Envios Threema"
+
+
+async def _mandar(session: AsyncSession, ch: Chamado, msg: str) -> str:
+    """Quem recebe vem de Cadastros › Envios Threema (`K.CHAMADOS_IA_PARADA`,
+    remetente "chamados").
+
+    * desligado: não manda;
+    * ninguém pela configuração antiga (emergência ou sem semente, com a
+      linha `chamados_ia` vazia): não manda, calado, como hoje;
+    * ninguém válido no Cadastro: o núcleo grava o registro `ok=false` e
+      acende o sino dos admins."""
+    quem = await threema_envios.resolver(K.CHAMADOS_IA_PARADA, session=session)
+    if not quem.ativo:
+        return _DESLIGADO
+    if not quem.ids and quem.motivo != threema_envios.NINGUEM_VALIDO:
+        return "aviso não saiu: ninguém cadastrado em 'quem recebe o aviso' (aba IA de Chamado)"
+    try:
+        r = await threema_envios.enviar(K.CHAMADOS_IA_PARADA, msg, session=session)
+    except threema.ThreemaConfigError as e:
+        logger.warning("chamados_ia_aviso_sem_config", chamado_id=str(ch.id), erro=str(e))
+        r = {"sent": [], "failed": list(quem.ids), "motivo": None}
+    if r.get("motivo") == threema_envios.DESLIGADO:
+        return _DESLIGADO
+    if r.get("motivo"):
+        return (
+            "aviso não saiu: ninguém válido recebe este aviso em Cadastros › Envios Threema "
+            "(os admins foram avisados)"
+        )
+    nomes = {d["id"]: d["nome"] for d in await threema.diretorio(session)}
+    ok = [nomes.get(rid, rid) for rid in r["sent"]]
+    if not ok:
+        return "aviso não saiu: o envio no Threema falhou"
+    resultado = f"aviso enviado no Threema pra {', '.join(ok)}"
+    if r["failed"]:
+        resultado += f" (falhou pra {', '.join(nomes.get(x, x) for x in r['failed'])})"
     return resultado

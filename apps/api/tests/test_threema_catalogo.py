@@ -264,6 +264,9 @@ MIGRADOS = [
     # F1/C8c: Chamados (itens 13 e 14)
     K.CHAMADOS_TIKTOK_SO_REEMBOLSO,
     K.CHAMADOS_ABERTURAS_PRESAS,
+    # F2/C9d: IA de Chamado parada e Encaminhar ao jurídico (15 e 16)
+    K.CHAMADOS_IA_PARADA,
+    K.CHAMADOS_ENCAMINHAR_JURIDICO,
     # F2/C9b: Informar do Controle de Estoque (item 17)
     K.CONTROLE_ESTOQUE_INFORMAR,
     # F1/C8b: Estoque e NF (itens 18 a 23)
@@ -275,6 +278,10 @@ MIGRADOS = [
     K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
     # F1/C8c: Produtos (item 24)
     K.PRODUTOS_VIGIA_SOMA_FAMILIA,
+    # F2/C9d: relatório da Denúncia e robô de Denúncia precisa de alguém (43
+    # e 44, junto com o 15 por causa da reserva `chamados_ia`)
+    K.DENUNCIA_RELATORIO_DIARIO,
+    K.DENUNCIA_ROBO_PRECISA_ALGUEM,
 ]
 
 
@@ -290,14 +297,17 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     o ponto JÁ faz (o Cadastro não muda o carimbo de ninguém): cada um tem o
     seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`
     (C8a), `test_threema_pontos_estoque_nf` (C8b),
-    `test_threema_pontos_chamados_produtos` (C8c) e
-    `test_threema_pontos_informar` (C9a, C9b e C9c)."""
+    `test_threema_pontos_chamados_produtos` (C8c),
+    `test_threema_pontos_informar` (C9a, C9b e C9c) e
+    `test_threema_pontos_chamados_denuncia` (C9d)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
         K.LOGISTICA_AMAZON_INFORMAR: "recusa",
         K.CONTROLE_ESTOQUE_INFORMAR: "recusa",
         K.DEVOLUCOES_INFORMAR: "recusa",
+        # o botão Encaminhar ao jurídico responde 422 sem mexer no chamado
+        K.CHAMADOS_ENCAMINHAR_JURIDICO: "recusa",
         # os carimbos `aviso_*_at` só gravam o que saiu
         K.LOGISTICA_AMAZON_PRAZOS: "acumula",
         # `aviso_prazo_acao_at/_para` só gravam o que saiu
@@ -330,6 +340,12 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
         K.CHAMADOS_ABERTURAS_PRESAS: "descarta",
         # sem carimbo: repete a cada rodada enquanto o problema existir
         K.PRODUTOS_VIGIA_SOMA_FAMILIA: "descarta",
+        # evento sem retentativa: o histórico do chamado diz que não saiu
+        K.CHAMADOS_IA_PARADA: "descarta",
+        # só o relatório de ONTEM sai: os dias desligados se perdem
+        K.DENUNCIA_RELATORIO_DIARIO: "descarta",
+        # as marcas do Redis são gravadas mesmo sem envio
+        K.DENUNCIA_ROBO_PRECISA_ALGUEM: "descarta",
     }
 
 

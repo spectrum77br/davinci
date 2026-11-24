@@ -3,9 +3,8 @@ ao que cada ponto de envio monta HOJE, para TODOS os envios do servidor
 gerenciados — quem recebe e se está ligado.
 
 "Hoje" é a função antiga de verdade sempre que ela existe
-(`ouvidoria.destinatarios`, `_recipients_margem_auto`,
-`denuncia_robo_aviso.destinatarios` com a reserva
-`chamados_ia`, o `send_to_all` que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
+(`ouvidoria.destinatarios`, `_recipients_margem_auto`, o `send_to_all` que
+cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
 meio de uma função maior, a expressão é copiada aqui E um teste confere que
 ela continua no código — se alguém mudar o ponto de envio, este arquivo
 reprova. Os botões que montam a lista dentro da rota (os 5 Informar e o
@@ -35,10 +34,7 @@ from app.config import get_settings
 from app.models import OuvidoriaRobo, ThreemaInformarConfig, User, UserRole
 from app.routers import informar as informar_router
 from app.services import (
-    chamados_ia_aviso,
-    chamados_juridico,
     denuncia_relatorio_threema,
-    denuncia_robo_aviso,
     margem_auto_hold,
     ouvidoria,
     threema,
@@ -158,6 +154,30 @@ async def _devolucoes_auto_antes_da_f2(db) -> list[str]:
     return P(row.recipients if row else "")
 
 
+async def _linha(db, ctx: str) -> list[str]:
+    """`parse(row.recipients if row else "")` da linha do Informar: a
+    expressão dos pontos que liam um contexto só (sem linha = ninguém)."""
+    row = (
+        await db.execute(select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == ctx))
+    ).scalar_one_or_none()
+    return P(row.recipients if row else "")
+
+
+async def _denuncia_robo_antes_da_f2(db) -> list[str]:
+    """denuncia_robo_aviso.destinatarios antes da F2/C9d: a linha
+    `denuncia_robo`; sem linha salva, a da IA de Chamado (`chamados_ia`).
+    Linha salva vazia = ninguém (não cai na reserva)."""
+    for ctx in ("denuncia_robo", "chamados_ia"):
+        row = (
+            await db.execute(
+                select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == ctx)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            return P(row.recipients)
+    return []
+
+
 # Cópias congeladas dos pontos que a F2 migrou. O "Enviar agora" dos Informar
 # migrados (C9a, C9b e C9c) lia a linha do contexto na rota (`_config_row` + a
 # expressão de `_EXPRESSOES`, que continua lá para os contextos ainda não
@@ -172,6 +192,13 @@ _ANTES_DA_F2 = {
     # Informar das Devoluções
     K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: _devolucoes_auto_antes_da_f2,
     K.DEVOLUCOES_INFORMAR: lambda db: _informar(db, "devolucoes"),
+    # C9d: chamados_ia_aviso.destinatarios (15), chamados_juridico.
+    # recipients_juridico (16), denuncia_relatorio_threema.destinatarios (43)
+    # e denuncia_robo_aviso.destinatarios com a reserva `chamados_ia` (44)
+    K.CHAMADOS_IA_PARADA: lambda db: _linha(db, "chamados_ia"),
+    K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda db: _linha(db, "juridico"),
+    K.DENUNCIA_RELATORIO_DIARIO: lambda db: _linha(db, "denuncia_relatorio"),
+    K.DENUNCIA_ROBO_PRECISA_ALGUEM: _denuncia_robo_antes_da_f2,
 }
 _ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2}
 
@@ -190,14 +217,10 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         # sem regra: `parse(rule) or None` → o send_to_all cai no THREEMA_RECIPIENTS
         # (o caminho de verdade, com 👤 e sem, está em test_item_1_por_regra)
         K.LOGISTICA_MENSAGEM_REGRA: lambda: P(s.threema_recipients),
-        K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
-        K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda: chamados_juridico.recipients_juridico(db),
         K.MARGEM_PEDIDO_SEGURADO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_REAVALIACAO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_MARGEM_ALTA: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_INFORMAR: lambda: _informar(db, "margem"),
-        K.DENUNCIA_RELATORIO_DIARIO: lambda: denuncia_relatorio_threema.destinatarios(db),
-        K.DENUNCIA_ROBO_PRECISA_ALGUEM: lambda: denuncia_robo_aviso.destinatarios(db),
         K.MARKETING_CONFERENCIA_SHOPEE: lambda: threema_aviso.destinatarios(db),
         K.MARKETING_CONFERENCIA_ML: lambda: threema_aviso.destinatarios(db),
         K.MARKETING_CONFERENCIA_AMAZON: lambda: threema_aviso.destinatarios(db),
@@ -505,6 +528,19 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         "services/logistica_amazon_avisos.py": "parse_recipients",
         # F2/C9c: nem o prazo de resposta das Devoluções
         "services/devolucao_acao_avisos.py": "parse_recipients",
+        # F2/C9d: nem a IA de Chamado parada, o jurídico, o relatório e o robô
+        # da Denúncia (nenhum lê mais a linha do Informar)
+        "services/chamados_ia_aviso.py": "ThreemaInformarConfig",
+        "services/chamados_juridico.py": "ThreemaInformarConfig",
+        "services/denuncia_relatorio_threema.py": "ThreemaInformarConfig",
+        "services/denuncia_robo_aviso.py": "ThreemaInformarConfig",
     }
+    for arquivo in (
+        "services/chamados_ia_aviso.py",
+        "services/chamados_juridico.py",
+        "services/denuncia_relatorio_threema.py",
+        "services/denuncia_robo_aviso.py",
+    ):
+        assert "parse_recipients" not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo

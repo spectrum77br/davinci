@@ -664,8 +664,6 @@ _MARCAS = {
     # o Informar ainda não migrado (28; o mapa contexto → chave tem teste
     # próprio; os migrados mandam por `_enviar_pelo_cadastro`)
     ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
-    ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
-    ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,  # 16
     # 25, 26 e 27 (Margem)
     ("services/margem_auto_hold.py", "_avisar_threema", "K.MARGEM_PEDIDO_SEGURADO"): 1,
     (
@@ -676,10 +674,6 @@ _MARCAS = {
     ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
     # 29 a 42 (um envio por robô; o mapa robô → chave tem teste próprio)
     ("services/ouvidoria.py", "avisar_pendentes", "chave_ouvidoria(robo_chave)"): 1,
-    # 43: o relatório do dia e o teste dele
-    ("services/denuncia_relatorio_threema.py", "enviar_pendente", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
-    ("services/denuncia_relatorio_threema.py", "enviar_teste", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
-    ("services/denuncia_robo_aviso.py", "rodar", "K.DENUNCIA_ROBO_PRECISA_ALGUEM"): 1,  # 44
     # 45 a 47 (o mapa plataforma → chave tem teste próprio)
     ("services/conferencia_shopee/threema_aviso.py", "enviar_pendente", "chave"): 1,
     # o núcleo do Cadastro (C5): forcar_para e lista resolvida
@@ -728,6 +722,14 @@ _PELO_CADASTRO = {
         "run",
         "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA",
     ): 1,
+    # F2/C9d: IA de Chamado parada (15), Encaminhar ao jurídico (16), o
+    # relatório da Denúncia e o teste dele (43, origem teste com forcar_para)
+    # e o robô de Denúncia precisa de alguém (44)
+    ("services/chamados_ia_aviso.py", "_mandar", "K.CHAMADOS_IA_PARADA"): 1,
+    ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,
+    ("services/denuncia_relatorio_threema.py", "enviar_pendente", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
+    ("services/denuncia_relatorio_threema.py", "enviar_teste", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
+    ("services/denuncia_robo_aviso.py", "rodar", "K.DENUNCIA_ROBO_PRECISA_ALGUEM"): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }

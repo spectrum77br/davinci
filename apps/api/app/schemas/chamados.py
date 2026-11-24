@@ -954,8 +954,9 @@ class AgentAnaliseIn(BaseModel):
     # `humano` num chamado que o monitor antigo já tinha fechado: reabre.
     reabrir: bool = False
     # 30/09 (297130): a IA parou na tela da loja ("não sou robô" ou login) e
-    # deixou o perfil aberto ali — o DaVinci avisa no Threema quem está no
-    # cadastro `chamados_ia` (services/chamados_ia_aviso). Só com `humano`.
+    # deixou o perfil aberto ali — o DaVinci avisa no Threema quem recebe o
+    # envio "IA de Chamado parada" em Cadastros › Envios Threema
+    # (services/chamados_ia_aviso). Só com `humano`.
     parado: Literal["captcha", "login"] | None = None
     # 13/11/2026 (296423, Vinicius: "a tela do chamado está em branco"): a IA falou
     # com a atendente da Shopee na tela e só a decisão dela (coluna da direita)

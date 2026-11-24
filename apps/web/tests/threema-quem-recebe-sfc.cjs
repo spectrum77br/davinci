@@ -11,9 +11,13 @@
 //    de marcar, sem "Salvar" e sem PUT; o "Enviar agora" continua (o mesmo
 //    POST), para quando ninguém receberia e mostra o motivo do servidor; o
 //    modo antigo (os painéis ainda não migrados) continua igual;
-//  - os painéis migrados (Logística, aba Amazon, Controle de Estoque e
-//    Devoluções — a tela nova e a antiga) usam o atalho com as chaves do
-//    catálogo.
+//  - o atalho com `somenteCadastro` (o envio sai de outro lugar) só mostra
+//    quem recebe: sem lista, sem "Salvar" e sem "Enviar agora";
+//  - os painéis migrados (Logística, aba Amazon, Controle de Estoque,
+//    Devoluções — a tela nova e a antiga —, IA de Chamado, jurídico e as duas
+//    da Denúncia) usam o atalho com as chaves do catálogo; o modal de
+//    encaminhar ao jurídico mostra quem recebe pelo Cadastro, não pela lista
+//    antiga.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -294,6 +298,24 @@ const leve = (extra = {}) => ({
     assert.match(html, /Este envio está desligado em Cadastros › Envios Threema\./)
   }
 
+  // ---------------------------------------------------------------- atalho só de leitura (somenteCadastro)
+  {
+    const m = montar('../components/InformarThreemaModal.vue', {
+      props: { open: false, contexto: 'chamados_ia', chave: 'chamados.ia_parada', somenteCadastro: true, descricao: 'IA parada' },
+      componentes: { ThreemaQuemRecebe: QUEM_MARCADOR },
+      responder: (url) => { throw new Error(`não devia chamar ${url}`) },
+    })
+    m.props.open = true
+    await esperar()
+    assert.deepEqual(m.chamadas, [], 'abrir não lê nem grava a lista antiga')
+    const html = await m.html()
+    assert.match(html, /data-quem-recebe="chamados\.ia_parada" data-titulo="Quem recebe"/)
+    assert.ok(!/type="checkbox"/.test(html), 'sem lista de marcar')
+    assert.ok(!/Salvar/.test(html), 'sem Salvar')
+    assert.ok(!/Enviar agora/.test(html), 'o envio sai de outro lugar')
+    assert.match(html, /Fechar/)
+  }
+
   // ---------------------------------------------------------------- modo antigo continua igual
   {
     const m = montar('../components/InformarThreemaModal.vue', {
@@ -344,7 +366,27 @@ const leve = (extra = {}) => ({
       assert.ok(!/escolher quem recebe/.test(fonte), `${rel}: o botão não promete escolher quem recebe`)
       return achados[0]
     })
-    for (const modal of [...modais, ...modaisEstoque, ...modaisDevolucoes]) {
+    // Chamados (C9d): IA de Chamado parada (15) e Encaminhar ao jurídico (16)
+    const chamados = fs.readFileSync(path.resolve(__dirname, '../components/ChamadosPainel.vue'), 'utf8')
+    const modaisChamados = chamados.match(/<InformarThreemaModal[\s\S]*?\/>/g)
+    assert.equal(modaisChamados.length, 2)
+    assert.match(modaisChamados[0], /contexto="chamados_ia"\s+chave="chamados\.ia_parada"\s+somente-cadastro/)
+    assert.match(modaisChamados[1], /contexto="juridico"\s+chave="chamados\.encaminhar_juridico"\s+somente-cadastro/)
+    // o modal de encaminhar mostra quem recebe pelo Cadastro (admin), não pela lista antiga
+    assert.ok(!chamados.includes("'/api/informar/juridico'"), 'não lê a lista antiga do jurídico')
+    assert.match(chamados, /<ThreemaQuemRecebe v-if="isAdmin" chave="chamados\.encaminhar_juridico"/)
+    assert.ok(!/editar destinatários/.test(chamados))
+    assert.match(chamados, /envio_desligado: '/, 'o 422 de desligado tem texto')
+    // Denúncia (C9d): o robô precisa de alguém (44) e o relatório do dia (43)
+    const denuncia = fs.readFileSync(path.resolve(__dirname, '../components/DenunciaRobo.vue'), 'utf8')
+    const modaisDenuncia = denuncia.match(/<InformarThreemaModal[\s\S]*?\/>/g)
+    assert.equal(modaisDenuncia.length, 2)
+    assert.match(modaisDenuncia[0], /contexto="denuncia_robo"\s+chave="denuncia\.robo_precisa_alguem"\s+somente-cadastro/)
+    assert.match(modaisDenuncia[1], /contexto="denuncia_relatorio"\s+chave="denuncia\.relatorio_diario"\s+somente-cadastro/)
+    for (const modal of [...modaisChamados, ...modaisDenuncia]) {
+      assert.ok(!/Sem ninguém salvo|Sem ninguém marcado/.test(modal), 'sem promessa da lista antiga')
+    }
+    for (const modal of [...modais, ...modaisEstoque, ...modaisDevolucoes, ...modaisChamados, ...modaisDenuncia]) {
       assert.ok(!/contexto-auto|enviar-com-auto|A seleção|Quem está marcado/.test(modal), 'nada de lista para salvar')
       for (const [, chave] of modal.matchAll(/chave(?:-auto)?="([^"]+)"/g)) {
         assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)

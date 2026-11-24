@@ -97,6 +97,9 @@ router = APIRouter(prefix="/api/informar", tags=["informar"])
 # com tempo parado e última localização.
 # `juridico` (Eduardo 04/09): destinatários do "Encaminhar ao jurídico" da aba
 # Chamados — só cadastro aqui; o envio sai de POST /api/chamados/{id}/juridico.
+# Desde a F2/C9d fica congelado (reserva de emergência): quem recebe se escolhe
+# em Cadastros › Envios Threema (o mesmo vale para `chamados_ia`,
+# `denuncia_robo` e `denuncia_relatorio`, abaixo).
 # `logistica_amazon` / `logistica_amazon_auto` (Vinicius 15/09, projeto Amazon):
 # botão Informar da aba Amazon da Logística. O manual manda a lista dos
 # pedidos de Envio próprio em trânsito (previsão dos Correios + data máxima
@@ -117,14 +120,17 @@ _CONTEXTOS = (
     # escolhe em Cadastros › Envios Threema.
     "devolucoes_auto",
     # 30/09: IA de Chamado parada em "não sou robô"/login na tela da loja —
-    # services/chamados_ia_aviso. Cadastro pela aba Chamados › IA de Chamado.
+    # services/chamados_ia_aviso. Era o cadastro da aba Chamados › IA de
+    # Chamado (e a reserva do `denuncia_robo`); congelado desde a F2/C9d.
     "chamados_ia",
     # 05/10: robô de Denúncia precisando de alguém (captcha na tela, robô parado,
     # mini sem notícia, SEI pedindo código) — services/denuncia_robo_aviso.
-    # Cadastro pela aba Denúncia › Robô › Ocorrências.
+    # Era o cadastro da aba Denúncia › Robô › Ocorrências; congelado desde a
+    # F2/C9d.
     "denuncia_robo",
     # 06/10: relatório do dia do robô de Denúncia, todo dia às 7h — services/
-    # denuncia_relatorio_threema. Cadastro pela aba Denúncia › Robô › Ocorrências.
+    # denuncia_relatorio_threema. Era o cadastro da aba Denúncia › Robô ›
+    # Ocorrências; congelado desde a F2/C9d.
     "denuncia_relatorio",
     # 06/10: aviso da Conferência Shopee quando a rodada fecha (resumo + link
     # do Excel) — services/conferencia_shopee/threema_aviso. A migration 0375
@@ -174,12 +180,13 @@ _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
     "logistica_amazon": _EMAILS_MARGEM,
     "logistica_amazon_auto": _EMAILS_MARGEM,
     # IA de Chamado: o aviso de "parou no não sou robô" vai pro Cairo (30/09) —
-    # ele também escolhe quem recebe. Espelho no front: AVISO_IA_USERS em
-    # pages/chamados.vue.
+    # ele também vê quem recebe (escolher, desde a F2/C9d, só admin, em
+    # Cadastros › Envios Threema). Espelho no front: AVISO_IA_USERS em
+    # components/ChamadosPainel.vue.
     "chamados_ia": _EMAILS_MARGEM,
     # Robô de Denúncia: "só o Cairo recebe, que sou eu" (05/10) — ele também
-    # escolhe quem recebe. Espelho no front: AVISO_ROBO_USERS em
-    # components/DenunciaRobo.vue.
+    # vê quem recebe (escolher, desde a F2/C9d, só admin). Espelho no front:
+    # AVISO_ROBO_USERS em components/DenunciaRobo.vue.
     "denuncia_robo": _EMAILS_MARGEM,
     "denuncia_relatorio": _EMAILS_MARGEM,
 }

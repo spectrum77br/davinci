@@ -16,9 +16,11 @@
 // alguém marcar "Lido"); "Hoje até agora" e os dias anteriores abrem na gaveta (DenunciaRelatorio).
 // 05/10 (Cairo): "isso coloca para avisar no Threema… só o Cairo recebe" — captcha na tela, robô parado,
 // mini sem notícia e SEI pedindo código viram Threema (worker a cada 2 min, services/denuncia_robo_aviso);
-// "Quem recebe o aviso" nas Ocorrências escolhe quem (cadastro Informar `denuncia_robo`).
+// "Quem recebe o aviso" nas Ocorrências mostra quem (era o cadastro Informar `denuncia_robo`).
 // 06/10 (Vinicius): o relatório do dia também vai pelo Threema, às 7h (services/denuncia_relatorio_threema);
-// "Quem recebe o relatório" = cadastro `denuncia_relatorio` (nasce com Cairo, harry potter e Roma).
+// "Quem recebe o relatório" = era o cadastro `denuncia_relatorio` (nasceu com Cairo, harry potter e Roma).
+// Tarefa 16 (F2/C9d): os dois botões viraram atalho de Cadastros › Envios Threema — mostram quem
+// recebe; escolher, só admin, lá.
 // 16/10 (Vinicius: "precisamos criar alguma regra horario inicio e fim… agora ele ja devia estar parado para o robo de
 // chamado funcionar"): JANELA DA NOITE em cima da tabela de Passos (início e fim, ligada ou não). Fora dela o robô não
 // começa passo da agenda e o que estiver rodando no fim para no ponto seguro; horário da agenda fora dela fica amarelo.
@@ -160,8 +162,9 @@ const porCanalHoje = computed(() =>
 
 // ── botões ──────────────────────────────────────────────────────────────────
 const podeMandar = useCan('denuncia', 'edit')
-// Quem recebe o aviso no Threema: admin ou o Cairo (espelho do backend: _EMAILS_EXTRAS["denuncia_robo"]
-// em routers/informar.py — mudou aqui, muda lá).
+// Quem vê quem recebe o aviso no Threema: admin ou o Cairo (espelho do backend:
+// _EMAILS_EXTRAS["denuncia_robo"] em routers/informar.py, a porta do "quem recebe" leve — mudou
+// aqui, muda lá). Escolher quem recebe, só admin, em Cadastros › Envios Threema.
 const auth = useAuthStore()
 const AVISO_ROBO_USERS = ['sa.geral@tutamail.com']
 const podeAviso = computed(() => {
@@ -869,18 +872,22 @@ function relLido() {
     </template>
 
     <DenunciaRelatorio v-model:open="relAberto" :dia="relDia" :pode-marcar="podeMandar" @lido="relLido" />
+    <!-- Atalhos de Cadastros › Envios Threema (tarefa 16, F2/C9d): quem recebe se escolhe lá,
+         só admin; aqui só os nomes. -->
     <InformarThreemaModal
       :open="avisoAberto"
       contexto="denuncia_robo"
+      chave="denuncia.robo_precisa_alguem"
       somente-cadastro
-      descricao="Quem está marcado recebe no Threema quando o robô de Denúncia precisa de alguém: captcha ('não sou robô') na tela do Mac mini — o robô espera uns 10 min —, robô parado, Mac mini sem notícia e SEI pedindo código ou assinatura. Uma mensagem por ocorrência, de dia e de noite. Sem ninguém salvo aqui, vale a lista da IA de Chamado. A seleção fica salva."
+      descricao="Avisa no Threema quando o robô de Denúncia precisa de alguém: captcha ('não sou robô') na tela do Mac mini — o robô espera uns 10 min —, robô parado, Mac mini sem notícia e SEI pedindo código ou assinatura. Uma mensagem por ocorrência, de dia e de noite."
       @close="avisoAberto = false"
     />
     <InformarThreemaModal
       :open="relatorioThreemaAberto"
       contexto="denuncia_relatorio"
+      chave="denuncia.relatorio_diario"
       somente-cadastro
-      descricao="Quem está marcado recebe no Threema, todo dia a partir das 7h, o relatório do dia anterior: anúncios achados, denúncias nas lojas, Anatel, respostas, prints e o que precisou de alguém — com o link do relatório completo e do Excel aqui no DaVinci. Uma mensagem por dia. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
+      descricao="Manda no Threema, todo dia a partir das 7h, o relatório do dia anterior: anúncios achados, denúncias nas lojas, Anatel, respostas, prints e o que precisou de alguém — com o link do relatório completo e do Excel aqui no DaVinci. Uma mensagem por dia. Liga e desliga pelo robô 'Relatório da Denúncia' em Ouvidoria › Robôs."
       @close="relatorioThreemaAberto = false"
     />
   </div>

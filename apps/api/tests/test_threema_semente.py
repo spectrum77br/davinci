@@ -30,7 +30,13 @@ from app.models import (
     UserStatus,
 )
 from app.services import threema_envios
-from app.services.threema_catalogo import ENVIOS, G_AVISOS_GERAIS, G_ESTOQUE_NF, K
+from app.services.threema_catalogo import (
+    ENVIOS,
+    G_AVISOS_GERAIS,
+    G_ESTOQUE_NF,
+    G_IA_CHAMADO,
+    K,
+)
 from tests.test_threema_resolver import desmigrar, migrar
 from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
     ID,
@@ -522,3 +528,39 @@ async def test_linha_do_informar_vazia_de_envio_automatico_nasce_desligada(db, m
         == 1
     )
     assert "(lista do Informar vazia)" in "\n".join(saida)
+
+
+@pytest.mark.asyncio
+async def test_lista_vazia_que_nasce_desligada_nao_entra_no_grupo(db, monkeypatch):
+    """F2/C9d: a IA de Chamado parada (15) e o robô de Denúncia (44) dividem o
+    grupo "IA de Chamado" (o 44 lia a `chamados_ia` de reserva). Com a linha
+    `denuncia_robo` salva VAZIA (o 44 hoje não manda para ninguém, sem cair na
+    reserva), o 44 nasce desligado e FORA do grupo — sem "pessoas diferentes"
+    parando a semente — e o 15 fica no grupo com a lista dele."""
+    await montar(db, monkeypatch, variante="vazias")
+    _codigo_antes_da(monkeypatch, "F2")
+    chaves = [K.CHAMADOS_IA_PARADA, K.DENUNCIA_ROBO_PRECISA_ALGUEM]
+    res = await _semear(db, "F2", chaves=chaves, aplicar=True)
+    planos = {p.chave: p for p in res.planos}
+    ia, robo = planos[K.CHAMADOS_IA_PARADA], planos[K.DENUNCIA_ROBO_PRECISA_ALGUEM]
+    assert (ia.grupo, [r.threema_id for r in ia.refs], ia.ativo) == (
+        G_IA_CHAMADO,
+        [ID["cairo_sa"]],
+        None,
+    )
+    assert (robo.grupo, robo.refs, robo.ativo, robo.grava_ativo) == (None, [], False, True)
+    linhas = (
+        (
+            await db.execute(
+                select(ThreemaEnvioDestinatario).where(
+                    ThreemaEnvioDestinatario.envio_chave == K.DENUNCIA_ROBO_PRECISA_ALGUEM
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert linhas == []
+    itens = await threema_envios.conferir(db, chaves=chaves)
+    assert [(x.chave, x.situacao) for x in itens] == [(c, "igual") for c in chaves]
+

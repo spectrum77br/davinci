@@ -343,8 +343,9 @@ async def _ids_legado(d: EnvioDef, escopo: str | None, session: AsyncSession):
         return ids, fonte
     if L.informar:
         # Linhas de threema_informar_config: a 1ª LINHA EXISTENTE vence e linha
-        # vazia = ninguém (denuncia_robo_aviso.destinatarios; com um contexto
-        # só é o `parse(row.recipients if row else "")` de todos os outros).
+        # vazia = ninguém (o `denuncia_robo_aviso.destinatarios` de antes da
+        # F2/C9d; com um contexto só é o `parse(row.recipients if row else "")`
+        # de todos os outros).
         for i, ctx in enumerate(L.informar):
             row = await _linha_informar(session, ctx)
             if row is not None:
@@ -1097,8 +1098,9 @@ async def semear(
       desligado de hoje é a lista vazia (`_lista_vazia_desliga`: o .env, ou a
       linha do Informar de um envio automático): com a lista de hoje vazia
       ele nasce `ativo=false` (calado, como hoje;
-      NULL seria "ligado com ninguém", com registro e sino a cada rodada) e,
-      com gente, `ativo` NULL. Carimba `semeado_em`.
+      NULL seria "ligado com ninguém", com registro e sino a cada rodada) e
+      sem entrar no grupo dele; com gente, `ativo` NULL. Carimba
+      `semeado_em`.
     - Chave já semeada fica como está (rodar duas vezes não muda nada), a
       menos de `sobrescrever` — que só vale para chave ainda não migrada.
     Commit fica com quem chama. Erros levantam CadastroError com o resultado
@@ -1155,6 +1157,13 @@ async def semear(
             # deixa duas; a conferência compara conjuntos).
             refs = [r for r in (mapa.ref(rid) for rid in _dedupe(ids)) if r is not None]
             grava_ativo = regra is None and _lista_vazia_desliga(d)
+            if grava_ativo and not ids:
+                # Lista de hoje vazia = o envio nasce desligado e sem ninguém:
+                # não entra no grupo. Ex.: a linha `denuncia_robo` salva vazia
+                # (o 44 não lê a reserva `chamados_ia`) não pode virar "IA de
+                # Chamado com ninguém" nem brigar com o 15, que lê a
+                # `chamados_ia` com gente.
+                grupo = None
             plano = PlanoEnvio(
                 d.chave,
                 d.nome,

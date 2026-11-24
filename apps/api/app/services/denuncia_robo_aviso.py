@@ -19,10 +19,18 @@ Repetição (marcas no Redis, sem tabela):
   - estado do momento (`agora:…`: mini sem notícia, robô parado, SEI deslogado): avisa quando
     começa; a marca é renovada enquanto continua; se some por 30 min e volta, avisa de novo;
   - "Tratado" na aba Robô tira da lista → não avisa.
-Quem recebe: cadastro `denuncia_robo` do Informar (botão "Quem recebe o aviso" em Robô ›
-Ocorrências); sem cadastro salvo, o da IA de Chamado (`chamados_ia` — o Cairo). Canal do
-Threema: o de chamados. Envio que falha não carimba (tenta de novo na volta seguinte); sem
-ninguém cadastrado, carimba (não há a quem mandar e o log não repete a cada 2 min).
+Quem recebe: o envio "Robô de Denúncia precisa de alguém" de Cadastros › Envios Threema
+(tarefa 16, F2/C9d). A semente copiou a lista de antes — o cadastro `denuncia_robo` do Informar
+e, sem cadastro salvo, o da IA de Chamado (`chamados_ia` — o Cairo), que vira o grupo "IA de
+Chamado", o mesmo do aviso da IA de Chamado parada; as duas linhas ficam congeladas como reserva
+de emergência. O botão "Quem recebe o aviso" em Robô › Ocorrências virou atalho: mostra quem
+recebe; só admin altera. Canal do Threema: o de chamados.
+
+Envio que falha não carimba (tenta de novo na volta seguinte). Desligado, ou sem ninguém pela
+configuração antiga, carimba como antes (o `descarta` do catálogo: o que aconteceu no período se
+perde e o log não repete a cada 2 min). Ninguém válido no Cadastro NÃO gasta as marcas: no
+máximo uma volta por hora chega ao núcleo — que grava o registro `ok=false` e acende o sino dos
+admins — e, acertada a lista, a volta seguinte já avisa o que ainda vale.
 """
 
 from __future__ import annotations
@@ -42,15 +50,16 @@ from app.models import (
     DenunciaRoboConfig,
     DenunciaRoboStatus,
     DenunciaRoboTratada,
-    ThreemaInformarConfig,
 )
 from app.redis_client import redis
-from app.services import threema, threema_registro
+from app.services import threema, threema_envios
 from app.services.denuncia_robo import PASSOS, montar_painel
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
+# As linhas do Informar que eram a lista (hoje só a reserva de emergência do
+# Cadastro: o `Legado.informar` do envio, no catálogo — a 1ª que existir vence).
 CONTEXTO = "denuncia_robo"
 CONTEXTO_RESERVA = "chamados_ia"
 FUSO = ZoneInfo("America/Sao_Paulo")
@@ -60,6 +69,9 @@ PREFIXO = "denuncia:robo_aviso:"
 MARCA_ROBO_S = 3 * 24 * 3600
 MARCA_AGORA_S = 30 * 60
 MESMO_TIPO_S = 3600
+# Ninguém válido no Cadastro: no máximo uma volta por hora chega ao núcleo (registro + sino).
+NINGUEM = PREFIXO + "ninguem"
+NINGUEM_S = 3600
 MAX_NA_MENSAGEM = 6
 
 ROTULO = {
@@ -142,20 +154,6 @@ def texto(itens: list[dict], link: str) -> str:
     return "\n".join(linhas)
 
 
-async def destinatarios(session: AsyncSession) -> list[str]:
-    """Cadastro `denuncia_robo`; sem cadastro salvo, o da IA de Chamado. Cadastro salvo vazio =
-    ninguém."""
-    for ctx in (CONTEXTO, CONTEXTO_RESERVA):
-        row = (
-            await session.execute(
-                select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == ctx)
-            )
-        ).scalar_one_or_none()
-        if row is not None:
-            return threema.parse_recipients(row.recipients)
-    return []
-
-
 async def _painel(session: AsyncSession, agora: datetime) -> dict:
     """O mesmo painel do GET /api/denuncia/robo (status mais novo, tratadas de 3 dias, agenda)."""
     st = (
@@ -177,7 +175,8 @@ async def _painel(session: AsyncSession, agora: datetime) -> dict:
         for r in (await session.execute(select(DenunciaRoboAgenda))).scalars().all()
         if r.acao in PASSOS
     }
-    cfg = await session.get(DenunciaRoboConfig, "janela_noite")   # 16/10: fora da janela não é "não começou"
+    # 16/10: fora da janela não é "não começou"
+    cfg = await session.get(DenunciaRoboConfig, "janela_noite")
     return montar_painel(
         st.dados if st else None, st.recebido_em if st else None, agora,
         tratadas=tratadas, agenda=agenda, janela=cfg.valor if cfg else None,
@@ -213,6 +212,11 @@ async def _novas(itens: list[dict]) -> tuple[list[dict], list[str]]:
     return novas, marcas
 
 
+async def _desfazer(marcas: list[str]) -> None:
+    for k in marcas:
+        await redis.delete(k)
+
+
 async def rodar(session: AsyncSession, agora: datetime | None = None) -> dict:
     """Uma volta: monta o painel, escolhe, carimba e manda. Devolve o que fez (para o log do
     worker)."""
@@ -223,22 +227,47 @@ async def rodar(session: AsyncSession, agora: datetime | None = None) -> dict:
     novas, marcas = await _novas(candidatas)
     if not novas:
         return {"avisadas": 0}
-    client = threema.ThreemaClient(contexto="chamados")
-    alvos = await destinatarios(session)
-    if client.disabled or not alvos:
-        motivo = "Threema de chamados desativado" if client.disabled else "ninguém cadastrado"
+    # Quem recebe: Cadastros › Envios Threema (`K.DENUNCIA_ROBO_PRECISA_ALGUEM`, remetente
+    # "chamados"). O `client.disabled` de antes é o canal do remetente desligado no servidor.
+    motivo = None
+    alvos: list[str] = []
+    if threema_envios.canal("chamados") == "desativado":
+        motivo = "Threema de chamados desativado"
+    else:
+        quem = await threema_envios.resolver(K.DENUNCIA_ROBO_PRECISA_ALGUEM, session=session)
+        alvos = list(quem.ids)
+        if not quem.ativo:
+            motivo = "desligado em Cadastros › Envios Threema"
+        elif not quem.ids and quem.motivo != threema_envios.NINGUEM_VALIDO:
+            motivo = "ninguém cadastrado"   # configuração antiga vazia (emergência ou sem semente)
+        elif not quem.ids and not await redis.set(NINGUEM, "1", nx=True, ex=NINGUEM_S):
+            # ninguém válido no Cadastro e esta hora já chegou ao núcleo: não gasta as marcas
+            await _desfazer(marcas)
+            return {"avisadas": 0}
+    if motivo:
+        # carimba (as marcas ficam): o que aconteceu enquanto isso se perde, como antes
         logger.warning("denuncia_robo_aviso_sem_destino", motivo=motivo,
                        chaves=[o["chave"] for o in novas])
         return {"avisadas": 0, "erro": motivo}
     link = f"{(get_settings().app_url or '').rstrip('/')}/denuncia?aba=robo"
     try:
-        with threema_registro.envio(K.DENUNCIA_ROBO_PRECISA_ALGUEM):
-            r = await client.send_to_all(texto(novas, link), alvos)
+        r = await threema_envios.enviar(
+            K.DENUNCIA_ROBO_PRECISA_ALGUEM, texto(novas, link), session=session
+        )
     except threema.ThreemaConfigError as e:
         r = {"sent": [], "failed": alvos, "erro": str(e)}
+    if r.get("motivo") == threema_envios.DESLIGADO:
+        # desligou entre a leitura e o envio: carimba, como o desligado acima
+        logger.warning("denuncia_robo_aviso_sem_destino", motivo=r["motivo"],
+                       chaves=[o["chave"] for o in novas])
+        return {"avisadas": 0, "erro": "desligado em Cadastros › Envios Threema"}
+    if r.get("motivo"):
+        # ninguém válido: o núcleo gravou o registro e acendeu o sino; as marcas voltam
+        await _desfazer(marcas)
+        logger.warning("denuncia_robo_aviso_ninguem_valido", chaves=[o["chave"] for o in novas])
+        return {"avisadas": 0, "erro": "ninguém válido para receber"}
     if not r.get("sent"):
-        for k in marcas:   # não carimba: tenta de novo na próxima volta
-            await redis.delete(k)
+        await _desfazer(marcas)   # não carimba: tenta de novo na próxima volta
         logger.warning("denuncia_robo_aviso_falhou", falhou=r.get("failed"), erro=r.get("erro"))
         return {"avisadas": 0, "erro": "envio falhou"}
     logger.info("denuncia_robo_aviso", chaves=[o["chave"] for o in novas], sent=r["sent"],

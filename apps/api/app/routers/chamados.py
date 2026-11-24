@@ -1451,9 +1451,10 @@ async def encaminhar_juridico(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> JuridicoOut:
-    """Encaminha o chamado ao jurídico: aviso no Threema (destinatários do
-    Informar `juridico`) com o link do dossiê (histórico + fotos), carimba
-    quem/quando e registra no histórico. Pode repetir (reenvio)."""
+    """Encaminha o chamado ao jurídico: aviso no Threema (quem recebe o envio
+    "Encaminhar ao jurídico" em Cadastros › Envios Threema) com o link do
+    dossiê (histórico + fotos), carimba quem/quando e registra no histórico.
+    Pode repetir (reenvio)."""
     ch = await _get_da_equipe(session, user, chamado_id)
     try:
         r = await chamados_juridico.encaminhar(session, ch, user, body.observacao)

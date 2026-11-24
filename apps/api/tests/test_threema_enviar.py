@@ -237,6 +237,15 @@ _USOS_DO_NUCLEO = {
     "routers/informar.py": {"enviar", "resolver"},
     "services/logistica_amazon_avisos.py": {"enviar", "resolver"},
     "services/devolucao_acao_avisos.py": {"enviar", "resolver"},
+    # F2/C9d: IA de Chamado parada (15), Encaminhar ao jurídico (16),
+    # relatório da Denúncia e o teste dele (43) e o robô de Denúncia (44): o
+    # liga/desliga e quem recebe lidos antes de montar/carimbar; `canal` é o
+    # `client.disabled` de antes (o canal do remetente desligado no servidor),
+    # lido sem criar o cliente no ponto.
+    "services/chamados_ia_aviso.py": {"enviar", "resolver", "canal"},
+    "services/chamados_juridico.py": {"enviar", "resolver", "canal"},
+    "services/denuncia_relatorio_threema.py": {"enviar", "resolver", "canal"},
+    "services/denuncia_robo_aviso.py": {"enviar", "resolver", "canal"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {

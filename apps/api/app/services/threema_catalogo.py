@@ -155,7 +155,8 @@ class Legado:
     # Campos de Settings (`getattr(settings, nome, "")`): o 1º não vazio vence.
     envs: tuple[str, ...] = ()
     # Linhas de `threema_informar_config`: a 1ª LINHA EXISTENTE vence; linha
-    # vazia = ninguém (é a regra do `denuncia_robo_aviso.destinatarios`).
+    # vazia = ninguém (era a regra do `denuncia_robo_aviso.destinatarios`,
+    # antes da F2/C9d).
     informar: tuple[str, ...] = ()
     # Robô da Ouvidoria: `ouvidoria.destinatarios(robo, chave)` (lista da tela,
     # depois o env do robô, depois o OUVIDORIA_THREEMA_RECIPIENTS).
@@ -387,16 +388,20 @@ def _servidor() -> list[EnvioDef]:
             K.CHAMADOS_IA_PARADA, "Chamados", "IA de Chamado", "IA de Chamado parada",
             "O robô da IA de Chamado parou em captcha ou em tela de login da loja.",
             "evento", "quando o robô devolve o resultado", "servidor", "chamados",
+            # Desligado, o aviso daquela parada se perde: sem retentativa (o
+            # resultado vai para o histórico do chamado).
             L(informar=("chamados_ia",), grupo=G_IA_CHAMADO), fatia="F2",
-            leitura="informar:chamados_ia",
+            leitura="informar:chamados_ia", migrado=True,
         ),
         E(
             K.CHAMADOS_ENCAMINHAR_JURIDICO, "Chamados", None, "Encaminhar ao jurídico",
             "Botão Encaminhar ao jurídico do chamado: manda o dossiê para quem cuida do "
             "jurídico.",
             "manual", "botão Encaminhar ao jurídico", "servidor", "juridico",
+            # Desligado, o botão responde 422 (`envio_desligado`) sem mexer no
+            # chamado.
             L(informar=("juridico",)), depende_de=(_DEP_CANAL_JURIDICO,),
-            ao_desligar="recusa", fatia="F2", leitura="informar:juridico",
+            ao_desligar="recusa", fatia="F2", leitura="informar:juridico", migrado=True,
         ),
         # ── Controle de Estoque e Produtos ─────────────────────────────────
         E(
@@ -574,17 +579,22 @@ def _demais() -> list[EnvioDef]:
             "Relatório do dia anterior do robô de Denúncia. O botão de teste da tela sai "
             "por aqui também, como origem 'teste'.",
             "horario", "a partir das 07:10", "servidor", "chamados",
+            # Desligado (o modo do robô), o dia não é carimbado, mas só sai o
+            # relatório de ONTEM: os dias do período se perdem.
             L(informar=("denuncia_relatorio",)), interruptor="robo_modo",
             interruptor_alvo="denuncia_relatorio_threema", fatia="F2",
-            leitura="informar:denuncia_relatorio",
+            leitura="informar:denuncia_relatorio", migrado=True,
         ),
         E(
             K.DENUNCIA_ROBO_PRECISA_ALGUEM, "Denúncia", "Robô",
             "Robô de Denúncia precisa de alguém",
             "Captcha na tela, robô parado, mini sem notícia ou SEI pedindo código.",
             "evento", "conferido a cada 2 min", "servidor", "chamados",
+            # Desligado, cada ocorrência nova é marcada no Redis mesmo sem envio
+            # (3 dias; o estado do momento, enquanto durar): ao religar só avisa
+            # o que for novo.
             L(informar=("denuncia_robo", "chamados_ia"), grupo=G_IA_CHAMADO), fatia="F2",
-            leitura="informar:denuncia_robo",
+            leitura="informar:denuncia_robo", migrado=True,
         ),
         *conferencia,
         E(

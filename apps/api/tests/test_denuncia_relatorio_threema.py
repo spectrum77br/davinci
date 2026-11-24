@@ -197,19 +197,23 @@ async def test_sem_cadastro_ou_falha_nao_carimba(db, enviados):
     assert (await rt.enviar_pendente(db, datetime(2026, 10, 6, 11, 7, tzinfo=UTC)))["enviado"]
 
 
-async def test_cadastro_pelo_informar(db, client, make_user, auth_as):
-    """O botão "Quem recebe o relatório" (Robô › Ocorrências) usa o Informar: admin e o Cairo."""
+async def test_quem_recebe_virou_atalho_do_cadastro(db, client, make_user, auth_as):
+    """Tarefa 16, F2/C9d: o botão "Quem recebe o relatório" (Robô › Ocorrências) virou atalho de
+    Cadastros › Envios Threema — só admin altera quem recebe. O PUT da lista antiga responde 410
+    (também para o Cairo, que antes escolhia); o GET segue mostrando a lista antiga (a reserva de
+    emergência) para admin e Cairo; os demais continuam sem acesso."""
+    await _cadastro(db, "TSTM0005")
     cairo = await make_user(email="sa.geral@tutamail.com")
-    cairo.threema = "M5TT27JA"
-    await db.commit()
     auth_as(cairo)
-    r = await client.put("/api/informar/denuncia_relatorio", json={"recipients": ["M5TT27JA", "ZZZZ9999"]})
-    assert r.status_code == 200, r.text
-    assert (await client.get("/api/informar/denuncia_relatorio")).json()["recipients"] == ["M5TT27JA"]
-    assert await rt.destinatarios(db) == ["M5TT27JA"]
+    r = await client.put("/api/informar/denuncia_relatorio", json={"recipients": ["TSTZ0009"]})
+    assert r.status_code == 410, r.text
+    assert r.json()["detail"]["code"] == "quem_recebe_no_cadastro"
+    assert (await client.get("/api/informar/denuncia_relatorio")).json()["recipients"] == ["TSTM0005"]
     outro = await make_user(email="fulano@x.com")
     auth_as(outro)
     assert (await client.get("/api/informar/denuncia_relatorio")).status_code == 403
+    r = await client.put("/api/informar/denuncia_relatorio", json={"recipients": []})
+    assert r.status_code == 403
 
 
 async def test_teste_so_pra_um_e_nao_carimba(db, client, make_user, auth_as, enviados):
