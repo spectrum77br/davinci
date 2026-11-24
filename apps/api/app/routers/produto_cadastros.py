@@ -1,7 +1,8 @@
 """Cadastros › Produtos (M-29, 24/11/2026): a lista oficial de categorias e tags de envio.
 
 Tabela Tipo | Nome (models/produto_cadastro.py, migration 0508). Quem pode:
-- ver a aba: permissão `cadastro_produtos` (view), como cada aba do grupo Cadastros tem a sua;
+- ver a aba: permissão `cadastro_produtos` (view), como cada aba do grupo Cadastros tem a sua; a
+  0508 deu essa view a quem já via alguma aba de Cadastros (item 11 do pedido);
 - criar, editar e excluir: só administrador, no servidor (`require_admin`);
 - GET /listas (só os nomes, para os filtros Tags e Categoria do Produtos 2): qualquer pessoa
   logada e ativa — é a lista dos filtros, não a tela de cadastro.

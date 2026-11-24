@@ -16,7 +16,15 @@ DADOS INICIAIS (os do pedido):
   nome: nada lá é mexido, nenhum produto perde a categoria.
 - Tag de envio: .cd, .ci, .pi, .ra, .sa, .sp.
 
-DOWNGRADE: apaga as duas tabelas (nada de fora aponta para elas).
+PERMISSÃO (item 11 do pedido: "mesma permissão das outras abas do grupo Cadastros"): a aba tem a
+chave própria `cadastro_produtos`, como cada aba do grupo. Para ninguém que já trabalha em Cadastros
+ficar sem ela no dia do deploy, todo usuário NÃO admin com `view` em alguma aba de Cadastros com
+chave própria (ABAS_CADASTROS) ganha `cadastro_produtos.view` — só ver; criar, editar e excluir são
+só de admin no servidor. Admin vê tudo e não precisa. Depois a tela Permissões ajusta quem quiser
+(molde da 0398). Imprime quem ganhou.
+
+DOWNGRADE: tira a chave `cadastro_produtos` de todos os usuários e apaga as duas tabelas (nada de
+fora aponta para elas).
 
 `SET LOCAL lock_timeout` como na 0505/0507: tabelas novas não travam ninguém, mas a regra da casa
 vale para toda migration — se algo segurar o catálogo, desiste em 5 s e é só rodar de novo.
@@ -62,6 +70,22 @@ INICIAIS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("tag_envio", "Tag de envio", (".cd", ".ci", ".pi", ".ra", ".sa", ".sp")),
 )
+# As abas do grupo Cadastros (apps/web/lib/navGroups.ts, TABS_CADASTROS e TABS_INTEGRACOES) com
+# chave própria, em 24/11/2026. Fora: Legendas (usa a chave dos Criativos, que é do Marketing) e
+# Imobilizado (sem chave: todo mundo vê os próprios itens).
+ABAS_CADASTROS: tuple[str, ...] = (
+    "empresa",
+    "emissao_servico",
+    "cadastro",
+    "lojas_info",
+    "segmentos",
+    "marcas",
+    "redes_sociais",
+    "email_padroes",
+    "integracoes",
+    "sincronizacoes",
+    "alertas",
+)
 
 
 def _datas() -> list[sa.Column]:
@@ -88,6 +112,34 @@ def semear(bind) -> None:
                 sa.text(f"INSERT INTO {s}.{CADASTROS} (tipo_id, nome) VALUES (:tipo, :nome)"),
                 {"tipo": tipo_id, "nome": nome},
             )
+
+
+def liberar_aba(bind) -> list[str]:
+    """`cadastro_produtos.view` para quem já vê alguma aba de Cadastros (ver docstring)."""
+    return [
+        r.name or r.email
+        for r in bind.execute(
+            sa.text(
+                f"""
+                UPDATE {SCHEMA}.users
+                   SET permissions = jsonb_set(
+                           coalesce(permissions, '{{}}'::jsonb),
+                           '{{cadastro_produtos}}',
+                           '{{"view": true, "edit": false, "delete": false}}'::jsonb,
+                           true
+                       )
+                 WHERE role::text <> 'admin'
+                   AND coalesce(permissions -> 'cadastro_produtos' ->> 'view', 'false') <> 'true'
+                   AND EXISTS (
+                       SELECT 1 FROM unnest(CAST(:abas AS text[])) AS aba
+                        WHERE coalesce(permissions -> aba ->> 'view', 'false') = 'true'
+                   )
+                RETURNING name, email
+                """
+            ),
+            {"abas": list(ABAS_CADASTROS)},
+        ).fetchall()
+    ]
 
 
 def upgrade() -> None:
@@ -143,9 +195,15 @@ def upgrade() -> None:
         schema=SCHEMA,
     )
     semear(op.get_bind())
+    quem = liberar_aba(op.get_bind()) or "ninguém (só admins veem Cadastros)"
+    print(f"[0508] aba Cadastros › Produtos liberada (só ver) para: {quem}")
 
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")  # ver o upgrade
+    op.execute(
+        f"UPDATE {SCHEMA}.users SET permissions = permissions - 'cadastro_produtos' "
+        "WHERE permissions ? 'cadastro_produtos'"
+    )
     op.drop_table(CADASTROS, schema=SCHEMA)
     op.drop_table(TIPOS, schema=SCHEMA)

@@ -2,7 +2,8 @@
 // Cadastros › Produtos (M-29, Harry 24/11/2026): a lista oficial de categorias e
 // tags de envio — tabela Tipo | Nome. Os filtros Tags e Categoria do Produtos 2
 // (M-30) leem esta lista (GET /api/produto-cadastros/listas).
-// Quem vê: permissão `cadastro_produtos` (view). Criar, editar e excluir: só
+// Quem vê: permissão `cadastro_produtos` (view; a migration 0508 deu a quem já via
+// alguma aba de Cadastros). Criar, editar e excluir: só
 // administrador (o servidor confere; aqui os botões nem aparecem para os outros).
 // Regras do servidor (routers/produto_cadastros.py): nome repetido no tipo é
 // recusado; Categoria que ainda tem produto (base do ERP) não sai nem muda de

@@ -106,6 +106,12 @@ async def test_0508_cria_igual_ao_model_com_os_dados_do_pedido_e_desce(db):
     rascunho = f"{modelo}_m0508"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
+    # A 0508 também abre a aba a quem já vê Cadastros (teste abaixo): a users tem de existir.
+    await db.execute(
+        text(
+            f'CREATE TABLE "{rascunho}".users (name text, email text, role text, permissions jsonb)'
+        )
+    )
     await db.commit()
 
     def _rodar(conn, passo: str) -> None:
@@ -185,6 +191,94 @@ async def test_0508_cria_igual_ao_model_com_os_dados_do_pedido_e_desce(db):
         await conn.run_sync(_rodar, "upgrade")
         await db.commit()
         assert await _catalogo(db, rascunho) == do_model
+    finally:
+        await db.rollback()
+        await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_0508_abre_a_aba_para_quem_ja_ve_alguma_aba_de_cadastros(db):
+    """M-29 item 11: "mesma permissão das outras abas do grupo Cadastros". A aba tem a chave
+    própria `cadastro_produtos`; para ninguém que já trabalha em Cadastros ficar sem ela no dia do
+    deploy, a 0508 dá `view` a quem já tem `view` em alguma aba de Cadastros com chave própria.
+    Criar/editar/excluir continuam só de admin (no servidor). Admin não precisa (vê tudo). Quem
+    não vê nenhuma aba de Cadastros, ou só a Legendas (chave dos Criativos), não ganha nada.
+    O downgrade tira a chave de todos."""
+    mod = _carregar()
+    rascunho = f"{Base.metadata.schema}_m0508u"
+    await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
+    await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
+    # Só o que a 0508 toca na users, como na produção (role é enum lá; aqui texto).
+    await db.execute(
+        text(
+            f'CREATE TABLE "{rascunho}".users (name text, email text PRIMARY KEY, '
+            "role text NOT NULL, permissions jsonb)"
+        )
+    )
+    ver = '{"view": true, "edit": false, "delete": false}'
+    pessoas = {
+        "loja@x": ("user", f'{{"lojas_info": {ver}}}'),
+        "integra@x": ("user", f'{{"integracoes": {ver}, "tabela_precos": {ver}}}'),
+        "cadastro@x": ("user", f'{{"cadastro": {ver}, "empresa": {ver}}}'),
+        "admin@x": ("admin", f'{{"lojas_info": {ver}}}'),
+        "legendas@x": ("user", f'{{"marketing_criativos": {ver}}}'),
+        "sem_view@x": ("user", '{"lojas_info": {"view": false, "edit": true}}'),
+        "nada@x": ("user", None),
+    }
+    for email, (role, perms) in pessoas.items():
+        await db.execute(
+            text(
+                f'INSERT INTO "{rascunho}".users (name, email, role, permissions) '
+                "VALUES (:e, :e, :r, CAST(:p AS jsonb))"
+            ),
+            {"e": email, "r": role, "p": perms},
+        )
+    await db.commit()
+
+    def _rodar(conn, passo: str) -> None:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            getattr(mod, passo)()
+
+    async def _aba() -> dict:
+        linhas = await db.execute(
+            text(f"SELECT email, permissions -> 'cadastro_produtos' FROM \"{rascunho}\".users")
+        )
+        return dict(linhas.all())
+
+    mod.SCHEMA = rascunho
+    try:
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade")
+        await db.commit()
+        so_ver = {"view": True, "edit": False, "delete": False}
+        assert await _aba() == {
+            "loja@x": so_ver,
+            "integra@x": so_ver,
+            "cadastro@x": so_ver,
+            "admin@x": None,
+            "legendas@x": None,
+            "sem_view@x": None,
+            "nada@x": None,
+        }
+        # O resto das permissões fica como estava.
+        integra = (
+            await db.execute(
+                text(f"SELECT permissions FROM \"{rascunho}\".users WHERE email = 'integra@x'")
+            )
+        ).scalar_one()
+        assert integra["tabela_precos"] == {"view": True, "edit": False, "delete": False}
+
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade")
+        await db.commit()
+        assert set((await _aba()).values()) == {None}
+        assert (
+            await db.execute(
+                text(f"SELECT permissions FROM \"{rascunho}\".users WHERE email = 'nada@x'")
+            )
+        ).scalar_one() is None
     finally:
         await db.rollback()
         await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
