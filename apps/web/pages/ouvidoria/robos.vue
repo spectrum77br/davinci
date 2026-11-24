@@ -1288,7 +1288,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                             <span class="text-muted-foreground">{{ l.label }}</span>
                             <span>
                               {{ l.valor }}
-                              <!-- Chave que o Cadastro governa (o "avisar margem alta" quando o 27 migrar). -->
+                              <!-- Chave que o Cadastro governa (o "avisar margem alta", item 27, desde a F3/C10b). -->
                               <template v-if="(r.config_no_cadastro || {})[l.chave]">
                                 ·
                                 <NuxtLink v-if="isAdmin" :to="linkDoEnvio((r.config_no_cadastro || {})[l.chave])" class="text-primary hover:underline" :data-config-cadastro="l.chave">muda em Cadastros › Envios Threema</NuxtLink>

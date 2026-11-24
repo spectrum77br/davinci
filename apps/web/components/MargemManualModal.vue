@@ -63,7 +63,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
           <ul class="list-disc pl-5 space-y-1 text-muted-foreground">
             <li>Pedido pendente por <span class="font-medium text-foreground">margem baixa ou problema de saldo</span> → move no Bling pra <span class="font-medium text-foreground">Aguardando Cancelamento</span>, escreve o recado nas Observações da venda e manda aviso no Threema com link de aprovar pelo celular.</li>
             <li>Margem <span class="font-medium text-foreground">negativa</span> (abaixo de zero e abaixo da mínima) → já grava <span class="font-medium text-foreground">Reprovado</span> direto; o aviso do Threema diz "reprovado automaticamente" e o link desfaz na hora, se quisermos manter a venda.</li>
-            <li>Margem <span class="font-medium text-foreground">acima de 60%</span> → só manda um alerta no Threema (geralmente é custo errado no cadastro do produto). Não mexe no pedido e avisa uma única vez.</li>
+            <li>Margem <span class="font-medium text-foreground">acima de 60%</span> → só manda um alerta no Threema (geralmente é custo errado no cadastro do produto), quando o alerta está ligado. Não mexe no pedido e avisa uma única vez.</li>
             <li>O robô <span class="font-medium text-foreground">não segura</span>: divergência de <span class="font-medium text-foreground">frete</span> e o "aguardando saldo" de <span class="font-medium text-foreground">ML, Shopee e TikTok</span> — esses só esperam o repasse; quando ele chega, o pedido aprova sozinho ou vira pendente de margem.</li>
           </ul>
         </section>
@@ -80,7 +80,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
         <section class="space-y-1">
           <h3 class="font-semibold">Botões do topo</h3>
           <ul class="list-disc pl-5 space-y-1 text-muted-foreground">
-            <li><span class="font-medium text-foreground">Informar</span> — escolhe quem recebe no Threema os avisos automáticos do robô (pedido segurado, reprovado automático e margem alta). O envio é sempre do robô.</li>
+            <li><span class="font-medium text-foreground">Informar</span> — mostra quem recebe no Threema os avisos automáticos do robô (pedido segurado, reprovado automático, reavaliação e margem alta). O envio é sempre do robô. Quem recebe e o liga/desliga do alerta de margem alta são escolhidos só por admin, em Cadastros › Envios Threema.</li>
             <li><span class="font-medium text-foreground">planilha</span> (admins) — baixa a rentabilidade por pedido no período escolhido.</li>
             <li><span class="font-medium text-foreground">atualizar</span> — força a atualização agora. A aba já se atualiza sozinha a cada 1 minuto.</li>
             <li><span class="font-medium text-foreground">Excel</span> — baixa todas as linhas dos filtros escolhidos (não só a página da tela), com as mesmas colunas da tabela.</li>

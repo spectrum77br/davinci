@@ -23,12 +23,13 @@ Há ainda um quarto cadastro SEM envio manual: `margem_auto`, quem recebe o
 aviso automático que o robô da Margem manda NA HORA em que segura, reprova
 (com o link de aprovar pelo celular) ou desconfia de um pedido
 (services/margem_auto_hold._avisar_threema). Ele aceita GET/PUT como os
-demais (o modal da Margem edita os dois), mas `/enviar` não existe pra ele —
-quem envia é o robô. Desde 25/09/2026 ele NÃO tem linha própria: GET/PUT
-leem e gravam a lista "Avisar" do Robô da Margem em Ouvidoria › Robôs
-(`ouvidoria_robos.threema_recipients` de `vigia_margem`) — uma lista só pro
-aviso de cada pedido e pro resumo das pendências, editável nas duas telas
-(migração 0325 juntou as duas).
+demais, mas `/enviar` não existe pra ele — quem envia é o robô. Desde
+25/09/2026 ele NÃO tem linha própria: GET/PUT leem e gravam a lista "Avisar"
+do Robô da Margem em Ouvidoria › Robôs (`ouvidoria_robos.threema_recipients`
+de `vigia_margem`) — uma lista só pro aviso de cada pedido e pro resumo das
+pendências (migração 0325 juntou as duas). Desde a F3/C10b (tarefa 16) os
+avisos que a leem (25 a 27 e o resumo do robô, 34) e o Informar da Margem
+(28) leem o Cadastro: as duas listas da Margem ficam congeladas (PUT 410).
 
 Cada contexto tem seu cadastro de destinatários (`threema_informar_config`),
 editado no modal do botão. O diretório de opções vem do CADASTRO DE USUÁRIOS
@@ -208,10 +209,11 @@ async def _resalvar_sem_mudanca(
 
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
-# exceção: o gerente (Cairo) vê e usa o botão de lá (incluindo o cadastro do
-# aviso automático); Logística e Controle de Estoque seguem admin-only.
-# Espelho no front: INFORMAR_MARGEM_USERS em pages/margem.vue — mudou aqui,
-# muda lá.
+# exceção: o gerente (Cairo) vê e usa o botão de lá (o "Enviar agora", pela
+# API, e quem recebe o aviso automático — escolher, desde a F3/C10b, só
+# admin, em Cadastros › Envios Threema); Logística e Controle de Estoque
+# seguem admin-only. Espelho no front: INFORMAR_MARGEM_USERS em
+# components/MargemPainel.vue — mudou aqui, muda lá.
 _EMAILS_MARGEM = frozenset({"sa.geral@tutamail.com"})
 _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
     "margem": _EMAILS_MARGEM,

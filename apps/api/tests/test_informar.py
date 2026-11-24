@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica, OuvidoriaRobo, User, UserRole, UserStatus
 from app.services import aprovar_link, informar, logistica_rules
+from app.services.threema_catalogo import K
+from tests.test_threema_resolver import desmigrar
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -248,8 +250,10 @@ async def test_informar_put_salva_so_ids_do_diretorio(
     )
     monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
     auth_as(admin)
-    # Um contexto cuja lista ainda vale (o do Controle de Estoque já é
-    # escolhido em Cadastros › Envios Threema: o PUT dele responde 410).
+    # Desde a F3/C10b todo contexto é escolhido em Cadastros › Envios Threema
+    # (o PUT responde 410): o código de antes da fatia, para a lista que
+    # ainda vale.
+    desmigrar(monkeypatch, K.MARGEM_INFORMAR)
     r = await client.put(
         "/api/informar/margem",
         json={"recipients": ["aaaa1111", "ZZZZ9999"]},
@@ -269,9 +273,12 @@ async def test_margem_auto_e_a_lista_do_robo_da_margem(
 ):
     """Uma lista só (25/09): o modal Informar da aba Margem e o "Avisar" do
     Robô da Margem na Ouvidoria editam a MESMA lista — quem recebe o aviso na
-    hora (com o link de aprovar pelo celular) e o resumo das pendências."""
+    hora (com o link de aprovar pelo celular) e o resumo das pendências.
+    Desde a F3/C10b ela é a configuração antiga desses envios (a reserva de
+    emergência e a fonte da semente, `threema_envios.legado`): o PUT só grava
+    com o código de antes da fatia (depois, 410 — `test_threema_pontos_margem`)."""
     from app.config import get_settings
-    from app.services import margem_auto_hold
+    from app.services import margem_auto_hold, threema_envios
 
     monkeypatch.setattr(
         get_settings(), "threema_recipient_names", "AAAA1111:Ana,BBBB2222:Bia",
@@ -279,6 +286,15 @@ async def test_margem_auto_e_a_lista_do_robo_da_margem(
     )
     monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
     auth_as(admin)
+    margem = (
+        K.MARGEM_PEDIDO_SEGURADO,
+        K.MARGEM_REAVALIACAO,
+        K.MARGEM_MARGEM_ALTA,
+        K.OUVIDORIA_VIGIA_MARGEM,
+    )
+    r = await client.put("/api/informar/margem_auto", json={"recipients": ["BBBB2222"]})
+    assert r.status_code == 410, r.text
+    desmigrar(monkeypatch, *margem)
 
     r = await client.put("/api/informar/margem_auto", json={"recipients": ["aaaa1111", "BBBB2222"]})
     assert r.status_code == 200, r.text
@@ -287,17 +303,21 @@ async def test_margem_auto_e_a_lista_do_robo_da_margem(
     robo = await db.get(OuvidoriaRobo, "vigia_margem")
     await db.refresh(robo)
     assert robo.threema_recipients == "AAAA1111, BBBB2222"
-    # O robô manda pra essa lista (ligado)…
-    assert await margem_auto_hold._recipients_margem_auto(db) == ["AAAA1111", "BBBB2222"]
+    # A configuração antiga dos avisos da Margem é essa lista…
+    for chave in margem:
+        leg = await threema_envios.legado(chave, session=db)
+        assert list(leg.ids) == ["AAAA1111", "BBBB2222"], chave
+    assert await margem_auto_hold._robo_ligado(db)
     # …e o que a Ouvidoria grava aparece no modal da Margem.
     robo.threema_recipients = "BBBB2222"
     await db.commit()
     r = await client.get("/api/informar/margem_auto")
     assert r.status_code == 200 and r.json()["recipients"] == ["BBBB2222"]
-    # Silencioso/desligado: a lista continua lá, mas ninguém recebe.
+    # Silencioso/desligado: a lista continua lá, mas ninguém recebe (o modo
+    # do robô é o "depende de" dos avisos na hora).
     robo.modo = "silencioso"
     await db.commit()
-    assert await margem_auto_hold._recipients_margem_auto(db) == []
+    assert not await margem_auto_hold._robo_ligado(db)
 
 
 @pytest.mark.asyncio
@@ -360,7 +380,9 @@ async def test_informar_diretorio_vem_do_cadastro_de_usuarios(
     assert "XXXX0000" not in dest  # desativado fora
     assert "RRRR0000" not in dest  # usuário-sistema fora
 
-    # E dá pra salvar o ID cadastrado (vale pro PUT também).
+    # E dá pra salvar o ID cadastrado (vale pro PUT também — no código de
+    # antes da F3/C10b; depois, quem recebe é escolhido no Cadastro).
+    desmigrar(monkeypatch, K.MARGEM_INFORMAR)
     r = await client.put("/api/informar/margem", json={"recipients": ["ZZZZ9999"]})
     assert r.status_code == 200
     assert r.json()["recipients"] == ["ZZZZ9999"]
@@ -483,8 +505,12 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
     monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
 
     auth_as(admin)
-    r = await client.put("/api/informar/margem", json={"recipients": ["AAAA1111"]})
-    assert r.status_code == 200
+    # A lista do Informar (congelada desde a F3/C10b) é a configuração antiga:
+    # sem semente no Cadastro, o "Enviar agora" manda para ela.
+    from app.models import ThreemaInformarConfig
+
+    db.add(ThreemaInformarConfig(contexto="margem", recipients="AAAA1111"))
+    await db.commit()
     r = await client.post("/api/informar/margem/enviar")
 
     assert r.status_code == 200

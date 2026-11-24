@@ -288,28 +288,35 @@ def _lista_vazia_desliga(d: EnvioDef) -> bool:
     Vale para a lista do .env e para a linha do Informar de um envio
     AUTOMÁTICO (F2: os prazos da Amazon, o prazo de resposta das Devoluções,
     a IA de Chamado parada e o robô da Denúncia — linha vazia ou ausente =
-    ninguém, calado), e para o aviso das pendências de cada robô da Ouvidoria
-    (F3: `avisar_pendentes` sem ninguém na lista "Avisar", no .env do robô e
-    no OUVIDORIA geral voltava `sem_destinatarios`, calado; o modo do robô é
-    o "depende de", lido antes). Não vale para o botão (`manual`: a lista
-    vazia é o 422 do botão, não um desligado), para o liga/desliga de outra
-    fonte (o modo do robô do relatório da Denúncia, a chave da conferência no
-    .env) nem para o usuário pelo nome (o 12: "thatcher" sem Threema é falha,
-    não desligado). Os avisos da Margem que leem a lista do Robô da Margem
-    (25 a 27) também não: são da C10b.
+    ninguém, calado), e para a lista do robô na Ouvidoria (a "Avisar", com o
+    .env do robô e o OUVIDORIA geral de reserva): o aviso das pendências de
+    cada robô (F3/C10a: `avisar_pendentes` sem ninguém voltava
+    `sem_destinatarios`, calado) e os avisos na hora do Robô da Margem
+    (F3/C10b, 25 a 27: `_recipients_margem_auto` vazio era o `if not
+    recipients: return`, calado). O modo do robô é o "depende de", lido
+    antes. No 27 o liga/desliga é a caixinha "avisar margem alta" (gravada
+    direto no robô): sem ninguém na lista ele também ficava calado com a
+    caixinha marcada, e é assim que continua (ver `_interruptor_cadastro`).
+    Não vale para o botão (`manual`: a lista vazia é o 422 do botão, não um
+    desligado), para o liga/desliga de outra fonte (o modo do robô do
+    relatório da Denúncia, a chave da conferência no .env) nem para o usuário
+    pelo nome (o 12: "thatcher" sem Threema é falha, não desligado).
 
     No Cadastro, ligado sem ninguém grava o registro `ok=false` e acende o
     sino dos admins a cada rodada. Por isso a semente grava `ativo=false`
-    quando a lista de hoje sai vazia, a conferência trata o legado vazio
-    desses envios como desligado e, para a semente rodada com um código que
-    ainda não conhecia a regra (`ativo` NULL e nenhuma linha), o
+    quando a lista de hoje sai vazia (no 27, que não tem `ativo` próprio,
+    não grava linha nenhuma), a conferência trata o legado vazio desses
+    envios como desligado e, para a semente rodada com um código que ainda
+    não conhecia a regra (`ativo` NULL e nenhuma linha), o
     `_interruptor_cadastro` também lê desligado."""
-    if d.interruptor != "proprio" or d.legado.interruptor_env:
+    if d.legado.interruptor_env or d.interruptor in ("robo_modo", "fixo"):
+        return False
+    if d.legado.robo:
+        return True
+    if d.interruptor != "proprio":
         return False
     if d.legado.envs:
         return True
-    if d.legado.robo:
-        return chave_ouvidoria(d.legado.robo) == d.chave
     return bool(d.legado.informar) and d.frequencia_tipo != "manual"
 
 
@@ -434,7 +441,8 @@ async def dependencias(chave: str, session: AsyncSession) -> list[tuple[str, boo
             ).scalar_one_or_none()
             ok = modo == "ligado"
         elif dep.tipo == "robo_modo":
-            # margem_auto_hold._recipients_margem_auto: sem linha = `ligado`.
+            # margem_auto_hold._robo_ligado (os avisos na hora do Robô da
+            # Margem): sem linha = `ligado`.
             ok = await ouvidoria.modo(session, dep.alvo) == "ligado"
         elif dep.tipo == "env":
             ok = bool(getattr(s, dep.alvo, False))
@@ -702,7 +710,11 @@ async def _interruptor_cadastro(d: EnvioDef, linha: ThreemaEnvio, session: Async
     vazia; a de antes da revisão da F1 não gravava `ativo`): sem isto, o
     envio ficaria ligado com ninguém e acenderia o sino dos admins a cada
     rodada, o que hoje não acontece. Lista com gente que não vale (suspenso,
-    grupo vazio) continua ligada: é o "ninguém válido", com sino."""
+    grupo vazio) continua ligada: é o "ninguém válido", com sino.
+
+    No 27 (`robo_config`, a caixinha "avisar margem alta") vale o mesmo por
+    cima da caixinha: sem nenhuma linha é o desligado de hoje (a lista vazia
+    calava o alerta com a caixinha marcada)."""
     if d.interruptor == "proprio":
         if linha.ativo is not None:
             return bool(linha.ativo)
@@ -711,6 +723,12 @@ async def _interruptor_cadastro(d: EnvioDef, linha: ThreemaEnvio, session: Async
         if _lista_vazia_desliga(d) and await _sem_linha_padrao(session, d.chave):
             return False
         return True
+    if (
+        d.interruptor == "robo_config"
+        and _lista_vazia_desliga(d)
+        and await _sem_linha_padrao(session, d.chave)
+    ):
+        return False
     return await _interruptor_legado(d, session)
 
 
@@ -1051,11 +1069,15 @@ class PlanoEnvio:
     fonte: str = ""
     grupo: str | None = None
     refs: list[Ref] = field(default_factory=list)
-    # Liga/desliga que a semente grava (só nos envios de `_lista_vazia_desliga`):
-    # False = a lista de hoje saiu vazia (o desligado de hoje); None = segue o
-    # interruptor de hoje (ligado). Sem valor nos outros envios (não mexe).
+    # Liga/desliga que a semente grava (só nos envios de `_lista_vazia_desliga`
+    # com `ativo` próprio): False = a lista de hoje saiu vazia (o desligado de
+    # hoje); None = segue o interruptor de hoje (ligado). Sem valor nos outros
+    # envios (não mexe).
     ativo: bool | None = None
     grava_ativo: bool = False
+    # A lista de hoje saiu vazia num envio de `_lista_vazia_desliga`: nasce
+    # sem linha nenhuma (calado, como hoje).
+    vazia: bool = False
 
 
 @dataclass
@@ -1177,12 +1199,14 @@ async def semear(
     - Envio com `Legado.grupo`: a lista vira o grupo (mesmo nome com pessoas
       diferentes, na rodada ou no banco, PARA com erro e nada é gravado).
     - Não mexe em `ativo` (NULL = interruptor de hoje), fora o envio cujo
-      desligado de hoje é a lista vazia (`_lista_vazia_desliga`: o .env, ou a
-      linha do Informar de um envio automático): com a lista de hoje vazia
-      ele nasce `ativo=false` (calado, como hoje;
+      desligado de hoje é a lista vazia (`_lista_vazia_desliga`: o .env, a
+      linha do Informar de um envio automático ou a lista do robô na
+      Ouvidoria): com a lista de hoje vazia ele nasce `ativo=false` (calado,
+      como hoje;
       NULL seria "ligado com ninguém", com registro e sino a cada rodada) e
-      sem entrar no grupo dele; com gente, `ativo` NULL. Carimba
-      `semeado_em`.
+      sem entrar no grupo dele; com gente, `ativo` NULL. O 27 (a caixinha do
+      robô é o liga/desliga) com a lista vazia nasce só sem linha nenhuma.
+      Carimba `semeado_em`.
     - Chave já semeada fica como está (rodar duas vezes não muda nada), a
       menos de `sobrescrever` — que só vale para chave ainda não migrada no
       código em execução; chave migrada se acerta na tela.
@@ -1239,14 +1263,17 @@ async def semear(
             # ID repetido na lista de hoje vira UMA linha (o índice único não
             # deixa duas; a conferência compara conjuntos).
             refs = [r for r in (mapa.ref(rid) for rid in _dedupe(ids)) if r is not None]
-            grava_ativo = regra is None and _lista_vazia_desliga(d)
-            if grava_ativo and not ids:
+            vazia_desliga = regra is None and _lista_vazia_desliga(d)
+            if vazia_desliga and not ids:
                 # Lista de hoje vazia = o envio nasce desligado e sem ninguém:
                 # não entra no grupo. Ex.: a linha `denuncia_robo` salva vazia
                 # (o 44 não lê a reserva `chamados_ia`) não pode virar "IA de
                 # Chamado com ninguém" nem brigar com o 15, que lê a
-                # `chamados_ia` com gente.
+                # `chamados_ia` com gente. O 27 não tem `ativo` próprio (a
+                # caixinha do robô): sem linha nenhuma, o
+                # `_interruptor_cadastro` o lê desligado.
                 grupo = None
+            grava_ativo = vazia_desliga and d.interruptor == "proprio"
             plano = PlanoEnvio(
                 d.chave,
                 d.nome,
@@ -1257,6 +1284,7 @@ async def semear(
                 refs=refs,
                 ativo=(False if not ids else None) if grava_ativo else None,
                 grava_ativo=grava_ativo,
+                vazia=vazia_desliga and not ids,
             )
             res.planos.append(plano)
             if grupo:
@@ -1416,6 +1444,9 @@ def _texto_semente(res: ResultadoSemente) -> list[str]:
             f" — nasce DESLIGADO (hoje a lista vazia {_lista_de_hoje(CATALOGO[p.chave])} é o"
             " desligado; ligue na tela quando escolher alguém)"
             if p.grava_ativo and p.ativo is False
+            else f" — fica CALADO enquanto a lista estiver vazia (hoje a lista vazia"
+            f" {_lista_de_hoje(CATALOGO[p.chave])} é o desligado)"
+            if p.vazia
             else ""
         )
         out.append(f"  - {rotulo} — {p.nome}: {via}{quem}{desligado}  [hoje: {p.fonte}]")

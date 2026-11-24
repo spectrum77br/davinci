@@ -308,8 +308,12 @@ _USOS_DO_NUCLEO = {
     # F3/C10a: o aviso das pendências de cada robô da Ouvidoria (29 a 42): o
     # liga/desliga e quem recebe lidos antes das pendências (desligado não
     # carimba; a configuração antiga vazia fica calada) e o envio pelo núcleo
-    # (o robô ainda não migrado, o 34, sai pela configuração antiga exata).
+    # (o do Robô da Margem, 34, migrou com a Margem na C10b).
     "services/ouvidoria.py": {"enviar", "resolver"},
+    # F3/C10b: os avisos na hora do Robô da Margem (25 a 27): o modo do robô,
+    # o liga/desliga e quem recebe lidos antes de montar o aviso (a margem
+    # alta, antes da auditoria) e o envio pelo núcleo.
+    "services/margem_auto_hold.py": {"enviar", "resolver"},
     # A tela dos robôs (F3/C10a): quem recebe o aviso de cada robô migrado,
     # pelo Cadastro (só nomes, o ID mascarado). Não manda nada.
     "routers/ouvidoria.py": {"quem_recebe", "mascara"},

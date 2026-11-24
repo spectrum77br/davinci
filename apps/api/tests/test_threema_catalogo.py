@@ -278,13 +278,20 @@ MIGRADOS = [
     K.CONTROLE_ESTOQUE_PRIORIDADE_KIT_CONFERENCIA,
     # F1/C8c: Produtos (item 24)
     K.PRODUTOS_VIGIA_SOMA_FAMILIA,
+    # F3/C10b: os avisos na hora do Robô da Margem (25 a 27) e o Informar da
+    # Margem (28)
+    K.MARGEM_PEDIDO_SEGURADO,
+    K.MARGEM_REAVALIACAO,
+    K.MARGEM_MARGEM_ALTA,
+    K.MARGEM_INFORMAR,
     # F3/C10a: o aviso das pendências de cada robô da Ouvidoria (29 a 33 e 35
-    # a 42; o do Robô da Margem, 34, vai com a Margem na C10b)
+    # a 42; o do Robô da Margem, 34, foi com a Margem na C10b)
     K.OUVIDORIA_VIGIA_IMPORTACAO,
     K.OUVIDORIA_VIGIA_CREDENCIAIS,
     K.OUVIDORIA_VIGIA_INGEST_BLING,
     K.OUVIDORIA_VIGIA_CORREIOS,
     K.OUVIDORIA_VIGIA_MARKETING_COMANDOS,
+    K.OUVIDORIA_VIGIA_MARGEM,
     K.OUVIDORIA_VIGIA_ROBO_MELHORENVIO,
     K.OUVIDORIA_VIGIA_ROBO_LEITURA,
     K.OUVIDORIA_VIGIA_ETIQUETAS,
@@ -319,8 +326,9 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     `test_threema_pontos_chamados_produtos` (C8c),
     `test_threema_pontos_informar` (C9a, C9b e C9c),
     `test_threema_pontos_chamados_denuncia` (C9d),
-    `test_threema_pontos_conferencia` (C9e) e
-    `test_threema_pontos_ouvidoria` (C10a)."""
+    `test_threema_pontos_conferencia` (C9e),
+    `test_threema_pontos_ouvidoria` (C10a) e
+    `test_threema_pontos_margem` (C10b)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
@@ -372,9 +380,18 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
         K.MARKETING_CONFERENCIA_SHOPEE: "descarta",
         K.MARKETING_CONFERENCIA_ML: "descarta",
         K.MARKETING_CONFERENCIA_AMAZON: "descarta",
-        # 29 a 42 (menos o 34): o `avisar_pendentes` desligado não carimba as
-        # ocorrências; ao religar, as pendentes saem numa mensagem só
+        # 29 a 42: o `avisar_pendentes` desligado não carimba as ocorrências;
+        # ao religar, as pendentes saem numa mensagem só
         **{c: "acumula" for c in MIGRADOS if c.startswith("ouvidoria.")},
+        # 25 e 26: o pedido já foi segurado/reavaliado quando o aviso sairia;
+        # desligado, o aviso daquele pedido se perde
+        K.MARGEM_PEDIDO_SEGURADO: "descarta",
+        K.MARGEM_REAVALIACAO: "descarta",
+        # 27: a auditoria (o dedup) só grava o que saiu; ao religar a caixinha,
+        # avisa o que estiver alto naquela hora
+        K.MARGEM_MARGEM_ALTA: "acumula",
+        # o "Enviar agora" responde 422 enquanto estiver desligado
+        K.MARGEM_INFORMAR: "recusa",
     }
 
 

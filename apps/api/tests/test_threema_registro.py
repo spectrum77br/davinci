@@ -673,17 +673,10 @@ _MARCAS = {
     ("services/logistica_bling.py", "enviar_threema_em_lote", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     ("routers/logistica.py", "enviar_threema", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     ("routers/logistica.py", "enviar_threema_pedido", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
-    # o Informar ainda não migrado (28; o mapa contexto → chave tem teste
-    # próprio; os migrados mandam por `_enviar_pelo_cadastro`)
+    # o Informar de contexto não migrado (desde a F3/C10b, nenhum: os 5
+    # mandam por `_enviar_pelo_cadastro`; o ramo fica para o código de antes
+    # de cada fatia — o mapa contexto → chave tem teste próprio)
     ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
-    # 25, 26 e 27 (Margem)
-    ("services/margem_auto_hold.py", "_avisar_threema", "K.MARGEM_PEDIDO_SEGURADO"): 1,
-    (
-        "services/margem_auto_hold.py",
-        "_avisar_threema_reavaliacao",
-        "K.MARGEM_REAVALIACAO",
-    ): 1,
-    ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
     # o núcleo do Cadastro (C5): forcar_para e lista resolvida
     ("services/threema_envios.py", "enviar", "chave"): 2,
 }
@@ -742,9 +735,17 @@ _PELO_CADASTRO = {
     # → chave tem teste próprio)
     ("services/conferencia_shopee/threema_aviso.py", "enviar_pendente", "chave"): 1,
     # F3/C10a: o aviso das pendências de cada robô da Ouvidoria (29 a 42, a
-    # chave do robô; o 34, ainda não migrado, sai pela configuração antiga
-    # exata pelo mesmo caminho)
+    # chave do robô; o 34 migrou com a Margem, na C10b)
     ("services/ouvidoria.py", "avisar_pendentes", "chave"): 1,
+    # F3/C10b: os avisos na hora do Robô da Margem — segurado ou reprovado
+    # (25), reavaliação (26) e margem alta (27)
+    ("services/margem_auto_hold.py", "_avisar_threema", "K.MARGEM_PEDIDO_SEGURADO"): 1,
+    (
+        "services/margem_auto_hold.py",
+        "_avisar_threema_reavaliacao",
+        "K.MARGEM_REAVALIACAO",
+    ): 1,
+    ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }

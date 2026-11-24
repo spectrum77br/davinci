@@ -463,16 +463,35 @@ async def _deps(session: AsyncSession, b: _Base, d: EnvioDef) -> list[dict]:
     return out
 
 
-def _texto_desligado(d: EnvioDef, linha: ThreemaEnvio | None, *, atalho: bool = False) -> str:
+def _caixinha_marcada(b: _Base, d: EnvioDef) -> bool:
+    """O liga/desliga gravado na config do robô (o 27, "avisar margem alta")
+    está marcado? Com ele marcado, o desligado é a lista vazia."""
+    if d.interruptor != "robo_config" or not d.interruptor_alvo:
+        return False
+    robo_chave, _, campo = d.interruptor_alvo.partition(".")
+    robo = b.robos.get(robo_chave)
+    return bool(ouvidoria.config_do_robo(robo, robo_chave).get(campo, False))
+
+
+def _texto_desligado(
+    d: EnvioDef, linha: ThreemaEnvio | None, *, atalho: bool = False, caixinha: bool = False
+) -> str:
     """Por que o envio está desligado e quem desliga. `atalho`: o texto vai
     para os painéis de origem (fora desta tela), então diz onde fica o
-    Cadastro."""
+    Cadastro. `caixinha`: a caixinha do robô (27) está marcada — então quem
+    desliga é a lista vazia (`_interruptor_cadastro`)."""
     cadastro = " em Cadastros › Envios Threema" if atalho else ""
     if d.interruptor == "robo_modo":
         robo = ouvidoria.ROBOS.get(d.interruptor_alvo or "")
         base = (
             f"Desligado: o robô '{robo.nome if robo else d.interruptor_alvo}' não está ligado "
             "em Ouvidoria › Robôs"
+        )
+    elif d.interruptor == "robo_config" and caixinha:
+        base = (
+            f"Desligado enquanto a lista{cadastro} estiver vazia (como antes: lista vazia = "
+            "desligado, mesmo com a caixinha 'avisar margem alta' marcada); escolha quem "
+            "recebe para ligar"
         )
     elif d.interruptor == "robo_config":
         base = "Desligado: a caixinha 'avisar margem alta' do Robô da Margem está desmarcada"
@@ -508,6 +527,8 @@ def _faixas(
     deps: list[dict],
     ultimo: dict | None,
     linha: ThreemaEnvio | None,
+    *,
+    caixinha: bool = False,
 ) -> tuple[list[str], list[dict]]:
     """(situações, faixas). A primeira situação é a principal."""
     sit: set[str] = set()
@@ -530,7 +551,7 @@ def _faixas(
 
     if d.onde_roda == "mac":
         if not quem.ativo:
-            faixa("cinza", "desligado", _texto_desligado(d, linha))
+            faixa("cinza", "desligado", _texto_desligado(d, linha, caixinha=caixinha))
         if quem.via == "mac_env":
             extra = (
                 f" A lista daqui ({len(quem.nomes)}) passa a valer quando o Mac ler o Cadastro."
@@ -569,7 +590,7 @@ def _faixas(
         ]
         outros = [x for x in deps if x["tipo"] != "robo_modo" and not x["ok"]]
         if not quem.ativo:
-            faixa("cinza", "desligado", _texto_desligado(d, linha))
+            faixa("cinza", "desligado", _texto_desligado(d, linha, caixinha=caixinha))
         for x in robo_desligado:
             faixa(
                 "cinza",
@@ -763,7 +784,7 @@ async def _envio_out(session: AsyncSession, b: _Base, d: EnvioDef) -> dict:
     quem = await _quem(session, b, d)
     deps = await _deps(session, b, d)
     ultimo = b.ultimos.get(d.chave)
-    situacoes, faixas = _faixas(d, quem, deps, ultimo, linha)
+    situacoes, faixas = _faixas(d, quem, deps, ultimo, linha, caixinha=_caixinha_marcada(b, d))
     pode = editavel(d)
     mac_no_env = d.onde_roda == "mac" and quem.via == "mac_env"
     if not d.gerenciado:
@@ -1359,7 +1380,7 @@ async def quem_recebe_leve(session: AsyncSession, chave: str) -> dict:
     receberia = nomes
     if not quem.ativo and d.gerenciado:
         linha = b.linhas.get(d.chave)
-        desligado = _texto_desligado(d, linha, atalho=True)
+        desligado = _texto_desligado(d, linha, atalho=True, caixinha=_caixinha_marcada(b, d))
         if quem.via == "cadastro" and d.onde_roda == "servidor":
             lido = await threema_envios._ler_cadastro(
                 d, None, session, olhar_emergencia=False, so_lista=True

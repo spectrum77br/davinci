@@ -11,10 +11,11 @@
 //    re-aviso fica só leitura com o link (admin) ou a frase (os demais); a
 //    edição não tem seletor nem campo de re-aviso, e o PATCH não manda a
 //    lista nem o re-aviso; o que o servidor ignorou vira aviso; a chave da
-//    config que o Cadastro governa (o "avisar margem alta", quando o 27
-//    migrar) fica só leitura e fora do PATCH;
-//  - o robô que ainda NÃO migrou (o Robô da Margem, até a C10b) segue com o
-//    seletor e o re-aviso de antes — mas o contato avulso virou link para
+//    config que o Cadastro governa (o "avisar margem alta", item 27, desde a
+//    C10b) fica só leitura e fora do PATCH;
+//  - o robô que ainda NÃO migrou (a API de antes da fatia: o Robô da Margem
+//    até a C10b) segue com o seletor e o re-aviso de antes — mas o contato
+//    avulso virou link para
 //    Cadastros › Envios Threema › Contatos externos (não se cadastra nem se
 //    remove mais daqui).
 const assert = require('node:assert/strict')
@@ -156,7 +157,7 @@ const margem = (extra = {}) => robo({
   {
     assert.equal(lib.LINK_CONTATOS_EXTERNOS, '/envios-threema?aba=contatos')
     assert.equal(lib.roboNoCadastro(robo()), true)
-    assert.equal(lib.roboNoCadastro(margem()), false, 'o 34 ainda não migrou')
+    assert.equal(lib.roboNoCadastro(margem()), false, 'o 34 antes da C10b (threema_migrado: false)')
     assert.equal(lib.roboNoCadastro(robo({ threema_migrado: undefined })), false, 'a API de antes')
     assert.equal(lib.roboNoCadastro(robo({ threema_envio: null })), false, 'o relatório da Denúncia')
     assert.deepEqual(lib.avisaRoboCadastro(robo()), {

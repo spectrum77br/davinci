@@ -12,12 +12,16 @@
 //    POST), para quando ninguém receberia e mostra o motivo do servidor; o
 //    modo antigo (os painéis ainda não migrados) continua igual;
 //  - o atalho com `somenteCadastro` (o envio sai de outro lugar) só mostra
-//    quem recebe: sem lista, sem "Salvar" e sem "Enviar agora";
+//    quem recebe: sem lista, sem "Salvar" e sem "Enviar agora"; `titulo`
+//    troca o rótulo do bloco principal e `chavesExtras` põe mais blocos, na
+//    ordem (a Margem, F3/C10b);
 //  - os painéis migrados (Logística, aba Amazon, Controle de Estoque,
 //    Devoluções — a tela nova e a antiga —, IA de Chamado, jurídico, as duas
-//    da Denúncia e a Conferência do Marketing, com a chave do marketplace
-//    aberto) usam o atalho com as chaves do catálogo; o modal de encaminhar
-//    ao jurídico mostra quem recebe pelo Cadastro, não pela lista antiga.
+//    da Denúncia, a Conferência do Marketing, com a chave do marketplace
+//    aberto, e a Margem, com os avisos do robô e o Informar) usam o atalho
+//    com as chaves do catálogo; o modal de encaminhar ao jurídico mostra quem
+//    recebe pelo Cadastro, não pela lista antiga; o manual da Margem não
+//    promete escolher quem recebe.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -338,6 +342,42 @@ const leve = (extra = {}) => ({
     assert.match(html, /Fechar/)
   }
 
+  // ---------------------------------------------------------------- atalho com mais blocos (Margem, F3/C10b)
+  {
+    const m = montar('../components/InformarThreemaModal.vue', {
+      props: {
+        open: false,
+        contexto: 'margem',
+        chave: 'margem.pedido_segurado',
+        somenteCadastro: true,
+        titulo: 'Pedido segurado ou reprovado',
+        chavesExtras: [
+          { chave: 'margem.reavaliacao', titulo: 'Reavaliação' },
+          { chave: 'margem.margem_alta', titulo: 'Margem alta' },
+          { chave: 'margem.informar', titulo: 'Informar da Margem' },
+        ],
+        descricao: 'Margem',
+      },
+      componentes: { ThreemaQuemRecebe: QUEM_MARCADOR },
+      responder: (url) => { throw new Error(`não devia chamar ${url}`) },
+    })
+    m.props.open = true
+    await esperar()
+    assert.deepEqual(m.chamadas, [], 'abrir não lê nem grava as listas antigas')
+    const html = await m.html()
+    const blocos = [...html.matchAll(/data-quem-recebe="([^"]+)" data-titulo="([^"]+)"/g)].map((x) => [x[1], x[2]])
+    assert.deepEqual(blocos, [
+      ['margem.pedido_segurado', 'Pedido segurado ou reprovado'],
+      ['margem.reavaliacao', 'Reavaliação'],
+      ['margem.margem_alta', 'Margem alta'],
+      ['margem.informar', 'Informar da Margem'],
+    ])
+    assert.ok(!/type="checkbox"/.test(html), 'sem lista de marcar')
+    assert.ok(!/Salvar/.test(html), 'sem Salvar')
+    assert.ok(!/Enviar agora/.test(html), 'quem envia é o robô (o Informar, só pela API)')
+    assert.match(html, /max-h-\[90vh\] overflow-y-auto/, 'muitos blocos: o modal rola')
+  }
+
   // ---------------------------------------------------------------- modo antigo continua igual
   {
     const m = montar('../components/InformarThreemaModal.vue', {
@@ -415,11 +455,27 @@ const leve = (extra = {}) => ({
       assert.ok(conferencia.includes(`'${chave}'`), `no mapa do marketplace: ${chave}`)
       assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)
     }
-    for (const modal of [...modaisChamados, ...modaisDenuncia, ...modaisConferencia]) {
+    // Margem (C10b): os avisos na hora do robô (25 a 27) e o Informar (28),
+    // só quem recebe — quem envia é o robô (e o Informar, pela API)
+    const margem = fs.readFileSync(path.resolve(__dirname, '../components/MargemPainel.vue'), 'utf8')
+    const modaisMargem = margem.match(/<InformarThreemaModal[\s\S]*?\/>/g)
+    assert.equal(modaisMargem.length, 1)
+    assert.match(modaisMargem[0], /contexto="margem"\s+chave="margem\.pedido_segurado"\s+somente-cadastro/)
+    assert.match(modaisMargem[0], /:chaves-extras="CHAVES_MARGEM_EXTRAS"/)
+    const extras = [...margem.matchAll(/\{ chave: '([^']+)', titulo: '[^']+' \}/g)].map((x) => x[1])
+    assert.deepEqual(extras, ['margem.reavaliacao', 'margem.margem_alta', 'margem.informar'])
+    for (const chave of ['margem.pedido_segurado', ...extras]) {
+      assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)
+    }
+    assert.ok(!/Marque aqui quem recebe/.test(margem), 'o botão não promete escolher quem recebe')
+    const manual = fs.readFileSync(path.resolve(__dirname, '../components/MargemManualModal.vue'), 'utf8')
+    assert.ok(!/escolhe quem recebe/.test(manual), 'o manual não promete escolher quem recebe')
+    assert.match(manual, /só por admin, em Cadastros › Envios Threema/)
+    for (const modal of [...modaisChamados, ...modaisDenuncia, ...modaisConferencia, ...modaisMargem]) {
       assert.ok(!/Sem ninguém salvo|Sem ninguém marcado/.test(modal), 'sem promessa da lista antiga')
     }
     assert.ok(!/contexto-auto|enviar-com-auto|A seleção|Quem está marcado/.test(modaisConferencia[0]), 'nada de lista para salvar')
-    for (const modal of [...modais, ...modaisEstoque, ...modaisDevolucoes, ...modaisChamados, ...modaisDenuncia]) {
+    for (const modal of [...modais, ...modaisEstoque, ...modaisDevolucoes, ...modaisChamados, ...modaisDenuncia, ...modaisMargem]) {
       assert.ok(!/contexto-auto|enviar-com-auto|A seleção|Quem está marcado/.test(modal), 'nada de lista para salvar')
       for (const [, chave] of modal.matchAll(/chave(?:-auto)?="([^"]+)"/g)) {
         assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)

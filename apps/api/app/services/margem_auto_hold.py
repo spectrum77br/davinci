@@ -128,6 +128,18 @@ E uma lista só: os avisos na hora vão pra lista "Avisar" do robô na
 Ouvidoria (a mesma que o modal Informar da aba Margem edita — o contexto
 `margem_auto` do Informar virou uma janela pra ela, migração 0325).
 
+CADASTROS › ENVIOS THREEMA (tarefa 16, F3/C10b): quem recebe os avisos na
+hora — pedido segurado ou reprovado (`margem.pedido_segurado`), reavaliação
+(`margem.reavaliacao`) e margem fora do normal (`margem.margem_alta`) — vem
+do Cadastro, escolhido só por admin ("só ADM altera quem recebe", decisão do
+dono em 23/11). A lista "Avisar" do robô fica congelada como reserva de
+emergência e fonte da semente. O modo do robô continua valendo ANTES (o
+"depende de": `silencioso` age e cala). Desligado no Cadastro: o aviso do
+pedido segurado/reavaliado se perde (o pedido já foi tratado) e a margem alta
+não grava a auditoria (ao religar, avisa o que estiver alto). Ninguém válido
+no Cadastro: o núcleo grava o registro `ok=false` e acende o sino dos admins;
+nada de auditoria. A configuração antiga vazia (emergência) fica calada.
+
 CONFERE A SITUAÇÃO AO VIVO ANTES DE SEGURAR (02/10/2026 — caso 291997): a
 seleção vem do snapshot, que pode estar velho, e o hold escrevia sem olhar a
 situação do GET — o 291997 ganhou duas trilhas `margens_auto` 6→83955 com 21
@@ -169,7 +181,7 @@ from app.models import (
     OuvidoriaRobo,
 )
 from app.security.cipher import decrypt_json
-from app.services import aprovar_link, informar, threema, threema_registro
+from app.services import aprovar_link, informar, threema_envios
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
@@ -462,34 +474,56 @@ async def _modo_do_robo(session: AsyncSession) -> str:
     return await ouvidoria.modo(session, _OUVIDORIA_ROBO)
 
 
-async def _recipients_margem_auto(session: AsyncSession) -> list[str]:
-    """Quem recebe os avisos NA HORA (segurado, reprovado com o link de
-    aprovar, liberado pela revisão, margem alta): a lista "Avisar" do Robô da
-    Margem na Ouvidoria — a mesma que o modal Informar da aba Margem edita.
-    Só no modo `ligado`: `silencioso` age e cala, como todo robô do painel."""
-    from app.services import ouvidoria
-
+async def _robo_ligado(session: AsyncSession) -> bool:
+    """Os avisos NA HORA só saem com o Robô da Margem `ligado` na Ouvidoria:
+    `silencioso` age e cala, como todo robô do painel. É o "depende de" dos
+    envios 25 a 27 no Cadastro (sem linha = `ligado`, `ouvidoria.modo`)."""
     robo = await session.get(OuvidoriaRobo, _OUVIDORIA_ROBO)
     modo = robo.modo if robo is not None else await _modo_do_robo(session)
-    if modo != "ligado":
-        return []
-    ids, _origem = ouvidoria.destinatarios(robo, _OUVIDORIA_ROBO)
-    return ids
+    return modo == "ligado"
+
+
+async def _pode_avisar(session: AsyncSession, chave: str) -> bool:
+    """O portão dos avisos NA HORA (segurado, reprovado com o link de
+    aprovar, liberado pela revisão, margem alta), lido ANTES de montar o
+    aviso e de gravar qualquer coisa — o `if not r.ativo or not r.ids` do
+    §4.6 do desenho. Quem recebe e o liga/desliga vêm de Cadastros › Envios
+    Threema (tarefa 16, F3/C10b; a semente copiou a lista "Avisar" do Robô da
+    Margem, que fica congelada como reserva).
+
+    * Robô fora do `ligado`: não passa (silencioso age e cala).
+    * Desligado no Cadastro (no 27, a caixinha "avisar margem alta"): não
+      passa.
+    * Ninguém pela configuração antiga (emergência, sem semente ou banco
+      fora, com a lista vazia): não passa, calado, como hoje.
+    * Ninguém válido no Cadastro: passa — o `threema_envios.enviar` grava o
+      registro `ok=false` e acende o sino dos admins, sem mandar nada."""
+    if not await _robo_ligado(session):
+        return False
+    res = await threema_envios.resolver(chave, session=session)
+    if not res.ativo:
+        logger.info("margem_threema_desligado", chave=chave, via=res.via)
+        return False
+    if res.ids:
+        return True
+    if res.motivo != threema_envios.NINGUEM_VALIDO:
+        logger.info("margem_threema_sem_destinatarios", chave=chave, via=res.via, motivo=res.motivo)
+        return False
+    return True
 
 
 async def _avisar_threema(
     session: AsyncSession, r: Mapping, motivo: str, *, reprovado: bool = False
 ) -> None:
-    """Aviso Threema NA HORA do hold, pra lista do Robô da Margem na
-    Ouvidoria (`_recipients_margem_auto`; o modal Informar da aba Margem
-    edita a mesma lista). Uma mensagem
+    """Aviso Threema NA HORA do hold (`margem.pedido_segurado`), para quem
+    está em Cadastros › Envios Threema (`_pode_avisar`). Uma mensagem
     por pedido, com conta, motivo, margem vs mínima e lucro — pedido do
     Eduardo (02/09): avisar na hora pra ele decidir do celular. `reprovado`
     troca cabeçalho e rodapé (o pedido já foi reprovado; o link desfaz).
-    Best-effort: sem destinatários cadastrados não manda nada; falha de envio
-    é logada e NÃO desfaz nem conta contra o hold (o essencial é segurar)."""
-    recipients = await _recipients_margem_auto(session)
-    if not recipients:
+    Best-effort: desligado ou sem ninguém não manda nada (o aviso se perde:
+    o `descarta` do catálogo); falha de envio é logada e NÃO desfaz nem conta
+    contra o hold (o essencial é segurar)."""
+    if not await _pode_avisar(session, K.MARGEM_PEDIDO_SEGURADO):
         return
     if reprovado:
         cabecalho = "DaVinci — Margem: pedido reprovado automaticamente"
@@ -521,13 +555,15 @@ async def _avisar_threema(
         ),
     )
     try:
-        with threema_registro.envio(K.MARGEM_PEDIDO_SEGURADO):
-            result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
+        # O remetente ("margem") vem do catálogo.
+        result = await threema_envios.enviar(K.MARGEM_PEDIDO_SEGURADO, msg, session=session)
         logger.info(
             "margem_auto_hold_threema",
             pedido_bling=str(r["pedido_bling"]),
             sent=result.get("sent", []),
             failed=result.get("failed", []),
+            via=result.get("via"),
+            motivo=result.get("motivo"),
         )
     except Exception as e:  # noqa: BLE001 — aviso é acessório, hold já feito
         logger.warning(
@@ -677,20 +713,19 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
     mensagem de alerta"). Margem alta assim costuma ser custo errado no
     cadastro. A auditoria (acao='alerta_margem_alta') é o dedup: gravada
     apenas quando pelo menos um destinatário recebeu — Threema fora do ar ou
-    sem cadastro → nada gravado, tenta de novo no próximo tick.
+    sem ninguém para receber → nada gravado, tenta de novo no próximo tick.
     12/11/2026 (Vinicius): só com a caixinha "Avisar margem fora do normal" do Robô da
-    Margem ligada na Ouvidoria (nasce desligada) — desligada, nada sai e nada é
-    gravado, então ligar de novo avisa o que estiver alto naquela hora."""
-    from app.services import ouvidoria
-
-    robo = await session.get(OuvidoriaRobo, _OUVIDORIA_ROBO)
-    if not ouvidoria.config_do_robo(robo, _OUVIDORIA_ROBO).get("avisar_margem_alta", False):
+    Margem ligada (nasce desligada) — desligada, nada sai e nada é
+    gravado, então ligar de novo avisa o que estiver alto naquela hora.
+    Desde a F3/C10b (tarefa 16) a caixinha é o liga/desliga do envio
+    `margem.margem_alta` em Cadastros › Envios Threema (gravado direto no
+    robô, só admin), e quem recebe vem de lá (`_pode_avisar`). Ninguém
+    válido: o núcleo grava o registro `ok=false` e acende o sino UMA vez por
+    rodada (não uma por pedido) e nada vai para a auditoria."""
+    if not await _pode_avisar(session, K.MARGEM_MARGEM_ALTA):
         return 0
     rows = (await session.execute(text(_alerta_margem_alta_sql()))).mappings().all()
     if not rows:
-        return 0
-    recipients = await _recipients_margem_auto(session)
-    if not recipients:
         return 0
     enviados = 0
     for r in rows:
@@ -715,10 +750,7 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
             ),
         )
         try:
-            with threema_registro.envio(K.MARGEM_MARGEM_ALTA):
-                result = await threema.ThreemaClient(contexto="margem").send_to_all(
-                    msg, recipients
-                )
+            result = await threema_envios.enviar(K.MARGEM_MARGEM_ALTA, msg, session=session)
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             logger.warning(
                 "margem_alerta_alta_falhou",
@@ -726,12 +758,25 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
                 erro=str(e)[:200],
             )
             continue
+        if result.get("motivo"):
+            # Desligado no meio da rodada, ou ninguém para receber (o núcleo
+            # já gravou o registro `ok=false` e acendeu o sino): sem
+            # auditoria, e os demais pedidos ficam para o próximo tick — um
+            # registro por rodada, não um por pedido.
+            logger.info(
+                "margem_alerta_alta_sem_envio",
+                pedido_bling=str(r["pedido_bling"]),
+                motivo=result.get("motivo"),
+                via=result.get("via"),
+            )
+            break
         logger.info(
             "margem_alerta_alta_threema",
             pedido_bling=str(r["pedido_bling"]),
             margem=margem,
             sent=result.get("sent", []),
             failed=result.get("failed", []),
+            via=result.get("via"),
         )
         if not result.get("sent"):
             continue  # ninguém recebeu → sem dedup, retenta no próximo tick
@@ -1108,11 +1153,11 @@ async def _voltar_pendente_one(session: AsyncSession, *, pedido_bling: str, blin
 async def _avisar_threema_reavaliacao(
     session: AsyncSession, r: Mapping, *, pedido_bling: str, motivo: str, liberado: bool
 ) -> None:
-    """Aviso da reavaliação pros mesmos destinatários do hold (a lista do
-    Robô da Margem na Ouvidoria).
-    Best-effort como o do hold: falha de envio não desfaz nada."""
-    recipients = await _recipients_margem_auto(session)
-    if not recipients:
+    """Aviso da reavaliação (`margem.reavaliacao`), para quem está em
+    Cadastros › Envios Threema (`_pode_avisar`; a semente copiou a mesma
+    lista do hold). Best-effort como o do hold: desligado ou sem ninguém não
+    manda (o aviso se perde, `descarta`); falha de envio não desfaz nada."""
+    if not await _pode_avisar(session, K.MARGEM_REAVALIACAO):
         return
     if liberado:
         cabecalho = "DaVinci — Margem: pedido liberado automaticamente"
@@ -1140,14 +1185,15 @@ async def _avisar_threema_reavaliacao(
         rodape=rodape + f"Ver no DaVinci: {aprovar_link.url_margem(pedido_bling)}",
     )
     try:
-        with threema_registro.envio(K.MARGEM_REAVALIACAO):
-            result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
+        result = await threema_envios.enviar(K.MARGEM_REAVALIACAO, msg, session=session)
         logger.info(
             "margem_reavaliar_threema",
             pedido_bling=pedido_bling,
             liberado=liberado,
             sent=result.get("sent", []),
             failed=result.get("failed", []),
+            via=result.get("via"),
+            motivo=result.get("motivo"),
         )
     except Exception as e:  # noqa: BLE001 — aviso é acessório
         logger.warning(

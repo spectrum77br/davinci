@@ -72,7 +72,8 @@ class RoboOut(BaseModel):
     threema_via: str | None = None
     threema_ativo: bool | None = None
     # Chave da config → envio do Cadastro que passou a editá-la (o "avisar
-    # margem alta" quando o item 27 migrar): só leitura aqui.
+    # margem alta" do Robô da Margem, item 27, desde a F3/C10b): só leitura
+    # aqui.
     config_no_cadastro: dict[str, str] = {}
     # PATCH: o que foi ignorado porque o Cadastro é quem edita.
     avisos: list[str] = []

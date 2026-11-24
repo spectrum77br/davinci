@@ -21,7 +21,10 @@
 // prazos que o robô manda), mostrado num segundo bloco. Com
 // `somenteCadastro` (IA de Chamado, jurídico e Denúncia, F2/C9d; Conferência,
 // F2/C9e — a chave do marketplace aberto) o atalho só mostra quem recebe: o
-// envio sai de outro lugar.
+// envio sai de outro lugar. `titulo` troca o rótulo do bloco principal e
+// `chavesExtras` põe mais blocos, um por envio (a Margem, F3/C10b: os avisos
+// na hora do robô — segurado, reavaliação, margem alta — e o Informar, que
+// antes liam a mesma lista do modal).
 import { computed } from 'vue'
 import { Loader2, Send, X } from 'lucide-vue-next'
 import { podeEnviarAgora, type QuemRecebeLeve } from '~/lib/enviosThreema'
@@ -50,6 +53,10 @@ const props = defineProps<{
   // botão também cuida de um aviso automático, o envio dele.
   chave?: string
   chaveAuto?: string
+  // Rótulo do bloco principal (padrão "Quem recebe", ou "Quem recebe o
+  // Enviar agora" com `chaveAuto`) e mais blocos, cada um com o seu envio.
+  titulo?: string
+  chavesExtras?: { chave: string; titulo: string }[]
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -155,7 +162,7 @@ const podeEnviar = computed(() => (atalho.value
     class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
     @click.self="emit('close')"
   >
-    <div class="bg-background border rounded-lg w-full max-w-sm p-5 space-y-4">
+    <div class="bg-background border rounded-lg w-full max-w-sm max-h-[90vh] overflow-y-auto p-5 space-y-4">
       <div class="flex items-center">
         <h2 class="text-lg font-semibold">Informar via Threema</h2>
         <Button class="ml-auto" size="sm" variant="ghost" @click="emit('close')">
@@ -167,10 +174,11 @@ const podeEnviar = computed(() => (atalho.value
       <template v-if="atalho && chave">
         <ThreemaQuemRecebe
           :chave="chave"
-          :titulo="chaveAuto ? 'Quem recebe o Enviar agora' : 'Quem recebe'"
+          :titulo="titulo || (chaveAuto ? 'Quem recebe o Enviar agora' : 'Quem recebe')"
           @carregado="quemPrincipal = $event"
         />
         <ThreemaQuemRecebe v-if="chaveAuto" :chave="chaveAuto" titulo="Quem recebe os avisos automáticos" />
+        <ThreemaQuemRecebe v-for="x in chavesExtras || []" :key="x.chave" :chave="x.chave" :titulo="x.titulo" />
       </template>
       <div v-else-if="loading" class="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 class="size-4 animate-spin" /> Carregando…

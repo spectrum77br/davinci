@@ -476,20 +476,25 @@ def _servidor() -> list[EnvioDef]:
             depende_de=(_DEP_FAMILIA,), fatia="F1", migrado=True,
         ),
         # ── Margem ─────────────────────────────────────────────────────────
+        # F3/C10b: os avisos na hora do Robô da Margem (25 a 27) e o Informar
+        # (28) leem o Cadastro. O modo do robô continua valendo antes (o
+        # "depende de": silencioso age e cala); a caixinha "avisar margem
+        # alta" é o liga/desliga do 27, gravado direto no robô. Quem vê a
+        # Margem pelo botão Informar (admin e o gerente) vê quem recebe.
         E(
             K.MARGEM_PEDIDO_SEGURADO, "Margem", None, "Pedido segurado ou reprovado",
             "O Robô da Margem segurou ou reprovou um pedido, com o link de aprovar pelo "
             "celular. Uma mensagem por pedido.",
             "evento", "na rodada do robô (:15/:45)", "servidor", "margem",
             L(robo="vigia_margem", grupo=G_ROBO_MARGEM), depende_de=(_DEP_ROBO_MARGEM,),
-            fatia="F3", leitura="informar:margem_auto",
+            fatia="F3", leitura="informar:margem_auto", migrado=True,
         ),
         E(
             K.MARGEM_REAVALIACAO, "Margem", None, "Reavaliação de reprovados",
             "Pedido reprovado que a revisão liberou ou devolveu para análise.",
             "evento", "na revisão das :35", "servidor", "margem",
             L(robo="vigia_margem", grupo=G_ROBO_MARGEM), depende_de=(_DEP_ROBO_MARGEM,),
-            fatia="F3", leitura="informar:margem_auto",
+            fatia="F3", leitura="informar:margem_auto", migrado=True,
         ),
         E(
             K.MARGEM_MARGEM_ALTA, "Margem", None, "Margem fora do normal",
@@ -497,8 +502,10 @@ def _servidor() -> list[EnvioDef]:
             "evento", "na rodada do robô (:15/:45)", "servidor", "margem",
             L(robo="vigia_margem", grupo=G_ROBO_MARGEM), interruptor="robo_config",
             interruptor_alvo="vigia_margem.avisar_margem_alta",
+            # Desligado (a caixinha), nada é gravado na auditoria: ao religar,
+            # avisa o que estiver alto naquela hora.
             depende_de=(_DEP_ROBO_MARGEM,), ao_desligar="acumula", fatia="F3",
-            leitura="informar:margem_auto",
+            leitura="informar:margem_auto", migrado=True,
         ),
         E(
             K.MARGEM_INFORMAR, "Margem", None, "Informar da Margem",
@@ -506,7 +513,7 @@ def _servidor() -> list[EnvioDef]:
             "produto, motivo, margem e lucro.",
             "manual", "Informar › Enviar agora (só pela API hoje)", "servidor", "margem",
             L(informar=("margem",)), ao_desligar="recusa", fatia="F3",
-            leitura="informar:margem",
+            leitura="informar:margem", migrado=True,
         ),
     ]
 
@@ -521,19 +528,14 @@ _REPETICOES = {
 }
 
 
-# O robô cujo aviso migra com a Margem (F3/C10b, item 34): até lá, o aviso
-# dele segue a lista "Avisar" do robô.
-_ROBO_DA_C10B = "vigia_margem"
-
-
 def _ouvidoria() -> list[EnvioDef]:
     """Itens 29 a 42: um envio por robô da Ouvidoria (o aviso das ocorrências
     pendentes, `ouvidoria.avisar_pendentes`). O remetente é o `contexto` do
     robô no catálogo da Ouvidoria.
 
-    F3/C10a: todos leem o Cadastro, menos o do Robô da Margem (34, C10b).
-    Quem vê a tela dos robôs (`ouvidoria:view`) vê quem recebe (só nomes),
-    como via a lista "Avisar" antes; só admin altera."""
+    F3: todos leem o Cadastro (C10a; o do Robô da Margem, 34, com a Margem
+    na C10b). Quem vê a tela dos robôs (`ouvidoria:view`) vê quem recebe (só
+    nomes), como via a lista "Avisar" antes; só admin altera."""
     out = []
     for chave, robo in ROBOS.items():
         if chave == _ROBO_COM_ENVIO_PROPRIO:
@@ -559,7 +561,7 @@ def _ouvidoria() -> list[EnvioDef]:
                 ao_desligar="acumula",
                 leitura="perm:ouvidoria:view",
                 fatia="F3",
-                migrado=chave != _ROBO_DA_C10B,
+                migrado=True,
             )
         )
     return out

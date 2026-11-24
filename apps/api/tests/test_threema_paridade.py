@@ -2,9 +2,8 @@
 ao que cada ponto de envio monta HOJE, para TODOS os envios do servidor
 gerenciados — quem recebe e se está ligado.
 
-"Hoje" é a função antiga de verdade sempre que ela existe
-(`ouvidoria.destinatarios`, `_recipients_margem_auto`, o `send_to_all` que
-cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
+"Hoje" é a função antiga de verdade sempre que ela existe (o `send_to_all`
+que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
 meio de uma função maior, a expressão é copiada aqui E um teste confere que
 ela continua no código — se alguém mudar o ponto de envio, este arquivo
 reprova. Os botões que montam a lista dentro da rota (os 5 Informar e o
@@ -35,7 +34,6 @@ from app.models import OuvidoriaRobo, ThreemaInformarConfig, User, UserRole
 from app.routers import informar as informar_router
 from app.services import (
     denuncia_relatorio_threema,
-    margem_auto_hold,
     ouvidoria,
     threema,
     threema_envios,
@@ -235,12 +233,33 @@ def _robo_antes_da_f3(robo: str):
     return _hoje
 
 
+async def _margem_auto_antes_da_f3(db) -> list[str]:
+    """margem_auto_hold._recipients_margem_auto antes da F3/C10b: a lista do
+    Robô da Margem (a mesma `ouvidoria.destinatarios` do aviso das pendências
+    dele), só com o robô `ligado` (sem linha = `ligado`). O modo é o "depende
+    de" dos envios 25 a 27 (`test_margem_fora_do_modo_ligado_e_o_depende_de`)."""
+    row = await db.get(OuvidoriaRobo, "vigia_margem")
+    modo = row.modo if row is not None else await ouvidoria.modo(db, "vigia_margem")
+    if modo != "ligado":
+        return []
+    return await _robo_antes_da_f3("vigia_margem")(db)
+
+
 # Cópias congeladas dos pontos que a F3 migrou: o aviso das pendências de cada
-# robô da Ouvidoria (C10a, itens 29 a 33 e 35 a 42).
+# robô da Ouvidoria (C10a, itens 29 a 33 e 35 a 42; o 34, do Robô da Margem,
+# na C10b), os avisos na hora do Robô da Margem (C10b, 25 a 27) e o "Enviar
+# agora" do Informar da Margem (C10b, 28; a rota lia a linha do contexto).
 _ANTES_DA_F3 = {
-    c: _robo_antes_da_f3(r)
-    for r in ouvidoria.ROBOS
-    if (c := chave_ouvidoria(r)) is not None and CATALOGO[c].migrado
+    **{
+        c: _robo_antes_da_f3(r)
+        for r in ouvidoria.ROBOS
+        if (c := chave_ouvidoria(r)) is not None and CATALOGO[c].migrado
+    },
+    **dict.fromkeys(
+        (K.MARGEM_PEDIDO_SEGURADO, K.MARGEM_REAVALIACAO, K.MARGEM_MARGEM_ALTA),
+        _margem_auto_antes_da_f3,
+    ),
+    K.MARGEM_INFORMAR: lambda db: _informar(db, "margem"),
 }
 _ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2, **_ANTES_DA_F3}
 
@@ -272,10 +291,6 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         # sem regra: `parse(rule) or None` → o send_to_all cai no THREEMA_RECIPIENTS
         # (o caminho de verdade, com 👤 e sem, está em test_item_1_por_regra)
         K.LOGISTICA_MENSAGEM_REGRA: lambda: P(s.threema_recipients),
-        K.MARGEM_PEDIDO_SEGURADO: lambda: margem_auto_hold._recipients_margem_auto(db),
-        K.MARGEM_REAVALIACAO: lambda: margem_auto_hold._recipients_margem_auto(db),
-        K.MARGEM_MARGEM_ALTA: lambda: margem_auto_hold._recipients_margem_auto(db),
-        K.MARGEM_INFORMAR: lambda: _informar(db, "margem"),
     }
     r = tabela[chave]()
     if hasattr(r, "__await__"):
@@ -290,7 +305,7 @@ async def _ativo_hoje(chave: str, db) -> bool:
         # denuncia_relatorio_threema.enviar_pendente
         return await ouvidoria.modo_efetivo(db, denuncia_relatorio_threema.ROBO) == "ligado"
     if chave == K.MARGEM_MARGEM_ALTA:
-        # margem_auto_hold._alertar_margem_alta
+        # margem_auto_hold._alertar_margem_alta antes da F3/C10b: a caixinha
         robo = await db.get(OuvidoriaRobo, "vigia_margem")
         return bool(ouvidoria.config_do_robo(robo, "vigia_margem").get("avisar_margem_alta", False))
     if chave in threema_aviso.CHAVE_ENVIO.values():
@@ -320,8 +335,8 @@ async def test_legado_igual_a_hoje_em_todas_as_chaves(db, monkeypatch, variante)
         leg = await threema_envios.legado(chave, session=db)
         hoje = await _hoje(chave, db, monkeypatch)
         if chave in (K.MARGEM_PEDIDO_SEGURADO, K.MARGEM_REAVALIACAO, K.MARGEM_MARGEM_ALTA):
-            # `_recipients_margem_auto` já devolve vazio fora do modo ligado: é o
-            # "depende de" do envio (o cenário tem o robô ligado).
+            # `_recipients_margem_auto` já devolvia vazio fora do modo ligado: é
+            # o "depende de" do envio (o cenário tem o robô ligado).
             deps = await threema_envios.dependencias(chave, db)
             assert all(ok for _, ok in deps)
         if list(leg.ids) != hoje:
@@ -390,14 +405,22 @@ async def test_margem_fora_do_modo_ligado_e_o_depende_de(db, monkeypatch):
     robo = await db.get(OuvidoriaRobo, "vigia_margem")
     robo.modo = "silencioso"
     await db.commit()
-    assert await margem_auto_hold._recipients_margem_auto(db) == []
+    assert await _margem_auto_antes_da_f3(db) == []
     for chave in (K.MARGEM_PEDIDO_SEGURADO, K.MARGEM_REAVALIACAO, K.MARGEM_MARGEM_ALTA):
         leg = await threema_envios.legado(chave, session=db)
         deps = await threema_envios.dependencias(chave, db)
         assert leg.ids  # a lista continua a mesma
         assert deps and not all(ok for _, ok in deps)  # e o envio depende do modo
         efetivo = list(leg.ids) if all(ok for _, ok in deps) else []
-        assert efetivo == await margem_auto_hold._recipients_margem_auto(db)
+        assert efetivo == await _margem_auto_antes_da_f3(db)
+    # sem linha do robô no banco: `ligado` (o `ouvidoria.modo`), como antes
+    await db.delete(robo)
+    await db.commit()
+    assert await _margem_auto_antes_da_f3(db) == list(
+        (await threema_envios.legado(K.MARGEM_PEDIDO_SEGURADO, session=db)).ids
+    )
+    deps = await threema_envios.dependencias(K.MARGEM_PEDIDO_SEGURADO, db)
+    assert all(ok for _, ok in deps)
 
 
 @pytest.mark.asyncio
@@ -601,6 +624,19 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
     aviso = inspect.getsource(ouvidoria.avisar_pendentes)
     for expressao in ("destinatarios(", "send_to_all", "ThreemaClient", "parse_recipients"):
         assert expressao not in aviso, expressao
+    # F3/C10b: os avisos na hora do Robô da Margem também não (nem o cliente,
+    # nem a lista do robô, nem a caixinha da margem alta, que o núcleo lê)
+    margem = (_APP / "services/margem_auto_hold.py").read_text(encoding="utf-8")
+    for expressao in (
+        "destinatarios(",
+        "send_to_all",
+        "ThreemaClient",
+        "parse_recipients",
+        "threema_recipients",
+        "avisar_margem_alta",
+        "_recipients_margem_auto",
+    ):
+        assert expressao not in margem, expressao
     # F2/C9e: o liga/desliga da Conferência (as chaves do .env) só no catálogo
     # e no núcleo — nem o ponto nem o varredor do worker leem mais
     for arquivo in ("services/conferencia_shopee/threema_aviso.py", "worker.py"):

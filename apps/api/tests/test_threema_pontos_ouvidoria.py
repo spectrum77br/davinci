@@ -153,12 +153,13 @@ def test_as_chaves_da_c10a_estao_migradas_com_o_remetente_do_robo():
         assert d.leitura == "perm:ouvidoria:view", chave
         # a lista antiga vazia é o desligado de hoje (`sem_destinatarios`)
         assert threema_envios._lista_vazia_desliga(d), chave
-    # o 34 vai com a Margem (C10b); o relatório da Denúncia tem envio próprio
-    assert not CATALOGO[MARGEM].migrado and CATALOGO[MARGEM].fatia == "F3"
+    # o 34 foi com a Margem (C10b, `test_threema_pontos_margem`); o relatório
+    # da Denúncia tem envio próprio
+    assert CATALOGO[MARGEM].migrado and CATALOGO[MARGEM].fatia == "F3"
     assert chave_ouvidoria("denuncia_relatorio_threema") is None
-    # os avisos da Margem que leem a lista do robô não entram na regra (C10b)
+    # os avisos da Margem que leem a lista do robô entraram na regra na C10b
     for chave in (K.MARGEM_PEDIDO_SEGURADO, K.MARGEM_REAVALIACAO, K.MARGEM_MARGEM_ALTA):
-        assert not threema_envios._lista_vazia_desliga(CATALOGO[chave]), chave
+        assert threema_envios._lista_vazia_desliga(CATALOGO[chave]), chave
 
 
 # ─────────────────────────────────────────────── (a) pelo Cadastro

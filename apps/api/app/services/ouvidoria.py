@@ -1152,11 +1152,12 @@ def destinatarios(robo: OuvidoriaRobo | None, chave: str) -> tuple[list[str], st
     """(IDs, origem). Override da tela → env do robô → OUVIDORIA geral.
     Origem 'robo' | 'env' | 'geral' | None — a tela mostra de onde veio.
 
-    Desde a F3/C10a (tarefa 16) é só a CONFIGURAÇÃO ANTIGA: o aviso dos robôs
-    lê Cadastros › Envios Threema (`avisar_pendentes`), e esta lista fica
-    congelada como reserva de emergência e fonte da semente
-    (`threema_envios.legado`, `Legado.robo` no catálogo). O aviso do Robô da
-    Margem (C10b) e a tela antiga ainda a leem."""
+    Desde a F3 (tarefa 16) é só a CONFIGURAÇÃO ANTIGA: o aviso dos robôs
+    (`avisar_pendentes`, C10a) e os avisos na hora do Robô da Margem
+    (`margem_auto_hold`, C10b) leem Cadastros › Envios Threema, e esta lista
+    fica congelada como reserva de emergência e fonte da semente
+    (`threema_envios.legado`, `Legado.robo` no catálogo). A tela antiga
+    ainda a lê."""
     if robo is not None:
         ids = threema.parse_recipients(robo.threema_recipients)
         if ids:
@@ -1275,9 +1276,10 @@ async def avisar_pendentes(
     Quem recebe e o liga/desliga do aviso vêm de Cadastros › Envios Threema
     (tarefa 16, F3/C10a): cada robô é um envio (`ouvidoria.<robô>`, com o
     remetente do robô no catálogo) e o modo do robô continua valendo antes
-    (o "depende de"). O envio do robô que ainda não migrou (o Robô da Margem,
-    C10b) segue a lista "Avisar" de antes pelo mesmo caminho (o `resolver`
-    devolve a configuração antiga exata).
+    (o "depende de"). Envio ainda não migrado (o código de antes da fatia)
+    seguiria a lista "Avisar" de antes pelo mesmo caminho (o `resolver`
+    devolve a configuração antiga exata); o do Robô da Margem (34) migrou
+    com a Margem (C10b).
 
     * Envio desligado no Cadastro: `envio_desligado`, sem carimbo — as
       pendências se acumulam e, ao religar, saem numa mensagem só (o

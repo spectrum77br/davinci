@@ -508,9 +508,13 @@ async def test_put_da_lista_migrada_responde_410_e_o_get_mostra_a_antiga(
     # a lista antiga não mudou (é a reserva de emergência) e o GET a mostra
     r = await client.get("/api/informar/logistica")
     assert r.status_code == 200 and r.json()["recipients"] == [ID["harry"]]
-    # contexto ainda não migrado continua gravando
-    r = await client.put("/api/informar/margem", json={"recipients": []})
-    assert r.status_code == 200, r.text
+    # contexto ainda não migrado (o código de antes da fatia) continua gravando
+    from tests.test_threema_resolver import desmigrar
+
+    with pytest.MonkeyPatch.context() as m:
+        desmigrar(m, K.MARGEM_INFORMAR)
+        r = await client.put("/api/informar/margem", json={"recipients": []})
+        assert r.status_code == 200, r.text
 
 
 def test_o_put_so_recusa_quando_todos_os_envios_da_lista_leem_o_cadastro(monkeypatch):

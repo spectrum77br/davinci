@@ -142,12 +142,22 @@ const shouldAutoRefresh = computed(() => {
 // Coluna "Lucro" (R$) restrita a administradores.
 const isAdmin = useIsAdmin()
 
-// Botão INFORMAR (admins + gerente): configura quem recebe os avisos
-// automáticos da Margem via Threema (quem envia é o robô — não há mais
-// "Enviar agora" aqui). A lista de e-mails extras espelha
-// _EMAILS_EXTRAS['margem'] no backend (routers/informar.py) — mudou lá,
-// muda aqui.
+// Botão INFORMAR (admins + gerente): mostra quem recebe os avisos
+// automáticos da Margem via Threema (quem envia é o robô — não há "Enviar
+// agora" aqui). Desde a F3/C10b (tarefa 16) quem recebe é escolhido só por
+// admin, em Cadastros › Envios Threema ("só ADM altera quem recebe", decisão
+// do dono em 23/11): o modal é o atalho, só com os nomes — o gerente continua
+// vendo. A lista de e-mails extras espelha _EMAILS_EXTRAS['margem'] no
+// backend (routers/informar.py) — mudou lá, muda aqui.
 const INFORMAR_MARGEM_USERS = ['sa.geral@tutamail.com']
+// Os envios do catálogo que o modal mostra (antes, a mesma lista do modal):
+// o aviso do hold é o principal; a reavaliação, a margem alta e o Informar
+// (relatório pela API) vêm em seguida.
+const CHAVES_MARGEM_EXTRAS = [
+  { chave: 'margem.reavaliacao', titulo: 'Reavaliação: liberado ou de volta para análise' },
+  { chave: 'margem.margem_alta', titulo: 'Margem fora do normal (acima de 60%)' },
+  { chave: 'margem.informar', titulo: 'Informar da Margem (relatório dos pendentes)' },
+]
 const canInformar = computed(() => {
   const email = _auth.user?.email?.toLowerCase()
   return isAdmin.value || (!!email && INFORMAR_MARGEM_USERS.includes(email))
@@ -1638,12 +1648,15 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       @close="raioXPedido = null"
     />
 
-    <!-- Modal do botão INFORMAR (admins + gerente) -->
+    <!-- Modal do botão INFORMAR (admins + gerente): atalho de Cadastros › Envios Threema -->
     <InformarThreemaModal
       :open="informarMargemOpen"
       contexto="margem"
-      descricao="Os avisos da Margem são automáticos — o robô manda na hora que segura, reprova (com o link de aprovar pelo celular) ou desconfia de um pedido. Marque aqui quem recebe esses avisos no Threema; é a mesma lista do Robô da Margem em Ouvidoria › Robôs, e só sai aviso com o robô ligado."
-      contexto-auto="margem_auto"
+      chave="margem.pedido_segurado"
+      somente-cadastro
+      titulo="Pedido segurado ou reprovado"
+      :chaves-extras="CHAVES_MARGEM_EXTRAS"
+      descricao="Os avisos da Margem são automáticos — o robô manda na hora que segura, reprova (com o link de aprovar pelo celular), revê ou desconfia de um pedido. Só sai aviso com o Robô da Margem ligado em Ouvidoria › Robôs."
       @close="informarMargemOpen = false"
     />
 
