@@ -14,11 +14,13 @@ quando faltam menos de `ANTECEDENCIA` — carimbando `aviso_prazo_acao_at` e
 com prazo novo no mesmo pedido, avisa de novo. Prazo já vencido há mais de
 `TOLERANCIA_VENCIDO` não avisa (é passado; o painel mostra "vencido").
 
-Quem recebe é o cadastro `devolucoes_auto` do modal Informar da aba
-Devoluções (threema_informar_config) — mesmo mecanismo dos avisos da Amazon
-(`logistica_amazon_auto`) e da Margem. Sem destinatário cadastrado não manda
-nem carimba: quando alguém for cadastrado, os avisos pendentes saem na rodada
-seguinte. Espelho do formato de `logistica_amazon_avisos.mensagem_aviso`.
+Quem recebe é o envio "Prazo de resposta da loja" de Cadastros › Envios
+Threema (tarefa 16, F2/C9c; a semente copiou o cadastro `devolucoes_auto` do
+modal Informar da aba Devoluções, que fica congelado como reserva de
+emergência) — mesmo mecanismo dos prazos da Amazon. Desligado ou sem ninguém
+não manda nem carimba: ao religar (ou quando alguém for posto na lista), os
+avisos pendentes saem na rodada seguinte. Espelho do formato de
+`logistica_amazon_avisos.mensagem_aviso`.
 """
 
 from __future__ import annotations
@@ -32,14 +34,16 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DevolucaoRastreio, Logistica, ThreemaInformarConfig
-from app.services import logistica_rules, threema, threema_registro
+from app.models import DevolucaoRastreio, Logistica
+from app.services import logistica_rules, threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
 
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
+# A linha do Informar que era a lista dos avisos (hoje só a reserva de
+# emergência do Cadastro: `Legado.informar` do envio, no catálogo).
 CONTEXTO_AUTO = "devolucoes_auto"
 # Avisa quando falta menos que isto pro prazo (mesma antecedência do
 # "Prazo contest." da aba Lançamentos)...
@@ -173,15 +177,6 @@ def mensagem_aviso(
     return "\n".join(linhas)
 
 
-async def recipients_auto(session: AsyncSession) -> list[str]:
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == CONTEXTO_AUTO)
-        )
-    ).scalar_one_or_none()
-    return threema.parse_recipients(row.recipients if row else "")
-
-
 async def run(
     session: AsyncSession,
     *,
@@ -193,7 +188,21 @@ async def run(
     """Uma rodada: dos pedidos dados (os que estão em Aguardando Devolução
     agora E cujo caso foi relido nesta rodada — prazo velho de conta que deu
     429 não vira aviso), manda o aviso dos que estão na janela e carimba cada
-    um. Commita. `linhas` = {pedido_bling: Logistica} já carregado pelo sync."""
+    um. Commita. `linhas` = {pedido_bling: Logistica} já carregado pelo sync.
+
+    Quem recebe vem de Cadastros › Envios Threema
+    (`K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA`, remetente "devolucoes"), lido ANTES
+    do laço:
+
+    * desligado: não manda e não carimba — ao religar, os avisos ainda na
+      janela saem de uma vez (o `acumula` do catálogo), um por caso;
+    * ninguém pela configuração antiga (emergência ou sem semente, com a
+      linha vazia): não manda nem carimba, calado, como hoje;
+    * ninguém válido no Cadastro: o 1º aviso passa pelo núcleo, que grava o
+      registro `ok=false` e acende o sino dos admins; nada é carimbado (quando
+      alguém for posto na lista, os pendentes saem na rodada seguinte).
+
+    Falha de envio não carimba (tenta na rodada seguinte)."""
     agora = _utc(agora) or datetime.now(UTC)
     resumo = {"casos": 0, "devidos": 0, "enviados": 0, "falhas": 0, "sem_destinatarios": 0}
     alvo = {str(p).strip() for p in pedidos if str(p).strip()}
@@ -212,10 +221,16 @@ async def run(
     resumo["devidos"] = len(devidos)
     if not devidos:
         return resumo
-    recipients = await recipients_auto(session)
-    if not recipients:
+    quem = await threema_envios.resolver(K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, session=session)
+    if not quem.ativo:
+        resumo["desligado"] = 1
+        logger.info("devolucao_acao_avisos_desligado", devidos=len(devidos), via=quem.via)
+        return resumo
+    if not quem.ids and quem.motivo != threema_envios.NINGUEM_VALIDO:
         resumo["sem_destinatarios"] = 1
-        logger.warning("devolucao_acao_avisos_sem_destinatarios", devidos=len(devidos))
+        logger.warning(
+            "devolucao_acao_avisos_sem_destinatarios", devidos=len(devidos), via=quem.via
+        )
         return resumo
     ctx: dict[str, Logistica] = dict(linhas or {})
     faltando = [r.pedido_bling for r in devidos if r.pedido_bling not in ctx]
@@ -224,18 +239,28 @@ async def run(
             await session.execute(select(Logistica).where(Logistica.pedido_bling.in_(faltando)))
         ).scalars():
             ctx.setdefault(lg.pedido_bling or "", lg)
-    client = client or threema.ThreemaClient(contexto="devolucoes")
     for row in devidos:
         texto = mensagem_aviso(row, ctx.get(row.pedido_bling), agora)
         try:
-            with threema_registro.envio(K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA):
-                res = await client.send_to_all(texto, recipients)
+            res = await threema_envios.enviar(
+                K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, texto, session=session, client=client
+            )
         except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima
             resumo["falhas"] += 1
             logger.warning(
                 "devolucao_acao_aviso_falhou", pedido=row.pedido_bling, err=str(e)[:200]
             )
             continue
+        if res.get("motivo"):
+            # Desligou ou ficou sem ninguém no meio da rodada (no ninguém
+            # válido o núcleo já registrou e acendeu o sino): o que falta
+            # fica para a próxima, sem carimbo.
+            desligou = res["motivo"] == threema_envios.DESLIGADO
+            resumo["desligado" if desligou else "sem_destinatarios"] = 1
+            logger.warning(
+                "devolucao_acao_avisos_nao_saiu", motivo=res["motivo"], pedido=row.pedido_bling
+            )
+            break
         if res.get("sent"):
             row.aviso_prazo_acao_at = agora
             row.aviso_prazo_acao_para = row.prazo_acao_auto
@@ -245,8 +270,8 @@ async def run(
                 pedido=row.pedido_bling,
                 acao=row.acao_auto,
                 prazo=str(row.prazo_acao_auto),
-                sent=res.get("sent"),
-                failed=res.get("failed"),
+                sent=len(res.get("sent") or []),
+                failed=len(res.get("failed") or []),
             )
         else:
             resumo["falhas"] += 1

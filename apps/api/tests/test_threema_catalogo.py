@@ -256,6 +256,10 @@ MIGRADOS = [
     K.LOGISTICA_LOJA_MUDA,
     K.DEVOLUCOES_PACOTE_VOLTA_GRAVE,
     K.DEVOLUCOES_PRAZO_CONTESTACAO,
+    # F2/C9c: prazo de resposta da loja e Informar das Devoluções (10 e 11)
+    K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA,
+    K.DEVOLUCOES_INFORMAR,
+    # F1/C8a (cont.)
     K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR,
     # F1/C8c: Chamados (itens 13 e 14)
     K.CHAMADOS_TIKTOK_SO_REEMBOLSO,
@@ -287,14 +291,17 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`
     (C8a), `test_threema_pontos_estoque_nf` (C8b),
     `test_threema_pontos_chamados_produtos` (C8c) e
-    `test_threema_pontos_informar` (C9a e C9b)."""
+    `test_threema_pontos_informar` (C9a, C9b e C9c)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
         K.LOGISTICA_AMAZON_INFORMAR: "recusa",
         K.CONTROLE_ESTOQUE_INFORMAR: "recusa",
+        K.DEVOLUCOES_INFORMAR: "recusa",
         # os carimbos `aviso_*_at` só gravam o que saiu
         K.LOGISTICA_AMAZON_PRAZOS: "acumula",
+        # `aviso_prazo_acao_at/_para` só gravam o que saiu
+        K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: "acumula",
         # o carimbo da ocorrência grave é gravado antes do aviso
         K.LOGISTICA_CORREIOS_GRAVE: "descarta",
         # sem carimbo: repete a cada rodada enquanto a automação estiver parada

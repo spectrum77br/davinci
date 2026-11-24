@@ -112,7 +112,9 @@ _CONTEXTOS = (
     "logistica_amazon",
     "logistica_amazon_auto",
     # Aviso automático do prazo de resposta nas devoluções (Acompanhamento) —
-    # services/devolucao_acao_avisos. Cadastro pelo modal Informar da aba.
+    # services/devolucao_acao_avisos. Era o cadastro do modal Informar da aba;
+    # desde a F2/C9c fica congelado (reserva de emergência) e quem recebe se
+    # escolhe em Cadastros › Envios Threema.
     "devolucoes_auto",
     # 30/09: IA de Chamado parada em "não sou robô"/login na tela da loja —
     # services/chamados_ia_aviso. Cadastro pela aba Chamados › IA de Chamado.

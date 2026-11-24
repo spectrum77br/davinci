@@ -332,8 +332,10 @@ def _servidor() -> list[EnvioDef]:
             K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, "Devoluções", None, "Prazo de resposta da loja",
             "Prazo da loja para responder a devolução: avisos de 24 h e de 4 h.",
             "evento", "depois do rastreio das devoluções (:10/:40)", "servidor", "devolucoes",
+            # Desligado, nada é carimbado: ao religar sai um aviso por caso
+            # ainda na janela (`aviso_prazo_acao_*` só grava o que saiu).
             L(informar=("devolucoes_auto",)), ao_desligar="acumula", fatia="F2",
-            leitura="informar:devolucoes_auto",
+            leitura="informar:devolucoes_auto", migrado=True,
         ),
         E(
             K.DEVOLUCOES_INFORMAR, "Devoluções", None, "Informar de Devoluções",
@@ -341,7 +343,7 @@ def _servidor() -> list[EnvioDef]:
             "última localização.",
             "manual", "botão Informar › Enviar agora", "servidor", "devolucoes",
             L(informar=("devolucoes",)), ao_desligar="recusa", fatia="F2",
-            leitura="informar:devolucoes",
+            leitura="informar:devolucoes", migrado=True,
         ),
         E(
             K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR, "Devoluções", None,

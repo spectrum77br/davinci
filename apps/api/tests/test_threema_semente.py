@@ -473,6 +473,7 @@ async def test_linha_do_informar_vazia_de_envio_automatico_nasce_desligada(db, m
         K.LOGISTICA_AMAZON_INFORMAR,
         K.LOGISTICA_AMAZON_PRAZOS,
         K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA,
+        K.DEVOLUCOES_INFORMAR,
         K.CONTROLE_ESTOQUE_INFORMAR,
     ]
     res = await _semear(db, "F2", chaves=chaves, aplicar=True)

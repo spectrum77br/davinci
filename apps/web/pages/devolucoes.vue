@@ -1228,7 +1228,7 @@ const lidoHa = computed(() => {
         <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="!filtrados.length" :title="`Baixa as ${filtrados.length} linhas que estão aparecendo (arquivo que o Excel abre)`" @click="exportar">
           <Download class="size-3.5" /> Excel
         </button>
-        <button v-if="isAdmin" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted" title="Enviar no Threema a lista de pedidos aguardando devolução e escolher quem recebe os avisos de prazo" @click="informarOpen = true">
+        <button v-if="isAdmin" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted" title="Enviar no Threema a lista de pedidos aguardando devolução e ver quem recebe os avisos de prazo" @click="informarOpen = true">
           <Megaphone class="size-3.5" /> Informar
         </button>
         <a v-if="canEdit" href="/devolucoes-antigo?tab=lancamentos" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 font-normal text-muted-foreground hover:bg-muted" title="O que ainda mora na tela de antes: correção de estoque (entrada sem devolução), histórico completo dos lançamentos com os filtros de tag e a planilha deles">ferramentas antigas</a>
@@ -1952,13 +1952,15 @@ const lidoHa = computed(() => {
       </div>
     </div>
 
-    <!-- Informar (só admin): mesma lista e mesmo cadastro de avisos da tela de antes. -->
+    <!-- Informar (só admin): a mesma lista da tela de antes. Atalho de
+         Cadastros › Envios Threema (tarefa 16, F2/C9c): quem recebe o
+         "Enviar agora" e o aviso de prazo se escolhe lá, só admin. -->
     <InformarThreemaModal
       :open="informarOpen"
       contexto="devolucoes"
-      contexto-auto="devolucoes_auto"
-      enviar-com-auto
-      descricao="Quem está marcado recebe no Threema o aviso automático de prazo: quando falta menos de 24 h pra loja responder na plataforma (TikTok: confirmar ou recusar o pacote recebido; Shopee: conferir o pacote recebido, enviar evidências, responder à proposta; Mercado Livre: revisar a devolução recebida em 3 dias), e um último aviso faltando 4 h — por caso e por prazo. O pedido de só reembolso tem aviso próprio pela aba Chamados. 'Enviar agora' manda a lista dos pedidos aguardando devolução, com dias parados, última localização e prazo. A seleção fica salva."
+      chave="devolucoes.informar"
+      chave-auto="devolucoes.prazo_resposta_loja"
+      descricao="O robô avisa no Threema, sozinho, o prazo de resposta da loja: quando falta menos de 24 h pra loja responder na plataforma (TikTok: confirmar ou recusar o pacote recebido; Shopee: conferir o pacote recebido, enviar evidências, responder à proposta; Mercado Livre: revisar a devolução recebida em 3 dias), e um último aviso faltando 4 h — por caso e por prazo. O pedido de só reembolso tem aviso próprio pela aba Chamados. 'Enviar agora' manda a lista dos pedidos aguardando devolução, com dias parados, última localização e prazo."
       @close="informarOpen = false"
     />
   </div>

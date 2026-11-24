@@ -230,11 +230,13 @@ _USOS_DO_NUCLEO = {
     "services/chamados_tiktok_reembolso.py": {"enviar"},
     "services/chamados_pendencias.py": {"enviar"},
     "services/vigia_estoque_familia.py": {"enviar"},
-    # F2/C9a e C9b: o "Enviar agora" dos Informar migrados (2, 3 e 17; o
-    # portão lê o liga/desliga antes de montar o relatório) e os prazos da
-    # Amazon (4; lido antes do laço, para o desligado não carimbar nada)
+    # F2/C9a, C9b e C9c: o "Enviar agora" dos Informar migrados (2, 3, 11 e
+    # 17; o portão lê o liga/desliga antes de montar o relatório), os prazos
+    # da Amazon (4) e o prazo de resposta das Devoluções (10; os dois lidos
+    # antes do laço, para o desligado não carimbar nada)
     "routers/informar.py": {"enviar", "resolver"},
     "services/logistica_amazon_avisos.py": {"enviar", "resolver"},
+    "services/devolucao_acao_avisos.py": {"enviar", "resolver"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {

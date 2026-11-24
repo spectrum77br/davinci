@@ -6,7 +6,9 @@ Cobre a corrente inteira com dados FALSOS (sem rede):
     (menor prazo; entrada suja nunca levanta);
   · sync do retorno grava/limpa `devolucao_rastreio.acao_auto/prazo_acao_auto`;
   · `devolucao_acao_avisos`: janela de 24 h, um aviso por (caso, prazo), sem
-    destinatário não manda nem carimba, Threema caído não carimba;
+    destinatário não manda nem carimba, Threema caído não carimba (sem semente
+    no Cadastro, quem recebe é a linha `devolucoes_auto` do Informar — a
+    reserva; o caminho pelo Cadastro está em `test_threema_pontos_informar`);
   · router: coluna "Prazo p/ responder" + ação em PT na aba Acompanhamento.
 """
 
@@ -23,7 +25,14 @@ from app.models import DevolucaoRastreio, Logistica, ThreemaInformarConfig
 from app.routers.devolutions import _prazo_resposta
 from app.services import devolucao_acao_avisos as avisos
 from app.services import devolucao_rastreio_sync as sync
-from app.services import logistica_meli, logistica_rules, logistica_shopee, logistica_tiktok, logistica_track
+from app.services import (
+    logistica_meli,
+    logistica_rules,
+    logistica_shopee,
+    logistica_tiktok,
+    logistica_track,
+    threema,
+)
 from app.services.devolucao_returns import ReturnInfo
 
 AGORA = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)  # 09:00 BRT
@@ -178,8 +187,9 @@ def fakes(monkeypatch):
         return {"consultados": 0, "entregues": 0, "localizacoes": 0, "desconhecidos": []}
 
     monkeypatch.setattr(sync, "_puxar_correios", _sem_correios)
-    # O sync chama os avisos com o Threema real: aqui um falso que nunca manda.
-    monkeypatch.setattr(avisos.threema, "ThreemaClient", lambda: _FakeThreema())
+    # O sync chama os avisos com o Threema real (o núcleo do Cadastro monta o
+    # cliente com o remetente do catálogo): aqui um falso que nunca manda.
+    monkeypatch.setattr(threema, "ThreemaClient", lambda **_: _FakeThreema())
     return respostas
 
 

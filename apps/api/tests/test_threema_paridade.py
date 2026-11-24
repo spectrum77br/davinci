@@ -3,8 +3,8 @@ ao que cada ponto de envio monta HOJE, para TODOS os envios do servidor
 gerenciados — quem recebe e se está ligado.
 
 "Hoje" é a função antiga de verdade sempre que ela existe
-(`ouvidoria.destinatarios`, `_recipients_margem_auto`, `recipients_auto` das
-Devoluções, `denuncia_robo_aviso.destinatarios` com a reserva
+(`ouvidoria.destinatarios`, `_recipients_margem_auto`,
+`denuncia_robo_aviso.destinatarios` com a reserva
 `chamados_ia`, o `send_to_all` que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
 meio de uma função maior, a expressão é copiada aqui E um teste confere que
 ela continua no código — se alguém mudar o ponto de envio, este arquivo
@@ -39,7 +39,6 @@ from app.services import (
     chamados_juridico,
     denuncia_relatorio_threema,
     denuncia_robo_aviso,
-    devolucao_acao_avisos,
     margem_auto_hold,
     ouvidoria,
     threema,
@@ -148,15 +147,31 @@ async def _amazon_auto_antes_da_f2(db) -> list[str]:
     return P(row.recipients if row else "")
 
 
+async def _devolucoes_auto_antes_da_f2(db) -> list[str]:
+    """devolucao_acao_avisos.recipients_auto antes da F2/C9c: a linha
+    `devolucoes_auto` do Informar (sem linha = ninguém)."""
+    row = (
+        await db.execute(
+            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == "devolucoes_auto")
+        )
+    ).scalar_one_or_none()
+    return P(row.recipients if row else "")
+
+
 # Cópias congeladas dos pontos que a F2 migrou. O "Enviar agora" dos Informar
-# migrados (C9a e C9b) lia a linha do contexto na rota (`_config_row` + a expressão
-# de `_EXPRESSOES`, que continua lá para os contextos ainda não migrados).
+# migrados (C9a, C9b e C9c) lia a linha do contexto na rota (`_config_row` + a
+# expressão de `_EXPRESSOES`, que continua lá para os contextos ainda não
+# migrados).
 _ANTES_DA_F2 = {
     K.LOGISTICA_INFORMAR: lambda db: _informar(db, "logistica"),
     K.LOGISTICA_AMAZON_INFORMAR: lambda db: _informar(db, "logistica_amazon"),
     K.LOGISTICA_AMAZON_PRAZOS: _amazon_auto_antes_da_f2,
     # C9b
     K.CONTROLE_ESTOQUE_INFORMAR: lambda db: _informar(db, "controle_estoque"),
+    # C9c: o prazo de resposta da loja (devolucao_acao_avisos.run) e o
+    # Informar das Devoluções
+    K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: _devolucoes_auto_antes_da_f2,
+    K.DEVOLUCOES_INFORMAR: lambda db: _informar(db, "devolucoes"),
 }
 _ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2}
 
@@ -175,8 +190,6 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         # sem regra: `parse(rule) or None` → o send_to_all cai no THREEMA_RECIPIENTS
         # (o caminho de verdade, com 👤 e sem, está em test_item_1_por_regra)
         K.LOGISTICA_MENSAGEM_REGRA: lambda: P(s.threema_recipients),
-        K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: lambda: devolucao_acao_avisos.recipients_auto(db),
-        K.DEVOLUCOES_INFORMAR: lambda: _informar(db, "devolucoes"),
         K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
         K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda: chamados_juridico.recipients_juridico(db),
         K.MARGEM_PEDIDO_SEGURADO: lambda: margem_auto_hold._recipients_margem_auto(db),
@@ -490,6 +503,8 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         "services/vigia_estoque_familia.py": "threema_recipients",
         # F2/C9a: os prazos da Amazon não leem mais a linha do Informar
         "services/logistica_amazon_avisos.py": "parse_recipients",
+        # F2/C9c: nem o prazo de resposta das Devoluções
+        "services/devolucao_acao_avisos.py": "parse_recipients",
     }
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo

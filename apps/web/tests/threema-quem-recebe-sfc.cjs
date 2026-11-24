@@ -11,8 +11,9 @@
 //    de marcar, sem "Salvar" e sem PUT; o "Enviar agora" continua (o mesmo
 //    POST), para quando ninguém receberia e mostra o motivo do servidor; o
 //    modo antigo (os painéis ainda não migrados) continua igual;
-//  - os painéis migrados (Logística, aba Amazon e Controle de Estoque) usam o
-//    atalho com as chaves do catálogo.
+//  - os painéis migrados (Logística, aba Amazon, Controle de Estoque e
+//    Devoluções — a tela nova e a antiga) usam o atalho com as chaves do
+//    catálogo.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -329,8 +330,22 @@ const leve = (extra = {}) => ({
     const modaisEstoque = estoque.match(/<InformarThreemaModal[\s\S]*?\/>/g)
     assert.equal(modaisEstoque.length, 1)
     assert.match(modaisEstoque[0], /contexto="controle_estoque"\s+chave="controle_estoque\.informar"/)
-    for (const modal of [...modais, ...modaisEstoque]) {
-      assert.ok(!/contexto-auto|enviar-com-auto|A seleção/.test(modal), 'nada de lista para salvar')
+    // Devoluções (C9c): o "Enviar agora" (11) e o aviso do prazo de resposta
+    // da loja (10), na tela nova e na antiga
+    const modaisDevolucoes = ['../pages/devolucoes.vue', '../pages/devolucoes-antigo.vue'].map((rel) => {
+      const fonte = fs.readFileSync(path.resolve(__dirname, rel), 'utf8')
+      const achados = fonte.match(/<InformarThreemaModal[\s\S]*?\/>/g)
+      assert.equal(achados.length, 1, rel)
+      assert.match(
+        achados[0],
+        /contexto="devolucoes"\s+chave="devolucoes\.informar"\s+chave-auto="devolucoes\.prazo_resposta_loja"/,
+        rel,
+      )
+      assert.ok(!/escolher quem recebe/.test(fonte), `${rel}: o botão não promete escolher quem recebe`)
+      return achados[0]
+    })
+    for (const modal of [...modais, ...modaisEstoque, ...modaisDevolucoes]) {
+      assert.ok(!/contexto-auto|enviar-com-auto|A seleção|Quem está marcado/.test(modal), 'nada de lista para salvar')
       for (const [, chave] of modal.matchAll(/chave(?:-auto)?="([^"]+)"/g)) {
         assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)
       }

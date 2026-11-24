@@ -1,11 +1,17 @@
-"""F2/C9a e C9b da tarefa 16: o Informar da Logística (item 2), o Informar
-da aba Amazon (3), os prazos da Amazon (4) e o Informar do Controle de
-Estoque (17) passam a ler o Cadastro (Cadastros › Envios Threema). A lista
-do Informar (`threema_informar_config`) fica congelada como reserva de
+"""F2/C9a, C9b e C9c da tarefa 16: o Informar da Logística (item 2), o
+Informar da aba Amazon (3), os prazos da Amazon (4), o Informar do Controle
+de Estoque (17), o prazo de resposta da loja nas Devoluções (10) e o Informar
+das Devoluções (11) passam a ler o Cadastro (Cadastros › Envios Threema). A
+lista do Informar (`threema_informar_config`) fica congelada como reserva de
 emergência e o PUT dela responde 410 — "só ADM altera quem recebe" (decisão
 do dono, 23/11): quem hoje marcava a lista no modal (o gerente, na aba
 Amazon) perde a edição, mas o "Enviar agora" continua para quem pode usar o
 botão hoje.
+
+Os itens 10 e 11 hoje não chegam a ninguém (a linha `devolucoes_auto` não
+existe em produção e a `devolucoes` está vazia): depois da semente o robô do
+prazo nasce DESLIGADO (calado, sem registro nem sino a cada rodada, como
+hoje) e o botão segue recusando com 422.
 
 Um teste por ponto, PELO CAMINHO REAL (a rota do botão e a rodada do robô; só
 o ThreemaClient é falso):
@@ -33,13 +39,14 @@ grava o envio desligado e a rodada segue sem mensagem, registro nem sino.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import get_settings
 from app.models import (
+    DevolucaoRastreio,
     Logistica,
     ThreemaEnvio,
     ThreemaInformarConfig,
@@ -47,7 +54,13 @@ from app.models import (
     UserStatus,
 )
 from app.routers import informar as informar_router
-from app.services import logistica_amazon_avisos, threema, threema_envios, threema_registro
+from app.services import (
+    devolucao_acao_avisos,
+    logistica_amazon_avisos,
+    threema,
+    threema_envios,
+    threema_registro,
+)
 from app.services.threema_catalogo import CATALOGO, K
 from tests.test_threema_pontos_logistica_devolucoes import _Fake, _ligar, _registro, _sinos
 from tests.test_threema_resolver import _usuario, semeado
@@ -61,26 +74,34 @@ pytestmark = pytest.mark.asyncio
 
 GERENTE = "sa.geral@tutamail.com"
 
-# As chaves da C9a e da C9b, o contexto do Informar de cada uma (a lista
-# antiga) e o remetente de HOJE (o `contexto` que o código passava ao
+# As chaves da C9a, da C9b e da C9c, o contexto do Informar de cada uma (a
+# lista antiga) e o remetente de HOJE (o `contexto` que o código passava ao
 # ThreemaClient).
 REMETENTE_DE_HOJE = {
     K.LOGISTICA_INFORMAR: "logistica",
     K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon",
     K.LOGISTICA_AMAZON_PRAZOS: "logistica",
     K.CONTROLE_ESTOQUE_INFORMAR: "controle_estoque",
+    # C9c
+    K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: "devolucoes",
+    K.DEVOLUCOES_INFORMAR: "devolucoes",
 }
 LISTA_DE_HOJE = {
     K.LOGISTICA_INFORMAR: "logistica",
     K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon",
     K.LOGISTICA_AMAZON_PRAZOS: "logistica_amazon_auto",
     K.CONTROLE_ESTOQUE_INFORMAR: "controle_estoque",
+    K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: "devolucoes_auto",
+    K.DEVOLUCOES_INFORMAR: "devolucoes",
 }
 BOTOES = {
     K.LOGISTICA_INFORMAR: "logistica",
     K.LOGISTICA_AMAZON_INFORMAR: "logistica_amazon",
     K.CONTROLE_ESTOQUE_INFORMAR: "controle_estoque",
+    K.DEVOLUCOES_INFORMAR: "devolucoes",
 }
+# Os robôs (envio automático, lista do Informar): o vazio de hoje é o desligado.
+ROBOS = (K.LOGISTICA_AMAZON_PRAZOS, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA)
 MINHAS = list(REMETENTE_DE_HOJE)
 
 
@@ -95,6 +116,34 @@ def _ambiente(monkeypatch):
     monkeypatch.setattr(threema, "ThreemaClient", _Fake)
     yield
     threema_envios.limpar_cache()
+
+
+@pytest.fixture
+async def vw_devolucoes(db):
+    """A `vw_devolucoes` de produção não vem do create_all: uma VAZIA, com as
+    colunas que a aba Acompanhamento lê — o relatório do Informar das
+    Devoluções sai de verdade ("nenhum pedido aguardando devolução")."""
+    schema = get_settings().database_schema
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_devolucoes AS
+            SELECT NULL::timestamptz AS data, NULL::text AS pedido_bling,
+                   NULL::text AS pedido_marketplace, NULL::text AS situacao,
+                   NULL::text AS plataforma_bling, NULL::text AS loja_nome,
+                   NULL::bigint AS bling_loja_id, NULL::text AS sku,
+                   NULL::text AS produto, NULL::integer AS quantidade,
+                   NULL::uuid AS bling_order_item_id, NULL::text AS nome_destinatario,
+                   NULL::text AS cidade_destino, NULL::text AS uf_destino
+            WHERE false
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+    yield
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.commit()
 
 
 async def _pessoas(db):
@@ -140,6 +189,45 @@ async def _botao(client, contexto: str):
     return await client.post(f"/api/informar/{contexto}/enviar")
 
 
+async def _caso_devolucao(db, pedido: str = "294865", *, horas: float = 9) -> DevolucaoRastreio:
+    """Devolução TikTok em Aguardando Devolução com a loja tendo de confirmar
+    o pacote recebido em `horas` (dentro da janela de 24 h: aviso devido)."""
+    db.add(
+        Logistica(
+            data=date.today(),
+            pedido_bling=pedido,
+            pedido_marketplace=f"57{pedido}",
+            plataforma="TikTok",
+            conta="mini",
+            cliente_nome="Fulano de Tal",
+        )
+    )
+    caso = DevolucaoRastreio(
+        pedido_bling=pedido,
+        fonte_auto="tiktok",
+        devolucao_status_auto="BUYER_SHIPPED_ITEM",
+        devolucao_tipo_auto="RETURN_AND_REFUND",
+        acao_auto="SELLER_RESPOND_RECEIVE_PACKAGE",
+        prazo_acao_auto=datetime.now(UTC) + timedelta(hours=horas),
+        rastreio_auto="AP1BR",
+        transportadora_auto="Correios",
+    )
+    db.add(caso)
+    await db.commit()
+    return caso
+
+
+async def _prazo_resposta(db, pedido: str = "294865") -> dict[str, int]:
+    """Item 10: a rodada do rastreio das devoluções (:10/:40) chega aos avisos
+    com o caso relido nesta rodada (o `pedidos` que o sync passa)."""
+    return await devolucao_acao_avisos.run(db, pedidos=[pedido])
+
+
+async def _carimbo(db, caso: DevolucaoRastreio):
+    await db.refresh(caso)
+    return caso.aviso_prazo_acao_at
+
+
 async def _amazon_prazos(db) -> Logistica:
     """Item 4: a rodada das 08:06/16:06 com um pedido de Envio próprio."""
     row = _pedido_amazon()
@@ -153,7 +241,7 @@ def _envios() -> list[tuple]:
     return [(e["chave"], e["via"], e["contexto"], e["destinos"]) for e in _Fake.envios]
 
 
-def test_as_chaves_da_c9a_e_c9b_estao_migradas_com_o_remetente_de_hoje():
+def test_as_chaves_da_c9a_c9b_e_c9c_estao_migradas_com_o_remetente_de_hoje():
     for chave, remetente in REMETENTE_DE_HOJE.items():
         d = CATALOGO[chave]
         assert d.migrado and d.fatia == "F2", chave
@@ -162,13 +250,17 @@ def test_as_chaves_da_c9a_e_c9b_estao_migradas_com_o_remetente_de_hoje():
     assert {c: informar_router._CHAVE_ENVIO[ctx] for c, ctx in BOTOES.items()} == {
         c: c for c in BOTOES
     }
-    assert CATALOGO[K.LOGISTICA_AMAZON_PRAZOS].ao_desligar == "acumula"
+    assert {CATALOGO[c].ao_desligar for c in ROBOS} == {"acumula"}
     assert {CATALOGO[c].ao_desligar for c in BOTOES} == {"recusa"}
+    # a lista vazia de hoje é o desligado do robô (nasce desligado), não do botão
+    assert all(threema_envios._lista_vazia_desliga(CATALOGO[c]) for c in ROBOS)
+    assert not any(threema_envios._lista_vazia_desliga(CATALOGO[c]) for c in BOTOES)
 
 
 # ─────────────────────────────────────────────── (a) Cadastro com a linha vazia
 
 
+@pytest.mark.usefixtures("vw_devolucoes")
 @pytest.mark.parametrize("chave", list(BOTOES))
 async def test_botao_com_a_linha_vazia_manda_pelo_cadastro(db, monkeypatch, client, auth_as, chave):
     admin, joana, sumido = await _pessoas(db)
@@ -198,9 +290,28 @@ async def test_amazon_prazos_com_a_linha_vazia_manda_pelo_cadastro_e_carimba(db)
     assert resumo["avisos"] == 0 and _Fake.envios == []
 
 
+async def test_prazo_resposta_com_a_linha_vazia_manda_pelo_cadastro_e_carimba(db):
+    _admin, joana, sumido = await _pessoas(db)
+    await _linha_informar(db, "devolucoes_auto", "")
+    await semeado(db, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, joana, sumido)
+    caso = await _caso_devolucao(db)
+    resumo = await _prazo_resposta(db)
+    assert (resumo["devidos"], resumo["enviados"]) == (1, 1)
+    chave = K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA
+    assert _envios() == [(chave, "cadastro", "devolucoes", ["TSTJ0006"])]
+    assert "faltam 8 h pra responder na plataforma" in _Fake.envios[0]["texto"]
+    assert await _carimbo(db, caso) is not None
+    assert caso.aviso_prazo_acao_para == caso.prazo_acao_auto
+    # rodada seguinte, mesmo prazo: nada de novo
+    _Fake.envios = []
+    resumo = await _prazo_resposta(db)
+    assert resumo["enviados"] == 0 and _Fake.envios == []
+
+
 # ─────────────────────────────────────────────── (b) desligado
 
 
+@pytest.mark.usefixtures("vw_devolucoes")
 @pytest.mark.parametrize("chave", list(BOTOES))
 async def test_botao_desligado_recusa(db, client, auth_as, chave):
     admin, joana, _ = await _pessoas(db)
@@ -242,9 +353,31 @@ async def test_amazon_prazos_desligado_acumula(db):
     assert row.aviso_previsao_correios_at is not None and row.aviso_prazo_amazon_3d_at is not None
 
 
+async def test_prazo_resposta_desligado_acumula(db):
+    chave = K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA
+    _admin, joana, _ = await _pessoas(db)
+    await semeado(db, chave, joana, ativo=False)
+    caso = await _caso_devolucao(db)
+    resumo = await _prazo_resposta(db)
+    assert (resumo["devidos"], resumo.get("desligado"), resumo["enviados"]) == (1, 1, 0)
+    assert _Fake.envios == []
+    assert await _carimbo(db, caso) is None
+    # a rodada seguinte, ainda desligado: nada sai, nada é carimbado
+    resumo = await _prazo_resposta(db)
+    assert (resumo.get("desligado"), resumo["enviados"]) == (1, 0)
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+    await _ligar(db, chave, None)
+    resumo = await _prazo_resposta(db)
+    # religado: o aviso pendente (ainda na janela) sai na rodada seguinte
+    assert resumo["enviados"] == 1
+    assert [e["destinos"] for e in _Fake.envios] == [["TSTJ0006"]]
+    assert await _carimbo(db, caso) is not None
+
+
 # ─────────────────────────────────────────────── (c) ninguém válido
 
 
+@pytest.mark.usefixtures("vw_devolucoes")
 @pytest.mark.parametrize("chave", list(BOTOES))
 async def test_botao_ninguem_valido_registra_acende_o_sino_e_recusa(
     db, monkeypatch, client, auth_as, chave
@@ -294,6 +427,38 @@ async def test_amazon_prazos_ninguem_valido_registra_acende_o_sino_e_nao_carimba
     assert [e["destinos"] for e in _Fake.envios] == [["TSTJ0006"], ["TSTJ0006"]]
 
 
+async def test_prazo_resposta_ninguem_valido_registra_acende_o_sino_e_nao_carimba(db):
+    chave = K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA
+    admin, joana, sumido = await _pessoas(db)
+    # a lista antiga tem gente: o Cadastro sem ninguém válido NUNCA cai nela
+    await _linha_informar(db, "devolucoes_auto", "TSTZ0009")
+    await semeado(db, chave, sumido)
+    caso = await _caso_devolucao(db)
+    resumo = await _prazo_resposta(db)
+    assert (resumo["sem_destinatarios"], resumo["enviados"]) == (1, 0)
+    assert _Fake.envios == []
+    assert await _carimbo(db, caso) is None
+    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    (linha,) = await _registro(db, chave)
+    assert (linha.ok, linha.erro, linha.via, linha.contexto) == (
+        False,
+        "sem_destinatario_valido",
+        "cadastro",
+        "devolucoes",
+    )
+    # a rodada seguinte registra de novo (1 por rodada), mas o sino do dia é um só
+    resumo = await _prazo_resposta(db)
+    assert resumo["sem_destinatarios"] == 1 and resumo["enviados"] == 0
+    assert len(await _registro(db, chave)) == 2
+    assert len(await _sinos(db, chave)) == 1
+    # alguém posto na lista: o pendente sai na rodada seguinte
+    await semeado(db, chave, joana)
+    resumo = await _prazo_resposta(db)
+    assert resumo["enviados"] == 1
+    assert [e["destinos"] for e in _Fake.envios] == [["TSTJ0006"]]
+    assert await _carimbo(db, caso) is not None
+
+
 async def test_configuracao_antiga_vazia_fica_calada_como_hoje(db, monkeypatch, client, auth_as):
     """Emergência (o piso do .env) com a lista antiga vazia: o botão responde
     422 sem montar nada e o robô sai sem mensagem, registro nem sino — o
@@ -310,6 +475,10 @@ async def test_configuracao_antiga_vazia_fica_calada_como_hoje(db, monkeypatch, 
     row = await _amazon_prazos(db)
     await db.refresh(row)
     assert row.aviso_previsao_correios_at is None
+    caso = await _caso_devolucao(db)
+    resumo = await _prazo_resposta(db)
+    assert (resumo["sem_destinatarios"], resumo["enviados"]) == (1, 0)
+    assert await _carimbo(db, caso) is None
     assert _Fake.envios == []
     for chave in MINHAS:
         assert await _registro(db, chave) == [] and await _sinos(db, chave) == [], chave
@@ -329,7 +498,7 @@ async def test_put_da_lista_migrada_responde_410_e_o_get_mostra_a_antiga(
     admin = await make_user(role=UserRole.ADMIN)
     await _linha_informar(db, "logistica", ID["harry"])
     auth_as(admin)
-    for contexto in ("logistica", "logistica_amazon", "logistica_amazon_auto", "controle_estoque"):
+    for contexto in LISTA_DE_HOJE.values():
         r = await client.put(f"/api/informar/{contexto}", json={"recipients": [ID["joana"]]})
         assert r.status_code == 410, (contexto, r.text)
         detalhe = r.json()["detail"]
@@ -401,12 +570,17 @@ async def test_gerente_perde_a_edicao_mas_segue_enviando_e_vendo_quem_recebe(
         q = r.json()
         assert q["nomes"] == ["joana c9a"] and q["usa_configuracao_antiga"] is False
         assert "TSTJ0006" not in r.text
-    # os Informar da Logística e do Controle de Estoque seguem só de admin
-    # (botão e quem recebe)
-    for chave in (K.LOGISTICA_INFORMAR, K.CONTROLE_ESTOQUE_INFORMAR):
+    # os Informar da Logística, do Controle de Estoque e das Devoluções seguem
+    # só de admin (botão e quem recebe; nas Devoluções, também o do prazo)
+    for chave in (K.LOGISTICA_INFORMAR, K.CONTROLE_ESTOQUE_INFORMAR, K.DEVOLUCOES_INFORMAR):
         assert (await _botao(client, BOTOES[chave])).status_code == 403, chave
         r = await client.get(f"/api/threema/envios/{chave}/quem-recebe")
         assert r.status_code == 403, chave
+    r = await client.get(f"/api/threema/envios/{K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA}/quem-recebe")
+    assert r.status_code == 403
+    for contexto in ("devolucoes", "devolucoes_auto"):
+        r = await client.put(f"/api/informar/{contexto}", json={"recipients": [ID["harry"]]})
+        assert r.status_code == 403, r.text
     operador = await make_user(role=UserRole.USER, permissions={"logistica": {"edit": True}})
     auth_as(operador)
     assert (await _botao(client, "logistica_amazon")).status_code == 403
@@ -417,7 +591,7 @@ async def test_gerente_perde_a_edicao_mas_segue_enviando_e_vendo_quem_recebe(
 # ─────────────────────────────────────────────── a semente da fatia
 
 
-@pytest.mark.usefixtures("limpar_ouvidoria")
+@pytest.mark.usefixtures("limpar_ouvidoria", "vw_devolucoes")
 @pytest.mark.parametrize("variante", ["cheio", "reservas", "vazias"])
 async def test_semente_confere_e_cada_ponto_manda_para_quem_o_legado_mandaria(
     db, monkeypatch, client, auth_as, make_user, variante
@@ -461,6 +635,115 @@ async def test_semente_confere_e_cada_ponto_manda_para_quem_o_legado_mandaria(
         assert esperado[K.LOGISTICA_INFORMAR] == [ID["harry"], ID["heisenberg"]]
         assert esperado[K.CONTROLE_ESTOQUE_INFORMAR] == [ID["harry"], ID["heisenberg"]]
         assert esperado[chave] == [ID["londres"], ID["harry"], ID["cairo_sa"]]
+    # Prazo de resposta das Devoluções (10): em todas as variantes a linha
+    # `devolucoes_auto` não existe ou está vazia (produção: não existe) — hoje
+    # ninguém recebe, calado. A semente desliga e a rodada segue calada: nada
+    # de registro nem sino a cada :10/:40.
+    chave = K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA
+    assert esperado[chave] == [] and esperado[K.DEVOLUCOES_INFORMAR] == []
+    linha = await db.get(ThreemaEnvio, chave, populate_existing=True)
+    assert linha.ativo is False
+    _Fake.envios = []
+    caso = await _caso_devolucao(db)
+    resumo = await _prazo_resposta(db)
+    assert (resumo["devidos"], resumo.get("desligado"), resumo["enviados"]) == (1, 1, 0)
+    assert await _carimbo(db, caso) is None
+    assert _Fake.envios == []
+    assert await _registro(db, chave) == [] and await _sinos(db, chave) == []
+    # o botão (11) vazio fica ligado sem ninguém, como os outros botões: o
+    # "Enviar agora" segue recusando com 422 (o atalho nem deixa clicar)
+    linha = await db.get(ThreemaEnvio, K.DEVOLUCOES_INFORMAR, populate_existing=True)
+    assert linha.ativo is None
+
+
+@pytest.mark.usefixtures("limpar_ouvidoria", "vw_devolucoes")
+async def test_devolucoes_com_gente_na_lista_semente_confere_e_suspenso_para_de_receber(
+    db, monkeypatch, client, auth_as, make_user
+):
+    """Se as listas das Devoluções tiverem gente na hora da semente (hoje não
+    têm), o Cadastro nasce com as mesmas pessoas (o contato externo também),
+    ligado, e cada ponto manda EXATAMENTE para elas; quem for suspenso depois
+    para de receber, embora a lista antiga (a reserva) ainda o tenha."""
+    c = await montar(db, monkeypatch)
+    await _linha_informar(db, "devolucoes", f"{ID['harry']},{ID['cairo_sa']}")
+    await _linha_informar(db, "devolucoes_auto", f"{ID['londres']},{ID['roma']}")
+    minhas = [K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, K.DEVOLUCOES_INFORMAR]
+    await threema_envios.semear(db, fatia="F2", chaves=minhas, aplicar=True)
+    await db.commit()
+    itens = await threema_envios.conferir(db, chaves=minhas)
+    assert [(x.chave, x.situacao) for x in itens] == [(k, "igual") for k in minhas]
+    for k in minhas:
+        assert (await db.get(ThreemaEnvio, k, populate_existing=True)).ativo is None, k
+    auth_as(await make_user(role=UserRole.ADMIN))
+    r = await _botao(client, "devolucoes")
+    assert r.status_code == 200, r.text
+    caso = await _caso_devolucao(db)
+    await _prazo_resposta(db)
+    assert _envios() == [
+        # "cairo sa" ativo, mesmo com o "cairo" suspenso de mesmo ID (M5)
+        (K.DEVOLUCOES_INFORMAR, "cadastro", "devolucoes", [ID["harry"], ID["cairo_sa"]]),
+        (K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, "cadastro", "devolucoes", [ID["londres"], ID["roma"]]),
+    ]
+    assert await _carimbo(db, caso) is not None
+    # suspensos depois da semente: param de receber
+    c.usuarios["harry"].status = UserStatus.SUSPENDED
+    c.usuarios["londres"].status = UserStatus.SUSPENDED
+    await db.commit()
+    threema_envios.limpar_cache()
+    _Fake.envios = []
+    r = await _botao(client, "devolucoes")
+    assert r.status_code == 200, r.text
+    await _caso_devolucao(db, "294866")
+    await _prazo_resposta(db, "294866")
+    assert [e["destinos"] for e in _Fake.envios] == [[ID["cairo_sa"]], [ID["roma"]]]
+    # a lista antiga ainda mandaria para eles
+    assert ID["harry"] in (await threema_envios.legado(K.DEVOLUCOES_INFORMAR, session=db)).ids
+    leg = await threema_envios.legado(K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, session=db)
+    assert ID["londres"] in leg.ids
+
+
+@pytest.mark.usefixtures("vw_devolucoes")
+async def test_operador_das_devolucoes_nao_edita_quem_recebe_e_o_admin_segue_enviando(
+    db, client, auth_as, make_user
+):
+    """O Informar das Devoluções sempre foi só de admin (botão e lista): quem
+    tem `devolucoes:edit` continua sem o botão e não edita quem recebe nem no
+    Informar nem no Cadastro. O admin não grava mais a lista antiga (410), mas
+    o "Enviar agora" segue com ele."""
+    admin, joana, _ = await _pessoas(db)
+    await _linha_informar(db, "devolucoes", ID["harry"])
+    await semeado(db, K.DEVOLUCOES_INFORMAR, joana)
+    await semeado(db, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA, joana)
+    operador = await make_user(
+        role=UserRole.USER, permissions={"devolucoes": {"view": True, "edit": True}}
+    )
+    auth_as(operador)
+    assert (await _botao(client, "devolucoes")).status_code == 403
+    for contexto in ("devolucoes", "devolucoes_auto"):
+        r = await client.put(f"/api/informar/{contexto}", json={"recipients": []})
+        assert r.status_code == 403, (contexto, r.text)
+    for chave in (K.DEVOLUCOES_INFORMAR, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA):
+        r = await client.patch(
+            f"/api/threema/envios/{chave}",
+            json={"destinatarios": [{"tipo": "usuario", "id": str(joana.id)}]},
+        )
+        assert r.status_code == 403, (chave, r.text)
+        r = await client.get(f"/api/threema/envios/{chave}/quem-recebe")
+        assert r.status_code == 403, (chave, r.text)
+    assert _Fake.envios == []
+    auth_as(admin)
+    for contexto in ("devolucoes", "devolucoes_auto"):
+        r = await client.put(f"/api/informar/{contexto}", json={"recipients": [ID["joana"]]})
+        assert r.status_code == 410, (contexto, r.text)
+    r = await client.get("/api/informar/devolucoes")
+    assert r.status_code == 200 and r.json()["recipients"] == [ID["harry"]]
+    r = await _botao(client, "devolucoes")
+    assert r.status_code == 200, r.text
+    assert _envios() == [(K.DEVOLUCOES_INFORMAR, "cadastro", "devolucoes", ["TSTJ0006"])]
+    for chave in (K.DEVOLUCOES_INFORMAR, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA):
+        r = await client.get(f"/api/threema/envios/{chave}/quem-recebe")
+        assert r.status_code == 200, r.text
+        assert r.json()["nomes"] == ["joana c9a"] and "TSTJ0006" not in r.text
 
 
 @pytest.mark.usefixtures("limpar_ouvidoria")

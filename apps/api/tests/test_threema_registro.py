@@ -661,10 +661,9 @@ _MARCAS = {
     ("services/logistica_bling.py", "enviar_threema_em_lote", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     ("routers/logistica.py", "enviar_threema", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     ("routers/logistica.py", "enviar_threema_pedido", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
-    # os Informar ainda não migrados (11 e 28; o mapa contexto → chave
-    # tem teste próprio; os migrados mandam por `_enviar_pelo_cadastro`)
+    # o Informar ainda não migrado (28; o mapa contexto → chave tem teste
+    # próprio; os migrados mandam por `_enviar_pelo_cadastro`)
     ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
-    ("services/devolucao_acao_avisos.py", "run", "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA"): 1,  # 10
     ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
     ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,  # 16
     # 25, 26 e 27 (Margem)
@@ -719,11 +718,16 @@ _PELO_CADASTRO = {
         "vigia_estoque_familia_sweep",
         "K.PRODUTOS_VIGIA_SOMA_FAMILIA",
     ): 1,
-    # F2/C9a e C9b: o "Enviar agora" dos Informar migrados (2, 3 e 17, a
-    # chave do contexto; os não migrados seguem na marca de `enviar`) e os
-    # prazos da Amazon (4)
+    # F2/C9a, C9b e C9c: o "Enviar agora" dos Informar migrados (2, 3, 11 e
+    # 17, a chave do contexto; o não migrado segue na marca de `enviar`), os
+    # prazos da Amazon (4) e o prazo de resposta das Devoluções (10)
     ("routers/informar.py", "_enviar_pelo_cadastro", "chave"): 1,
     ("services/logistica_amazon_avisos.py", "run", "K.LOGISTICA_AMAZON_PRAZOS"): 1,
+    (
+        "services/devolucao_acao_avisos.py",
+        "run",
+        "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA",
+    ): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }
