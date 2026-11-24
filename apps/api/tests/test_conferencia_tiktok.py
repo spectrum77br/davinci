@@ -26,7 +26,7 @@ import respx
 from app.models import IntegrationPlatform, ProductLink
 from app.services.marketplaces.tiktok import TIKTOK_BASE_URL, TikTokClient
 from app.services.pricing.conferencia_leitores import LEITORES
-from app.services.pricing.conferencia_tiktok import ler_precos_tiktok
+from app.services.pricing.conferencia_tiktok import ATRIBUTO_SITUACAO_TIKTOK, ler_precos_tiktok
 
 pytestmark = pytest.mark.asyncio
 
@@ -389,6 +389,84 @@ async def test_produto_excluido_e_desativado() -> None:
     assert leituras[apagado.id].ativo is False
     assert leituras[pausado.id].preco == Decimal("100.00")
     assert leituras[pausado.id].ativo is False
+    assert leituras[pausado.id].motivo == "pausado no TikTok"
+
+
+async def test_rascunho_em_revisao_e_reprovado_nao_estao_a_venda() -> None:
+    """M-31, exemplo A (uranyx wp53 24.128, 24/11): o rascunho sem promoção
+    tinha o preço cheio lido e o `ativo` vazio — acendia o (!) e o cartão."""
+    cliente = ClienteFalso(
+        produtos={
+            "VENDA": _produto("VENDA", {"S1": "1462.00"}),
+            "RASCUNHO": _produto("RASCUNHO", {"S1": "1844.70"}, status="DRAFT"),
+            "REVISAO": _produto("REVISAO", {"S1": "100.00"}, status="PENDING"),
+            "REPROVADO": _produto("REPROVADO", {"S1": "100.00"}, status="FAILED"),
+        }
+    )
+    venda, rascunho = _vinculo("VENDA", "S1"), _vinculo("RASCUNHO", "S1")
+    revisao, reprovado = _vinculo("REVISAO", "S1"), _vinculo("REPROVADO", "S1")
+
+    leituras = await ler_precos_tiktok(cliente, [venda, rascunho, revisao, reprovado])
+
+    assert (leituras[venda.id].ativo, leituras[venda.id].motivo) == (True, "sem promoção ativa")
+    assert leituras[rascunho.id].preco == Decimal("1844.70")
+    assert (leituras[rascunho.id].ativo, leituras[rascunho.id].motivo) == (
+        False,
+        "rascunho no TikTok",
+    )
+    assert (leituras[revisao.id].ativo, leituras[revisao.id].motivo) == (
+        False,
+        "em revisão no TikTok",
+    )
+    assert (leituras[reprovado.id].ativo, leituras[reprovado.id].motivo) == (
+        False,
+        "reprovado no TikTok",
+    )
+
+
+async def test_em_promocao_usa_a_situacao_guardada_dos_anuncios_importados() -> None:
+    """M-31: o SKU em promoção não passa pelo GET do produto — a leitura não
+    diz se está à venda. Vale a situação guardada na lista de anúncios."""
+    cliente = ClienteFalso(
+        [
+            _por_sku("A1", "FIXED_PRICE", "P1", {"S1": "299.00"}),
+            _por_sku("A2", "FIXED_PRICE", "P2", {"S1": "299.00"}),
+            _por_sku("A3", "FIXED_PRICE", "P3", {"S1": "299.00"}),
+            _por_sku("A4", "FIXED_PRICE", "P4", {"S1": "299.00"}),
+        ]
+    )
+    a_venda, rascunho = _vinculo("P1", "S1"), _vinculo("P2", "S1")
+    pausado, sem_situacao = _vinculo("P3", "S1"), _vinculo("P4", "S1")
+    setattr(a_venda, ATRIBUTO_SITUACAO_TIKTOK, "ACTIVATE")
+    setattr(rascunho, ATRIBUTO_SITUACAO_TIKTOK, "DRAFT")
+    setattr(pausado, ATRIBUTO_SITUACAO_TIKTOK, "SELLER_DEACTIVATED")
+
+    leituras = await ler_precos_tiktok(cliente, [a_venda, rascunho, pausado, sem_situacao])
+
+    assert {leituras[v.id].preco for v in (a_venda, rascunho, pausado)} == {Decimal("299.00")}
+    assert (leituras[a_venda.id].ativo, leituras[a_venda.id].motivo) == (True, None)
+    assert (leituras[rascunho.id].ativo, leituras[rascunho.id].motivo) == (
+        False,
+        "rascunho no TikTok",
+    )
+    assert (leituras[pausado.id].ativo, leituras[pausado.id].motivo) == (
+        False,
+        "pausado no TikTok",
+    )
+    # Sem situação guardada: não se sabe (conta como à venda na tela).
+    assert leituras[sem_situacao.id].ativo is None
+    assert cliente.chamadas_produto == []
+
+
+async def test_status_lido_agora_vale_mais_que_o_guardado() -> None:
+    cliente = ClienteFalso(produtos={"P1": _produto("P1", {"S1": "100.00"})})
+    v = _vinculo("P1", "S1")
+    # A lista guardada ainda diz rascunho; o TikTok diz agora que está à venda.
+    setattr(v, ATRIBUTO_SITUACAO_TIKTOK, "DRAFT")
+
+    leitura = (await ler_precos_tiktok(cliente, [v]))[v.id]
+
+    assert (leitura.ativo, leitura.motivo) == (True, "sem promoção ativa")
 
 
 async def test_vinculo_sem_produto_nao_vai_ao_tiktok() -> None:

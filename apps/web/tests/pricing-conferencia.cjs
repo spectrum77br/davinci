@@ -221,25 +221,86 @@ assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [
   bloqueio: null, texto: 'Envia para MLB5' } } }), ['Anúncio de catálogo MLB9 em revisão'])
 assert.deepEqual(cartao({ celula: { cell_status: 'auto', catalogo: { anuncios: [anCat('MLB9', 'closed', 'encerrado')],
   bloqueio: 'encerrado', texto: null } } }), ['Anúncio de catálogo MLB9 encerrado'])
-// c) Kit: o que a conferência leu ao vivo — basta um inativo, o balão diz qual.
+// c) Kit (M-31, 24/11/2026): só anúncio À VENDA conta. Com algum à venda, o
+// inativo/excluído/rascunho não acende nada; sem nenhum à venda, um motivo só
+// ("Nenhum anúncio à venda nesta conta") e embaixo a situação de cada um.
+const NENHUM_A_VENDA = 'Nenhum anúncio à venda nesta conta'
+assert.equal(L.CARTAO_NENHUM_A_VENDA, NENHUM_A_VENDA)
 const inativo = (anuncio, motivo = null, preco = 1000) => ({ ...a(preco, anuncio), ativo: false, motivo })
-const c1 = cartao({ conferida: conf('conferida', [a(1000, 'MLB1'), inativo('MLB2')]) })
-assert.equal(c1.length, 1)
-assert.match(c1[0], /^Anúncio MLB2: inativo no marketplace/)
+assert.deepEqual(cartao({ conferida: conf('conferida', [a(1000, 'MLB1'), inativo('MLB2')]) }), [])
+assert.deepEqual(cartao({ conferida: conf('conferida', [inativo('MLB2')]) }),
+  [NENHUM_A_VENDA, 'Anúncio MLB2: inativo no marketplace (pausado, em revisão ou fora do ar)'])
 assert.deepEqual(cartao({ conferida: conf('conferida', [inativo('MLB3', 'anúncio encerrado — o envio pula', null)]) }),
-  ['Anúncio MLB3: anúncio encerrado'])
+  [NENHUM_A_VENDA, 'Anúncio MLB3: anúncio encerrado'])
 assert.deepEqual(cartao({ conferida: conf('conferida', [{ ...a(null, '123'), ativo: null, motivo: 'anúncio excluído na Shopee' }]) }),
-  ['Anúncio 123: anúncio excluído na Shopee'])
+  [NENHUM_A_VENDA, 'Anúncio 123: anúncio excluído na Shopee'])
 assert.deepEqual(cartao({ conferida: conf('conferida', [{ ...inativo('MLB4', 'removido por moderação — o envio pula', null), variacao: 'V1' }]) }),
-  ['Anúncio MLB4 (variação V1): removido por moderação'])
-// Sem preço por outro motivo (não lido, promoção não suportada): não é inativo.
+  [NENHUM_A_VENDA, 'Anúncio MLB4 (variação V1): removido por moderação'])
+// TikTok: a situação que o leitor grava (rascunho, em revisão, reprovado, pausado).
+assert.deepEqual(cartao({ conferida: conf('conferida', [
+  { ...inativo('T1', 'rascunho no TikTok', 1844.7), variacao: 'S1' },
+  inativo('T2', 'em revisão no TikTok'), inativo('T3', 'reprovado no TikTok'),
+]) }), [NENHUM_A_VENDA, 'Anúncio T1 (variação S1): rascunho no TikTok', 'Anúncio T2: em revisão no TikTok',
+  'Anúncio T3: reprovado no TikTok'])
+// Sem preço por outro motivo (não lido, promoção não suportada): está à venda.
 assert.deepEqual(cartao({ conferida: conf('conferida', [{ ...a(null, 'T9'), motivo: 'em Oferta Relâmpago — o envio pula, não conferido' }]) }), [])
+// Leitura sem anúncio (erro na conta, sem anúncio): o "nenhum à venda" não aparece.
+assert.deepEqual(cartao({ conferida: conf('conferida', []) }), [])
+assert.deepEqual(cartao({ conferida: conf('erro_conta', [{ ...a(null, 'X1'), ativo: null }], 'recusou (403)') }), [])
 // "Fora do envio" da conferência que é anúncio parado conta; o resto não.
 assert.deepEqual(cartao({ conferida: conf('sem_anuncio', [], 'MLB1 pausado — não envia') }), ['MLB1 pausado — não envia'])
-// Muitos inativos: os 3 primeiros e "e mais".
+// Muitos fora de venda: o motivo, os 3 primeiros e "e mais".
 const muitos = cartao({ conferida: conf('conferida', ['A', 'B', 'C', 'D', 'E'].map((x) => inativo(x))) })
-assert.equal(muitos.length, 4)
-assert.equal(muitos[3], '… e mais 2 anúncio(s) inativo(s)')
+assert.equal(muitos.length, 5)
+assert.equal(muitos[0], NENHUM_A_VENDA)
+assert.equal(muitos[4], '… e mais 2 anúncio(s) fora de venda')
+// Muitos fora de venda, mas um à venda: nada.
+assert.deepEqual(cartao({ conferida: conf('conferida', [...['A', 'B', 'C', 'D'].map((x) => inativo(x)), a(1000, 'OK')]) }), [])
+
+// O (!) (M-31): só os anúncios à venda. Exemplos do pedido (conferidos em 24/11).
+{
+  const mgCel = L.margemDaResposta({ department: 'celular', margem_pct: 5, geral_ligada: true, por_produto_ligada: true, produtos: {} }, 'celular')
+  const celConf = (anuncios) => ({ pricing_account_id: 'C1', pricing_product_id: 'P1', preco_tabela: null, situacao: 'conferida',
+    motivo: null, conferido_em: '2026-11-24T12:00:00Z', job_id: 'J1', anuncios })
+  const gradeCom = (preco) => () => ({ pricing_account_id: 'C1', pricing_product_id: 'P1', price: preco, source: 'calc', cell_status: 'auto' })
+  const tudo = (tabela, anuncios) => {
+    const c = celConf(anuncios)
+    const divs = L.divergenciasDaConferencia([c], mgCel, gradeCom(tabela))
+    const d = divs.get('P1::C1') ?? null
+    return { d, cartao: cartao({ conferida: c, divergencia: d }) }
+  }
+  // A) uranyx wp53 24.128, mini TikTok kit 1, Tabela 1462: à venda a 1462 e o
+  // rascunho lido a 1.844,70 → sem (!) e sem cartão.
+  const A = tudo(1462, [
+    { anuncio: '1735492791114106582', variacao: 'dg023.ra', preco: 1462, preco_promocional: null, ativo: true, motivo: null },
+    { anuncio: '1738102761217623766', variacao: 'dg023.ra', preco: 1844.7, preco_promocional: null, ativo: false, motivo: 'rascunho no TikTok' },
+  ])
+  assert.equal(A.d, null)
+  assert.deepEqual(A.cartao, [])
+  // B) uranyx F105 12.64.64, barbosa Shopee kit 1, Tabela 1089: dois à venda a
+  // 1089 e um excluído na Shopee → sem cartão.
+  const B = tudo(1089, [a(1089, '1'), a(1089, '2'),
+    { ...a(null, '58255874237'), ativo: false, motivo: 'anúncio excluído na Shopee' }])
+  assert.equal(B.d, null)
+  assert.deepEqual(B.cartao, [])
+  // C) Todos inativos ou excluídos: o cartão continua, sem (!) (mesmo com o
+  // preço lido fora da margem).
+  const C = tudo(1000, [inativo('X1', 'pausado no TikTok', 1500), { ...a(null, 'X2'), ativo: false, motivo: 'produto excluído no TikTok' }])
+  assert.equal(C.d, null)
+  assert.deepEqual(C.cartao, [NENHUM_A_VENDA, 'Anúncio X1: pausado no TikTok', 'Anúncio X2: produto excluído no TikTok'])
+  // D) À venda fora da margem: o (!) e o cartão continuam; o fora de venda não
+  // entra na conta dos anúncios do balão.
+  const D = tudo(1600, [a(1743, 'W1'), inativo('W2', 'rascunho no TikTok', 1600), { ...a(null, 'W3'), ativo: true }])
+  assert.deepEqual(D.d.fora.map((x) => x.anuncio), ['W1'])
+  assert.deepEqual([D.d.anuncios, D.d.naoLidos], [2, 1])
+  assert.equal(D.cartao.length, 1)
+  assert.match(D.cartao[0], /^Preço do anúncio fora da margem de 5%: anúncio 1743 × Tabela 1600/)
+  // À venda: ativo vazio conta; ativo false ou sem preço por exclusão, não.
+  assert.equal(L.anuncioAVenda({ ...a(100), ativo: null }), true)
+  assert.equal(L.anuncioAVenda({ ...a(100), ativo: false }), false)
+  assert.equal(L.anuncioAVenda({ ...a(null), ativo: null, motivo: 'anúncio encerrado — o envio pula' }), false)
+  assert.equal(L.anuncioAVenda({ ...a(null), ativo: null, motivo: 'anúncio não encontrado' }), true)
+}
 
 // d) O último envio deu erro.
 assert.deepEqual(cartao({ celula: { cell_status: 'error', catalogo: null } }), [ERRO_ENVIO])
@@ -251,12 +312,17 @@ assert.deepEqual(cartao({ divergencia: div }),
 assert.match(cartao({ divergencia: { ...div, margem: 12.5, fora: [a(1031, 'B0X'), a(1300, 'B0Y')] } })[0],
   /^Preço do anúncio fora da margem de 12,5%: .* \(e mais 1\)$/)
 
-// Vários motivos juntos, na ordem a–e (o balão junta com quebra de linha).
+// Vários motivos juntos, na ordem a–e (o balão junta com quebra de linha). O
+// inativo ao lado de um à venda não entra (M-31).
 assert.deepEqual(cartao({
   celula: { cell_status: 'error', catalogo: null },
   conferida: conf('conferida', [a(1031, 'B0X'), inativo('B0Z')]),
   divergencia: div,
-}).map((m) => m.slice(0, 22)), ['Anúncio B0Z: inativo n', ERRO_ENVIO.slice(0, 22), 'Preço do anúncio fora '])
+}).map((m) => m.slice(0, 22)), [ERRO_ENVIO.slice(0, 22), 'Preço do anúncio fora '])
+assert.deepEqual(cartao({
+  celula: { cell_status: 'error', catalogo: null },
+  conferida: conf('conferida', [inativo('B0Z')]),
+}).map((m) => m.slice(0, 22)), [NENHUM_A_VENDA.slice(0, 22), 'Anúncio B0Z: inativo n', ERRO_ENVIO.slice(0, 22)])
 console.log('pricing conferencia cartão ok')
 
 // O template: o cartão (à esquerda do aviãozinho, espaço sempre reservado) e

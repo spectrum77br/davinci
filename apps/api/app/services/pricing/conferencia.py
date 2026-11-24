@@ -92,6 +92,8 @@ from app.models import (
     BackgroundJobType,
     CellStatus,
     Integration,
+    IntegrationPlatform,
+    Listing,
     PricingAccount,
     PricingConferencia,
     PricingOverride,
@@ -106,6 +108,7 @@ from app.models.pricing_conferencia import (
     SITUACAO_SEM_ANUNCIO,
     SITUACOES,
 )
+from app.services import vinculo_saude
 from app.services.atendimento.clientes import cliente_da_integracao
 from app.services.pricing import conferencia_leitores
 from app.services.pricing.anuncios import (
@@ -140,6 +143,11 @@ MODULOS_DE_LEITOR = (
 # O leitor da Amazon endereça o anúncio pelo SKU do PRODUTO vinculado, como o
 # envio (`conferencia_amazon.sku_do_envio`): o núcleo põe o SKU em cada vínculo.
 ATRIBUTO_SKU_DO_PRODUTO = "sku_do_produto"
+# M-31: o TikTok nem sempre diz na leitura se o produto está à venda (SKU em
+# promoção não passa pelo GET do produto). O núcleo põe em cada vínculo do
+# TikTok o status guardado na lista de anúncios importados (`listings`), e o
+# leitor usa quando a leitura não disse (`conferencia_tiktok`, mesmo nome).
+ATRIBUTO_SITUACAO_TIKTOK = "situacao_tiktok"
 
 CONTAS_AO_MESMO_TEMPO = 3
 # Plataformas lidas uma loja por vez: a cota de chamadas da Shopee é do
@@ -497,10 +505,46 @@ async def _carregar_vinculos(
         .outerjoin(Product, Product.id == ProductLink.product_id)
         .where(ProductLink.integration_id.in_(ids))
     )
+    tiktok: list[ProductLink] = []
     for link, sku in linhas.all():
         setattr(link, ATRIBUTO_SKU_DO_PRODUTO, sku or None)
+        if link.platform == IntegrationPlatform.TIKTOK:
+            tiktok.append(link)
         por_integ[link.integration_id].adicionar(link, sku)
+    if tiktok:
+        situacoes = await _situacoes_tiktok_guardadas(
+            session, {lk.integration_id for lk in tiktok}
+        )
+        for link in tiktok:
+            setattr(
+                link,
+                ATRIBUTO_SITUACAO_TIKTOK,
+                situacoes.get((link.integration_id, (link.external_id or "").strip())),
+            )
     return por_integ
+
+
+async def _situacoes_tiktok_guardadas(
+    session: AsyncSession, integracao_ids: set[UUID]
+) -> dict[tuple[UUID, str], str]:
+    """M-31: (integração, product_id) → status cru do TikTok (ACTIVATE, DRAFT,
+    PENDING, FAILED, SELLER_DEACTIVATED...) guardado na lista de anúncios
+    importados (`listings.raw_data` → `status`, uma linha por produto). SÓ
+    LEITURA do banco."""
+    if not integracao_ids:
+        return {}
+    linhas = await session.execute(
+        select(Listing.integration_id, Listing.external_id, Listing.raw_data["status"].astext)
+        .where(
+            Listing.integration_id.in_(list(integracao_ids)),
+            Listing.platform == IntegrationPlatform.TIKTOK,
+        )
+    )
+    return {
+        (integ, (ext or "").strip()): status.strip().upper()
+        for integ, ext, status in linhas.all()
+        if status and status.strip()
+    }
 
 
 def _motivo_sem_anuncio(canal: str, resolucao: Resolucao, *, marca_nao_lida: bool) -> str:
@@ -714,13 +758,26 @@ def _numero(valor: Decimal | None) -> float | None:
 def _anuncio(link: ProductLink, leitura: LeituraAnuncio | None, *, lida: bool) -> dict[str, Any]:
     if not isinstance(leitura, LeituraAnuncio):
         leitura = None
+    ativo = leitura.ativo if leitura else None
+    motivo = leitura.motivo if leitura else (MOTIVO_SEM_LEITURA if lida else None)
+    # M-31: vínculo já marcado como morto (excluído, encerrado, bloqueado) não
+    # está à venda — a menos que a leitura de agora diga que está. Duplicado
+    # (migration 0333) é o mesmo anúncio de outro vínculo: não entra aqui.
+    if (
+        lida
+        and link.morto_desde is not None
+        and ativo is not True
+        and not vinculo_saude.eh_duplicado(link.morto_motivo)
+    ):
+        ativo = False
+        motivo = link.morto_motivo or motivo
     return {
         "anuncio": link.external_id,
         "variacao": link.variation_id,
         "preco": _numero(leitura.preco) if leitura else None,
         "preco_promocional": _numero(leitura.preco_promocional) if leitura else None,
-        "ativo": leitura.ativo if leitura else None,
-        "motivo": leitura.motivo if leitura else (MOTIVO_SEM_LEITURA if lida else None),
+        "ativo": ativo,
+        "motivo": motivo,
     }
 
 

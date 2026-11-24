@@ -148,9 +148,35 @@ export function celulaComparavel<C extends CelulaCartao>(c: C | null | undefined
   return c
 }
 
+// ---------- Anúncio à venda (M-31, 24/11/2026)
+// Só anúncio À VENDA conta para comparar preço, acender o cartão vermelho e
+// mostrar o (!). Não está à venda: o leitor disse que não está ativo
+// (rascunho, pausado, em revisão, reprovado, excluído, vínculo morto...), ou
+// veio sem preço porque foi encerrado/excluído/moderado. `ativo` vazio (o
+// leitor não sabe) conta como à venda.
+// Texto do leitor que é anúncio fora de venda (ML encerrado/moderado,
+// Shopee/TikTok excluído, TikTok rascunho/reprovado/congelado/desativado,
+// vínculo morto "não existe mais"/"bloqueado").
+export const PADRAO_ANUNCIO_FORA_DE_VENDA = /pausad|em revis|encerrad|exclu[íi]d|modera|rascunho|reprovad|removid|banid|bloquead|congelad|desativad|n[ãa]o existe mais/i
+
+export function anuncioAVenda(a: AnuncioConferido): boolean {
+  if (a.ativo === false) return false
+  return !(a.preco == null && a.motivo != null && PADRAO_ANUNCIO_FORA_DE_VENDA.test(a.motivo))
+}
+
+// A situação do anúncio fora de venda, para o balão do cartão.
+export function situacaoForaDeVenda(a: AnuncioConferido): string {
+  const variacao = a.variacao ? ` (variação ${a.variacao})` : ''
+  const detalhe = a.motivo && PADRAO_ANUNCIO_FORA_DE_VENDA.test(a.motivo)
+    ? a.motivo.replace(/\s*—\s*o envio pula$/, '')
+    : 'inativo no marketplace (pausado, em revisão ou fora do ar)'
+  return `Anúncio ${a.anuncio}${variacao}: ${detalhe}`
+}
+
 // Compara com o preço ATUAL da célula (o da Tabela agora), não com o da hora
 // da conferência, e com a margem da linha. Calculado uma vez para a grade
-// inteira (a célula só consulta o mapa). Chave: `produto::conta`.
+// inteira (a célula só consulta o mapa). Chave: `produto::conta`. Só os
+// anúncios à venda (M-31).
 export function divergenciasDaConferencia(
   celulas: readonly CelulaConferida[],
   mg: MargemConferencia | null | undefined,
@@ -165,14 +191,15 @@ export function divergenciasDaConferencia(
     const c = celulaComparavel(celulaDe(conf.pricing_product_id, conf.pricing_account_id))
     if (!c) continue
     const tabela = Number(c.price)
-    const fora = anunciosForaDaMargem(conf.anuncios, tabela, margemLinha)
+    const aVenda = conf.anuncios.filter(anuncioAVenda)
+    const fora = anunciosForaDaMargem(aVenda, tabela, margemLinha)
     if (fora.length) {
       m.set(`${conf.pricing_product_id}::${conf.pricing_account_id}`, {
         tabela,
         fora,
         conferidoEm: conf.conferido_em,
-        naoLidos: conf.anuncios.filter((a) => a.preco == null).length,
-        anuncios: conf.anuncios.length,
+        naoLidos: aVenda.filter((a) => a.preco == null).length,
+        anuncios: aVenda.length,
         margem: margemLinha,
       })
     }
@@ -217,8 +244,11 @@ export const MOTIVO_ANUNCIO: Record<string, string> = {
 //   a) a conta não tem integração no DaVinci (na coluna de catálogo, a conta
 //      de kit dela) — token vencido não conta;
 //   b) não há anúncio vinculado (não repete quando já é o a);
-//   c) há anúncio vinculado inativo (pausado, em revisão, encerrado, inativo
-//      ou excluído) — basta um, e o balão diz qual;
+//   c) há anúncio de catálogo vinculado inativo (pausado, em revisão,
+//      encerrado) — basta um, e o balão diz qual; na conferência (M-31),
+//      só quando NENHUM anúncio da célula está à venda ("Nenhum anúncio à
+//      venda nesta conta", com a situação de cada um embaixo) — com algum à
+//      venda, os outros não acendem nada;
 //   d) o último envio de preço deu erro;
 //   e) o preço do anúncio está fora da margem (a do produto ou a Geral).
 // Vem do /grid (integração, cell_status, bloqueio do catálogo) e da última
@@ -237,6 +267,8 @@ export type EntradaCartao = {
 export const CARTAO_SEM_INTEGRACAO = 'Conta sem integração no DaVinci'
 export const CARTAO_SEM_ANUNCIO = 'Sem anúncio vinculado nesta conta'
 export const CARTAO_ERRO_ENVIO = 'O último envio de preço deu erro'
+// M-31: a célula tem anúncio vinculado, mas nenhum à venda.
+export const CARTAO_NENHUM_A_VENDA = 'Nenhum anúncio à venda nesta conta'
 // Anúncios inativos listados no balão; o resto vira "e mais N".
 export const CARTAO_INATIVOS_NO_BALAO = 3
 export const BLOQUEIOS_ANUNCIO_INATIVO = new Set(['pausado', 'em_revisao', 'encerrado'])
@@ -289,17 +321,6 @@ export function motivosDoCartao(e: EntradaCartao): string[] {
   if (!inativos.length && cat?.bloqueio && BLOQUEIOS_ANUNCIO_INATIVO.has(cat.bloqueio)) {
     inativos.push(`Anúncio de catálogo ${MOTIVO_ANUNCIO[cat.bloqueio] ?? cat.bloqueio}`)
   }
-  // O que a conferência leu ao vivo: inativo, ou sem preço porque foi
-  // encerrado/excluído/moderado.
-  for (const a of conf?.anuncios ?? []) {
-    const motivoInativo = a.motivo && PADRAO_ANUNCIO_INATIVO.test(a.motivo) ? a.motivo : null
-    if (a.ativo !== false && !(a.preco == null && motivoInativo)) continue
-    const variacao = a.variacao ? ` (variação ${a.variacao})` : ''
-    const detalhe = motivoInativo
-      ? motivoInativo.replace(/\s*—\s*o envio pula$/, '')
-      : 'inativo no marketplace (pausado, em revisão ou fora do ar)'
-    inativos.push(`Anúncio ${a.anuncio}${variacao}: ${detalhe}`)
-  }
   // "Fora do envio" da conferência: só pausado/em revisão/encerrado é motivo
   // (sincronizado, mesmo anúncio, só catálogo... são regra do envio).
   if (!cat && conf?.situacao === 'sem_anuncio' && tipoSemAnuncio(conf.motivo) === 'fora_do_envio'
@@ -309,6 +330,18 @@ export function motivosDoCartao(e: EntradaCartao): string[] {
   for (const m of inativos.slice(0, CARTAO_INATIVOS_NO_BALAO)) somar(m)
   if (inativos.length > CARTAO_INATIVOS_NO_BALAO) {
     somar(`… e mais ${inativos.length - CARTAO_INATIVOS_NO_BALAO} anúncio(s) inativo(s)`)
+  }
+  // O que a conferência leu ao vivo (M-31): com algum anúncio à venda, os
+  // outros (rascunho, pausado, excluído...) não acendem nada — o cartão e o
+  // (!) dependem só dos à venda. Sem nenhum à venda: um motivo só, e embaixo
+  // cada anúncio com a situação dele.
+  const lidos = conf?.anuncios ?? []
+  if (lidos.length && !lidos.some(anuncioAVenda)) {
+    somar(CARTAO_NENHUM_A_VENDA)
+    for (const a of lidos.slice(0, CARTAO_INATIVOS_NO_BALAO)) somar(situacaoForaDeVenda(a))
+    if (lidos.length > CARTAO_INATIVOS_NO_BALAO) {
+      somar(`… e mais ${lidos.length - CARTAO_INATIVOS_NO_BALAO} anúncio(s) fora de venda`)
+    }
   }
 
   // d) O último envio deu erro (o texto do erro não fica guardado).

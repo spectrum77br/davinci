@@ -198,28 +198,53 @@ const contarPorConta = (cartoes, contas) => {
   return m
 }
 
+// M-31 (24/11/2026): só anúncio À VENDA conta no cartão e no (!). A regra
+// mudou de propósito para o anúncio fora de venda (rascunho, pausado,
+// excluído): a comparação com a cópia de antes da M-22 usa a conferência com
+// todos os anúncios à venda (aí as duas regras têm de dar o mesmo); com os
+// anúncios como vieram, a página e as Pendências do Faturamento continuam
+// iguais entre si (a mesma regra do módulo).
+const soAVenda = (conferencia) => (conferencia == null ? conferencia : {
+  ...conferencia,
+  celulas: conferencia.celulas.map((cel) => ({
+    ...cel,
+    anuncios: cel.anuncios.map((a) => (L.anuncioAVenda(a) ? a : { ...a, ativo: true, motivo: null })),
+  })),
+})
 let comCartao = 0
 let semVinculoTirado = 0
+let foraDeVenda = 0
 for (let n = 0; n < 600; n++) {
   const c = sortearCenario(n)
-  const antes = montarAntes(ref(clone(c.grid)), ref(clone(c.conferencia)), ref(null), ref(c.dep), ref(true), ref([]),
+  const conferenciaAVenda = soAVenda(c.conferencia)
+  const antes = montarAntes(ref(clone(c.grid)), ref(clone(conferenciaAVenda)), ref(null), ref(c.dep), ref(true), ref([]),
     ref(c.dep), fmtPctAntes)
   // A grade de agora, no mesmo estado (o aplicarSemVinculo da página não mudou).
   const gradeAgora = clone(antes.grade)
   const margemAgora = c.conferencia ? L.margemDaResposta(c.conferencia.margem, c.dep) : null
-  const agora = montarAgora(ref(gradeAgora), ref(clone(c.conferencia)), ref(margemAgora), ref(c.dep), ref(true), ref([]), L)
+  const agora = montarAgora(ref(gradeAgora), ref(clone(conferenciaAVenda)), ref(margemAgora), ref(c.dep), ref(true), ref([]), L)
   assert.deepEqual([...agora.divergencias], [...antes.divergencias], `cenário ${n}: (!) igual`)
   assert.deepEqual([...agora.cartoes], [...antes.cartoes], `cenário ${n}: cartões iguais (mesmos motivos)`)
   // O Faturamento: a grade como veio do /grid e a conferência, sem a página.
-  const porConta = L.cartoesPorConta(clone(c.grid), clone(c.conferencia), c.dep)
+  const porConta = L.cartoesPorConta(clone(c.grid), clone(conferenciaAVenda), c.dep)
   assert.deepEqual([...porConta], [...contarPorConta(antes.cartoes, c.grid.accounts)], `cenário ${n}: Pendências = cartões da grade`)
+  // Com os anúncios fora de venda: a página e o Faturamento pela mesma regra.
+  const agoraTodos = montarAgora(ref(clone(antes.grade)), ref(clone(c.conferencia)), ref(margemAgora), ref(c.dep), ref(true), ref([]), L)
+  const porContaTodos = L.cartoesPorConta(clone(c.grid), clone(c.conferencia), c.dep)
+  assert.deepEqual([...porContaTodos], [...contarPorConta(agoraTodos.cartoes, c.grid.accounts)],
+    `cenário ${n}: Pendências = cartões da grade (com anúncio fora de venda)`)
+  for (const d of agoraTodos.divergencias.values()) {
+    assert.ok(d.fora.every(L.anuncioAVenda), `cenário ${n}: o (!) só olha anúncio à venda`)
+  }
+  for (const cel of c.conferencia?.celulas ?? []) foraDeVenda += cel.anuncios.filter((a) => !L.anuncioAVenda(a)).length
   comCartao += antes.cartoes.size
   semVinculoTirado += c.grid.cells.filter((x) => x.cell_status === 'no_link').length
     - antes.grade.cells.filter((x) => x.cell_status === 'no_link').length
 }
 assert.ok(comCartao > 1000, `os sorteios têm cartões de verdade (${comCartao})`)
 assert.ok(semVinculoTirado > 20, 'e casos de "sem vínculo" vencido')
-console.log(`pricing-cartao-compartilhado: 600 grades sorteadas, ${comCartao} cartões — iguais aos de antes da M-22`)
+assert.ok(foraDeVenda > 100, `e anúncios fora de venda (${foraDeVenda})`)
+console.log(`pricing-cartao-compartilhado: 600 grades sorteadas, ${comCartao} cartões — iguais aos de antes da M-22 (anúncios à venda)`)
 
 // ---------------------------------------------------------------- casos à mão
 {

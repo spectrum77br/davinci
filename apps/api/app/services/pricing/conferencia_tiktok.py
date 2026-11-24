@@ -24,10 +24,19 @@ loja tem como ser conferido. O detalhe de UMA promoção que não veio (o
 cliente tenta de novo a falha passageira) não derruba a loja: o SKU achado
 nas outras confere, e o que está fora delas fica "promoção da loja não lida"
 (ele pode estar justo na que faltou).
+
+M-31 (24/11/2026): só anúncio À VENDA conta na Tabela (cartão vermelho e
+"(!)"). O leitor diz se o produto está à venda (`ativo`): pelo status do GET
+do produto e, quando a leitura não traz o status (SKU em promoção), pela
+situação que o DaVinci já guarda nos anúncios importados (`listings.raw_data`
+→ `status`, que o núcleo põe no vínculo em `ATRIBUTO_SITUACAO_TIKTOK`).
+ACTIVATE = à venda; rascunho, em revisão, reprovado, pausado, desativado,
+congelado e excluído = não está à venda (`ativo=False`, o motivo diz qual).
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -51,8 +60,20 @@ _MOEDA = "BRL"
 _TETO_INTEIRO_REAIS = Decimal("100000")
 # `status` do produto (API 202309; LIVE/ACTIVE das versões antigas).
 _STATUS_ATIVO = frozenset({"ACTIVATE", "LIVE", "ACTIVE"})
-_STATUS_INATIVO = frozenset({"SELLER_DEACTIVATED", "PLATFORM_DEACTIVATED", "FREEZE", "DELETED"})
+# M-31: o que não está à venda → a situação que a tela mostra.
+SITUACAO_FORA_DE_VENDA = {
+    "DRAFT": "rascunho no TikTok",
+    "PENDING": "em revisão no TikTok",
+    "FAILED": "reprovado no TikTok",
+    "SELLER_DEACTIVATED": "pausado no TikTok",
+    "PLATFORM_DEACTIVATED": "desativado pelo TikTok",
+    "FREEZE": "congelado no TikTok",
+    "DELETED": "produto excluído no TikTok",
+}
 _STATUS_APAGADO = "DELETED"
+# M-31: o vínculo chega com o status guardado na lista de anúncios importados
+# (o núcleo, `conferencia._carregar_vinculos`, põe; o mesmo nome lá).
+ATRIBUTO_SITUACAO_TIKTOK = "situacao_tiktok"
 # Recusa da CONTA na leitura do produto (HTTP 401/403, token vencido mesmo
 # depois da renovação — `_EXPIRED_CREDS_CODES` do cliente —, falta de escopo
 # 105005): levanta, e a conferência marca a conta inteira.
@@ -101,7 +122,30 @@ async def ler_precos_tiktok(
                 if produto is not None
                 else LeituraAnuncio(preco=None, motivo=motivo)
             )
+
+    # M-31: a leitura que não disse se está à venda usa a situação guardada.
+    for vinculo, _produto_id, _sku_id in a_ler:
+        leitura = leituras.get(vinculo.id)
+        if leitura is not None:
+            leituras[vinculo.id] = com_situacao_guardada(
+                leitura, getattr(vinculo, ATRIBUTO_SITUACAO_TIKTOK, None)
+            )
     return leituras
+
+
+def com_situacao_guardada(leitura: LeituraAnuncio, guardada: str | None) -> LeituraAnuncio:
+    """M-31: a leitura com o `ativo` da situação guardada do anúncio, quando o
+    TikTok não disse agora (`ativo` None — ex.: SKU em promoção, sem o GET do
+    produto). O status lido agora vale mais que o guardado."""
+    if leitura.ativo is not None:
+        return leitura
+    status = (guardada or "").strip().upper()
+    if status in _STATUS_ATIVO:
+        return replace(leitura, ativo=True)
+    situacao = SITUACAO_FORA_DE_VENDA.get(status)
+    if situacao is not None:
+        return replace(leitura, ativo=False, motivo=situacao)
+    return leitura
 
 
 def _pela_promocao(
@@ -193,7 +237,9 @@ def _pelo_preco_base(produto: dict, sku_id: str) -> LeituraAnuncio:
     status = str(produto.get("status") or "").strip().upper()
     ativo = _ativo(status)
     if status == _STATUS_APAGADO:
-        return LeituraAnuncio(preco=None, ativo=False, motivo="produto excluído no TikTok")
+        return LeituraAnuncio(preco=None, ativo=False, motivo=SITUACAO_FORA_DE_VENDA[status])
+    # M-31: fora de venda (rascunho, pausado...), o motivo diz a situação.
+    fora_de_venda = SITUACAO_FORA_DE_VENDA.get(status)
     skus = [s for s in produto.get("skus") or [] if isinstance(s, dict)]
     if sku_id:
         sku = next((s for s in skus if str(s.get("id") or "") == sku_id), None)
@@ -205,7 +251,7 @@ def _pelo_preco_base(produto: dict, sku_id: str) -> LeituraAnuncio:
         motivo = (
             "SKU não encontrado no anúncio" if sku_id else "vínculo sem SKU num produto com vários"
         )
-        return LeituraAnuncio(preco=None, ativo=ativo, motivo=motivo)
+        return LeituraAnuncio(preco=None, ativo=ativo, motivo=fora_de_venda or motivo)
     preco_sku = sku.get("price") if isinstance(sku.get("price"), dict) else {}
     # `sale_price` é o que a leitura traz (SKU real do piloto de 30/09:
     # {"currency": "BRL", "sale_price": "1226.7"}) e o que o `update_price`
@@ -214,7 +260,9 @@ def _pelo_preco_base(produto: dict, sku_id: str) -> LeituraAnuncio:
     if valor is None or valor == "":
         valor = preco_sku.get("amount")
     preco, motivo = _reais(valor, preco_sku.get("currency"))
-    return LeituraAnuncio(preco=preco, ativo=ativo, motivo=motivo or "sem promoção ativa")
+    return LeituraAnuncio(
+        preco=preco, ativo=ativo, motivo=fora_de_venda or motivo or "sem promoção ativa"
+    )
 
 
 def _reais(valor: Any, moeda: Any) -> tuple[Decimal | None, str | None]:
@@ -236,6 +284,6 @@ def _reais(valor: Any, moeda: Any) -> tuple[Decimal | None, str | None]:
 def _ativo(status: str) -> bool | None:
     if status in _STATUS_ATIVO:
         return True
-    if status in _STATUS_INATIVO:
+    if status in SITUACAO_FORA_DE_VENDA:
         return False
     return None

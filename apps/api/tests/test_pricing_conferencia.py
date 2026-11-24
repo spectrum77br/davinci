@@ -39,6 +39,7 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     LinkSyncStatus,
+    Listing,
     PricingAccount,
     PricingConferencia,
     PricingOverride,
@@ -51,7 +52,7 @@ from app.models import (
     UserRole,
 )
 from app.security.cipher import encrypt_json
-from app.services.pricing import conferencia
+from app.services.pricing import conferencia, conferencia_tiktok
 from app.services.pricing.anuncios import CANAL_CATALOGO, CANAL_KIT, kit_pula_catalogo
 from app.services.pricing.conferencia_leitores import LeituraAnuncio
 from app.services.pricing.push import bases_com_catalogo_ligado, push_one, resolver_para_envio
@@ -1655,6 +1656,107 @@ async def test_conferir_uma_celula_le_e_grava_so_ela(
     await db.refresh(job)
     assert job.finished_at == terminou_em
     assert len((await db.execute(select(BackgroundJob))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_vinculos_do_tiktok_levam_a_situacao_guardada(db: AsyncSession, admin: User):
+    """M-31 (24/11/2026): a conferência põe em cada vínculo do TikTok o status
+    guardado na lista de anúncios importados (`listings.raw_data.status`) — o
+    leitor usa quando o TikTok não diz na leitura (SKU em promoção). Exemplo
+    A do pedido: na mini TikTok, o dg023.ra à venda e o rascunho (DRAFT)."""
+    tt = await _integracao(db, admin, "mini tiktok", IntegrationPlatform.TIKTOK)
+    ml = await _integracao(db, admin, "ml qualquer", IntegrationPlatform.ML)
+    prod = Product(user_id=admin.id, sku="dg023.ra", name="uranyx wp53 24.128")
+    db.add(prod)
+    await db.flush()
+    db.add_all(
+        [
+            _link(admin, tt, prod, "1735492791114106582", variation_id="S1"),
+            _link(admin, tt, prod, "1738102761217623766", variation_id="S2"),
+            _link(admin, tt, prod, "1700000000000000000", variation_id="S3"),
+            _link(admin, ml, prod, "MLB1"),
+            Listing(
+                user_id=admin.id,
+                integration_id=tt.id,
+                platform=IntegrationPlatform.TIKTOK,
+                external_id="1735492791114106582",
+                title="wp53",
+                raw_data={"status": "ACTIVATE"},
+            ),
+            Listing(
+                user_id=admin.id,
+                integration_id=tt.id,
+                platform=IntegrationPlatform.TIKTOK,
+                external_id="1738102761217623766",
+                title="wp53 rascunho",
+                raw_data={"status": " draft "},
+            ),
+        ]
+    )
+    await db.commit()
+
+    vinculos = await conferencia._carregar_vinculos(db, [tt.id, ml.id])
+
+    situacao = {
+        lk.external_id: getattr(lk, conferencia.ATRIBUTO_SITUACAO_TIKTOK, "fora")
+        for v in vinculos.values()
+        for lk in v.links
+    }
+    assert situacao == {
+        "1735492791114106582": "ACTIVATE",
+        "1738102761217623766": "DRAFT",
+        # Sem linha na lista: não se sabe.
+        "1700000000000000000": None,
+        # Só o TikTok ganha a situação.
+        "MLB1": "fora",
+    }
+    assert conferencia.ATRIBUTO_SITUACAO_TIKTOK == conferencia_tiktok.ATRIBUTO_SITUACAO_TIKTOK
+
+
+@pytest.mark.asyncio
+async def test_vinculo_morto_nao_esta_a_venda_na_conferencia(db: AsyncSession):
+    """M-31: vínculo já marcado como morto (excluído, bloqueado) grava
+    `ativo` False com o motivo dele — a não ser que a leitura de agora diga
+    que está à venda. Duplicado (o mesmo anúncio de outro vínculo) não entra."""
+    agora = datetime.now(UTC)
+
+    def _morto(motivo: str | None) -> ProductLink:
+        return ProductLink(
+            id=uuid.uuid4(),
+            external_id="58255874237",
+            variation_id="0",
+            morto_desde=agora,
+            morto_motivo=motivo,
+        )
+
+    excluido = conferencia._anuncio(
+        _morto("anúncio bloqueado ou excluído na Shopee"),
+        LeituraAnuncio(preco=None, motivo="anúncio não encontrado"),
+        lida=True,
+    )
+    assert (excluido["ativo"], excluido["motivo"]) == (
+        False,
+        "anúncio bloqueado ou excluído na Shopee",
+    )
+    voltou = conferencia._anuncio(
+        _morto("anúncio excluído na Shopee"),
+        LeituraAnuncio(preco=Decimal("1089"), ativo=True),
+        lida=True,
+    )
+    assert (voltou["ativo"], voltou["preco"], voltou["motivo"]) == (True, 1089.0, None)
+    duplicado = conferencia._anuncio(
+        _morto("duplicado: mesmo anúncio em outro vínculo"),
+        LeituraAnuncio(preco=Decimal("1089")),
+        lida=True,
+    )
+    assert duplicado["ativo"] is None
+    # Conta que não foi lida (erro na conta): fica como está.
+    sem_leitura = conferencia._anuncio(_morto("anúncio excluído na Shopee"), None, lida=False)
+    assert (sem_leitura["ativo"], sem_leitura["motivo"]) == (None, None)
+    # Vínculo vivo: nada muda.
+    vivo = ProductLink(id=uuid.uuid4(), external_id="58222967787", variation_id="0")
+    lido_vivo = conferencia._anuncio(vivo, LeituraAnuncio(preco=Decimal("1089")), lida=True)
+    assert (lido_vivo["ativo"], lido_vivo["motivo"]) == (None, None)
 
 
 @pytest.mark.asyncio
