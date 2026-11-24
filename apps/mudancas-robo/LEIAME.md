@@ -5,6 +5,9 @@ conector). Este robô, no Mac do Eduardo, **faz** a mudança numa cópia separad
 manda o diff para a tela **Sistema › Mudanças**, que só o Eduardo e o Thorfinn veem.
 **Aprovado**, o robô roda as conferências e **publica** (push no main + `davinci-deploy` no
 servidor). Nada do pedido roda — nem teste — antes do Aprovar; nada vai para o ar sem ele.
+Exceção (0509, 24/11/2026): os pedidos de quem tem aprovação automática (o Harry) são
+aprovados pelo próprio DaVinci quando o robô entrega — menos os que mexem em permissão,
+login, Histórico ou na própria trava (`arquivos_sensiveis`), que esperam o clique.
 
 ## Como funciona uma rodada (a cada 1 min, `rodada.py`)
 1. Pergunta ao DaVinci se há trabalho (`/api/sistema-mudancas-robo/pegar`) — sem IA.

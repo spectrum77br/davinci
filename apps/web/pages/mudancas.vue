@@ -387,7 +387,7 @@ async function recusar() {
   <div>
     <PageHeader
       title="Mudanças do sistema"
-      description="Pedidos de mudança feitos pelo Claude. O robô prepara e testa; só vai para o ar depois que você aprova."
+      description="Pedidos de mudança feitos pelo Claude. O robô prepara e testa; só vai para o ar depois que você aprova — ou sozinho, nos pedidos de quem tem aprovação automática (dá para cancelar antes de publicar)."
     >
       <template #actions>
         <button
@@ -519,7 +519,7 @@ async function recusar() {
                 <p v-if="textoParou" class="mt-1 whitespace-pre-wrap break-words">{{ textoParou }}</p>
               </div>
               <div v-else-if="detalhe.status === 'pedida' || detalhe.status === 'fazendo'" class="mb-4 rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-sm">
-                O robô ainda está trabalhando nesta mudança. Os botões de aprovar aparecem quando ela estiver pronta.
+                O robô ainda está trabalhando nesta mudança. Quando ela estiver pronta, aparecem os botões de aprovar — se for de quem tem aprovação automática, ela já vai direto para a fila de publicar.
               </div>
               <div v-else-if="detalhe.status === 'pronta' && !detalhe.pode_aprovar" class="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
                 Esta mudança está esperando aprovação, mas a aprovação não está liberada para você.

@@ -45,7 +45,8 @@ async def _catalogo(db, schema: str) -> dict:
                 "SELECT table_name, column_name, udt_name, is_nullable, column_default "
                 "FROM information_schema.columns WHERE table_schema = :s AND ("
                 "table_name = :t OR (table_name = 'sistema_mudanca' "
-                "AND column_name = 'aprovado_automatico')) ORDER BY table_name, column_name"
+                "AND column_name IN ('aprovado_automatico', 'conector_id'))) "
+                "ORDER BY table_name, column_name"
             ),
             {"s": schema, "t": NOVA},
         )
@@ -56,7 +57,8 @@ async def _catalogo(db, schema: str) -> dict:
                 "SELECT co.conname, co.contype::text, pg_get_constraintdef(co.oid) "
                 "FROM pg_constraint co JOIN pg_class cl ON cl.oid = co.conrelid "
                 "JOIN pg_namespace n ON n.oid = cl.relnamespace "
-                "WHERE n.nspname = :s AND cl.relname = :t ORDER BY co.conname"
+                "WHERE n.nspname = :s AND (cl.relname = :t OR co.conname = "
+                "'fk_sistema_mudanca_conector_id_claude_conectores') ORDER BY co.conname"
             ),
             {"s": schema, "t": NOVA},
         )
@@ -92,6 +94,7 @@ async def test_0509_cria_igual_ao_model_com_o_harry_e_desce(db):
         )
     )
     await db.execute(text(f'CREATE TABLE "{rascunho}".sistema_mudanca (id uuid PRIMARY KEY)'))
+    await db.execute(text(f'CREATE TABLE "{rascunho}".claude_conectores (id uuid PRIMARY KEY)'))
     await db.execute(
         text(f'CREATE TABLE "{rascunho}".sistema_mudanca_aprovador (user_id uuid PRIMARY KEY)')
     )
@@ -129,7 +132,8 @@ async def test_0509_cria_igual_ao_model_com_o_harry_e_desce(db):
         await conn.run_sync(_rodar, "upgrade")
         await db.commit()
         da_migration = await _catalogo(db, rascunho)
-        assert da_migration["colunas"], "a migration não criou a tabela"
+        assert len(da_migration["colunas"]) == 5, da_migration["colunas"]  # 3 + 2 colunas
+        assert any("conector" in c[0] for c in da_migration["constraints"])
         assert da_migration == await _catalogo(db, modelo)
 
         regras = (
@@ -142,7 +146,7 @@ async def test_0509_cria_igual_ao_model_com_o_harry_e_desce(db):
         conn = await db.connection()
         await conn.run_sync(_rodar, "downgrade")
         await db.commit()
-        assert (await _catalogo(db, rascunho))["colunas"] == []
+        assert await _catalogo(db, rascunho) == {"colunas": [], "constraints": []}
 
         # sem heisenberg aprovador, a regra não nasce
         await db.execute(text(f'DELETE FROM "{rascunho}".sistema_mudanca_aprovador'))

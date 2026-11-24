@@ -82,6 +82,14 @@ class SistemaMudanca(Base):
     tipo: Mapped[str] = mapped_column(
         String(20), nullable=False, default="mudanca", server_default=text("'mudanca'")
     )
+    # 0509: o conector do Claude pelo qual o pedido chegou. A aprovação
+    # automática só vale para o conector que a própria pessoa (ou um aprovador)
+    # gerou — um admin qualquer pode gerar link em nome de outro.
+    conector_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("claude_conectores.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     titulo: Mapped[str] = mapped_column(String(200), nullable=False)
     descricao: Mapped[str] = mapped_column(Text, nullable=False)
     onde: Mapped[str | None] = mapped_column(Text, nullable=True)

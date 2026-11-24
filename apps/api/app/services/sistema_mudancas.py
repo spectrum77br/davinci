@@ -30,8 +30,11 @@ Aprovação automática (0509, Eduardo 24/11/2026: "todas as tarefas que o harry
 jogar em mudança é para fazer, está automaticamente aprovado"): o pedido de
 quem está em `sistema_mudanca_auto_aprovacao` vai de `pronta` direto para
 `aprovada` em nome de quem autorizou, enquanto essa pessoa continuar
-aprovadora ativa. Os aprovadores recebem o aviso com o link (dá para
-"Cancelar aprovação" até o robô começar a publicar).
+aprovadora ativa, e só para pedido que chegou pelo conector do Claude que a
+própria pessoa (ou um aprovador) gerou. Pedido que mexe na própria trava, em
+login/permissão ou no Histórico (`arquivos_sensiveis`) espera o clique mesmo
+assim. Os aprovadores recebem o aviso com o link (dá para "Cancelar
+aprovação" até o robô começar a publicar).
 Quem pede: admin ativo, pelo conector (`claude_tarefas.pedir_mudanca`).
 """
 
@@ -51,6 +54,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    ClaudeConector,
     SistemaMudanca,
     SistemaMudancaAprovador,
     SistemaMudancaAutoAprovacao,
@@ -201,11 +205,17 @@ def pode_pedir(user: User) -> bool:
     return user.role == UserRole.ADMIN and user.status == UserStatus.ACTIVE
 
 
-async def autorizado_automatico(session: AsyncSession, pedido_por: UUID | None) -> UUID | None:
+async def autorizado_automatico(
+    session: AsyncSession, *, pedido_por: UUID | None, conector_id: UUID | None
+) -> UUID | None:
     """Quem deixou os pedidos desta pessoa aprovados sozinhos (0509), se a
-    regra ainda vale: quem pede continua admin ativo e quem autorizou continua
-    aprovador ativo. Senão None (o pedido espera o Aprovar como sempre)."""
-    if pedido_por is None:
+    regra vale para ESTE pedido: quem pede continua admin ativo, quem
+    autorizou continua aprovador ativo e o pedido chegou por um conector do
+    Claude da própria pessoa, não revogado, gerado por ela mesma ou por um
+    aprovador — qualquer admin gera link em nome de outro (POST
+    /api/claude-conector) e, sem essa trava, pediria em nome de quem tem a
+    regra. Senão None (o pedido espera o Aprovar como sempre)."""
+    if pedido_por is None or conector_id is None:
         return None
     regra = await session.get(SistemaMudancaAutoAprovacao, pedido_por)
     if regra is None or regra.autorizado_por is None:
@@ -216,7 +226,105 @@ async def autorizado_automatico(session: AsyncSession, pedido_por: UUID | None) 
     quem_autorizou = await session.get(User, regra.autorizado_por)
     if not await pode_aprovar(session, quem_autorizou):
         return None
+    conector = await session.get(ClaudeConector, conector_id)
+    if conector is None or conector.revoked_at is not None or conector.user_id != pedido_por:
+        return None
+    if conector.created_by != pedido_por:
+        criador = await session.get(User, conector.created_by) if conector.created_by else None
+        if not await pode_aprovar(session, criador):
+            return None
     return regra.autorizado_por
+
+
+# Arquivos que decidem quem aprova, quem entra, quem vê o quê e o que fica
+# registrado: pedido que mexe neles nunca é aprovado sozinho, nem para quem
+# tem a regra — senão um pedido aprovado sozinho poderia afrouxar a própria
+# trava ou o login (revisões de 24/11/2026: ex. tirar o `_dev_guard()` do
+# /api/dev/mock-login viraria sessão ADMIN para qualquer um). Vale o caminho
+# tirado do DIFF (o que vai para o ar), não a lista `arquivos` que o robô
+# manda. Nome de arquivo também pega a pasta de mesmo nome.
+_SENSIVEIS = re.compile(
+    r"^apps/(?:api/(?:alembic/|app/(?:"
+    # a própria trava (Sistema › Mudanças) e o conector do Claude
+    r"(?:services|routers)/sistema_mudancas[^/]*|models/sistema_mudanca"
+    r"|services/claude_tarefas|(?:routers|models)/claude_conector"
+    # quem entra: login, sessão, usuários, papéis, ERP, limites, robô de verificação
+    r"|routers/(?:auth|oauth|users|dev|erp_gate)|models/(?:user|auth_code|enums|__init__)"
+    r"|services/(?:erp_acesso|bootstrap|rate_limit|turnstile)"
+    r"|services/(?:atendimento|app_uranyx)/acesso|deps|security"
+    # o que fica registrado (Histórico) e a montagem do app
+    r"|routers/historico|models/historico|historico|config|main|db|__init__"
+    r")(?:\.py$|/))"
+    r"|web/(?:pages/(?:mudancas|login|historico)\.vue$|middleware/|stores/auth\.ts$))"
+)
+# Linha mexida (acrescentada OU tirada) no código do servidor que fala de
+# permissão, sessão, papel, Histórico ou da própria trava: também espera o
+# clique — a lista de arquivos nunca fica completa (qualquer rota pode ganhar
+# um `require_admin` a menos).
+_PALAVRAS_SENSIVEIS = re.compile(
+    r"require_(?:admin|owner|permission|user|active_user)|get_current_user|user_scope"
+    r"|issue_session_token|_dev_guard|set_cookie|delete_cookie"
+    r"|app\.(?:security|deps|historico)|HistoricoAcesso|historico_acesso|\bidentificar\("
+    r"|DISABLE TRIGGER|session_replication_role"
+    r"|UserRole\.|UserStatus\.|\.permissions\b|\.role\b"
+    r"|sistema_mudanca|SistemaMudanca|autorizado_automatico|arquivos_sensiveis|pode_aprovar"
+    r"|erp_acesso|LIBERADOS_POR_ID"
+)
+_CODIGO_SERVIDOR = re.compile(r"^apps/api/app/")
+_DIFF_GIT = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
+_DIFF_CAMINHO = re.compile(
+    r"^(?:--- a/|\+\+\+ b/|rename from |rename to |copy from |copy to )(.+)$"
+)
+
+
+def arquivos_sensiveis(diff: str) -> list[str]:
+    """O que no diff impede a aprovação automática: caminho sensível, ou
+    "caminho (palavra)" quando uma linha mexida do código do servidor fala de
+    permissão/sessão/Histórico/trava. Lido das linhas do próprio diff. Linha
+    `diff --git` que não dá para ler (caminho com espaço ou entre aspas) conta
+    como sensível: na dúvida, espera o clique."""
+    achados: list[str] = []
+    pelo_caminho: set[str] = set()
+    pela_palavra: set[str] = set()
+    atuais: tuple[str, ...] = ()
+
+    def _marca(texto: str) -> None:
+        if texto not in achados:
+            achados.append(texto)
+
+    for linha in (diff or "").splitlines():
+        if linha.startswith("diff --git "):
+            casou = _DIFF_GIT.match(linha)
+            if casou is None:
+                atuais = ()
+                _marca(linha[len("diff --git ") :])
+                continue
+            atuais = casou.groups()
+            caminhos: tuple[str, ...] = atuais
+        elif linha.startswith(("--- ", "+++ ", "rename ", "copy ")):
+            casou = _DIFF_CAMINHO.match(linha)
+            if casou is None:
+                continue
+            caminhos = (casou.group(1),)
+            atuais = (*atuais, casou.group(1))
+        else:
+            if linha[:1] in ("+", "-"):
+                achou = _PALAVRAS_SENSIVEIS.search(linha[1:])
+                if achou:
+                    for c in atuais:
+                        if (
+                            _CODIGO_SERVIDOR.match(c)
+                            and c not in pelo_caminho
+                            and c not in pela_palavra
+                        ):
+                            pela_palavra.add(c)
+                            _marca(f"{c} ({achou.group(0)})")
+            continue
+        for c in caminhos:
+            if _SENSIVEIS.match(c) and c not in pelo_caminho:
+                pelo_caminho.add(c)
+                _marca(c)
+    return achados
 
 
 # ── avisos ────────────────────────────────────────────────────────────────
@@ -288,12 +396,19 @@ async def _avisar_aprovadores(session: AsyncSession, m: SistemaMudanca, **kw: An
 
 
 async def criar_pedido(
-    session: AsyncSession, *, dono: User, titulo: Any, descricao: Any, onde: Any = None
+    session: AsyncSession,
+    *,
+    dono: User,
+    titulo: Any,
+    descricao: Any,
+    onde: Any = None,
+    conector_id: UUID | None = None,
 ) -> SistemaMudanca:
     if not pode_pedir(dono):
         raise MudancaError("so_admin", "pedir mudança no sistema é só para administradores")
     m = SistemaMudanca(
         pedido_por=dono.id,
+        conector_id=conector_id,
         titulo=_limpo(titulo, "o título", MAX_TITULO),
         descricao=_limpo(descricao, "a descrição", MAX_DESCRICAO),
         onde=_limpo(onde, "o onde", MAX_ONDE, obrigatorio=False),
@@ -753,6 +868,7 @@ async def registrar_resultado(
     novo = str(dados.get("status") or "")
     agora = _agora()
     automatica = False
+    segurada: list[str] = []  # tinha a regra, mas mexe em arquivo sensível
     if m.status == "fazendo" and m.tipo == "pergunta":
         permitidos = ("respondida", "falhou", "pedida")
     elif m.status == "fazendo":
@@ -801,8 +917,12 @@ async def registrar_resultado(
         m.branch = branch[:500]
         m.erro = None
         if m.tipo == "mudanca":
-            autorizou = await autorizado_automatico(session, m.pedido_por)
+            autorizou = await autorizado_automatico(
+                session, pedido_por=m.pedido_por, conector_id=m.conector_id
+            )
             if autorizou is not None:
+                segurada = arquivos_sensiveis(diff)
+            if autorizou is not None and not segurada:
                 # 0509: ninguém precisa clicar — vai direto para a fila de publicar.
                 novo = "aprovada"
                 automatica = True
@@ -882,13 +1002,30 @@ async def registrar_resultado(
             evento="falhou",
         )
     elif novo == "pronta":
+        motivo = ""
+        if segurada:
+            motivo = f"não foi aprovada sozinha: mexe em {', '.join(segurada[:3])}"
+            if len(segurada) > 3:
+                motivo += f" e mais {len(segurada) - 3}"
         await _avisar_aprovadores(
             session,
             m,
             titulo=f"🛠️ {codigo(m)} pronta para aprovar",
-            mensagem=m.titulo,
+            mensagem=f"{m.titulo} — {motivo}".strip(" —"),
             evento="pronta",
         )
+        if segurada:
+            await _avisar(
+                session,
+                [m.pedido_por],
+                titulo=f"✋ {codigo(m)} espera o clique do Eduardo ou do Thorfinn",
+                mensagem=(
+                    f"{m.titulo} — mexe em permissão, login, Histórico ou na própria "
+                    "aprovação; essas não vão ao ar sozinhas"
+                ),
+                m=m,
+                evento="segurada",
+            )
     elif novo == "publicada":
         await _avisar(
             session,

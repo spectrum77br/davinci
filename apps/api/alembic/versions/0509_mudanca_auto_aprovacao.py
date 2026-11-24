@@ -12,6 +12,9 @@ fazer, está automaticamente aprovado".
   quem ganhou ou perdeu a aprovação automática é o que ele serve para mostrar.
 - sistema_mudanca.aprovado_automatico: a aprovação veio da regra (ninguém
   clicou). A tela e o conector dizem "automático".
+- sistema_mudanca.conector_id: o conector do Claude pelo qual o pedido chegou.
+  A regra só vale para o conector que a própria pessoa (ou um aprovador)
+  gerou: qualquer admin gera link em nome de outro (revisão de 24/11/2026).
 
 Revision ID: 0509_mudanca_auto_aprovacao
 Revises: 0508_produto_cadastros
@@ -45,6 +48,21 @@ def upgrade() -> None:
             nullable=False,
         ),
         schema=SCHEMA,
+    )
+    op.add_column(
+        "sistema_mudanca",
+        sa.Column("conector_id", postgresql.UUID(as_uuid=True), nullable=True),
+        schema=SCHEMA,
+    )
+    op.create_foreign_key(
+        op.f("fk_sistema_mudanca_conector_id_claude_conectores"),
+        "sistema_mudanca",
+        "claude_conectores",
+        ["conector_id"],
+        ["id"],
+        source_schema=SCHEMA,
+        referent_schema=SCHEMA,
+        ondelete="SET NULL",
     )
     op.create_table(
         "sistema_mudanca_auto_aprovacao",
@@ -92,4 +110,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("sistema_mudanca_auto_aprovacao", schema=SCHEMA)
+    op.drop_constraint(
+        op.f("fk_sistema_mudanca_conector_id_claude_conectores"),
+        "sistema_mudanca",
+        type_="foreignkey",
+        schema=SCHEMA,
+    )
+    op.drop_column("sistema_mudanca", "conector_id", schema=SCHEMA)
     op.drop_column("sistema_mudanca", "aprovado_automatico", schema=SCHEMA)

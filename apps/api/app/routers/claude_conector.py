@@ -62,8 +62,9 @@ INSTRUCOES = (
     "mandou; `concluir_tarefa` quando disser que terminou algo (confirme qual antes); "
     "`consultar_pedido` quando uma tarefa ou pergunta citar um número de pedido (somente "
     "leitura); `pedir_mudanca` quando quiser corrigir ou mudar o PRÓPRIO sistema (texto, "
-    "regra, tela) — vai para um robô e só entra no ar depois de aprovada pelo Eduardo ou "
-    "pelo Thorfinn; `listar_mudancas` para ver em que pé estão; "
+    "regra, tela) — vai para um robô e só entra no ar depois de aprovada (pelo Eduardo ou "
+    "pelo Thorfinn, ou automaticamente para quem o Eduardo liberou — a resposta do "
+    "`pedir_mudanca` diz qual vale); `listar_mudancas` para ver em que pé estão; "
     "`perguntar_sobre_o_sistema` quando quiser saber COMO um processo do sistema funciona "
     "(um robô lê o código e responde em alguns minutos) e `ver_resposta_do_sistema` para "
     "ler a resposta. Responda sempre com o texto devolvido pela ferramenta."
@@ -302,6 +303,7 @@ async def _chamar_ferramenta(
         )
     except Exception as e:  # noqa: BLE001 — Redis fora do ar não bloqueia o chefe
         logger.warning("claude_mcp_rate_limit_indisponivel", err=str(e)[:120])
+    marca = claude_tarefas.CONECTOR_ATUAL.set(conector.id)
     try:
         texto = await executar(session, dono=dono, args=args)
         conector.ultimo_erro = None
@@ -324,6 +326,8 @@ async def _chamar_ferramenta(
                 erro=True,
             ),
         )
+    finally:
+        claude_tarefas.CONECTOR_ATUAL.reset(marca)
 
 
 async def _tratar(

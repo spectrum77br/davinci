@@ -694,3 +694,23 @@ async def test_consultar_pedido_ramos_vazios_vencido_cancelado_e_rastreio_sem_la
         "Margem SKU SKU4 · sem decisão manual (ver status na aba Margem) · "
         "plataforma 8.2% (lucro R$ 90,00)"
     ) in texto
+
+
+@pytest.mark.asyncio
+async def test_pedir_mudanca_pelo_mcp_guarda_o_conector(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """0509: o pedido de mudança guarda o conector pelo qual chegou (a aprovação
+    automática só vale para o link que a própria pessoa ou um aprovador gerou)."""
+    from app.models import SistemaMudanca
+
+    _admin, dono, token, body = await _conector(client, db, make_user, auth_as)
+    r = await client.post(
+        f"/api/claude-mcp/{token}/mcp",
+        json=_tool(1, "pedir_mudanca", titulo="Mudar texto", descricao="Hoje A, deve dizer B"),
+    )
+    assert r.status_code == 200, r.text
+    assert "registrado" in r.json()["result"]["content"][0]["text"]
+    m = (await db.execute(select(SistemaMudanca))).scalar_one()
+    assert (m.pedido_por, str(m.conector_id)) == (dono.id, body["id"])
+    assert claude_tarefas.CONECTOR_ATUAL.get() is None  # o roteador tira depois da chamada

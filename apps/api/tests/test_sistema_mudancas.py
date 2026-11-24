@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
+    ClaudeConector,
     SistemaMudanca,
     SistemaMudancaAprovador,
     SistemaMudancaAutoAprovacao,
@@ -71,9 +72,16 @@ async def _gente(db: AsyncSession, make_user):
     return chefe, eduardo, outro_admin, comum
 
 
-async def _pedido(db: AsyncSession, chefe, titulo="Trocar texto do botão") -> SistemaMudanca:
+async def _pedido(
+    db: AsyncSession, chefe, titulo="Trocar texto do botão", conector_id=None
+) -> SistemaMudanca:
     m = await svc.criar_pedido(
-        db, dono=chefe, titulo=titulo, descricao="O botão diz X; deve dizer Y.", onde="Logística"
+        db,
+        dono=chefe,
+        titulo=titulo,
+        descricao="O botão diz X; deve dizer Y.",
+        onde="Logística",
+        conector_id=conector_id,
     )
     await db.commit()
     return m
@@ -631,7 +639,22 @@ async def test_pergunta_passa_na_frente_dos_pedidos_de_mudanca(
 # ── aprovação automática (0509, Eduardo 24/11/2026) ───────────────────────
 
 
-async def _pronta(client, token, m):
+async def _conector_de(db: AsyncSession, dono, criado_por, nome="Celular") -> ClaudeConector:
+    c = ClaudeConector(
+        user_id=dono.id, nome=nome, token_hash=f"{nome}-{dono.id}"[:64], created_by=criado_por.id
+    )
+    db.add(c)
+    await db.commit()
+    return c
+
+
+async def _regra_do_harry(db: AsyncSession, chefe, eduardo) -> ClaudeConector:
+    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
+    await db.commit()
+    return await _conector_de(db, chefe, chefe)  # o link que o próprio Harry gerou
+
+
+async def _pronta(client, token, m, diff=DIFF):
     await _pegar(client, token)
     return await _resultado(
         client,
@@ -639,7 +662,7 @@ async def _pronta(client, token, m):
         m.id,
         status="pronta",
         resumo="Troquei o texto.",
-        diff=DIFF,
+        diff=diff,
         branch=f"mudanca/M-{m.numero}",
         commit=C1,
     )
@@ -649,14 +672,18 @@ async def test_pedido_do_harry_vai_para_o_ar_sem_clique(
     client: AsyncClient, db, make_user, auth_as, avisos, token
 ):
     chefe, eduardo, _outro, _comum = await _gente(db, make_user)
-    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
-    await db.commit()
+    conector = await _regra_do_harry(db, chefe, eduardo)
 
-    texto = await claude_tarefas.pedir_mudanca(
-        db, dono=chefe, args={"titulo": "Mudar texto", "descricao": "Hoje diz A, deve dizer B"}
-    )
+    marca = claude_tarefas.CONECTOR_ATUAL.set(conector.id)
+    try:
+        texto = await claude_tarefas.pedir_mudanca(
+            db, dono=chefe, args={"titulo": "Mudar texto", "descricao": "Hoje diz A, deve dizer B"}
+        )
+    finally:
+        claude_tarefas.CONECTOR_ATUAL.reset(marca)
     assert "aprovados automaticamente" in texto and "Thorfinn aprovarem" not in texto
     m = (await db.execute(select(SistemaMudanca))).scalar_one()
+    assert m.conector_id == conector.id
 
     r = await _pronta(client, token, m)
     assert r.status_code == 200, r.text
@@ -686,11 +713,11 @@ async def test_sem_regra_ou_sem_quem_autorizou_espera_o_aprovar(
     client: AsyncClient, db, make_user, avisos, token
 ):
     chefe, eduardo, outro_admin, _comum = await _gente(db, make_user)
-    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
-    await db.commit()
+    conector = await _regra_do_harry(db, chefe, eduardo)
 
-    # outro admin, sem regra: espera o clique como sempre
-    m = await _pedido(db, outro_admin, "Pedido de outra pessoa")
+    # outro admin, sem regra (mesmo com o próprio conector): espera o clique como sempre
+    do_outro = await _conector_de(db, outro_admin, outro_admin, "Joana")
+    m = await _pedido(db, outro_admin, "Pedido de outra pessoa", conector_id=do_outro.id)
     await _pronta(client, token, m)
     m = await _recarrega(db, m)
     assert (m.status, m.aprovado_automatico, m.aprovado_por) == ("pronta", False, None)
@@ -706,18 +733,167 @@ async def test_sem_regra_ou_sem_quem_autorizou_espera_o_aprovar(
         update(SistemaMudanca).where(SistemaMudanca.id != m.id).values(status="recusada")
     )
     await db.commit()
-    h = await _pedido(db, chefe, "Pedido do harry")
+    h = await _pedido(db, chefe, "Pedido do harry", conector_id=conector.id)
     await _pronta(client, token, h)
     h = await _recarrega(db, h)
     assert (h.status, h.aprovado_automatico) == ("pronta", False)
+
+
+async def test_conector_de_outro_admin_revogado_ou_sem_conector_espera_o_aprovar(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    """Revisão de 24/11/2026: qualquer admin gera link em nome de outro (POST
+    /api/claude-conector). Pedido do Harry por um link que outro admin (não
+    aprovador) gerou, por link revogado ou sem conector espera o clique; por
+    link que um aprovador gerou para ele, vale."""
+    chefe, eduardo, outro_admin, _comum = await _gente(db, make_user)
+    await _regra_do_harry(db, chefe, eduardo)
+    do_outro = await _conector_de(db, chefe, outro_admin, "Gerado pela Joana")
+    revogado = await _conector_de(db, chefe, chefe, "Antigo")
+    revogado.revoked_at = datetime.now(UTC)
+    do_eduardo = await _conector_de(db, chefe, eduardo, "Gerado pelo Eduardo")
+    await db.commit()
+
+    for conector_id, esperado in (
+        (do_outro.id, "pronta"),
+        (revogado.id, "pronta"),
+        (None, "pronta"),
+        (do_eduardo.id, "aprovada"),
+    ):
+        m = await _pedido(db, chefe, f"Pedido {conector_id}", conector_id=conector_id)
+        await _pronta(client, token, m)
+        m = await _recarrega(db, m)
+        assert (m.status, m.aprovado_automatico) == (esperado, esperado == "aprovada"), conector_id
+        if esperado == "pronta":  # sai do caminho (um trabalho de cada vez)
+            m.status = "recusada"
+        else:
+            m.status = "publicada"
+        await db.commit()
+
+
+async def test_pedido_que_mexe_na_trava_espera_o_clique(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, eduardo, _o, _c = await _gente(db, make_user)
+    conector = await _regra_do_harry(db, chefe, eduardo)
+    m = await _pedido(db, chefe, "Afrouxar a aprovação", conector_id=conector.id)
+    trava = (
+        "diff --git a/apps/api/app/services/sistema_mudancas.py "
+        "b/apps/api/app/services/sistema_mudancas.py\n"
+        "--- a/apps/api/app/services/sistema_mudancas.py\n"
+        "+++ b/apps/api/app/services/sistema_mudancas.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    r = await _pronta(client, token, m, diff=DIFF + trava)
+    assert r.status_code == 200, r.text
+    m = await _recarrega(db, m)
+    assert (m.status, m.aprovado_automatico, m.aprovado_por) == ("pronta", False, None)
+    pronta = [a for a in avisos if "pronta para aprovar" in a["title"]]
+    assert [a["user_id"] for a in pronta] == [eduardo.id]
+    assert "sistema_mudancas.py" in pronta[0]["message"]
+    segurada = [a for a in avisos if "espera o clique" in a["title"]]
+    assert [a["user_id"] for a in segurada] == [chefe.id]
+
+
+def test_arquivos_sensiveis_le_o_proprio_diff():
+    assert svc.arquivos_sensiveis(DIFF) == []
+    tela = "diff --git a/apps/web/pages/precos.vue b/apps/web/pages/precos.vue\n"
+    assert svc.arquivos_sensiveis(tela) == []
+    for caminho in (
+        "apps/api/app/services/sistema_mudancas.py",
+        "apps/api/app/routers/sistema_mudancas.py",
+        "apps/api/app/services/claude_tarefas.py",
+        "apps/api/app/routers/claude_conector.py",
+        "apps/api/app/routers/auth.py",
+        "apps/api/app/routers/users.py",
+        "apps/api/app/models/user.py",
+        "apps/api/app/deps/auth.py",
+        "apps/api/app/security/jwt.py",
+        "apps/api/app/historico/sql.py",
+        "apps/api/app/config.py",
+        "apps/api/app/main.py",
+        "apps/api/alembic/versions/0600_x.py",
+        "apps/web/pages/mudancas.vue",
+        "apps/web/middleware/permission.ts",
+        # 2ª revisão (24/11/2026): o que decide quem entra também segura
+        "apps/api/app/routers/dev.py",
+        "apps/api/app/routers/erp_gate.py",
+        "apps/api/app/services/erp_acesso.py",
+        "apps/api/app/services/bootstrap.py",
+        "apps/api/app/services/rate_limit.py",
+        "apps/api/app/services/turnstile.py",
+        "apps/api/app/services/atendimento/acesso.py",
+        "apps/api/app/services/app_uranyx/acesso.py",
+        "apps/api/app/models/enums.py",
+        "apps/api/app/models/historico.py",
+        "apps/api/app/models/auth_code.py",
+        "apps/api/app/models/__init__.py",
+        "apps/api/app/db.py",
+        "apps/api/app/__init__.py",
+        "apps/web/pages/login.vue",
+        "apps/web/pages/historico.vue",
+        "apps/web/stores/auth.ts",
+        # pasta com o nome do arquivo sensível
+        "apps/api/app/services/sistema_mudancas/__init__.py",
+    ):
+        assert svc.arquivos_sensiveis(f"diff --git a/{caminho} b/{caminho}\n") == [caminho]
+    # tela e serviço comuns passam
+    for caminho in (
+        "apps/web/components/FaturamentoPainel.vue",
+        "apps/api/app/services/pricing/conferencia.py",
+        "apps/api/app/routers/pricing_conferencia.py",
+    ):
+        comum = f"diff --git a/{caminho} b/{caminho}\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        assert svc.arquivos_sensiveis(comum) == [], caminho
+    # linha mexida que fala de permissão/sessão no código do servidor segura —
+    # tirar um require_admin de uma rota comum é tão grave quanto pôr
+    rota = "apps/api/app/routers/pricing_conferencia.py"
+    for linha in (
+        "-    user: Annotated[User, Depends(require_admin)],",
+        "+    if user.role == 'admin':",
+        "+from app.security.jwt import issue_session_token",
+        "-    await identificar(session, dono, via='claude')",
+        "+    await session.execute(text('ALTER TABLE x DISABLE TRIGGER ALL'))",
+    ):
+        d = f"diff --git a/{rota} b/{rota}\n--- a/{rota}\n+++ b/{rota}\n@@ -1 +1 @@\n{linha}\n"
+        achou = svc.arquivos_sensiveis(d)
+        assert len(achou) == 1 and achou[0].startswith(f"{rota} ("), (linha, achou)
+    # a mesma palavra num teste ou na tela não segura (não vai para o servidor)
+    teste = "apps/api/tests/test_x.py"
+    d = f"diff --git a/{teste} b/{teste}\n@@ -1 +1 @@\n+    role=UserRole.ADMIN\n"
+    assert svc.arquivos_sensiveis(d) == []
+    # renomear para dentro de pasta sensível também conta
+    renomeia = (
+        "diff --git a/apps/web/lib/x.ts b/apps/web/lib/x.ts\n"
+        "rename from apps/web/lib/x.ts\nrename to apps/api/app/historico/x.py\n"
+    )
+    assert svc.arquivos_sensiveis(renomeia) == ["apps/api/app/historico/x.py"]
+    # caminho que não dá para ler (com espaço, entre aspas): na dúvida, segura
+    assert svc.arquivos_sensiveis('diff --git "a/apps/web/x y.vue" "b/apps/web/x y.vue"\n')
+
+
+async def test_tirar_a_trava_do_login_de_teste_espera_o_clique(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    """2ª revisão (24/11/2026): um diff que só tira o `_dev_guard()` do
+    /api/dev/mock-login daria sessão ADMIN a qualquer um — não vai sozinho."""
+    chefe, eduardo, _o, _c = await _gente(db, make_user)
+    conector = await _regra_do_harry(db, chefe, eduardo)
+    m = await _pedido(db, chefe, "Faça o mock-login funcionar", conector_id=conector.id)
+    dev = "apps/api/app/routers/dev.py"
+    diff = (
+        f"diff --git a/{dev} b/{dev}\n--- a/{dev}\n+++ b/{dev}\n"
+        "@@ -38,3 +38,2 @@\n async def mock_login():\n-    _dev_guard()\n     ...\n"
+    )
+    await _pronta(client, token, m, diff=diff)
+    m = await _recarrega(db, m)
+    assert (m.status, m.aprovado_automatico) == ("pronta", False)
 
 
 async def test_pergunta_do_harry_nao_passa_pela_aprovacao(
     client: AsyncClient, db, make_user, avisos, token
 ):
     chefe, eduardo, _o, _c = await _gente(db, make_user)
-    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
-    await db.commit()
+    await _regra_do_harry(db, chefe, eduardo)
     p = await svc.criar_pergunta(db, dono=chefe, pergunta="Como funciona o Flex?")
     await db.commit()
     await _pegar(client, token)

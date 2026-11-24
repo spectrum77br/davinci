@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -1323,6 +1324,11 @@ async def responder_dm(session: AsyncSession, *, dono: User, args: dict[str, Any
 # Mudanças) e aí vai para o ar — ou a aprovação é automática para quem o
 # Eduardo liberou (0509, 24/11/2026). Regras em services/sistema_mudancas.
 
+# O conector do Claude que está chamando a ferramenta agora (o roteador do MCP
+# põe e tira a cada chamada). O pedido de mudança guarda o conector: a
+# aprovação automática só vale para o conector da própria pessoa (0509).
+CONECTOR_ATUAL: ContextVar[UUID | None] = ContextVar("claude_conector_atual", default=None)
+
 TOOL_PEDIR_MUDANCA: dict[str, Any] = {
     "name": "pedir_mudanca",
     "title": "Pedir mudança no sistema DaVinci",
@@ -1472,6 +1478,7 @@ async def pedir_mudanca(session: AsyncSession, *, dono: User, args: dict[str, An
             titulo=args.get("titulo"),
             descricao=args.get("descricao"),
             onde=args.get("onde"),
+            conector_id=CONECTOR_ATUAL.get(),
         )
     except sistema_mudancas.MudancaError as exc:
         raise TarefaInvalidaError(
@@ -1479,13 +1486,17 @@ async def pedir_mudanca(session: AsyncSession, *, dono: User, args: dict[str, An
         ) from exc
     await session.commit()
     codigo = sistema_mudancas.codigo(m)
-    if await sistema_mudancas.autorizado_automatico(session, m.pedido_por) is not None:
+    automatica = await sistema_mudancas.autorizado_automatico(
+        session, pedido_por=m.pedido_por, conector_id=m.conector_id
+    )
+    if automatica is not None:
         return (
             f"Pedido de mudança {codigo} registrado: {m.titulo}. O robô vai preparar e testar "
             "a mudança; os seus pedidos são aprovados automaticamente, então ela vai para o ar "
             "sozinha quando o robô terminar e os testes passarem (o Eduardo e o Thorfinn são "
-            "avisados). Se o robô disser que precisa da equipe, a equipe faz. Para "
-            f"acompanhar, pergunte como está a {codigo}."
+            "avisados). Só espera o clique deles se mexer em permissão, login, Histórico ou "
+            "na própria aprovação. Se o robô disser que precisa da equipe, a equipe faz. "
+            f"Para acompanhar, pergunte como está a {codigo}."
         )
     return (
         f"Pedido de mudança {codigo} registrado: {m.titulo}. O robô vai preparar e testar a "
