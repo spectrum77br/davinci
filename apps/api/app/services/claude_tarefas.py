@@ -1320,7 +1320,8 @@ async def responder_dm(session: AsyncSession, *, dono: User, args: dict[str, Any
 #
 # O chefe pede correções rápidas no DaVinci pelo Claude dele; um robô no Mac do
 # Eduardo prepara e testa; SÓ o Eduardo ou o Thorfinn aprovam (tela Sistema ›
-# Mudanças) e aí vai para o ar. Regras em services/sistema_mudancas.
+# Mudanças) e aí vai para o ar — ou a aprovação é automática para quem o
+# Eduardo liberou (0509, 24/11/2026). Regras em services/sistema_mudancas.
 
 TOOL_PEDIR_MUDANCA: dict[str, Any] = {
     "name": "pedir_mudanca",
@@ -1328,7 +1329,8 @@ TOOL_PEDIR_MUDANCA: dict[str, Any] = {
     "description": (
         "Pede uma mudança no PRÓPRIO sistema DaVinci: um texto, uma regra, um campo ou uma "
         "tela que está errada ou deveria funcionar diferente. Um robô prepara e testa a "
-        "mudança e ela só vai para o ar depois que o Eduardo ou o Thorfinn aprovarem — "
+        "mudança e ela só vai para o ar depois de aprovada (pelo Eduardo ou pelo Thorfinn, "
+        "ou automaticamente para quem o Eduardo liberou — a resposta diz qual vale) — "
         "avise isso ao usuário. NÃO use para tarefas de pessoas (para isso é "
         "`criar_tarefa`) nem para mexer em dados de um pedido/produto. Antes de chamar, "
         "garanta que o pedido está claro: o que acontece hoje, o que deve acontecer, em "
@@ -1477,6 +1479,14 @@ async def pedir_mudanca(session: AsyncSession, *, dono: User, args: dict[str, An
         ) from exc
     await session.commit()
     codigo = sistema_mudancas.codigo(m)
+    if await sistema_mudancas.autorizado_automatico(session, m.pedido_por) is not None:
+        return (
+            f"Pedido de mudança {codigo} registrado: {m.titulo}. O robô vai preparar e testar "
+            "a mudança; os seus pedidos são aprovados automaticamente, então ela vai para o ar "
+            "sozinha quando o robô terminar e os testes passarem (o Eduardo e o Thorfinn são "
+            "avisados). Se o robô disser que precisa da equipe, a equipe faz. Para "
+            f"acompanhar, pergunte como está a {codigo}."
+        )
     return (
         f"Pedido de mudança {codigo} registrado: {m.titulo}. O robô vai preparar e testar a "
         "mudança; ela só vai para o ar depois que o Eduardo ou o Thorfinn aprovarem. Para "

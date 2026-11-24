@@ -90,7 +90,8 @@ async def test_0508_cria_igual_ao_model_com_os_dados_do_pedido_e_desce(db):
     cfg = Config(str(raiz / "alembic.ini"))
     cfg.set_main_option("script_location", str(raiz / "alembic"))
     roteiro = ScriptDirectory.from_config(cfg)
-    assert roteiro.get_heads() == ["0508_produto_cadastros"]
+    # Uma ponta só (a 0509 da aprovação automática veio depois, 24/11/2026).
+    assert len(roteiro.get_heads()) == 1, roteiro.get_heads()
     caminho = [r.revision for r in roteiro.walk_revisions("base", "0508_produto_cadastros")]
     assert caminho[:4] == [
         "0508_produto_cadastros",

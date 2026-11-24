@@ -21,7 +21,13 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import SistemaMudanca, SistemaMudancaAprovador, SistemaMudancaRobo, UserRole
+from app.models import (
+    SistemaMudanca,
+    SistemaMudancaAprovador,
+    SistemaMudancaAutoAprovacao,
+    SistemaMudancaRobo,
+    UserRole,
+)
 from app.services import claude_tarefas
 from app.services import sistema_mudancas as svc
 from app.services.claude_tarefas import TarefaInvalidaError
@@ -620,3 +626,102 @@ async def test_pergunta_passa_na_frente_dos_pedidos_de_mudanca(
     assert (await _pegar(client, token))["id"] == str(p.id)  # a pergunta, criada depois, sai antes
     await _resultado(client, token, p.id, status="respondida", resposta="Assim.")
     assert (await _pegar(client, token))["id"] == str(m.id)
+
+
+# ── aprovação automática (0509, Eduardo 24/11/2026) ───────────────────────
+
+
+async def _pronta(client, token, m):
+    await _pegar(client, token)
+    return await _resultado(
+        client,
+        token,
+        m.id,
+        status="pronta",
+        resumo="Troquei o texto.",
+        diff=DIFF,
+        branch=f"mudanca/M-{m.numero}",
+        commit=C1,
+    )
+
+
+async def test_pedido_do_harry_vai_para_o_ar_sem_clique(
+    client: AsyncClient, db, make_user, auth_as, avisos, token
+):
+    chefe, eduardo, _outro, _comum = await _gente(db, make_user)
+    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
+    await db.commit()
+
+    texto = await claude_tarefas.pedir_mudanca(
+        db, dono=chefe, args={"titulo": "Mudar texto", "descricao": "Hoje diz A, deve dizer B"}
+    )
+    assert "aprovados automaticamente" in texto and "Thorfinn aprovarem" not in texto
+    m = (await db.execute(select(SistemaMudanca))).scalar_one()
+
+    r = await _pronta(client, token, m)
+    assert r.status_code == 200, r.text
+    m = await _recarrega(db, m)
+    assert (m.status, m.aprovado_por, m.aprovado_automatico) == ("aprovada", eduardo.id, True)
+    assert m.aprovado_em is not None and m.diff_sha == svc.sha_do_diff(DIFF)
+    auto = [a for a in avisos if "aprovada automaticamente" in a["title"]]
+    assert {a["user_id"] for a in auto} == {eduardo.id, chefe.id}
+    assert not [a for a in avisos if "pronta para aprovar" in a["title"]]
+
+    auth_as(eduardo)
+    d = (await client.get(f"/api/sistema-mudancas/{m.id}")).json()
+    assert d["aprovado_por_nome"] == "heisenberg (automático)" and d["aprovado_automatico"]
+    assert d["pode_aprovar"] is False and d["pode_cancelar"] is True  # dá para segurar
+
+    lista = await claude_tarefas.listar_mudancas(db, dono=chefe, args={"codigo": f"M-{m.numero}"})
+    assert "aprovada automaticamente" in lista and "Troquei o texto." in lista
+
+    t = await _pegar(client, token)
+    assert t["acao"] == "publicar" and t["commit"] == C1
+    await _resultado(client, token, m.id, status="publicada", commit=C2)
+    m = await _recarrega(db, m)
+    assert m.status == "publicada" and m.aprovado_automatico
+
+
+async def test_sem_regra_ou_sem_quem_autorizou_espera_o_aprovar(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, eduardo, outro_admin, _comum = await _gente(db, make_user)
+    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
+    await db.commit()
+
+    # outro admin, sem regra: espera o clique como sempre
+    m = await _pedido(db, outro_admin, "Pedido de outra pessoa")
+    await _pronta(client, token, m)
+    m = await _recarrega(db, m)
+    assert (m.status, m.aprovado_automatico, m.aprovado_por) == ("pronta", False, None)
+    texto = await claude_tarefas.pedir_mudanca(
+        db, dono=outro_admin, args={"titulo": "x", "descricao": "Hoje A, deve B"}
+    )
+    assert "Thorfinn aprovarem" in texto
+
+    # quem autorizou deixou de aprovar: a regra para de valer
+    await db.delete(await db.get(SistemaMudancaAprovador, eduardo.id))
+    await db.commit()
+    await db.execute(
+        update(SistemaMudanca).where(SistemaMudanca.id != m.id).values(status="recusada")
+    )
+    await db.commit()
+    h = await _pedido(db, chefe, "Pedido do harry")
+    await _pronta(client, token, h)
+    h = await _recarrega(db, h)
+    assert (h.status, h.aprovado_automatico) == ("pronta", False)
+
+
+async def test_pergunta_do_harry_nao_passa_pela_aprovacao(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, eduardo, _o, _c = await _gente(db, make_user)
+    db.add(SistemaMudancaAutoAprovacao(pedido_por=chefe.id, autorizado_por=eduardo.id))
+    await db.commit()
+    p = await svc.criar_pergunta(db, dono=chefe, pergunta="Como funciona o Flex?")
+    await db.commit()
+    await _pegar(client, token)
+    r = await _resultado(client, token, p.id, status="respondida", resposta="Assim.")
+    assert r.status_code == 200
+    p = await _recarrega(db, p)
+    assert (p.status, p.aprovado_automatico, p.aprovado_por) == ("respondida", False, None)

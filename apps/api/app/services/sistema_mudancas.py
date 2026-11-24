@@ -26,6 +26,12 @@ O caminho de um pedido (`sistema_mudanca.status`):
   • Publicar vem antes de fazer (quem já foi aprovado não espera a fila).
 
 Quem aprova: `sistema_mudanca_aprovador` (por user_id — ver o model).
+Aprovação automática (0509, Eduardo 24/11/2026: "todas as tarefas que o harry
+jogar em mudança é para fazer, está automaticamente aprovado"): o pedido de
+quem está em `sistema_mudanca_auto_aprovacao` vai de `pronta` direto para
+`aprovada` em nome de quem autorizou, enquanto essa pessoa continuar
+aprovadora ativa. Os aprovadores recebem o aviso com o link (dá para
+"Cancelar aprovação" até o robô começar a publicar).
 Quem pede: admin ativo, pelo conector (`claude_tarefas.pedir_mudanca`).
 """
 
@@ -47,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     SistemaMudanca,
     SistemaMudancaAprovador,
+    SistemaMudancaAutoAprovacao,
     SistemaMudancaRobo,
     User,
     UserRole,
@@ -192,6 +199,24 @@ async def pode_aprovar(session: AsyncSession, user: User | None) -> bool:
 
 def pode_pedir(user: User) -> bool:
     return user.role == UserRole.ADMIN and user.status == UserStatus.ACTIVE
+
+
+async def autorizado_automatico(session: AsyncSession, pedido_por: UUID | None) -> UUID | None:
+    """Quem deixou os pedidos desta pessoa aprovados sozinhos (0509), se a
+    regra ainda vale: quem pede continua admin ativo e quem autorizou continua
+    aprovador ativo. Senão None (o pedido espera o Aprovar como sempre)."""
+    if pedido_por is None:
+        return None
+    regra = await session.get(SistemaMudancaAutoAprovacao, pedido_por)
+    if regra is None or regra.autorizado_por is None:
+        return None
+    quem_pede = await session.get(User, pedido_por)
+    if quem_pede is None or quem_pede.disabled_at is not None or not pode_pedir(quem_pede):
+        return None
+    quem_autorizou = await session.get(User, regra.autorizado_por)
+    if not await pode_aprovar(session, quem_autorizou):
+        return None
+    return regra.autorizado_por
 
 
 # ── avisos ────────────────────────────────────────────────────────────────
@@ -359,6 +384,10 @@ def detalhe_dict(
     def _nome(uid: UUID | None) -> str | None:
         return nomes_.get(uid) if uid else None
 
+    aprovado_por_nome = _nome(m.aprovado_por)
+    if m.aprovado_automatico:
+        aprovado_por_nome = f"{aprovado_por_nome or '?'} (automático)"
+
     def _iso(v: datetime | None) -> str | None:
         return v.isoformat() if v else None
 
@@ -373,7 +402,8 @@ def detalhe_dict(
         "arquivos": m.arquivos or [],
         "branch": m.branch,
         "commit": m.commit,
-        "aprovado_por_nome": _nome(m.aprovado_por),
+        "aprovado_por_nome": aprovado_por_nome,
+        "aprovado_automatico": bool(m.aprovado_automatico),
         "aprovado_em": _iso(m.aprovado_em),
         "recusado_por_nome": _nome(m.recusado_por),
         "recusado_em": _iso(m.recusado_em),
@@ -404,6 +434,7 @@ async def aprovar(
     m.status = "aprovada"
     m.aprovado_por = user.id
     m.aprovado_em = agora
+    m.aprovado_automatico = False
     m.erro = None
     m.atualizado_em = agora
     await session.flush()
@@ -721,6 +752,7 @@ async def registrar_resultado(
     _do_robo(m, robo)
     novo = str(dados.get("status") or "")
     agora = _agora()
+    automatica = False
     if m.status == "fazendo" and m.tipo == "pergunta":
         permitidos = ("respondida", "falhou", "pedida")
     elif m.status == "fazendo":
@@ -768,6 +800,15 @@ async def registrar_resultado(
         m.commit = commit[:64]
         m.branch = branch[:500]
         m.erro = None
+        if m.tipo == "mudanca":
+            autorizou = await autorizado_automatico(session, m.pedido_por)
+            if autorizou is not None:
+                # 0509: ninguém precisa clicar — vai direto para a fila de publicar.
+                novo = "aprovada"
+                automatica = True
+                m.aprovado_por = autorizou
+                m.aprovado_em = agora
+                m.aprovado_automatico = True
     elif novo == "publicada":
         m.publicado_em = agora
         commit = str(dados.get("commit") or "").strip()
@@ -800,7 +841,9 @@ async def registrar_resultado(
     m.prazo_robo = None
     m.atualizado_em = agora
     await session.flush()
-    logger.info("mudanca_resultado", mudanca=codigo(m), status=novo, robo=robo)
+    logger.info(
+        "mudanca_resultado", mudanca=codigo(m), status=novo, robo=robo, automatica=automatica
+    )
 
     if novo == "aprovada" and m.adiamentos and m.adiamentos % AVISO_ADIAMENTOS == 0:
         await _avisar(
@@ -811,7 +854,16 @@ async def registrar_resultado(
             m=m,
             evento="adiada_muito",
         )
-    if novo == "respondida":
+    if automatica:
+        await _avisar(
+            session,
+            [*(u.id for u in await aprovadores(session)), m.pedido_por],
+            titulo=f"🤖 {codigo(m)} aprovada automaticamente — vai para o ar",
+            mensagem=m.titulo,
+            m=m,
+            evento="aprovada_auto",
+        )
+    elif novo == "respondida":
         await _avisar(
             session,
             [m.pedido_por],
@@ -882,6 +934,10 @@ def linha_para_o_claude(m: SistemaMudanca, nomes_: dict[UUID, str]) -> str:
         return " — ".join(partes)
     if m.status == "pronta" and m.resumo:
         partes.append(f"o que o robô fez: {m.resumo[:400]}")
+    if m.aprovado_automatico and m.status in ("aprovada", "publicando", "publicada"):
+        partes.append("aprovada automaticamente")
+        if m.resumo:
+            partes.append(f"o que o robô fez: {m.resumo[:400]}")
     if m.status == "recusada":
         quem = nomes_.get(m.recusado_por) if m.recusado_por else None
         partes.append(f"recusada por {quem or '?'}: {m.motivo_recusa or ''}")

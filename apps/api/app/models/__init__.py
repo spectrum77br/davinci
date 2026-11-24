@@ -60,6 +60,7 @@ from app.models.claude_conector import ClaudeConector
 from app.models.sistema_mudanca import (
     SistemaMudanca,
     SistemaMudancaAprovador,
+    SistemaMudancaAutoAprovacao,
     SistemaMudancaRobo,
 )
 from app.models.company import Cadastro, CadastroStore, Company, Store
@@ -400,6 +401,7 @@ __all__ = [
     "ClaudeConector",
     "SistemaMudanca",
     "SistemaMudancaAprovador",
+    "SistemaMudancaAutoAprovacao",
     "SistemaMudancaRobo",
     "AlertSeverity",
     "AlertType",

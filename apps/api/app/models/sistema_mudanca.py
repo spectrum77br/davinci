@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -119,6 +120,11 @@ class SistemaMudanca(Base):
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     aprovado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 0509 (24/11/2026): aprovada pela regra de `sistema_mudanca_auto_aprovacao`
+    # (ninguém clicou; `aprovado_por` é quem deixou a regra).
+    aprovado_automatico: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     recusado_por: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -140,6 +146,26 @@ class SistemaMudancaAprovador(Base):
 
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SistemaMudancaAutoAprovacao(Base):
+    """Pedidos de quem já nascem aprovados (0509). Eduardo, 24/11/2026: "todas
+    as tarefas que o harry jogar em mudança é para fazer, está automaticamente
+    aprovado". Quando o robô termina (pronta), o pedido de `pedido_por` vira
+    aprovada em nome de `autorizado_por` — só enquanto quem autorizou continua
+    aprovador ativo. Por `user_id`, como o aprovador."""
+
+    __tablename__ = "sistema_mudanca_auto_aprovacao"
+
+    pedido_por: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    autorizado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
