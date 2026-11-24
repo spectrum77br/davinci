@@ -13,7 +13,6 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
-    IntegrationPlatform,
     User,
 )
 from app.schemas.products import (
@@ -216,20 +215,13 @@ async def enqueue_auto_link(
     # Bling, só as da equipe de quem clicou e só das plataformas com leitor de
     # vínculo. O corpo só pode estreitar. Antes, integration_ids=None lia
     # todas as integrações, inclusive as 21 ML arquivadas e o Bling.
+    # Mesma lista do Vincular do fim do "Atualizar" (PLATAFORMAS_VINCULO): antes
+    # esta lista era repetida aqui e ficou sem a Temu (24/11/2026), embora a
+    # tela já oferecesse a Temu no diálogo do Vincular.
     # Import local: produtos_botoes puxa os leitores de anúncio (pesado).
-    from app.services.produtos_botoes import contas_do_botao
+    from app.services.produtos_botoes import PLATAFORMAS_VINCULO, contas_do_botao
 
-    contas = await contas_do_botao(
-        session,
-        user,
-        {
-            IntegrationPlatform.ML,
-            IntegrationPlatform.SHOPEE,
-            IntegrationPlatform.TIKTOK,
-            IntegrationPlatform.AMAZON,
-            IntegrationPlatform.MAGALU,
-        },
-    )
+    contas = await contas_do_botao(session, user, PLATAFORMAS_VINCULO)
     ids = [getattr(c, "id", c) for c in contas]
     if body.integration_ids:
         pedidas = set(body.integration_ids)

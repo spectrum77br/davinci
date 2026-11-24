@@ -517,15 +517,19 @@ async def test_vincular_monta_as_contas_no_servidor(
     make_user: Callable,
     auth_as: Callable[[User | None], None],
 ):
-    """Entram ML, Shopee, TikTok, Amazon e Magalu não arquivadas. Ficam fora:
-    arquivada, Bling e Carrefour (sem leitor de vínculo). O corpo só estreita
-    (o que não é do escopo é ignorado). O job leva trigger 'botao_vincular'."""
+    """Entram ML, Shopee, TikTok, Amazon, Magalu e Temu não arquivadas. Ficam
+    fora: arquivada, Bling e Carrefour (sem leitor de vínculo). O corpo só
+    estreita (o que não é do escopo é ignorado). O job leva trigger
+    'botao_vincular'."""
     admin = await make_user(role=UserRole.ADMIN)
     ml = await _conta(db, admin, IntegrationPlatform.ML)
     shopee = await _conta(db, admin, IntegrationPlatform.SHOPEE)
     tiktok = await _conta(db, admin, IntegrationPlatform.TIKTOK)
     amazon = await _conta(db, admin, IntegrationPlatform.AMAZON)
     magalu = await _conta(db, admin, IntegrationPlatform.MAGALU)
+    temu = await _conta(db, admin, IntegrationPlatform.TEMU)
+    # Âncora Temu "só conciliação" (nasce arquivada): fica fora como qualquer arquivada.
+    await _conta(db, admin, IntegrationPlatform.TEMU, arquivada=True)
     arquivada = await _conta(db, admin, IntegrationPlatform.ML, arquivada=True)
     await _conta(db, admin, IntegrationPlatform.BLING)
     await _conta(db, admin, IntegrationPlatform.CARREFOUR)
@@ -536,11 +540,20 @@ async def test_vincular_monta_as_contas_no_servidor(
         r = await client.post("/api/jobs/auto-link", json={})
     assert r.status_code == 201
     args = pool.enqueue_job.await_args.args
-    esperadas = {str(i.id) for i in (ml, shopee, tiktok, amazon, magalu)}
-    assert set(args[2]) == esperadas and len(args[2]) == 5
+    esperadas = {str(i.id) for i in (ml, shopee, tiktok, amazon, magalu, temu)}
+    assert set(args[2]) == esperadas and len(args[2]) == 6
     job = await db.get(BackgroundJob, uuid.UUID(r.json()["job_id"]))
     assert job.payload["trigger"] == "botao_vincular"
     assert set(job.payload["integration_ids"]) == esperadas
+
+    # Só a Temu (o diálogo do Vincular oferece a Temu): entra, não dá 400.
+    await db.execute(BackgroundJob.__table__.delete())
+    await db.commit()
+    pool = _pool_falso()
+    with patch("app.routers.jobs.get_arq_sync_pool", return_value=pool):
+        r = await client.post("/api/jobs/auto-link", json={"integration_ids": [str(temu.id)]})
+    assert r.status_code == 201
+    assert pool.enqueue_job.await_args.args[2] == [str(temu.id)]
 
     # O corpo só estreita: a arquivada e um id qualquer são ignorados.
     await db.execute(BackgroundJob.__table__.delete())
