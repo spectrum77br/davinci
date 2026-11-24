@@ -7060,8 +7060,10 @@ watch(department, async () => {
         </PopoverRoot>
         <!-- Equipes ▾ (M-26, 23/11/2026): 1, 2 e 3, no visual do Plataforma e
              do Contas. Soma com os dois: a coluna só aparece passando nos três.
-             Filtro parcial: "Equipes (1)". -->
-        <PopoverRoot>
+             Filtro parcial: "Equipes (1)". Sem a lista da aba Contas (quem não
+             tem permissão de ver Contas, ex. churchill) não há a equipe de cada
+             coluna: o botão não aparece, senão desmarcar esvaziaria a grade. -->
+        <PopoverRoot v-if="!accountsErr">
           <PopoverTrigger as-child>
             <button type="button" class="btn btn-sm h-7 py-0" data-filtro="equipes" title="Escolher as equipes cujas contas a grade mostra">
               {{ rotuloFiltroEquipes }}

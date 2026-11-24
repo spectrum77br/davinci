@@ -260,6 +260,10 @@ for (const marca of ordem) {
   antes = i
 }
 assert.ok(!barra.includes('Recarregar'), 'o Recarregar saiu da barra')
+// M-26 (24/11/2026): sem a lista da aba Contas (quem não pode ver Contas,
+// ex. churchill) não se sabe a equipe da coluna; o Equipes ▾ não aparece,
+// senão desmarcar uma caixa esvaziaria a grade.
+assert.match(tabela, /<PopoverRoot v-if="!accountsErr">\s*<PopoverTrigger as-child>\s*<button[^>]*data-filtro="equipes"/)
 assert.ok(!barra.includes('conferir-anuncios') && !barra.includes('Conferir anúncios'), 'o Conferir anúncios saiu da barra')
 assert.ok(!barra.includes('pushAllAndClose') && !barra.includes('showPushMenu'), 'o menu do Enviar saiu')
 assert.doesNotMatch(barra, /<select/, 'Plataforma não é mais select')
