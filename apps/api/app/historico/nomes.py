@@ -45,6 +45,7 @@ PAGINAS: dict[str, str] = {
     "/financeiro/simulacao": "Simulação",
     "/financeiro/dnp": "DNP",
     "/imobilizado": "Cadastros › Imobilizado",
+    "/cadastro-produtos": "Cadastros › Produtos",
     "/garantias": "Pós-venda › Garantias",
     "/importacao": "Importação",
     # Integrações virou aba de Cadastros em 17/11/2026, com o Histórico dentro
@@ -131,6 +132,7 @@ API: dict[str, str] = {
     "/api/users": "Configurações › Usuários",
     "/api/tarefas": "Tarefas",
     "/api/imobilizado": "Cadastros › Imobilizado",
+    "/api/produto-cadastros": "Cadastros › Produtos",
     "/api/garantias": "Pós-venda › Garantias",
     "/api/claude-conector": "Tarefas › Conector do Claude",
     "/api/claude-mcp": "Claude (conector)",
@@ -450,6 +452,9 @@ TABELAS: dict[str, str] = {
     "chamado_mensagem": "Mensagem do chamado",
     "tarefas": "Tarefa",
     "imobilizado": "Item do imobilizado",
+    # M-29 (24/11/2026, migration 0507): Cadastros › Produtos.
+    "produto_cadastro_tipos": "Tipo (Cadastros › Produtos)",
+    "produto_cadastros": "Categoria ou tag (Cadastros › Produtos)",
     "garantias": "Garantia",
     "garantia_atendimentos": "Atendimento da garantia",
     "garantia_atendimento_anexos": "Anexo do atendimento da garantia",

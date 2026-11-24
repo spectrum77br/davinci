@@ -426,6 +426,9 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    # 0507 (M-29): Cadastros › Produtos — os nomes antes dos tipos (FK RESTRICT).
+    "produto_cadastros",
+    "produto_cadastro_tipos",
     # 0387: as tabelas NOSSAS por cima da Central (FK → mail_*, users,
     # atendimento_*, integrations, store_info, marcas): antes de todas.
     "mail_reconciliation",

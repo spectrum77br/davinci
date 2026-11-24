@@ -127,6 +127,11 @@ Resource = Literal[
     # Cadastros › E-mails: padrões de e-mail por marca e canal (logo,
     # assinatura, prévia e envio de teste).
     "email_padroes",
+    # Cadastros › Produtos (M-29, 24/11/2026): a lista de categorias e tags de
+    # envio (Tipo | Nome). Só `view` vale (abre a aba); criar, editar e excluir
+    # são só de administrador no servidor (routers/produto_cadastros.py).
+    # Mesmo nome no useCan.ts.
+    "cadastro_produtos",
     # Ouvidoria › Robôs (21/09/2026): catálogo dos robôs (modo, última
     # rodada, quem avisa) + ocorrências que eles abriram. Grupo próprio no
     # menu, entre Cadastros e Admin — mesmo nome no useCan.ts.

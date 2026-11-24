@@ -323,6 +323,7 @@ from app.models.product import (
     ProductCategory,
     ProductLink,
 )
+from app.models.produto_cadastro import ProdutoCadastro, ProdutoCadastroTipo
 from app.models.refund import Refund
 from app.models.segment import Segment, SegmentSpecialDate
 from app.models.situacao_bling import SituacaoBling
@@ -565,6 +566,8 @@ __all__ = [
     "ConfiguracaoSegura",
     "OrganizarOculto",
     "OrganizarPrevia",
+    "ProdutoCadastro",
+    "ProdutoCadastroTipo",
     "OuvidoriaOcorrencia",
     "OuvidoriaRobo",
     "OuvidoriaRodada",

@@ -964,6 +964,10 @@ class Settings(BaseSettings):
     # separados por vírgula. Vazio = a mesma lista do App Uranyx (hoje thorfinn e
     # heisenberg), para não depender de mexer no .env agora.
     erp_usuarios: str = ""
+    # Endereço do serviço erp dentro da davinci_net (M-29, 24/11/2026): Cadastros › Produtos
+    # pergunta a ele quantos produtos usam uma categoria/tag antes de excluir ou renomear.
+    # Sem o serviço no ar, a exclusão de categoria fica recusada (não dá para conferir).
+    erp_interno_url: str = "http://erp:8765"
     # Troca de autoridade (etapa 2): vazio = Bling. Preenchido = o ERP próprio responde no lugar
     # do Bling, com token fixo. Só muda com o OK do Eduardo, no .env do servidor.
     bling_api_base: str = ""
