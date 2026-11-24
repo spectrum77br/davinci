@@ -332,16 +332,26 @@ async function principal() {
   html = await adm.html()
   assert.match(menu(html, 'periodo'), /checked data-campo="periodo-personalizado"/)
   assert.doesNotMatch(menu(html, 'periodo'), /checked data-campo="periodo-mes"/, 'uma caixa por vez')
+  const rotuloValido = texto(await adm.html()).match(/Período: [^ ]+ – [^ ]+/)[0]
   adm.state.customStart = '2026-11-20'
   adm.state.customEnd = '2026-11-10'
   const n = adm.chamadas.length
   adm.state.aplicarPersonalizado()
   assert.equal(adm.chamadas.length, n, 'de depois de até: não lê')
-  assert.match(menu(await adm.html(), 'periodo'), /A data inicial precisa ser antes da final\./)
+  html = await adm.html()
+  assert.match(menu(html, 'periodo'), /A data inicial precisa ser antes da final\./)
+  // Revisão (24/11): a tabela segue com o período anterior — o botão também,
+  // e o aviso fica à vista fora do popover.
+  assert.match(texto(html), new RegExp(rotuloValido.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')), 'o botão mostra o período que está na tabela')
+  assert.doesNotMatch(texto(html), /Período: 20\/11\/2026/)
+  const barraInv = html.slice(html.indexOf('data-faturamento-barra'), html.indexOf('data-faturamento-tabela'))
+  assert.match(barraInv, /data-aviso-periodo[^>]*>[^<]*A data inicial precisa ser antes da final/, 'aviso fora do popover')
   adm.state.customStart = '2026-11-01'
   adm.state.customEnd = '2026-11-10'
   await adm.state.aplicarPersonalizado()
-  assert.match(texto(await adm.html()), /Período: 01\/11\/2026 – 10\/11\/2026/)
+  html = await adm.html()
+  assert.match(texto(html), /Período: 01\/11\/2026 – 10\/11\/2026/)
+  assert.doesNotMatch(html, /data-aviso-periodo/, 'período válido: sem aviso')
   adm.state.escolherModo('month')
   adm.state.month = '2026-10'
   await adm.state.load()

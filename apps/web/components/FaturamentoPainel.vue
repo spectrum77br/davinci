@@ -137,9 +137,15 @@ function dataCurta(iso: string): string {
 }
 const periodoInvalido = computed(() => mode.value === 'custom'
   && (!customStart.value || !customEnd.value || customStart.value > customEnd.value))
-const rotuloPeriodo = computed(() => mode.value === 'month'
+// O período escolhido agora na caixa…
+const rotuloEscolhido = computed(() => mode.value === 'month'
   ? `Período: ${mesCurto(month.value)}`
   : `Período: ${customStart.value ? dataCurta(customStart.value) : '…'} – ${customEnd.value ? dataCurta(customEnd.value) : '…'}`)
+// …e o botão mostra o da última leitura (o que está na tabela): com um
+// personalizado inválido a tela não relê, e o botão não pode mostrar um
+// período que a tabela não tem (revisão de 24/11/2026).
+const rotuloCarregado = ref<string | null>(null)
+const rotuloPeriodo = computed(() => rotuloCarregado.value ?? rotuloEscolhido.value)
 
 function shiftMonth(delta: number) {
   const [y, m] = month.value.split('-').map(Number)
@@ -189,6 +195,7 @@ async function load() {
   const seq = ++seqLoad
   loading.value = true
   error.value = null
+  rotuloCarregado.value = rotuloEscolhido.value
   try {
     const { start, end } = periodoParams()
     const qs = new URLSearchParams({ start, end })
@@ -676,6 +683,8 @@ const colunas = computed(() => (isAdmin.value ? 11 : 10))
         <RefreshCw v-else class="h-4 w-4 mr-1" />
         Atualizar
       </button>
+      <!-- Personalizado inválido: a tabela fica no período anterior; o aviso fica à vista com o popover fechado. -->
+      <span v-if="periodoInvalido" class="text-xs text-destructive" data-aviso-periodo>Período não aplicado. A data inicial precisa ser antes da final.</span>
       <span class="ml-auto text-xs text-muted-foreground" data-contador>{{ linhasFiltradas.length }} contas</span>
     </div>
 
