@@ -22,6 +22,15 @@ Shopee de conta não arquivada: as linhas diárias da Amazon são a soma da
 janela de 7 dias (não o gasto do dia) e as contas arquivadas são as de
 demonstração.
 
+Só de 09/09/2026 em diante (revisão de 24/11): antes disso o número do
+`marketing_metrics` está errado e nunca foi consertado — inflado até 09/07 e
+gasto 0 de 09/07 a 08/09 (a coleta recebia 404, gravava 0 e marcava sucesso;
+conserto 5a007892, 08/10/2026). O backfill do conserto regravou de 09/09 a
+08/10 (produção, 08/10 10h UTC) e a coleta consertada cuida de 08/10 em
+diante; cada dia a partir de 09/09 foi regravado ou conferido igual por ela.
+Copiar o antes faria agosto aparecer como R$ 0,00 e maio/junho inflados — sem
+linha, a tela mostra "—" ou o asterisco de parcial.
+
 DOWNGRADE: apaga a tabela (o `marketing_metrics` não é tocado).
 
 `SET LOCAL lock_timeout` como na 0505: a FK nova trava `marketing_accounts`
@@ -35,6 +44,7 @@ Revises: 0505_alertas_por_equipe
 
 # ruff: noqa: S608 — SQL montado só com nomes fixos desta migration (schema), sem entrada de fora
 from collections.abc import Sequence
+from datetime import date
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -53,6 +63,8 @@ TABELA = "marketing_gasto_dia"
 # FIXOS (não importam o modelo vivo).
 ORIGEM_COPIA = "marketing_metrics"
 PLATAFORMAS_COPIADAS = ("ml", "shopee")
+# O 1º dia que a coleta consertada (5a007892) regravou ou conferiu (docstring).
+PRIMEIRO_DIA_CONFIAVEL = date(2026, 9, 9)
 
 
 def copiar_linhas_diarias(bind) -> None:
@@ -73,11 +85,12 @@ def copiar_linhas_diarias(bind) -> None:
                AND m.spend >= 0 AND m.spend < 1e10  -- fora NaN e infinito
                AND a.arquivada_em IS NULL
                AND a.platform IN ({plataformas})
+               AND (m.timestamp AT TIME ZONE 'UTC')::date >= :desde
              GROUP BY m.account_id, (m.timestamp AT TIME ZONE 'UTC')::date
             ON CONFLICT (marketing_account_id, dia) DO NOTHING
             """
         ),
-        {"origem": ORIGEM_COPIA},
+        {"origem": ORIGEM_COPIA, "desde": PRIMEIRO_DIA_CONFIAVEL},
     )
 
 

@@ -538,13 +538,18 @@ async def test_migration_0506_cria_o_que_o_modelo_declara_copia_e_o_downgrade_de
             },
         )
     for conta, quando, gasto, intensidade in (
-        (ml, "2026-05-20T12:00:00+00:00", 95.125, 0),
-        (ml, "2026-05-21T12:00:00+00:00", 0.0, 0),
-        (ml, "2026-05-21T15:00:00+00:00", 9.0, 50),  # linha por hora: fica de fora
-        (ml, "2026-05-22T12:00:00+00:00", float("nan"), 0),  # NaN: fica de fora
-        (shopee, "2026-06-01T12:00:00+00:00", 3.3, 0),
-        (amazon, "2026-06-05T12:00:00+00:00", 70.0, 0),  # soma de 7 dias: fora
-        (arquivada, "2026-06-05T12:00:00+00:00", 1.0, 0),  # demonstração: fora
+        # Antes de 09/09 a coleta antiga gravava número errado (inflado até
+        # 09/07, zero de 09/07 a 08/09) e nada consertou: fica de fora.
+        (ml, "2026-05-20T12:00:00+00:00", 4000.0, 0),
+        (ml, "2026-08-15T12:00:00+00:00", 0.0, 0),
+        (ml, "2026-09-08T12:00:00+00:00", 0.0, 0),
+        (ml, "2026-09-09T12:00:00+00:00", 95.125, 0),
+        (ml, "2026-09-10T12:00:00+00:00", 0.0, 0),
+        (ml, "2026-09-10T15:00:00+00:00", 9.0, 50),  # linha por hora: fica de fora
+        (ml, "2026-09-11T12:00:00+00:00", float("nan"), 0),  # NaN: fica de fora
+        (shopee, "2026-10-01T12:00:00+00:00", 3.3, 0),
+        (amazon, "2026-10-05T12:00:00+00:00", 70.0, 0),  # soma de 7 dias: fora
+        (arquivada, "2026-10-05T12:00:00+00:00", 1.0, 0),  # demonstração: fora
     ):
         await db.execute(
             text(f'INSERT INTO "{r}".marketing_metrics VALUES (:id, :c, :t, :g, :i)'),
@@ -580,17 +585,17 @@ async def test_migration_0506_cria_o_que_o_modelo_declara_copia_e_o_downgrade_de
             )
         ).all()
         assert copiadas == [
-            (ml, date(2026, 5, 20), Decimal("95.13"), None, "marketing_metrics"),
-            (ml, date(2026, 5, 21), Decimal("0.00"), None, "marketing_metrics"),
-            (shopee, date(2026, 6, 1), Decimal("3.30"), None, "marketing_metrics"),
-        ]
+            (ml, date(2026, 9, 9), Decimal("95.13"), None, "marketing_metrics"),
+            (ml, date(2026, 9, 10), Decimal("0.00"), None, "marketing_metrics"),
+            (shopee, date(2026, 10, 1), Decimal("3.30"), None, "marketing_metrics"),
+        ], "só de 09/09 em diante (o que a coleta consertada gravou ou conferiu)"
         # Uma linha por (conta, dia); gasto negativo recusado; conta apagada leva o histórico.
         with pytest.raises(Exception):  # noqa: B017 — IntegrityError do asyncpg
             await db.execute(
                 text(
                     f'INSERT INTO "{r}".marketing_gasto_dia'
                     " (marketing_account_id, dia, gasto_ads, origem)"
-                    f" VALUES ('{ml}', '2026-05-20', 1, 'x')"
+                    f" VALUES ('{ml}', '2026-09-09', 1, 'x')"
                 )
             )
         await db.rollback()
@@ -621,7 +626,7 @@ async def test_migration_0506_cria_o_que_o_modelo_declara_copia_e_o_downgrade_de
         assert sorted(restantes) == ["marketing_accounts", "marketing_metrics"]
         assert (
             await db.execute(text(f'SELECT count(*) FROM "{r}".marketing_metrics'))
-        ).scalar_one() == 6
+        ).scalar_one() == 9
     finally:
         await db.rollback()
         await db.execute(text(f'DROP SCHEMA IF EXISTS "{r}" CASCADE'))
