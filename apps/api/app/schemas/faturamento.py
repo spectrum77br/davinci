@@ -3,9 +3,17 @@
 local bling_orders."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
+
+
+class MargemFaixa(BaseModel):
+    """As margens da aba Contas (margin1..5, fração: 0.425 = 42,5%) das contas
+    de preço da loja: a menor e a maior (iguais = uma margem só)."""
+
+    min: float
+    max: float
 
 
 class FaturamentoLinha(BaseModel):
@@ -20,6 +28,21 @@ class FaturamentoLinha(BaseModel):
     pedidos: int
     faturamento: float
     ticket_medio: float
+    # M-22 (24/11/2026). A equipe de vendas da loja (store_info.sales_team:
+    # 101/102/103; None = sem equipe ou loja sem cadastro).
+    equipe: int | None = None
+    # As contas da Tabela de Preços da loja (kit e catálogo): a tela soma os
+    # cartões vermelhos delas na grade (coluna Pendências). Vazia = a loja não
+    # tem conta na Tabela de Preços ("—").
+    contas_preco: list[str] = Field(default_factory=list)
+    # Gasto guardado (Ads + afiliados) no período; None = sem dado ("—").
+    # `investimento_desde`: desde quando o gasto está guardado; `parcial`: o
+    # período começa antes disso.
+    investimento: float | None = None
+    investimento_desde: date | None = None
+    investimento_parcial: bool = False
+    # SÓ para administrador: a API não manda este campo a quem não é ADM.
+    margem: MargemFaixa | None = None
 
 
 class FaturamentoOut(BaseModel):

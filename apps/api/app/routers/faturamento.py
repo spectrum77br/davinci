@@ -32,13 +32,23 @@ Definições fixadas com o operador:
   A loja mostra só a sua parte e some se não vendeu o departamento; loja sem
   tipo, presencial e órfã entram quando venderam. Os 4 somam o total sem
   filtro. Sem filtro, nada muda.
+- M-22 (24/11/2026, prévia aprovada em 23/11): cada linha traz também a
+  `equipe` (sales_team), as `contas_preco` da loja (a tela conta os cartões
+  vermelhos delas na grade: Pendências), o `investimento` do período (gasto
+  de Ads guardado por dia em marketing_gasto_dia; None = sem dado) e, SÓ para
+  administrador, a `margem` (menor e maior margin1..5 das contas de preço da
+  loja) — a quem não é ADM a resposta sai SEM o campo. Como cada conta se liga
+  à loja: services/faturamento_contas.py. As regras de quais pedidos entram e
+  de quem vê quais lojas não mudaram.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import Text, case, func, literal, select
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -48,8 +58,9 @@ from app.db import get_session
 from app.deps.auth import require_permission, user_scope
 from app.deps.team_scope import nome_da_equipe
 from app.models import BlingOrder, StoreInfo, User, UserRole
-from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
+from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut, MargemFaixa
 from app.services import departamento as dep_svc
+from app.services import faturamento_contas as contas_svc
 from app.services.store_departments import resolve_store_departments
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
@@ -136,6 +147,46 @@ async def _agg_do_departamento(session: AsyncSession, department: str, filtros: 
         .group_by(ped.c.bling_store_id)
         .cte("agg")
     )
+
+
+def _dias_do_periodo(start: datetime, end: datetime) -> tuple[date, date]:
+    """Os dias do período para o Investimento: o fim é exclusivo (o mês vem
+    como [dia 1, dia 1 do mês seguinte); o personalizado até 23:59:59)."""
+    return start.date(), (end - timedelta(microseconds=1)).date()
+
+
+async def _colunas_m22(
+    session: AsyncSession,
+    itens: list[FaturamentoLinha],
+    equipe_da_loja: dict[str, int | None],
+    start: datetime,
+    end: datetime,
+    *,
+    admin: bool,
+) -> None:
+    """Preenche as colunas da M-22 nas linhas de loja cadastrada (a órfã fica
+    sem conta, sem investimento e sem margem)."""
+    integ_por_loja = await contas_svc.integracoes_das_lojas(session)
+    contas_preco = await contas_svc.contas_preco_das_lojas(session, integ_por_loja)
+    contas_ads = await contas_svc.contas_ads_das_lojas(session, integ_por_loja)
+    inicio, fim = _dias_do_periodo(start, end)
+    investimentos = await contas_svc.investimento_das_lojas(session, contas_ads, inicio, fim)
+    for it in itens:
+        if it.store_id not in equipe_da_loja:
+            continue  # órfã ("Sem cadastro")
+        loja = UUID(it.store_id)
+        it.equipe = equipe_da_loja[it.store_id]
+        contas = contas_preco.get(loja, [])
+        it.contas_preco = sorted(str(c.id) for c in contas)
+        inv = investimentos.get(loja)
+        if inv is not None and inv.total is not None:
+            it.investimento = float(round(inv.total, 2))
+            it.investimento_desde = inv.desde
+            it.investimento_parcial = inv.parcial
+        if admin:
+            faixa = contas_svc.faixa_de_margem(contas)
+            if faixa is not None:
+                it.margem = MargemFaixa(min=float(faixa[0]), max=float(faixa[1]))
 
 
 @router.get("", response_model=FaturamentoEquipesOut)
@@ -264,6 +315,7 @@ async def list_faturamento(
     itens: list[FaturamentoLinha] = []
     total_pedidos = 0
     total_faturamento = 0.0
+    equipe_da_loja = {str(s.id): s.sales_team for s in stores}
     for r in (await session.execute(roster_stmt)).all():
         ped = int(r.pedidos or 0)
         fat = float(r.faturamento or 0)
@@ -333,7 +385,10 @@ async def list_faturamento(
     # nome pra a lista ficar estável.
     itens.sort(key=lambda x: (-x.faturamento, (x.loja or "").lower()))
 
-    return FaturamentoEquipesOut(
+    admin = user.role == UserRole.ADMIN
+    await _colunas_m22(session, itens, equipe_da_loja, start, end, admin=admin)
+
+    out = FaturamentoEquipesOut(
         itens=itens,
         total_pedidos=total_pedidos,
         total_faturamento=round(total_faturamento, 2),
@@ -342,4 +397,11 @@ async def list_faturamento(
         teams=list(teams_avail),
         equipes=[EquipeFaturamento(numero=n, nome=nome_da_equipe(n)) for n in teams_avail],
         team=team,
+    )
+    if admin:
+        return out
+    # A Margem é só do administrador (M-22): para os outros o campo nem vai na
+    # resposta (o mesmo critério de ADM da Tabela de Preços: role == admin).
+    return JSONResponse(
+        out.model_dump(mode="json", exclude={"itens": {"__all__": {"margem"}}})
     )
