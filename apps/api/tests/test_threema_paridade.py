@@ -12,7 +12,7 @@ envio capturado.
 
 Envio MIGRADO (o ponto passou a ler o Cadastro): a montagem antiga saiu do
 código e fica aqui como CÓPIA CONGELADA do ponto antes do commit da fatia
-(`_ANTES_DA_F1`, `_ANTES_DA_F2`, `_ANTES_DA_F3`). É ela que o `legado` tem
+(`_ANTES_DA_F1`, `_ANTES_DA_F2`, `_ANTES_DA_F3`, `_ANTES_DA_F4`). É ela que o `legado` tem
 de continuar reproduzindo — é a reserva de emergência e a fonte da semente.
 
 Três cenários (`threema_cadastro_apoio`): o "cheio", parecido com produção,
@@ -261,7 +261,17 @@ _ANTES_DA_F3 = {
     ),
     K.MARGEM_INFORMAR: lambda db: _informar(db, "margem"),
 }
-_ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2, **_ANTES_DA_F3}
+# Cópia congelada dos 3 pontos que a F4 migrou (C11, item 1): o motor da
+# Logística, o botão da regra e o da linha mandavam
+# `send_to_all(texto, recipients=parse_recipients(rule.threema_recipients) or
+# None)` — com 👤, a lista da regra; sem, o `send_to_all` caía no
+# THREEMA_RECIPIENTS (services/threema.py). Aqui, a lista padrão (sem regra);
+# a de cada regra, pelo `send_to_all` de verdade, está em
+# `test_item_1_por_regra_pelo_send_to_all_de_verdade`.
+_ANTES_DA_F4 = {
+    K.LOGISTICA_MENSAGEM_REGRA: lambda db: P(get_settings().threema_recipients),
+}
+_ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2, **_ANTES_DA_F3, **_ANTES_DA_F4}
 
 
 def _conferencia_ligada_antes_da_f2(chave: str) -> bool:
@@ -279,7 +289,6 @@ def _conferencia_ligada_antes_da_f2(chave: str) -> bool:
 
 async def _hoje(chave: str, db, monkeypatch) -> list[str]:
     """Quem recebe HOJE o envio `chave`, pelo código de hoje."""
-    s = get_settings()
     robo = chave.removeprefix("ouvidoria.")
     if chave in _ANTES:
         r = _ANTES[chave](db)
@@ -287,15 +296,9 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
     if chave.startswith("ouvidoria."):
         # ouvidoria.avisar_pendentes → ouvidoria.destinatarios(robo, chave)
         return ouvidoria.destinatarios(await db.get(OuvidoriaRobo, robo), robo)[0]
-    tabela = {
-        # sem regra: `parse(rule) or None` → o send_to_all cai no THREEMA_RECIPIENTS
-        # (o caminho de verdade, com 👤 e sem, está em test_item_1_por_regra)
-        K.LOGISTICA_MENSAGEM_REGRA: lambda: P(s.threema_recipients),
-    }
-    r = tabela[chave]()
-    if hasattr(r, "__await__"):
-        r = await r
-    return list(r)
+    # Desde a F4/C11 todo envio do servidor gerenciado migrou: o "hoje" de
+    # cada um é a cópia congelada do ponto antes da fatia.
+    raise KeyError(chave)
 
 
 async def _ativo_hoje(chave: str, db) -> bool:
@@ -427,7 +430,8 @@ async def test_margem_fora_do_modo_ligado_e_o_depende_de(db, monkeypatch):
 @pytest.mark.usefixtures("limpar_ouvidoria")
 async def test_item_1_por_regra_pelo_send_to_all_de_verdade(db, monkeypatch):
     """Com 👤: a lista da regra. Sem 👤: o `send_to_all(texto, None)` cai no
-    THREEMA_RECIPIENTS (services/threema.py) — conferido pelo envio real."""
+    THREEMA_RECIPIENTS (services/threema.py) — conferido pelo envio real, com
+    a expressão dos 3 pontos do item 1 antes da F4/C11 (cópia congelada)."""
     c = await montar(db, monkeypatch)
     for regra in c.regras.values():
         enviados: list[str] = []
@@ -441,7 +445,7 @@ async def test_item_1_por_regra_pelo_send_to_all_de_verdade(db, monkeypatch):
             router.post("/send_simple").mock(side_effect=_resp)
             segredo = "x"
             cli = threema.ThreemaClient(gateway_id="*TSTGW01", secret=segredo, contexto="logistica")
-            # a mesma expressão dos 3 pontos do item 1
+            # a expressão dos 3 pontos do item 1 antes da F4/C11
             await cli.send_to_all("t", recipients=P(regra.threema_recipients) or None)
         leg = await threema_envios.legado(K.LOGISTICA_MENSAGEM_REGRA, escopo=regra.id, session=db)
         assert list(leg.ids) == enviados, regra.status_plataforma
@@ -483,13 +487,6 @@ async def test_mac_e_informativos_nao_tem_lista_no_servidor(db):
 # Onde a lista é montada no meio de uma função maior, a cópia acima vale só
 # enquanto a expressão continuar no código.
 _EXPRESSOES: dict[str, tuple[str, ...]] = {
-    "services/logistica_bling.py": ("threema.parse_recipients(rule.threema_recipients) or None",),
-    "routers/logistica.py": (
-        # botão da linha do pedido
-        "threema.parse_recipients(rule.threema_recipients) or None",
-        # botão da regra (a rota também é conferida de verdade abaixo)
-        "threema.parse_recipients(s.threema_recipients) or None",
-    ),
     # os 5 Informar (`_informar` acima; a rota também é conferida abaixo)
     "routers/informar.py": ('threema.parse_recipients(row.recipients if row else "")',),
     "services/threema.py": ("recipients or parse_recipients(get_settings().threema_recipients)",),
@@ -540,9 +537,10 @@ async def test_informar_pela_rota_de_verdade(db, monkeypatch, client, make_user,
 async def test_botao_da_regra_pela_rota_de_verdade(
     db, monkeypatch, client, make_user, auth_as, variante
 ):
-    """`POST /api/logistica/status/{id}/enviar-threema` sem escolha avulsa
-    manda para `legado(item 1, escopo=regra)`: o 👤 da regra, ou o
-    THREEMA_RECIPIENTS pelo `send_to_all` de verdade quando ela não tem 👤."""
+    """`POST /api/logistica/status/{id}/enviar-threema` sem semente (o código
+    da F4 publicado antes do `semear`) manda para `legado(item 1,
+    escopo=regra)`: o 👤 da regra, ou o THREEMA_RECIPIENTS quando ela não tem
+    👤 — pelo `send_to_all` de verdade; lista vazia → 422."""
     c = await montar(db, monkeypatch, variante=variante)
     s = get_settings()
     monkeypatch.setattr(s, "threema_gateway_id", "*TSTGW01")
@@ -606,6 +604,8 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         "services/denuncia_robo_aviso.py": "ThreemaInformarConfig",
         # F2/C9e: nem a Conferência (a linha do Informar e as chaves do .env)
         "services/conferencia_shopee/threema_aviso.py": "ThreemaInformarConfig",
+        # F4/C11: o motor da Logística não lê mais o 👤 das regras
+        "services/logistica_bling.py": "threema_recipients",
     }
     for arquivo in (
         "services/chamados_ia_aviso.py",
@@ -617,6 +617,15 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         assert "parse_recipients" not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
+    # F4/C11: os 3 pontos do item 1 não montam mais a lista nem criam o
+    # cliente, e o POST/PATCH das regras não gravam mais o 👤
+    for arquivo in ("services/logistica_bling.py", "routers/logistica.py"):
+        fonte = (_APP / arquivo).read_text(encoding="utf-8")
+        for expressao in ("parse_recipients(", "send_to_all", "ThreemaClient", "threema_registro"):
+            assert expressao not in fonte, (arquivo, expressao)
+    rota = (_APP / "routers/logistica.py").read_text(encoding="utf-8")
+    assert "threema_recipients=_clean(" not in rota
+    assert "s.threema_recipients = " not in rota
     # F3/C10a: o aviso dos robôs não monta mais a lista (o `destinatarios`
     # fica no módulo só como a configuração antiga) nem cria o cliente
     import inspect

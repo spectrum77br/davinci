@@ -314,6 +314,13 @@ _USOS_DO_NUCLEO = {
     # o liga/desliga e quem recebe lidos antes de montar o aviso (a margem
     # alta, antes da auditoria) e o envio pelo núcleo.
     "services/margem_auto_hold.py": {"enviar", "resolver"},
+    # F4/C11: a Mensagem da regra de status (item 1) — o motor (quem recebe
+    # cada regra lido uma vez por rodada, antes de montar o aviso; ninguém
+    # válido sai no máximo uma vez por hora) e os dois botões pelo núcleo,
+    # com o escopo da regra; a junção das regras repetidas só LÊ o escopo de
+    # cada regra no Cadastro.
+    "services/logistica_bling.py": {"enviar", "resolver"},
+    "routers/logistica.py": {"enviar", "escopo_das_regras"},
     # A tela dos robôs (F3/C10a): quem recebe o aviso de cada robô migrado,
     # pelo Cadastro (só nomes, o ID mascarado). Não manda nada.
     "routers/ouvidoria.py": {"quem_recebe", "mascara"},

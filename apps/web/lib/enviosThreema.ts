@@ -561,3 +561,59 @@ export function configSemCadastro<T>(config: Record<string, T>, r: Pick<RoboThre
   const fora = r.config_no_cadastro || {}
   return Object.fromEntries(Object.entries(config).filter(([k]) => !(k in fora)))
 }
+
+// ─── a Mensagem Threema das regras da Logística (pages/logistica.vue, F4/C11) ───
+
+/** O envio do item 1: a Mensagem Threema de cada regra da aba Status. */
+export const CHAVE_MENSAGEM_REGRA = 'logistica.mensagem_regra'
+
+/** Quem recebe a Mensagem Threema de UMA regra (só nomes, nunca o ID):
+ *  `propria` = a regra tem lista própria no Cadastro (na configuração
+ *  antiga, o 👤); senão vale a lista padrão do envio. */
+export type QuemRecebeDaRegra = {
+  propria: boolean
+  ativo: boolean
+  nomes: string[]
+  ninguem: boolean
+  avisos: string[]
+}
+
+/** `GET /api/threema/envios/logistica.mensagem_regra/quem-recebe/regras`. */
+export type QuemRecebeRegras = {
+  chave: string
+  nome: string
+  migrado: boolean
+  via: string
+  usa_configuracao_antiga: boolean
+  padrao: QuemRecebeDaRegra
+  // só as regras com Mensagem Threema ou com lista própria
+  regras: Record<string, QuemRecebeDaRegra>
+}
+
+/** A regra na tela de Cadastros › Envios Threema (a gaveta do item 1, já
+ *  na regra). Só admin abre. */
+export function linkDaRegra(regraId: string): string {
+  return `${linkDoEnvio(CHAVE_MENSAGEM_REGRA)}&regra=${encodeURIComponent(regraId)}`
+}
+
+/** Quem recebe a regra: a lista dela ou, sem ela, a padrão. null = não
+ *  carregou (o servidor decide na hora de mandar). */
+export function quemRecebeDaRegra(q: QuemRecebeRegras | null | undefined, regraId: string): QuemRecebeDaRegra | null {
+  if (!q) return null
+  return q.regras[regraId] || q.padrao
+}
+
+/** O "vai para…" do botão Enviar da regra (não há mais escolha avulsa: só
+ *  admin escolhe quem recebe, em Cadastros › Envios Threema). */
+export function textoVaiPara(r: QuemRecebeDaRegra | null): { tipo: 'ok' | 'ninguem' | 'desconhecido'; texto: string } {
+  if (!r) {
+    return {
+      tipo: 'desconhecido',
+      texto: 'Não consegui carregar quem recebe: a mensagem vai para a lista da regra em Cadastros › Envios Threema.',
+    }
+  }
+  if (r.ninguem || !r.nomes.length) {
+    return { tipo: 'ninguem', texto: 'Ninguém recebe: esta mensagem não sai. Quem recebe se escolhe em Cadastros › Envios Threema (só admin).' }
+  }
+  return { tipo: 'ok', texto: `Vai para: ${r.nomes.join(', ')} (${r.propria ? 'lista própria da regra' : 'lista padrão'}).` }
+}

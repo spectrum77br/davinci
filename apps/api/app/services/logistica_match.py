@@ -460,13 +460,22 @@ def resumo_acoes(rule: LogisticaStatus | None) -> list[str]:
 # mensagem) mantém as linhas separadas.
 
 
-def _acoes_da_regra(r: LogisticaStatus, anexos: Sequence[str]) -> tuple:
+def _acoes_da_regra(
+    r: LogisticaStatus, anexos: Sequence[str], escopo: Sequence[str] | None = None
+) -> tuple:
     """Tudo o que a regra FAZ, num formato comparável. Textos comparados letra por
-    letra (só sem espaço nas pontas); destinatários do Threema como conjunto;
-    imagens pelo conteúdo (hash)."""
-    destinatarios = sorted(
-        {d.strip() for d in (r.threema_recipients or "").split(",") if d.strip()}
-    )
+    letra (só sem espaço nas pontas); quem recebe a Mensagem Threema como
+    conjunto; imagens pelo conteúdo (hash).
+
+    Quem recebe: o `escopo` da regra em Cadastros › Envios Threema quando dado
+    (tarefa 16, F4/C11 — `threema_envios.escopo_das_regras`; vazio = a lista
+    padrão do envio); sem ele, o 👤 da regra (a configuração antiga)."""
+    if escopo is not None:
+        destinatarios = sorted(set(escopo))
+    else:
+        destinatarios = sorted(
+            {d.strip() for d in (r.threema_recipients or "").split(",") if d.strip()}
+        )
     return (
         (r.alterar_status_bling or "").strip(),
         bool(r.monitoramento),
@@ -498,6 +507,7 @@ def regras_repetidas(
     rows: Sequence[LogisticaStatus],
     *,
     anexos: Mapping[UUID, Sequence[str]] | None = None,
+    escopos: Mapping[UUID, Sequence[str]] | None = None,
 ) -> tuple[list[GrupoRepetido], list[list[LogisticaStatus]]]:
     """Acha as linhas da aba Status que dá pra juntar numa só.
 
@@ -507,6 +517,11 @@ def regras_repetidas(
     (`_acoes_da_regra`; `anexos` = hashes das imagens de cada regra). Só entram
     linhas com Status Atual: a curinga (vale de qualquer estado) nunca se junta
     — somar estados a ela mudaria o que ela cobre.
+
+    `escopos` (tarefa 16, F4/C11): quem recebe a Mensagem Threema de cada
+    regra em Cadastros › Envios Threema (`threema_envios.escopo_das_regras`;
+    regra fora do mapa = a lista padrão). Dado, só junta regras com o MESMO
+    escopo no Cadastro (o 👤 congelado não conta); None = compara o 👤.
 
     Devolve (grupos, conflitos). Conflito = o grupo divide algum Status Atual
     com outra linha da mesma chave que faz OUTRA coisa: hoje o pedido nesse
@@ -532,7 +547,10 @@ def regras_repetidas(
         por_acoes: dict[tuple, list[LogisticaStatus]] = {}
         for r in linhas:
             if _estados(r):
-                por_acoes.setdefault(_acoes_da_regra(r, anexos.get(r.id, ())), []).append(r)
+                escopo = escopos.get(r.id, ()) if escopos is not None else None
+                por_acoes.setdefault(
+                    _acoes_da_regra(r, anexos.get(r.id, ()), escopo), []
+                ).append(r)
         for iguais in por_acoes.values():
             if len(iguais) < 2:
                 continue

@@ -3,8 +3,15 @@
 O client faz um POST form-urlencoded por destinatário em
 `msgapi.threema.ch/send_simple` (Basic mode = o servidor cifra). O endpoint
 `/api/logistica/status/{id}/enviar-threema` envia a `mensagem_threema` da linha
-pra todos os destinatários configurados. Config vem do `.env`
+pra quem recebe a regra. Config vem do `.env`
 (threema_gateway_id/secret/recipients); vazia levanta ThreemaConfigError.
+
+Desde a tarefa 16 (F4/C11), quem recebe é escolhido em Cadastros › Envios
+Threema (só admin): o 👤 da regra e a escolha avulsa do modal são ignorados,
+com aviso. Aqui o Cadastro não tem semente (o código publicado antes do
+`semear` da fatia): o envio segue a configuração antiga EXATA — o 👤
+congelado da regra ou o THREEMA_RECIPIENTS. Com o Cadastro, os 3 pontos são
+conferidos em `test_threema_pontos_logistica_regras`.
 """
 
 from __future__ import annotations
@@ -18,10 +25,11 @@ import pytest
 import pytest_asyncio
 import respx
 from httpx import AsyncClient
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import User, UserRole, UserStatus
+from app.models import LogisticaStatus, User, UserRole, UserStatus
 from app.services import threema
 
 os.environ["THREEMA_GATEWAY_ID"] = "*3MAGW01"
@@ -138,6 +146,17 @@ async def _cria_status(client: AsyncClient, **extra) -> str:
     return r.json()["id"]
 
 
+async def _pessoa_congelada(db: AsyncSession, sid: str, recipients: str) -> None:
+    """O 👤 que a regra já tinha antes da tarefa 16 (F4/C11): a API não grava
+    mais; fica congelado como a configuração antiga."""
+    await db.execute(
+        update(LogisticaStatus)
+        .where(LogisticaStatus.id == uuid.UUID(sid))
+        .values(threema_recipients=recipients)
+    )
+    await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_enviar_threema_ok(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
@@ -171,9 +190,12 @@ async def test_threema_destinatarios_lista(
 
 
 @pytest.mark.asyncio
-async def test_enviar_threema_subset_e_pedido(
+async def test_enviar_threema_escolha_avulsa_ignorada_e_pedido(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):
+    """A escolha avulsa (o modal de antes, numa aba velha) não vale mais: a
+    mensagem vai para quem recebe a regra, com aviso; o cabeçalho
+    pedido/loja continua."""
     auth_as(admin)
     sid = await _cria_status(
         client, status_plataforma="x", mensagem_threema="avisar equipe"
@@ -185,25 +207,27 @@ async def test_enviar_threema_subset_e_pedido(
             json={"recipients": ["ABCD1234"], "pedido": "701-9", "loja": "Amazon"},
         )
     assert r.status_code == 200, r.text
-    assert r.json()["sent"] == ["ABCD1234"]
-    # só um destinatário (o escolhido) e o cabeçalho pedido/loja na mensagem.
-    assert len(route.calls) == 1
+    assert sorted(r.json()["sent"]) == ["ABCD1234", "EFGH5678"]
+    assert len(r.json()["avisos"]) == 1 and "Cadastros › Envios Threema" in r.json()["avisos"][0]
+    assert len(route.calls) == 2
     body = route.calls.last.request.content.decode()
-    assert "to=ABCD1234" in body
     assert "Pedido+701-9" in body and "Loja+Amazon" in body
 
 
 @pytest.mark.asyncio
-async def test_enviar_threema_recipients_vazio_422(
+async def test_enviar_threema_recipients_vazio_tambem_e_ignorado(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):
     auth_as(admin)
     sid = await _cria_status(client, status_plataforma="x", mensagem_threema="oi")
-    r = await client.post(
-        f"/api/logistica/status/{sid}/enviar-threema", json={"recipients": []}
-    )
-    assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "logistica_sem_destinatario_threema"
+    with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
+        router.post("/send_simple").mock(return_value=httpx.Response(200, text="mid"))
+        r = await client.post(
+            f"/api/logistica/status/{sid}/enviar-threema", json={"recipients": []}
+        )
+    assert r.status_code == 200, r.text
+    assert sorted(r.json()["sent"]) == ["ABCD1234", "EFGH5678"]
+    assert r.json()["avisos"]
 
 
 @pytest.mark.asyncio
@@ -230,45 +254,67 @@ async def test_enviar_threema_status_inexistente_404(
 # ---- destinatários salvos por regra (👤) + envio por LINHA do marketplace ----
 
 
-async def test_status_persiste_threema_recipients(
-    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+async def test_status_ignora_threema_recipients_com_aviso(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
 ):
+    """POST e PATCH das regras IGNORAM o 👤 (só admin escolhe quem recebe, em
+    Cadastros › Envios Threema), com aviso — não 422: o resto é gravado."""
     auth_as(admin)
-    sid = await _cria_status(
-        client,
-        status_plataforma="x",
-        mensagem_threema="oi",
-        threema_recipients="ABCD1234,EFGH5678",
+    r = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": "x",
+            "mensagem_threema": "oi",
+            "threema_recipients": "ABCD1234,EFGH5678",
+        },
     )
-    # veio de volta no GET.
-    r = await client.get("/api/logistica/status")
-    row = next(x for x in r.json() if x["id"] == sid)
-    assert row["threema_recipients"] == "ABCD1234,EFGH5678"
-    # patch atualiza; vazio zera pra NULL.
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+    assert r.json()["threema_recipients"] is None
+    assert r.json()["mensagem_threema"] == "oi"
+    assert len(r.json()["avisos"]) == 1 and "👤" in r.json()["avisos"][0]
+    # sem 👤 no corpo: sem aviso
+    r = await client.post("/api/logistica/status", json={"status_plataforma": "y"})
+    assert r.json()["avisos"] == []
+    # o 👤 de antes fica congelado: o PATCH não muda nem apaga, e avisa
+    await _pessoa_congelada(db, sid, "ABCD1234,EFGH5678")
     r = await client.patch(
-        f"/api/logistica/status/{sid}", json={"threema_recipients": "ABCD1234"}
+        f"/api/logistica/status/{sid}",
+        json={"threema_recipients": "ABCD1234", "mensagem_threema": "oi 2"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["threema_recipients"] == "ABCD1234"
+    assert r.json()["threema_recipients"] == "ABCD1234,EFGH5678"
+    assert r.json()["mensagem_threema"] == "oi 2"
+    assert r.json()["avisos"]
+    r = await client.patch(f"/api/logistica/status/{sid}", json={"threema_recipients": ""})
+    assert r.json()["threema_recipients"] == "ABCD1234,EFGH5678"
+    assert r.json()["avisos"]
+    # a aba velha que só repete o 👤 de sempre: sem aviso
     r = await client.patch(
-        f"/api/logistica/status/{sid}", json={"threema_recipients": ""}
+        f"/api/logistica/status/{sid}",
+        json={"threema_recipients": "ABCD1234,EFGH5678", "monitoramento": True},
     )
-    assert r.json()["threema_recipients"] is None
+    assert r.json()["avisos"] == [] and r.json()["monitoramento"] is True
+    # o GET da aba não traz aviso nenhum
+    row = next(x for x in (await client.get("/api/logistica/status")).json() if x["id"] == sid)
+    assert row["avisos"] == []
 
 
 @pytest.mark.asyncio
 async def test_enviar_threema_usa_recipients_salvos_da_regra(
-    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
 ):
-    """Sem body, o envio da aba Status cai na lista salva na regra (👤), não no
-    `.env`."""
+    """Sem semente no Cadastro, o envio da aba Status segue a configuração
+    antiga: a lista congelada na regra (👤), não o `.env`."""
     auth_as(admin)
-    sid = await _cria_status(
-        client,
-        status_plataforma="x",
-        mensagem_threema="avisar",
-        threema_recipients="EFGH5678",
-    )
+    sid = await _cria_status(client, status_plataforma="x", mensagem_threema="avisar")
+    await _pessoa_congelada(db, sid, "EFGH5678")
     with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
         route = router.post("/send_simple").mock(
             return_value=httpx.Response(200, text="mid")
@@ -289,18 +335,22 @@ async def _cria_logistica(client: AsyncClient, **extra) -> str:
 
 @pytest.mark.asyncio
 async def test_enviar_threema_pedido_casa_regra_com_pedido_e_loja(
-    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
 ):
     """Da LINHA do marketplace: acha a regra casada (coligação), injeta
-    Pedido/Loja da própria linha e usa os destinatários salvos na regra."""
+    Pedido/Loja da própria linha e usa quem recebe a regra (sem semente: o
+    👤 congelado)."""
     auth_as(admin)
-    await _cria_status(
+    sid = await _cria_status(
         client,
         plataforma="Shopee",
         status_plataforma="Concluído",
         mensagem_threema="pedido concluído, avisar",
-        threema_recipients="ABCD1234",
     )
+    await _pessoa_congelada(db, sid, "ABCD1234")
     lid = await _cria_logistica(
         client,
         plataforma="Shopee",

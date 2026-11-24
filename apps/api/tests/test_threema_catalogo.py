@@ -246,6 +246,8 @@ def test_mac_tem_reserva_do_env_do_mac_e_nenhum_remetente_do_servidor():
 # acrescenta os seus aqui, na ordem do catálogo, junto com o `migrado=True` e
 # os testes por ponto).
 MIGRADOS = [
+    # F4/C11: a Mensagem da regra de status (item 1, com escopo por regra)
+    K.LOGISTICA_MENSAGEM_REGRA,
     # F2/C9a: Informar da Logística e da aba Amazon, prazos da Amazon (2, 3 e 4)
     K.LOGISTICA_INFORMAR,
     K.LOGISTICA_AMAZON_INFORMAR,
@@ -327,9 +329,13 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     `test_threema_pontos_informar` (C9a, C9b e C9c),
     `test_threema_pontos_chamados_denuncia` (C9d),
     `test_threema_pontos_conferencia` (C9e),
-    `test_threema_pontos_ouvidoria` (C10a) e
-    `test_threema_pontos_margem` (C10b)."""
+    `test_threema_pontos_ouvidoria` (C10a),
+    `test_threema_pontos_margem` (C10b) e
+    `test_threema_pontos_logistica_regras` (C11)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
+        # item 1: não desliga — o liga/desliga de cada regra é a própria
+        # Mensagem Threema dela (o `estado_resolvido` não muda)
+        K.LOGISTICA_MENSAGEM_REGRA: "—",
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
         K.LOGISTICA_AMAZON_INFORMAR: "recusa",

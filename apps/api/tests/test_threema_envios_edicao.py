@@ -357,6 +357,7 @@ async def test_regras_do_item_1(db, monkeypatch, client, make_user, auth_as):
     regra = c.regras["sem_pessoa"]
     url = f"/api/threema/envios/{chave}/regras/{regra.id}"
     corpo = {"destinatarios": [_ref(c.usuarios["joana"])]}
+    desmigrar(monkeypatch, chave)  # o código de antes da F4/C11
     r = await client.put(url, json=corpo)
     assert r.json()["detail"]["code"] == "envio_nao_migrado", "item 1 não migrado"
     migrar(monkeypatch, chave)

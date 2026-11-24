@@ -1402,6 +1402,86 @@ async def quem_recebe_leve(session: AsyncSession, chave: str) -> dict:
     }
 
 
+def _leve_da_resolucao(res: threema_envios.Resolucao, *, propria: bool) -> dict:
+    # Na configuração antiga a lista é a EXATA de hoje (ID repetido sai duas
+    # vezes): o nome aparece uma vez só.
+    destinos = list({x.id: x for x in res.destinos}.values())
+    nomes = [n["nome"] for n in _nomes_dos_destinos(destinos)]
+    return {
+        "propria": propria,
+        "ativo": res.ativo,
+        "nomes": nomes,
+        "ninguem": res.ativo and not nomes,
+        "avisos": list(res.avisos),
+    }
+
+
+async def quem_recebe_regras(session: AsyncSession, chave: str) -> dict:
+    """Item 1 (F4/C11): quem recebe a Mensagem Threema de cada regra de
+    status, só os NOMES — o atalho da aba Status da Logística (as etiquetas no
+    lugar do 👤 e o "vai para…" do botão Enviar).
+
+    `padrao`: a lista padrão do envio (a de toda regra sem lista própria).
+    `regras`: {id: …} das regras com Mensagem Threema ou com lista própria (no
+    Cadastro; na configuração antiga — emergência ou sem semente —, o 👤).
+    Regra com lista própria em que ninguém vale usa a padrão, com o aviso do
+    núcleo. Mesma resolução do envio (`threema_envios.resolver`)."""
+    d = _envio(chave)
+    if d.escopo_tipo != "regra_status":
+        raise TelaError(422, "sem_regras", "Este envio não tem lista por regra.")
+    padrao = await threema_envios.resolver(d.chave, session=session, com_nomes=True)
+    pelo_cadastro = padrao.via in ("cadastro", "cache")
+    proprias: set[uuid.UUID] = set()
+    if pelo_cadastro:
+        proprias = set(
+            (
+                await session.execute(
+                    select(ThreemaEnvioDestinatario.logistica_status_id)
+                    .where(
+                        ThreemaEnvioDestinatario.envio_chave == d.chave,
+                        ThreemaEnvioDestinatario.logistica_status_id.is_not(None),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+    regras = (
+        (
+            await session.execute(
+                select(LogisticaStatus).order_by(LogisticaStatus.created_at, LogisticaStatus.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[str, dict] = {}
+    for r in regras:
+        propria = (
+            r.id in proprias
+            if pelo_cadastro
+            else bool(threema.parse_recipients(r.threema_recipients))
+        )
+        if not propria and not (r.mensagem_threema or "").strip():
+            continue
+        res = (
+            await threema_envios.resolver(d.chave, escopo=r.id, session=session, com_nomes=True)
+            if propria
+            else padrao
+        )
+        out[str(r.id)] = _leve_da_resolucao(res, propria=propria)
+    return {
+        "chave": d.chave,
+        "nome": d.nome,
+        "migrado": d.migrado,
+        "via": padrao.via,
+        "usa_configuracao_antiga": padrao.via == "legado",
+        "padrao": _leve_da_resolucao(padrao, propria=False),
+        "regras": out,
+    }
+
+
 # ─────────────────────────────────────────────────────────── robôs do Mac
 
 

@@ -254,11 +254,16 @@ def _servidor() -> list[EnvioDef]:
             "Mensagem da regra de status",
             "Texto 'Mensagem Threema' da regra da aba Status, com 'Pedido X | Loja Y' no "
             "topo. Sai pelo motor da Logística a cada 5 min, pelo botão Enviar da regra e "
-            "pelo botão da linha do pedido. Quem recebe pode ser escolhido por regra (👤).",
+            "pelo botão da linha do pedido. Quem recebe: a lista padrão ou uma lista própria "
+            "por regra.",
             "misto", "motor a cada 5 min + botões da regra e da linha", "servidor",
             "logistica", L(regra_status=True, grupo=G_AVISOS_GERAIS),
+            # Sem interruptor (o liga/desliga de cada regra é a própria
+            # Mensagem Threema dela, F4/C11): o motor, o botão da regra e o da
+            # linha mandam pelo Cadastro, com a lista da regra (escopo) ou a
+            # padrão.
             interruptor="fixo", ao_desligar="—", escopo_tipo="regra_status", fatia="F4",
-            leitura="perm:logistica:view",
+            leitura="perm:logistica:view", migrado=True,
         ),
         E(
             K.LOGISTICA_INFORMAR, "Logística", None, "Informar da Logística",

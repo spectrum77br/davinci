@@ -8,7 +8,8 @@ capturaria o caminho). Tudo é só de admin, menos:
 * `GET /envios/{chave}/quem-recebe`: só os NOMES de quem recebe (sem ID), com
   a porta que o catálogo declara para cada envio (`EnvioDef.leitura`): a
   mesma do botão Informar daquele painel ou a permissão de ver o painel. É o
-  atalho dos painéis de origem;
+  atalho dos painéis de origem (`/quem-recebe/regras`: o mesmo, por regra de
+  status, para a Mensagem Threema das regras da Logística, item 1);
 * `/agent/*`: os robôs do Mac, com o token de agente (`X-Agent-Token`, o
   mesmo do executor de NF). Leem a lista de cada envio do Mac e gravam no
   registro o que mandaram.
@@ -169,6 +170,22 @@ async def quem_recebe(
     await _porta_leitura(user, chave)
     try:
         return await tela.quem_recebe_leve(session, chave)
+    except tela.TelaError as e:
+        raise _erro(e) from e
+
+
+@router.get("/envios/{chave}/quem-recebe/regras")
+async def quem_recebe_regras(
+    chave: str,
+    session: Sessao,
+    user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Item 1 (F4/C11): só os nomes de quem recebe a Mensagem Threema de cada
+    regra de status (a lista própria da regra ou a padrão), sem ID — as
+    etiquetas da aba Status da Logística. Porta: a do catálogo."""
+    await _porta_leitura(user, chave)
+    try:
+        return await tela.quem_recebe_regras(session, chave)
     except tela.TelaError as e:
         raise _erro(e) from e
 

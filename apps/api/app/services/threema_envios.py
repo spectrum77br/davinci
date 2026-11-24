@@ -874,6 +874,38 @@ async def quem_recebe(
     return await resolver(chave, escopo=escopo, session=session, com_nomes=True)
 
 
+async def escopo_das_regras(
+    session: AsyncSession, chave: str
+) -> dict[uuid.UUID, tuple[str, ...]] | None:
+    """Item 1 (F4/C11): a lista própria de cada regra de status no Cadastro,
+    num formato comparável (`("grupo:<id>", "usuario:<id>")`, sem ordem e sem
+    ID do Threema) — a junção das regras repetidas da aba Status só junta
+    regras com o MESMO escopo, e o log da junção o leva.
+
+    Regra fora do mapa = usa a lista padrão do envio. None = o envio ainda
+    segue o 👤 de cada regra (não migrado ou sem semente): quem compara usa o
+    👤 (a mesma fonte do `legado`). A emergência não conta: ela não muda o
+    que está guardado no Cadastro. Só leitura, com a sessão de quem chama."""
+    d = _envio(chave)
+    if d.escopo_tipo != "regra_status" or not d.migrado:
+        return None
+    linha = await session.get(ThreemaEnvio, d.chave)
+    if linha is None or linha.semeado_em is None:
+        return None
+    out: dict[uuid.UUID, set[str]] = {}
+    for r in (
+        await session.execute(
+            select(ThreemaEnvioDestinatario).where(
+                ThreemaEnvioDestinatario.envio_chave == d.chave,
+                ThreemaEnvioDestinatario.logistica_status_id.is_not(None),
+            )
+        )
+    ).scalars():
+        ref = r.user_id or r.grupo_id or r.contato_id
+        out.setdefault(r.logistica_status_id, set()).add(f"{r.tipo}:{ref}")
+    return {regra: tuple(sorted(refs)) for regra, refs in out.items()}
+
+
 # ─────────────────────────────────────────────────────────── envio
 
 

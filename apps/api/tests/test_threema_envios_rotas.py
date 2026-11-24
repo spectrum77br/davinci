@@ -461,6 +461,7 @@ async def test_envios_da_pessoa_conta_o_item_1_pelo_da_regra(
     recebe (o aviso de Usuários antes de suspender e o filtro ?pessoa=)."""
     c = await montar(db, monkeypatch)
     await _admin(db, make_user, auth_as)
+    desmigrar(monkeypatch, K.LOGISTICA_MENSAGEM_REGRA)  # o código de antes da F4/C11
     joana, heis = c.usuarios["joana"], c.usuarios["heisenberg"]
     assert ID["joana"] not in get_settings().threema_recipients  # fora do padrão
     uso = (await client.get(f"/api/threema/pessoas/{joana.id}/envios")).json()

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck, PackageX } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck, PackageX } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
+import { CHAVE_MENSAGEM_REGRA, linkDaRegra, quemRecebeDaRegra, textoVaiPara, type QuemRecebeRegras } from '~/lib/enviosThreema'
 import type { FlexPedidoSemPeca } from '~/components/LogisticaFlexPedidosSemPeca.vue'
 
 definePageMeta({
@@ -1949,6 +1950,8 @@ type LogisticaStatus = {
   mensagem_chamado: string | null
   mensagem_bling: string | null
   mensagem_threema: string | null
+  // O 👤 de antes, congelado (reserva de emergência): quem recebe agora se
+  // escolhe em Cadastros › Envios Threema (tarefa 16, F4/C11).
   threema_recipients: string | null
   anexos: Anexo[]
   created_by: string | null
@@ -1982,6 +1985,8 @@ let statusLoaded = false
 async function refreshStatus() {
   statusLoading.value = true
   statusError.value = null
+  // quem recebe a Mensagem Threema de cada regra (as etiquetas), em paralelo
+  void loadThreemaRegras()
   try {
     statusRows.value = await api<LogisticaStatus[]>('/api/logistica/status')
     statusLoaded = true
@@ -2412,94 +2417,62 @@ async function removeStatusRow(s: LogisticaStatus) {
 }
 
 // ---- Mensagem Threema (notifica as pessoas do problema) ----
-// O modal serve pra dois modos: 'salvar' (ícone 👤 guarda QUEM recebe na regra,
-// porque vai virar automático) e 'enviar' (dispara agora pros escolhidos).
-type ThreemaDestinatario = { id: string; nome: string }
-const threemaDestinatarios = ref<ThreemaDestinatario[]>([])
-const threemaModal = reactive({
-  open: false,
-  mode: 'enviar' as 'enviar' | 'salvar',
-  status: null as LogisticaStatus | null,
-  selecionados: new Set<string>(),
-  sending: false,
-})
-
-async function loadThreemaDestinatarios() {
-  if (threemaDestinatarios.value.length) return
+// Quem recebe a Mensagem de cada regra vem de Cadastros › Envios Threema
+// (tarefa 16, F4/C11 — "só ADM altera quem recebe", decisão do dono em
+// 23/11): a lista própria da regra ou a padrão do envio. O 👤 virou etiquetas
+// de leitura (com o link da regra para o admin) e o "Enviar" mostra para quem
+// vai, sem escolha avulsa; quem tem logistica:edit continua mandando.
+const threemaRegras = ref<QuemRecebeRegras | null>(null)
+let threemaRegrasSeq = 0
+async function loadThreemaRegras() {
+  const meu = ++threemaRegrasSeq
   try {
-    threemaDestinatarios.value = await api<ThreemaDestinatario[]>(
-      '/api/logistica/threema/destinatarios',
+    const q = await api<QuemRecebeRegras>(
+      `/api/threema/envios/${CHAVE_MENSAGEM_REGRA}/quem-recebe/regras`,
     )
+    if (meu === threemaRegrasSeq) threemaRegras.value = q
   } catch {
-    threemaDestinatarios.value = []
+    // sem a lista, as etiquetas mostram "—" e o servidor decide ao mandar
+    if (meu === threemaRegrasSeq) threemaRegras.value = null
   }
 }
 
-// IDs salvos na regra (string "A,B" → Set). Se vazio, cai em "todos".
-function parseThreemaIds(raw: string | null): Set<string> {
-  if (!raw) return new Set()
-  return new Set(
-    raw
-      .split(/[,;\s]+/)
-      .map((x) => x.trim().toUpperCase())
-      .filter(Boolean),
-  )
-}
-
-function preselecionarThreema(s: LogisticaStatus): Set<string> {
-  const salvos = parseThreemaIds(s.threema_recipients)
-  if (salvos.size) return salvos
-  return new Set(threemaDestinatarios.value.map((d) => d.id))
-}
-
-// 👤 — escolher e SALVAR na regra quem recebe (base do envio automático futuro).
-async function escolherDestinatarios(s: LogisticaStatus) {
-  await loadThreemaDestinatarios()
-  threemaModal.mode = 'salvar'
-  threemaModal.status = s
-  threemaModal.selecionados = preselecionarThreema(s)
-  threemaModal.open = true
-}
+const threemaModal = reactive({
+  open: false,
+  status: null as LogisticaStatus | null,
+  sending: false,
+})
+// "Vai para: A, B (lista própria da regra)" do modal de envio.
+const threemaVaiPara = computed(() =>
+  threemaModal.status
+    ? textoVaiPara(quemRecebeDaRegra(threemaRegras.value, threemaModal.status.id))
+    : null,
+)
 
 async function enviarThreema(s: LogisticaStatus) {
   if (!s.mensagem_threema) return
-  await loadThreemaDestinatarios()
-  threemaModal.mode = 'enviar'
   threemaModal.status = s
-  threemaModal.selecionados = preselecionarThreema(s)
   threemaModal.open = true
+  // a lista pode ter mudado no Cadastro desde que a aba abriu
+  await loadThreemaRegras()
 }
 
-function toggleThreemaDest(id: string) {
-  if (threemaModal.selecionados.has(id)) threemaModal.selecionados.delete(id)
-  else threemaModal.selecionados.add(id)
+// O que o servidor recusou, em frase (o "sem ninguém" traz a frase dele).
+function erroThreema(e: any): string {
+  const d = e?.data?.detail
+  return d?.message || d?.code || e?.message || 'erro'
 }
 
 async function confirmarThreemaModal() {
   const s = threemaModal.status
   if (!s) return
-  const recipients = [...threemaModal.selecionados]
-  if (!recipients.length) {
-    toasts.error('Escolha ao menos um destinatário')
-    return
-  }
   threemaModal.sending = true
   setStatusBusy(s.id, true)
   statusError.value = null
   try {
-    if (threemaModal.mode === 'salvar') {
-      await patchStatusField(s.id, { threema_recipients: recipients.join(',') })
-      if (statusError.value) {
-        toasts.error('Não foi possível salvar', statusError.value)
-        return
-      }
-      toasts.success('Destinatários salvos', `${recipients.length} contato(s)`)
-      threemaModal.open = false
-      return
-    }
-    const r = await api<{ sent: string[]; failed: string[] }>(
+    const r = await api<{ sent: string[]; failed: string[]; avisos?: string[] }>(
       `/api/logistica/status/${s.id}/enviar-threema`,
-      { method: 'POST', body: { recipients } },
+      { method: 'POST' },
     )
     if (r.failed.length) {
       toasts.error(`Enviado a ${r.sent.length}, falhou ${r.failed.length}`, r.failed.join(', '))
@@ -2508,9 +2481,10 @@ async function confirmarThreemaModal() {
     }
     threemaModal.open = false
   } catch (e: any) {
-    const code = e?.data?.detail?.code || e?.message || 'erro'
-    statusError.value = code
-    toasts.error(threemaModal.mode === 'salvar' ? 'Não foi possível salvar' : 'Não foi possível enviar', code)
+    statusError.value = e?.data?.detail?.code || e?.message || 'erro'
+    toasts.error('Não foi possível enviar', erroThreema(e))
+    // ninguém para receber: a lista mudou — recarrega as etiquetas
+    void loadThreemaRegras()
   } finally {
     threemaModal.sending = false
     setStatusBusy(s.id, false)
@@ -2519,9 +2493,9 @@ async function confirmarThreemaModal() {
 
 // Enviar Threema a partir de uma LINHA do marketplace (aba Amazon/Shopee/etc):
 // o servidor acha a regra casada (coligação), injeta Pedido/Loja da própria
-// linha e usa os destinatários salvos na regra.
+// linha e manda para quem recebe a regra em Cadastros › Envios Threema.
 async function enviarThreemaPedido(c: Logistica) {
-  if (!confirm(`Enviar aviso Threema do pedido ${c.pedido_marketplace || c.pedido_bling || ''} (loja ${c.plataforma || '—'})?`)) return
+  if (!confirm(`Enviar aviso Threema do pedido ${c.pedido_marketplace || c.pedido_bling || ''} (loja ${c.plataforma || '—'})?\nVai para quem recebe a regra em Cadastros › Envios Threema.`)) return
   refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
   try {
     const r = await api<{ sent: string[]; failed: string[] }>(
@@ -2536,8 +2510,7 @@ async function enviarThreemaPedido(c: Logistica) {
     // Enviou → o aviso foi feito: o pedido resolve e some do painel.
     if (r.sent.length) await refresh()
   } catch (e: any) {
-    const code = e?.data?.detail?.code || e?.message || 'erro'
-    toasts.error('Não foi possível enviar', code)
+    toasts.error('Não foi possível enviar', erroThreema(e))
   } finally {
     const s = new Set(refreshingMeli.value)
     s.delete(c.id)
@@ -4600,23 +4573,20 @@ async function aplicarStatusBling(c: Logistica) {
                   @keydown.esc="cancelEdit"
                 />
                 <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_threema ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_threema || '—' }}</span>
-                <div v-if="canEdit && s.mensagem_threema" class="mt-1 flex items-center gap-1">
+                <!-- Quem recebe: etiquetas de leitura (Cadastros › Envios Threema,
+                     só admin muda — tarefa 16, F4/C11); o Enviar segue para
+                     quem edita a Logística. -->
+                <div v-if="s.mensagem_threema" class="mt-1 flex flex-wrap items-center gap-1" @click.stop>
                   <button
+                    v-if="canEdit"
                     class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10 disabled:opacity-50"
-                    title="Enviar Mensagem Threema aos destinatários"
+                    title="Enviar Mensagem Threema para quem recebe esta regra"
                     :disabled="statusBusy.has(s.id)"
                     @click.stop="enviarThreema(s)"
                   >
                     <Send class="size-3" /> Enviar
                   </button>
-                  <button
-                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-50"
-                    :title="s.threema_recipients ? `Destinatários salvos: ${s.threema_recipients}` : 'Escolher quem recebe (salvar na regra)'"
-                    :disabled="statusBusy.has(s.id)"
-                    @click.stop="escolherDestinatarios(s)"
-                  >
-                    <UserRound class="size-3" />
-                  </button>
+                  <ThreemaRegraQuemRecebe :regra-id="s.id" :quem="quemRecebeDaRegra(threemaRegras, s.id)" />
                 </div>
               </td>
               <!-- Ação -->
@@ -4779,22 +4749,16 @@ async function aplicarStatusBling(c: Logistica) {
               class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
               @change="patchStatusField(s.id, { mensagem_threema: ($event.target as HTMLTextAreaElement).value.trim() || null })"
             />
-            <div v-if="canEdit && s.mensagem_threema" class="mt-1 flex items-center gap-1">
+            <div v-if="s.mensagem_threema" class="mt-1 flex flex-wrap items-center gap-1">
               <button
+                v-if="canEdit"
                 class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-primary hover:bg-primary/10 disabled:opacity-50"
                 :disabled="statusBusy.has(s.id)"
                 @click="enviarThreema(s)"
               >
                 <Send class="size-3.5" /> Enviar Threema
               </button>
-              <button
-                class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-muted-foreground hover:bg-muted disabled:opacity-50"
-                :title="s.threema_recipients ? `Destinatários salvos: ${s.threema_recipients}` : 'Escolher quem recebe (salvar na regra)'"
-                :disabled="statusBusy.has(s.id)"
-                @click="escolherDestinatarios(s)"
-              >
-                <UserRound class="size-3.5" />
-              </button>
+              <ThreemaRegraQuemRecebe :regra-id="s.id" :quem="quemRecebeDaRegra(threemaRegras, s.id)" />
             </div>
           </div>
         </div>
@@ -4900,6 +4864,10 @@ async function aplicarStatusBling(c: Logistica) {
             placeholder="mensagem p/ notificar as pessoas"
             class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
           />
+          <p class="mt-1 text-xs text-muted-foreground" data-quem-recebe-nova>
+            Vai para a lista padrão da Mensagem da regra. Uma lista só desta regra, só admin
+            escolhe, em Cadastros › Envios Threema.
+          </p>
         </div>
 
         <div class="flex justify-end gap-2">
@@ -5134,44 +5102,44 @@ async function aplicarStatusBling(c: Logistica) {
       </div>
     </div>
 
-    <!-- Modal: escolher destinatários da Mensagem Threema -->
+    <!-- Modal: enviar a Mensagem Threema da regra. Sem escolha avulsa: vai
+         para quem recebe a regra em Cadastros › Envios Threema (só admin
+         muda; tarefa 16, F4/C11). -->
     <div v-if="threemaModal.open" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="threemaModal.open = false">
       <div class="bg-background border rounded-lg w-full max-w-sm p-5 space-y-4">
         <div class="flex items-center">
-          <h2 class="text-lg font-semibold">{{ threemaModal.mode === 'salvar' ? 'Destinatários da regra' : 'Enviar Threema' }}</h2>
+          <h2 class="text-lg font-semibold">Enviar Threema</h2>
           <Button class="ml-auto" size="sm" variant="ghost" @click="threemaModal.open = false">
             <X class="size-4" />
           </Button>
         </div>
-        <p class="text-sm text-muted-foreground">{{ threemaModal.mode === 'salvar' ? 'Escolha quem recebe o aviso desta regra (usado no envio e no automático).' : 'Escolha quem recebe a mensagem.' }}</p>
-        <div v-if="!threemaDestinatarios.length" class="text-sm text-muted-foreground">
-          Nenhum destinatário configurado.
-        </div>
-        <div v-else class="space-y-2">
-          <label
-            v-for="d in threemaDestinatarios"
-            :key="d.id"
-            class="flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50"
-          >
-            <input
-              type="checkbox"
-              class="size-4"
-              :checked="threemaModal.selecionados.has(d.id)"
-              @change="toggleThreemaDest(d.id)"
-            />
-            {{ d.nome }}
-          </label>
-        </div>
+        <p
+          v-if="threemaVaiPara"
+          class="text-sm"
+          :class="threemaVaiPara.tipo === 'ninguem' ? 'font-medium text-red-600 dark:text-red-400' : threemaVaiPara.tipo === 'desconhecido' ? 'text-muted-foreground' : ''"
+          :data-vai-para="threemaVaiPara.tipo"
+        >
+          {{ threemaVaiPara.texto }}
+        </p>
+        <p class="text-xs text-muted-foreground">
+          <template v-if="isAdmin">
+            Quem recebe se escolhe em
+            <NuxtLink
+              v-if="threemaModal.status"
+              :to="linkDaRegra(threemaModal.status.id)"
+              class="text-primary hover:underline"
+            >Cadastros › Envios Threema</NuxtLink>.
+          </template>
+          <template v-else>Só admin muda quem recebe (Cadastros › Envios Threema).</template>
+        </p>
         <div class="flex justify-end gap-2">
           <Button variant="ghost" @click="threemaModal.open = false">Cancelar</Button>
           <Button
-            :disabled="threemaModal.sending || !threemaModal.selecionados.size"
+            :disabled="threemaModal.sending || threemaVaiPara?.tipo === 'ninguem'"
             @click="confirmarThreemaModal"
           >
-            <component :is="threemaModal.mode === 'salvar' ? UserRound : Send" class="size-4 mr-1" />
-            {{ threemaModal.sending
-              ? (threemaModal.mode === 'salvar' ? 'Salvando…' : 'Enviando…')
-              : (threemaModal.mode === 'salvar' ? 'Salvar' : 'Enviar') }}
+            <Send class="size-4 mr-1" />
+            {{ threemaModal.sending ? 'Enviando…' : 'Enviar' }}
           </Button>
         </div>
       </div>

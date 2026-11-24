@@ -669,10 +669,6 @@ def test_todo_envio_gerenciado_do_servidor_tem_marca():
 # vai para `_PELO_CADASTRO` (e, se manda por uma função com chave, para
 # `_CHAMADAS_COM_CHAVE`).
 _MARCAS = {
-    # item 1: motor (5 min), botão da regra, botão da linha do pedido
-    ("services/logistica_bling.py", "enviar_threema_em_lote", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
-    ("routers/logistica.py", "enviar_threema", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
-    ("routers/logistica.py", "enviar_threema_pedido", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     # o Informar de contexto não migrado (desde a F3/C10b, nenhum: os 5
     # mandam por `_enviar_pelo_cadastro`; o ramo fica para o código de antes
     # de cada fatia — o mapa contexto → chave tem teste próprio)
@@ -746,6 +742,15 @@ _PELO_CADASTRO = {
         "K.MARGEM_REAVALIACAO",
     ): 1,
     ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
+    # F4/C11: a Mensagem da regra de status (item 1, com o escopo da regra) —
+    # o motor (5 min) e os dois botões (o da regra e o da linha do pedido),
+    # que mandam pela mesma função da rota
+    (
+        "services/logistica_bling.py",
+        "enviar_threema_em_lote",
+        "K.LOGISTICA_MENSAGEM_REGRA",
+    ): 1,
+    ("routers/logistica.py", "_mandar_mensagem_da_regra", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }

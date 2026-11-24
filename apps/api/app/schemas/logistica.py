@@ -384,7 +384,11 @@ class LogisticaStatusOut(BaseModel):
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
+    # O 👤 de antes, congelado (reserva de emergência): quem recebe agora é
+    # escolhido em Cadastros › Envios Threema (tarefa 16, F4/C11).
     threema_recipients: str | None = None
+    # O que o POST/PATCH não gravou (o 👤 é ignorado, não 422).
+    avisos: list[str] = Field(default_factory=list)
     anexos: list[AnexoOut] = Field(default_factory=list)
     created_by: UUID | None = None
     created_at: datetime
@@ -483,8 +487,9 @@ class ThreemaDestinatarioOut(BaseModel):
 
 
 class EnviarThreemaIn(BaseModel):
-    """Corpo do envio: destinatários escolhidos (None/vazio = usa a lista fixa
-    do `.env`) + pedido/loja opcionais pra compor o cabeçalho da mensagem."""
+    """Corpo do envio: pedido/loja opcionais pra compor o cabeçalho da
+    mensagem. `recipients` (a escolha avulsa da tela de antes) é ignorado:
+    quem recebe vem de Cadastros › Envios Threema (tarefa 16, F4/C11)."""
 
     recipients: list[str] | None = None
     pedido: str | None = None
@@ -496,6 +501,8 @@ class EnviarThreemaOut(BaseModel):
 
     sent: list[str] = Field(default_factory=list)
     failed: list[str] = Field(default_factory=list)
+    # O que o envio ignorou (a escolha avulsa de uma aba velha).
+    avisos: list[str] = Field(default_factory=list)
 
 
 class MensagemBlingPreviewOut(BaseModel):

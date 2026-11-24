@@ -11,6 +11,16 @@ Aba "Status": cadastro/referência do que fazer pra cada STATUS PLATAFORMA
 (alterar status bling, abrir chamado, mensagem). Por enquanto é só cadastro —
 não escreve no Bling automaticamente.
 
+Mensagem Threema das regras (tarefa 16, F4/C11 — "só ADM altera quem recebe",
+decisão do dono, 23/11): quem recebe vem de Cadastros › Envios Threema (o
+envio "Mensagem da regra de status", com uma lista própria por regra ou a
+padrão), editado só por admin. O POST e o PATCH das regras IGNORAM o 👤
+(`threema_recipients`, congelado como reserva de emergência) com um aviso em
+`avisos` — não 422: a aba aberta antes da publicação continua salvando o
+resto. Os dois botões de envio (o da regra e o da linha) seguem para quem tem
+`logistica:edit`, mandando pelo núcleo do Cadastro; a escolha avulsa de
+destinatários que uma aba velha ainda mande é ignorada, também com aviso.
+
 Gated pelo recurso `logistica`.
 """
 
@@ -131,7 +141,7 @@ from app.services import (
     logistica_track_sync,
     flex_config,
     threema,
-    threema_registro,
+    threema_envios,
     tracken,
 )
 from app.services.threema_catalogo import K
@@ -505,7 +515,7 @@ async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaSta
     )
 
 
-def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
+def _to_status_out(s: LogisticaStatus, avisos: Sequence[str] | None = None) -> LogisticaStatusOut:
     return LogisticaStatusOut(
         id=s.id,
         plataforma=s.plataforma,
@@ -520,6 +530,7 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         mensagem_bling=s.mensagem_bling,
         mensagem_threema=s.mensagem_threema,
         threema_recipients=s.threema_recipients,
+        avisos=list(avisos or []),
         anexos=[
             AnexoOut(
                 id=a.id,
@@ -590,6 +601,19 @@ async def sugestao(
 
 # ---- Aba Status (cadastro) ----
 
+# Quem recebe a Mensagem Threema de uma regra (tarefa 16, F4/C11): Cadastros ›
+# Envios Threema, só admin. O 👤 e a escolha avulsa da tela de antes são
+# ignorados, com estes avisos.
+_EM_CADASTROS = "Cadastros › Envios Threema (só admin)"
+_AVISO_PESSOA_IGNORADA = (
+    f"Quem recebe a Mensagem Threema agora é escolhido em {_EM_CADASTROS}: "
+    "o 👤 mandado não foi gravado."
+)
+_AVISO_ESCOLHA_IGNORADA = (
+    f"Quem recebe a Mensagem Threema é escolhido em {_EM_CADASTROS}: a escolha "
+    "feita na tela não vale — a mensagem foi para a lista da regra."
+)
+
 
 async def _load_status(session: AsyncSession, status_id: UUID) -> LogisticaStatus | None:
     return (
@@ -633,13 +657,18 @@ async def create_status(
         mensagem_chamado=_clean(body.mensagem_chamado),
         mensagem_bling=_clean(body.mensagem_bling),
         mensagem_threema=_clean(body.mensagem_threema),
-        threema_recipients=_clean(body.threema_recipients),
         created_by=user.id,
     )
     session.add(s)
     await session.commit()
+    avisos = []
+    if _clean(body.threema_recipients):
+        # O 👤 não é mais gravado (tarefa 16, F4/C11): a regra nova usa a lista
+        # padrão do envio até o admin dar uma lista própria a ela.
+        avisos.append(_AVISO_PESSOA_IGNORADA)
+        logger.info("logistica_status_threema_ignorado", status_id=str(s.id), por=str(user.id))
     s = await _load_status(session, s.id)
-    return _to_status_out(s)
+    return _to_status_out(s, avisos)
 
 
 # ---- Juntar linhas repetidas da aba Status ----
@@ -653,12 +682,33 @@ async def create_status(
 
 async def _regras_repetidas(
     session: AsyncSession,
-) -> tuple[list[logistica_match.GrupoRepetido], list[list[LogisticaStatus]]]:
+) -> tuple[
+    list[logistica_match.GrupoRepetido],
+    list[list[LogisticaStatus]],
+    dict[UUID, tuple[str, ...]] | None,
+]:
+    """(grupos, conflitos, escopos). `escopos`: quem recebe a Mensagem
+    Threema de cada regra em Cadastros › Envios Threema (tarefa 16, F4/C11) —
+    só junta regras com o mesmo escopo; None = o envio ainda segue o 👤 (sem
+    semente), e a comparação usa o 👤."""
     rows = (
         await session.execute(select(LogisticaStatus).options(selectinload(LogisticaStatus.anexos)))
     ).scalars().all()
     anexos = {r.id: [hashlib.sha256(a.blob).hexdigest() for a in r.anexos] for r in rows}
-    return logistica_match.regras_repetidas(list(rows), anexos=anexos)
+    escopos = await threema_envios.escopo_das_regras(session, K.LOGISTICA_MENSAGEM_REGRA)
+    grupos, conflitos = logistica_match.regras_repetidas(
+        list(rows), anexos=anexos, escopos=escopos
+    )
+    return grupos, conflitos, escopos
+
+
+def _escopo_log(escopos: dict[UUID, tuple[str, ...]] | None, regra: LogisticaStatus) -> object:
+    """Quem recebe a Mensagem Threema da regra, para o log da junção (refazer
+    à mão): a lista própria no Cadastro (`tipo:id`, sem ID do Threema), "padrao"
+    ou, antes da semente, "👤" (o `threema_recipients` já vai na linha)."""
+    if escopos is None:
+        return "👤"
+    return list(escopos.get(regra.id, ())) or "padrao"
 
 
 def _linha_repetida(r: LogisticaStatus) -> StatusRepetidaLinha:
@@ -672,7 +722,7 @@ async def status_repetidas(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "view"))],
 ) -> StatusRepetidasOut:
-    grupos, conflitos = await _regras_repetidas(session)
+    grupos, conflitos, _ = await _regras_repetidas(session)
     return StatusRepetidasOut(
         grupos=[
             StatusRepetidaGrupo(
@@ -705,7 +755,7 @@ async def juntar_status_repetidas(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> StatusJuntarOut:
-    grupos, _ = await _regras_repetidas(session)
+    grupos, _, escopos = await _regras_repetidas(session)
     atuais = {(g.manter.id, frozenset(r.id for r in g.apagar)): g for g in grupos}
     juntados = apagadas = pulados = 0
     for pedido in body.grupos:
@@ -720,8 +770,15 @@ async def juntar_status_repetidas(
             manter=str(g.manter.id),
             status_atual_antes=g.manter.status_atual,
             status_atual_depois=g.status_atual,
+            # Quem recebe a Mensagem Threema (o mesmo em todas: só junta regras
+            # com o mesmo escopo no Cadastro, tarefa 16, F4/C11).
+            escopo_threema=_escopo_log(escopos, g.manter),
             apagadas=[
-                _to_status_out(r).model_dump(mode="json", exclude={"anexos"}) for r in g.apagar
+                {
+                    **_to_status_out(r).model_dump(mode="json", exclude={"anexos", "avisos"}),
+                    "escopo_threema": _escopo_log(escopos, r),
+                }
+                for r in g.apagar
             ],
         )
         g.manter.status_atual = g.status_atual
@@ -738,8 +795,12 @@ async def patch_status(
     status_id: UUID,
     body: LogisticaStatusPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> LogisticaStatusOut:
+    """Edita uma regra. O 👤 (`threema_recipients`) é IGNORADO (tarefa 16,
+    F4/C11: quem recebe é escolhido em Cadastros › Envios Threema, só por
+    admin), com um aviso em `avisos` quando o valor mandado mudaria algo — a
+    aba aberta antes da publicação manda o 👤 de sempre junto com o resto."""
     s = await _load_status(session, status_id)
     if s is None:
         raise HTTPException(404, detail={"code": "logistica_status_not_found"})
@@ -769,12 +830,16 @@ async def patch_status(
         s.mensagem_bling = _clean(data["mensagem_bling"])
     if "mensagem_threema" in data:
         s.mensagem_threema = _clean(data["mensagem_threema"])
-    if "threema_recipients" in data:
-        s.threema_recipients = _clean(data["threema_recipients"])
+    avisos = []
+    if "threema_recipients" in data and _clean(data["threema_recipients"]) != _clean(
+        s.threema_recipients
+    ):
+        avisos.append(_AVISO_PESSOA_IGNORADA)
+        logger.info("logistica_status_threema_ignorado", status_id=str(s.id), por=str(user.id))
 
     await session.commit()
     s = await _load_status(session, s.id)
-    return _to_status_out(s)
+    return _to_status_out(s, avisos)
 
 
 @router.get("/threema/destinatarios", response_model=list[ThreemaDestinatarioOut])
@@ -799,10 +864,12 @@ async def enviar_threema(
     _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
     payload: EnviarThreemaIn | None = None,
 ) -> EnviarThreemaOut:
-    """Envia a `mensagem_threema` desta linha da aba Status pros destinatários
-    escolhidos (`payload.recipients`; vazio/ausente = lista fixa do `.env`).
-    `pedido`/`loja` opcionais entram no topo da mensagem. 404 se a linha some;
-    422 sem mensagem/sem destinatário/sem config."""
+    """Envia a `mensagem_threema` desta linha da aba Status para quem recebe
+    a regra em Cadastros › Envios Threema (a lista própria dela ou a padrão;
+    tarefa 16, F4/C11). `pedido`/`loja` opcionais entram no topo da mensagem;
+    `recipients` (a escolha avulsa da tela de antes) é ignorado, com aviso.
+    404 se a linha some; 422 sem mensagem, sem ninguém para receber ou sem
+    config."""
     payload = payload or EnviarThreemaIn()
     s = await _load_status(session, status_id)
     if s is None:
@@ -810,27 +877,75 @@ async def enviar_threema(
     texto = (s.mensagem_threema or "").strip()
     if not texto:
         raise HTTPException(422, detail={"code": "logistica_sem_mensagem_threema"})
-    if payload.recipients is not None and not payload.recipients:
-        raise HTTPException(422, detail={"code": "logistica_sem_destinatario_threema"})
-    # Destinatários: escolha explícita do body > lista salva na regra (👤) > .env.
-    recipients = payload.recipients
-    if recipients is None:
-        recipients = threema.parse_recipients(s.threema_recipients) or None
+    avisos = _escolha_avulsa_ignorada(payload, onde="regra", status_id=status_id)
     texto = threema.compose_texto(texto, pedido=payload.pedido, loja=payload.loja)
-    try:
-        with threema_registro.envio(K.LOGISTICA_MENSAGEM_REGRA, escopo=status_id):
-            result = await threema.ThreemaClient(contexto="logistica").send_to_all(
-                texto, recipients=recipients or None
-            )
-    except threema.ThreemaConfigError as e:
-        raise HTTPException(422, detail={"code": str(e)}) from e
+    result = await _mandar_mensagem_da_regra(session, status_id, texto)
     logger.info(
         "logistica_threema_enviado",
         status_id=str(status_id),
+        via=result["via"],
         sent=len(result["sent"]),
         failed=len(result["failed"]),
     )
-    return EnviarThreemaOut(sent=result["sent"], failed=result["failed"])
+    return EnviarThreemaOut(sent=result["sent"], failed=result["failed"], avisos=avisos)
+
+
+def _escolha_avulsa_ignorada(payload: EnviarThreemaIn, **contexto) -> list[str]:
+    """A escolha avulsa de quem recebe (o modal de antes) não vale mais: só
+    admin escolhe, em Cadastros › Envios Threema (tarefa 16, F4/C11)."""
+    if payload.recipients is None:
+        return []
+    logger.info(
+        "logistica_threema_escolha_ignorada",
+        escolhidos=len(payload.recipients),
+        **{k: str(v) for k, v in contexto.items()},
+    )
+    return [_AVISO_ESCOLHA_IGNORADA]
+
+
+async def _mandar_mensagem_da_regra(
+    session: AsyncSession, regra_id: UUID, texto: str
+) -> dict:
+    """A Mensagem Threema de uma regra pelo núcleo do Cadastro (tarefa 16,
+    F4/C11): a lista própria da regra (escopo) ou a padrão do envio, com o
+    remetente de sempre (`logistica`, do catálogo). O núcleo põe a marca do
+    registro.
+
+    * Ninguém para receber → 422 `sem_destinatarios` (no ninguém válido do
+      Cadastro o núcleo já gravou o registro `ok=false` e acendeu o sino dos
+      admins; pela configuração antiga — emergência ou sem semente — é a
+      lista vazia de antes).
+    * Sem config do Threema → 422 com o código do erro, como antes."""
+    try:
+        result = await threema_envios.enviar(
+            K.LOGISTICA_MENSAGEM_REGRA, texto, escopo=regra_id, session=session
+        )
+    except threema.ThreemaConfigError as e:
+        raise HTTPException(422, detail={"code": str(e)}) from e
+    if result["motivo"] == threema_envios.DESLIGADO:  # o item 1 não desliga; por garantia
+        raise HTTPException(
+            422,
+            detail={
+                "code": "envio_desligado",
+                "message": f"Este envio está desligado em {_EM_CADASTROS}.",
+            },
+        )
+    if result["motivo"]:
+        antiga = result["via"] == "legado"
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sem_destinatarios",
+                "message": (
+                    "Ninguém recebe esta mensagem pela configuração antiga (o 👤 da regra "
+                    "e a lista do servidor estão vazios)."
+                    if antiga
+                    else "Ninguém recebe esta mensagem: escolha quem recebe em "
+                    f"{_EM_CADASTROS}."
+                ),
+            },
+        )
+    return result
 
 
 @router.delete("/status/{status_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1939,9 +2054,10 @@ async def enviar_threema_pedido(
 ) -> EnviarThreemaOut:
     """Envia a Mensagem Threema da regra que CASA com este pedido (coligação da
     aba Status), já com `Pedido X | Loja Y` no topo — vindos da própria linha do
-    marketplace. Destinatários: escolha explícita do body > lista salva na regra
-    (👤) > lista fixa do `.env`. 404 se a linha some; 422 sem regra com mensagem
-    Threema / sem destinatário / sem config."""
+    marketplace. Quem recebe: a regra em Cadastros › Envios Threema (a lista
+    própria dela ou a padrão; tarefa 16, F4/C11); `recipients` (a escolha
+    avulsa de antes) é ignorado, com aviso. 404 se a linha some; 422 sem regra
+    com mensagem Threema / sem ninguém para receber / sem config."""
     payload = payload or EnviarThreemaIn()
     c = (
         await session.execute(select(Logistica).where(Logistica.id == logistica_id))
@@ -1962,23 +2078,13 @@ async def enviar_threema_pedido(
     )
     if rule is None:
         raise HTTPException(422, detail={"code": "logistica_sem_mensagem_threema"})
-    if payload.recipients is not None and not payload.recipients:
-        raise HTTPException(422, detail={"code": "logistica_sem_destinatario_threema"})
-    recipients = payload.recipients
-    if recipients is None:
-        recipients = threema.parse_recipients(rule.threema_recipients) or None
+    avisos = _escolha_avulsa_ignorada(payload, onde="linha", logistica_id=logistica_id)
     texto = threema.compose_texto(
         (rule.mensagem_threema or "").strip(),
         pedido=c.pedido_marketplace or c.pedido_bling,
         loja=c.plataforma,
     )
-    try:
-        with threema_registro.envio(K.LOGISTICA_MENSAGEM_REGRA, escopo=rule.id):
-            result = await threema.ThreemaClient(contexto="logistica").send_to_all(
-                texto, recipients=recipients or None
-            )
-    except threema.ThreemaConfigError as e:
-        raise HTTPException(422, detail={"code": str(e)}) from e
+    result = await _mandar_mensagem_da_regra(session, rule.id, texto)
     # Enviou pra ao menos um → o aviso foi feito: carimba e o pedido resolve
     # (a Mensagem Threema deixa de contar como pendência) e some do painel.
     if result["sent"]:
@@ -1987,10 +2093,12 @@ async def enviar_threema_pedido(
     logger.info(
         "logistica_threema_pedido_enviado",
         id=str(logistica_id),
+        regra=str(rule.id),
+        via=result["via"],
         sent=len(result["sent"]),
         failed=len(result["failed"]),
     )
-    return EnviarThreemaOut(sent=result["sent"], failed=result["failed"])
+    return EnviarThreemaOut(sent=result["sent"], failed=result["failed"], avisos=avisos)
 
 
 async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:

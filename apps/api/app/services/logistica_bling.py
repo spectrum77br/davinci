@@ -37,13 +37,14 @@ from app.models import (
     LogisticaStatus,
     SituacaoBling,
 )
+from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import (
     logistica_match,
     logistica_rules,
     logistica_track,
     threema,
-    threema_registro,
+    threema_envios,
 )
 from app.services.amazon_shipment_status import AMAZON_SHIPPED, amazon_shipment_confirmed
 from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA, SITUACOES_ENVIADO_ETIQUETA
@@ -834,6 +835,33 @@ async def aplicar_status_em_lote(
     return {"aplicados": aplicados, "pulados": pulados, "falhas": falhas}
 
 
+# Ninguém válido no Cadastro para a Mensagem da regra (tarefa 16, F4/C11): sem
+# carimbo, a mesma linha volta a cada rodada do motor (5 min), e cada volta
+# gravaria um registro `ok=false` (um lote no Histórico). A tentativa que chega
+# ao núcleo (registro + sino dos admins) sai no máximo uma vez por hora para o
+# envio, como na F1/F3 (`nf_auto_enfileirar._pode_avisar`,
+# `ouvidoria.AVISO_NINGUEM_PREFIXO`); Redis fora = não passa. Nenhum carimbo é
+# gasto: quem acertar a lista recebe o aviso da linha na rodada seguinte.
+_AVISO_NINGUEM_PREFIXO = "logistica:threema_regra_ninguem:"
+_AVISO_NINGUEM_S = 3600
+
+
+async def _ninguem_passa() -> bool:
+    """A tentativa com ninguém válido desta hora (`_AVISO_NINGUEM_PREFIXO`):
+    a 1ª da hora marca e passa; as outras, não. Redis fora = não passa."""
+    try:
+        marcou = await redis.set(
+            f"{_AVISO_NINGUEM_PREFIXO}{K.LOGISTICA_MENSAGEM_REGRA}",
+            "1",
+            nx=True,
+            ex=_AVISO_NINGUEM_S,
+        )
+    except Exception as e:  # noqa: BLE001 — sem a marca, melhor calar que repetir
+        logger.warning("logistica_threema_ninguem_dedupe_falhou", err=str(e)[:200])
+        return False
+    return bool(marcou)
+
+
 async def enviar_threema_em_lote(
     session: AsyncSession, ids: Collection[UUID] | None = None
 ) -> dict[str, int]:
@@ -841,8 +869,14 @@ async def enviar_threema_em_lote(
     pedido do usuário: "não está mandando a mensagem no Threema"). Pra cada
     linha de marketplace que casa uma regra APLICÁVEL AO ESTADO ATUAL com
     `mensagem_threema` e ainda não foi avisada (`threema_enviado_at` NULL),
-    manda o texto já com `Pedido X | Loja Y` pros destinatários da regra (👤)
-    ou da lista fixa do `.env` — o mesmo que o botão por linha faz.
+    manda o texto já com `Pedido X | Loja Y` — o mesmo que o botão por linha
+    faz.
+
+    Quem recebe vem de Cadastros › Envios Threema (tarefa 16, F4/C11; o envio
+    "Mensagem da regra de status"): a lista própria da regra (escopo = o id da
+    regra) ou, sem ela, a lista padrão do envio. O envio não tem interruptor:
+    o liga/desliga de cada regra é a própria Mensagem Threema dela. A
+    semente copiou o 👤 de cada regra e o THREEMA_RECIPIENTS (a padrão).
 
     Dedupe pela própria coluna: carimba `threema_enviado_at` ao enviar, então
     o motor (a cada 5 min) não reenvia; depois disso a Mensagem Threema deixa
@@ -850,8 +884,13 @@ async def enviar_threema_em_lote(
     (o recarregar passa as pendentes do painel); sem `ids` varre todas.
 
     - enviados: avisou ao menos um destinatário e carimbou.
-    - falhas: nenhum destinatário recebeu / erro no gateway (não carimba →
-      tenta de novo no próximo recarregar).
+    - falhas: nenhum destinatário recebeu / erro no gateway / ninguém para
+      receber (não carimba → tenta de novo na próxima rodada).
+    - Ninguém pela configuração antiga (emergência ou sem semente, com o 👤
+      e o THREEMA_RECIPIENTS vazios): calado, como antes, sem carimbo.
+    - Ninguém válido no Cadastro: o núcleo grava o registro `ok=false` e
+      acende o sino dos admins, no máximo uma vez por hora (`_ninguem_passa`);
+      sem carimbo.
     Sem gateway configurado (ThreemaConfigError) o lote para na hora, sem
     marcar nada. Commit por linha."""
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
@@ -864,7 +903,8 @@ async def enviar_threema_em_lote(
         for r in (await session.execute(stmt)).scalars().all()
         if (r.plataforma or "").strip().lower() in alvo and r.threema_enviado_at is None
     ]
-    client: threema.ThreemaClient | None = None
+    # Quem recebe, por regra (escopo), lido uma vez por rodada.
+    quem: dict[UUID, threema_envios.Resolucao] = {}
     enviados = falhas = 0
     for row in rows:
         assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
@@ -884,17 +924,34 @@ async def enviar_threema_em_lote(
         )
         if rule is None:
             continue
+        if rule.id not in quem:
+            quem[rule.id] = await threema_envios.resolver(
+                K.LOGISTICA_MENSAGEM_REGRA, escopo=rule.id, session=session
+            )
+        res = quem[rule.id]
+        if not res.ativo:  # o item 1 não desliga (a Mensagem é o interruptor)
+            continue
+        if not res.ids:
+            if res.motivo != threema_envios.NINGUEM_VALIDO:
+                logger.info(
+                    "logistica_threema_lote_sem_destinatarios",
+                    regra=str(rule.id),
+                    via=res.via,
+                    motivo=res.motivo,
+                )
+                continue
+            if not await _ninguem_passa():
+                falhas += 1
+                continue
         texto = threema.compose_texto(
             (rule.mensagem_threema or "").strip(),
             pedido=row.pedido_marketplace or row.pedido_bling,
             loja=row.plataforma,
         )
-        recipients = threema.parse_recipients(rule.threema_recipients) or None
-        if client is None:
-            client = threema.ThreemaClient(contexto="logistica")
         try:
-            with threema_registro.envio(K.LOGISTICA_MENSAGEM_REGRA, escopo=rule.id):
-                result = await client.send_to_all(texto, recipients=recipients)
+            result = await threema_envios.enviar(
+                K.LOGISTICA_MENSAGEM_REGRA, texto, escopo=rule.id, session=session
+            )
         except threema.ThreemaConfigError as e:
             logger.warning("logistica_threema_lote_sem_config", err=str(e))
             break
@@ -909,11 +966,21 @@ async def enviar_threema_em_lote(
                 "logistica_threema_auto_enviado",
                 id=str(row.id),
                 pedido=row.pedido_marketplace or row.pedido_bling,
+                regra=str(rule.id),
+                via=result["via"],
                 sent=len(result["sent"]),
                 failed=len(result["failed"]),
             )
             await session.commit()
         else:
             falhas += 1
+            if result.get("motivo"):
+                logger.warning(
+                    "logistica_threema_lote_nao_saiu",
+                    id=str(row.id),
+                    regra=str(rule.id),
+                    motivo=result["motivo"],
+                    via=result["via"],
+                )
     await session.commit()
     return {"enviados": enviados, "falhas": falhas}
