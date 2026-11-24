@@ -43,10 +43,16 @@ from app.services.marketplaces.temu import (
     CAMPOS_CREDENCIAL as TEMU_CAMPOS_CREDENCIAL,
 )
 from app.services.marketplaces.temu import (
+    MALL_ID_FIXADO as TEMU_MALL_ID_FIXADO,
+)
+from app.services.marketplaces.temu import (
     REGIOES_VALIDAS as TEMU_REGIOES,
 )
 from app.services.marketplaces.temu import (
     STOCK_WRITE_FLAG as TEMU_STOCK_WRITE_FLAG,
+)
+from app.services.marketplaces.temu import (
+    ULTIMO_TESTE as TEMU_ULTIMO_TESTE,
 )
 from app.services.marketplaces.tiktok import TikTokClient
 
@@ -99,7 +105,10 @@ def _validated_carrefour_credentials(credentials: dict, *, existing: dict | None
 def _validated_temu_credentials(credentials: dict, *, existing: dict | None = None) -> dict:
     """Só os campos do formulário (app_key, app_secret, access_token, region).
     A trava `_temu_stock_write_enabled` é do servidor: o formulário não a
-    grava nem a apaga (a que já existe é mantida na edição)."""
+    grava. Editar sem trocar credencial mantém a trava; TROCAR app_key,
+    app_secret, access_token ou região a DESLIGA e apaga o último teste — o
+    token novo pode ser de outra loja, e só o administrador religa, depois de
+    um Testar OK da mesma loja (PUT /temu-writes)."""
     if not isinstance(credentials, dict) or set(credentials) - TEMU_CAMPOS_CREDENCIAL:
         raise HTTPException(400, detail={"code": "temu_credentials_invalid"})
     limpos: dict[str, str] = {}
@@ -111,7 +120,23 @@ def _validated_temu_credentials(credentials: dict, *, existing: dict | None = No
         limpos["region"] = limpos["region"].lower() or "global"
         if limpos["region"] not in TEMU_REGIOES:
             raise HTTPException(400, detail={"code": "temu_region_invalid"})
-    return {**(existing or {}), **limpos}
+    antes = existing or {}
+    merged = {**antes, **limpos}
+    if existing is not None and _temu_credencial_mudou(antes, merged):
+        merged[TEMU_STOCK_WRITE_FLAG] = False
+        merged.pop(TEMU_ULTIMO_TESTE, None)
+    return merged
+
+
+def _temu_regiao(creds: dict) -> str:
+    return str(creds.get("region") or "global").strip().lower() or "global"
+
+
+def _temu_credencial_mudou(antes: dict, depois: dict) -> bool:
+    return any(
+        str(antes.get(k) or "").strip() != str(depois.get(k) or "").strip()
+        for k in ("app_key", "app_secret", "access_token")
+    ) or _temu_regiao(antes) != _temu_regiao(depois)
 
 
 def _validate_carrefour_store(platform: IntegrationPlatform, store: Store | None) -> None:
@@ -138,10 +163,16 @@ def _connection_test_time(platform: IntegrationPlatform, info: dict | None) -> d
 async def _locked_carrefour_integration(
     session: AsyncSession, integration_id: UUID,
 ) -> Integration:
+    return await _locked_integration(session, integration_id, IntegrationPlatform.CARREFOUR)
+
+
+async def _locked_integration(
+    session: AsyncSession, integration_id: UUID, platform: IntegrationPlatform,
+) -> Integration:
     integration = await session.scalar(
         select(Integration).where(
             Integration.id == integration_id,
-            Integration.platform == IntegrationPlatform.CARREFOUR,
+            Integration.platform == platform,
         ).with_for_update(key_share=True).execution_options(populate_existing=True)
     )
     if integration is None:
@@ -191,6 +222,7 @@ def _to_out(i: Integration, company_id: UUID | None, store_id: UUID | None = Non
         vacation_mode=i.vacation_mode,
         **write_flags,
         temu_stock_write_enabled=_temu_stock_write_enabled(i),
+        temu_loja=_temu_loja(i),
         created_at=i.created_at,
         updated_at=i.updated_at,
     )
@@ -212,6 +244,17 @@ def _temu_stock_write_enabled(i: Integration) -> bool:
     if i.platform != IntegrationPlatform.TEMU or not i.credentials:
         return False
     return decrypt_json(i.credentials).get(TEMU_STOCK_WRITE_FLAG) is True
+
+
+def _temu_loja(i: Integration) -> str | None:
+    """A loja (mallId) desta conta Temu: a fixada ao ligar a trava, ou a lida
+    no último Testar. Nunca devolve credencial."""
+    if i.platform != IntegrationPlatform.TEMU or not i.credentials:
+        return None
+    creds = decrypt_json(i.credentials)
+    teste = creds.get(TEMU_ULTIMO_TESTE)
+    lida = teste.get("mall_id") if isinstance(teste, dict) else None
+    return str(creds.get(TEMU_MALL_ID_FIXADO) or lida or "") or None
 
 
 def _apply_carrefour_write_flags(i: Integration, data: dict) -> None:
@@ -279,6 +322,7 @@ async def _temu_writes_status(session: AsyncSession, integration: Integration) -
     )
     return {
         "stock_write_enabled": _temu_stock_write_enabled(integration),
+        "loja": _temu_loja(integration),
         "price_write_enabled": False,
         "price_motivo": "preço da Temu ainda não liberado (falta a whitelist da Temu)",
         "vacation_mode": integration.vacation_mode,
@@ -316,7 +360,12 @@ async def temu_write_update(
     if integration is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
     credentials = decrypt_json(integration.credentials) if integration.credentials else {}
-    credentials[TEMU_STOCK_WRITE_FLAG] = body.stock_write_enabled is True
+    ligar = body.stock_write_enabled is True
+    if ligar:
+        _temu_conferir_antes_de_ligar(integration, credentials)
+        # Fixa a loja desta integração: token de outra loja reprova no Testar.
+        credentials[TEMU_MALL_ID_FIXADO] = str(credentials[TEMU_ULTIMO_TESTE]["mall_id"])
+    credentials[TEMU_STOCK_WRITE_FLAG] = ligar
     integration.credentials = encrypt_json(credentials)
     await session.commit()
     await session.refresh(integration)
@@ -327,6 +376,24 @@ async def temu_write_update(
         por=str(_u.id),
     )
     return await _temu_writes_status(session, integration)
+
+
+def _temu_conferir_antes_de_ligar(integration: Integration, credentials: dict) -> None:
+    """Ligar o envio exige um Testar OK do token ATUAL (trocar a credencial
+    apaga o registro): loja informada, LOCAL (100), do Brasil (29), com as
+    permissões de ler SKUs e de gravar estoque, token não vencido e, se a
+    loja já foi fixada antes, a MESMA loja."""
+    teste = credentials.get(TEMU_ULTIMO_TESTE)
+    if integration.last_test_ok is not True or not isinstance(teste, dict):
+        raise HTTPException(409, detail={"code": "temu_teste_necessario"})
+    if not teste.get("pronto_para_estoque") or not teste.get("mall_id"):
+        raise HTTPException(409, detail={"code": "temu_loja_nao_pronta"})
+    fixada = str(credentials.get(TEMU_MALL_ID_FIXADO) or "")
+    if fixada and fixada != str(teste["mall_id"]):
+        raise HTTPException(409, detail={"code": "temu_loja_diferente"})
+    vence = integration.token_expires_at
+    if vence is not None and vence <= datetime.now(UTC):
+        raise HTTPException(409, detail={"code": "temu_token_vencido"})
 
 
 def _make_token_save_callback(session: AsyncSession, integ: Integration):
@@ -444,6 +511,14 @@ async def patch_integration(
     if i.platform == IntegrationPlatform.CARREFOUR:
         i = await _locked_carrefour_integration(session, i.id)
         _validate_carrefour_store(i.platform, await _resolve_store(session, i))
+    if i.platform == IntegrationPlatform.TEMU:
+        # Conta Temu é da equipe da loja: quem é de outra equipe não a edita.
+        scope = await resolve_team_scope(session, _u)
+        if not scope.unrestricted and i.id not in scope.integration_ids:
+            raise HTTPException(404, detail={"code": "integration_not_found"})
+        # Lê as credenciais travadas: sem isto, um PATCH concorrente com o
+        # PUT /temu-writes (desligar) regravava a trava como estava (ligada).
+        i = await _locked_integration(session, i.id, IntegrationPlatform.TEMU)
     if "name" in data and data["name"] is not None:
         i.name = data["name"]
     if "status" in data and data["status"] is not None:
@@ -461,11 +536,9 @@ async def patch_integration(
                 i.last_error = None
         elif i.platform == IntegrationPlatform.TEMU:
             updated = _validated_temu_credentials(data["credentials"], existing=existing)
-            if any(
-                updated.get(k) != existing.get(k)
-                for k in ("app_key", "app_secret", "access_token", "region")
-            ):
-                # O teste anterior era de outra chave/token.
+            if _temu_credencial_mudou(existing, updated):
+                # O teste anterior era de outra chave/token (e a trava já foi
+                # desligada pelo _validated_temu_credentials).
                 i.last_test_at = None
                 i.last_test_ok = None
                 i.last_error = None
@@ -539,6 +612,31 @@ async def test_integration(
     creds = decrypt_json(i.credentials)
     client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i), integration_id=i.id)
     result = await client.test_connection()
+    if i.platform == IntegrationPlatform.TEMU:
+        i = await _locked_integration(session, i.id, IntegrationPlatform.TEMU)
+        current = decrypt_json(i.credentials) if i.credentials else {}
+        if _temu_credencial_mudou(client.creds, current):
+            # Salvaram outro token enquanto a Temu respondia: o resultado é do
+            # token antigo e não pode valer para o novo.
+            await session.rollback()
+            return TestConnectionOut(
+                ok=False,
+                code="temu_credentials_changed",
+                detail="As credenciais da Temu mudaram durante o teste. Teste novamente.",
+            )
+        info = result.info if isinstance(result.info, dict) else {}
+        if result.ok and info:
+            current[TEMU_ULTIMO_TESTE] = {
+                "mall_id": info.get("mall_id"),
+                "mall_type": info.get("mall_type"),
+                "region_id": info.get("region_id"),
+                "escopos_faltando": list(info.get("escopos_faltando") or []),
+                "pronto_para_estoque": info.get("pronto_para_estoque") is True,
+                "em": datetime.now(UTC).isoformat(),
+            }
+        else:
+            current.pop(TEMU_ULTIMO_TESTE, None)
+        i.credentials = encrypt_json(current)
     if i.platform == IntegrationPlatform.CARREFOUR:
         i = await _locked_carrefour_integration(session, i.id)
         current = decrypt_json(i.credentials)

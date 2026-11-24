@@ -22,6 +22,8 @@ class IntegrationOut(BaseModel):
     carrefour_stock_write_enabled: bool = False
     carrefour_price_write_enabled: bool = False
     temu_stock_write_enabled: bool = False
+    # Loja (mallId) da conta Temu: a fixada ao ligar o envio ou a do último Testar.
+    temu_loja: str | None = None
     archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

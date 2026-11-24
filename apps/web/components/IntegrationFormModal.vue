@@ -101,13 +101,13 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
       lines: [
         '**Temu:** App Key e App Secret ficam no app da loja em partner.temu.com.',
         'O Access Token sai do Seller Center (Gerenciamento de autorização). Brasil usa a região global (padrão).',
-        'Salvar não envia estoque: o envio é ligado à parte pelo administrador em Integrações.',
+        'Salvar não envia estoque: o envio é ligado à parte pelo administrador em Integrações. Trocar o token desliga o envio até testar de novo.',
       ],
     },
     fields: [
       { key: 'app_key', label: 'App Key', placeholder: 'App Key da Temu Open Platform', required: true },
       { key: 'app_secret', label: 'App Secret', type: 'password', required: true },
-      { key: 'access_token', label: 'Access Token', placeholder: 'Token de acesso da API', required: true },
+      { key: 'access_token', label: 'Access Token', type: 'password', placeholder: 'Token de acesso da API', required: true },
       { key: 'region', label: 'Região', placeholder: 'global (Brasil), us ou eu — padrão: global' },
     ],
   },

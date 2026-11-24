@@ -42,7 +42,7 @@ from app.services.marketplaces.carrefour import CarrefourClient
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
-from app.services.marketplaces.temu import TemuClient
+from app.services.marketplaces.temu import TemuClient, TemuListaPorProduto
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -98,9 +98,11 @@ def _client_for_listings(session: AsyncSession, integ: Integration):
         return TikTokClient(creds, on_token_refresh=on_refresh)
     if integ.platform == IntegrationPlatform.TEMU:
         # 24/11/2026 (loja local BR): só lê (temu.local.sku.list.retrieve).
-        # A lista guarda uma linha por produto (goodsId); o vínculo por SKU
-        # (goodsId, skuId) é do Vincular (auto_link), não da promoção abaixo.
-        return TemuClient(creds)
+        # A lista guarda uma linha por produto (goodsId): o leitor junta os
+        # SKUs do produto (senão o último SKU lido, o excluído, mandava na
+        # linha). O vínculo por SKU (goodsId, skuId) é do Vincular (auto_link),
+        # não da promoção abaixo.
+        return TemuListaPorProduto(TemuClient(creds))
     return None
 
 

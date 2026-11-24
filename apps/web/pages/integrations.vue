@@ -23,6 +23,7 @@ type Integration = {
   carrefour_stock_write_enabled?: boolean
   carrefour_price_write_enabled?: boolean
   temu_stock_write_enabled?: boolean
+  temu_loja?: string | null
   created_at: string
   updated_at: string
 }
@@ -278,10 +279,19 @@ async function toggleCarrefourWrite(i: Integration, kind: 'stock' | 'price') {
 // desligado; só o administrador liga. Desligado, o DaVinci lê e vincula os
 // anúncios, mas não envia nada. Preço da Temu ainda não é enviado.
 const temuWriteId = ref<string | null>(null)
+// O servidor só liga depois de um "testar" OK do token atual (loja local do
+// Brasil, com as permissões de estoque) e na mesma loja de antes.
+const TEMU_WRITE_ERRORS: Record<string, string> = {
+  temu_teste_necessario: 'Clique em "testar" (e veja o teste passar) antes de ligar o envio de estoque.',
+  temu_loja_nao_pronta: 'O último teste não liberou o envio: a loja precisa ser local do Brasil e o token precisa das permissões de estoque (Product Management).',
+  temu_loja_diferente: 'O token testado é de outra loja Temu. Para outra loja, crie outra integração.',
+  temu_token_vencido: 'O token da Temu venceu: gere outro no Seller Center, salve e teste.',
+}
 async function toggleTemuStockWrite(i: Integration) {
   const enabled = !i.temu_stock_write_enabled
   if (enabled && !confirm(
-    `Ligar o envio de estoque do DaVinci para "${i.name}"?\n\n`
+    `Ligar o envio de estoque do DaVinci para "${i.name}"`
+    + (i.temu_loja ? ` (loja Temu ${i.temu_loja})` : '') + '?\n\n'
     + 'A partir de agora, cada mudança de estoque dos produtos vinculados será enviada para a Temu. '
     + 'Se o Bling também envia estoque para esta loja, desligue lá para não ter dois enviando.'
   )) return
@@ -291,7 +301,8 @@ async function toggleTemuStockWrite(i: Integration) {
     await api(`/api/integrations/${i.id}/temu-writes`, { method: 'PUT', body: { stock_write_enabled: enabled } })
     await refresh()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || 'Não foi possível alterar o envio.'
+    const code = e?.data?.detail?.code
+    error.value = (code && TEMU_WRITE_ERRORS[code]) || code || 'Não foi possível alterar o envio.'
   } finally {
     temuWriteId.value = null
   }
@@ -429,6 +440,7 @@ const tab = ref<'integracoes' | 'automacoes'>(
             As alterações ficam pendentes até a confirmação do Carrefour.
           </p>
           <p v-if="i.platform === 'temu'" class="text-xs text-muted-foreground">
+            <template v-if="i.temu_loja">Loja Temu {{ i.temu_loja }}. </template>
             Estoque: {{ i.temu_stock_write_enabled ? 'envio habilitado' : 'envio desativado (só lê e vincula)' }}.
             Preços: ainda não enviados (falta a liberação da Temu).
           </p>

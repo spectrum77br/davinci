@@ -99,9 +99,10 @@ class TemuFalsa:
 
 @pytest.fixture
 def temu_http(monkeypatch):
+    original = httpx.AsyncClient  # o de verdade, mesmo se instalar 2 vezes
+
     def instalar(responder=None) -> TemuFalsa:
         falsa = TemuFalsa(responder)
-        original = httpx.AsyncClient
         monkeypatch.setattr(
             temu_mod.httpx,
             "AsyncClient",
@@ -244,7 +245,27 @@ def test_transporte_recusa_escrita_sem_trava_e_qualquer_escrita_que_nao_seja_est
         ({"success": False, "errorCode": 3000032, "errorMsg": "no api access"}, "conta"),
         ({"success": False, "errorCode": 5000003, "errorMsg": "NOT_IN_IP_WHITE_LIST"}, "conta"),
         ({"success": False, "errorCode": 150013002, "errorMsg": "Quantity"}, "fatal"),
-        (httpx.Response(400, text="x"), "fatal"),
+        ({"success": False, "errorCode": 150010003, "errorMsg": "Invalid"}, "fatal"),
+        # Falha interna da Temu: tentar de novo (como o 2000000).
+        ({"success": False, "errorCode": 7000000, "errorMsg": "BUSINESS_SERVICE"}, "retryable"),
+        ({"success": False, "errorCode": 2000000, "errorMsg": "BUSINESS"}, "retryable"),
+        # Página de WAF/gateway com HTTP 200: soluço de rede.
+        (httpx.Response(200, text="<html>busy</html>"), "retryable"),
+        (httpx.Response(200, json=["lista"]), "retryable"),
+        # Erro do gateway/app/relógio: vale para a conta toda, nunca do vínculo.
+        ({"success": False, "errorCode": 3000003, "errorMsg": "type not exists"}, "conta"),
+        ({"success": False, "errorCode": 3000004, "errorMsg": "sunset"}, "conta"),
+        ({"success": False, "errorCode": 6000001, "errorMsg": "RPC_NOT_FOUND"}, "conta"),
+        ({"success": False, "errorCode": 3000000, "errorMsg": "BAD_PARAMS"}, "conta"),
+        ({"success": False, "errorCode": 3000040, "errorMsg": "no sign"}, "conta"),
+        ({"success": False, "errorCode": 3000011, "errorMsg": "timestamp invalid"}, "conta"),
+        ({"success": False, "errorCode": 3000012, "errorMsg": "timestamp expired"}, "conta"),
+        ({"success": False, "errorCode": 5000002, "errorMsg": "staging"}, "conta"),
+        ({"success": False, "errorCode": 9999999, "errorMsg": "desconhecido"}, "conta"),
+        ({"success": False, "errorMsg": "sem código"}, "conta"),
+        (httpx.Response(400, text="x"), "conta"),
+        (httpx.Response(404, text="x"), "conta"),
+        (httpx.Response(401, text="x"), "conta"),
     ],
 )
 def test_classificacao_dos_erros(temu_http, resposta, classe):
@@ -344,6 +365,56 @@ def test_testar_conexao_diz_qual_permissao_falta(temu_http):
     assert "bg.local.goods.stock.edit" in r.detail and "Product Management" in r.detail
 
 
+@pytest.mark.parametrize(
+    ("expired", "trecho"),
+    [(1765634102000, "2025"), (10**30, None), (2**70, None)],
+)
+def test_validade_em_milissegundos_ou_lixo_nao_derruba_o_testar(temu_http, expired, trecho):
+    temu_http(lambda corpo: _info(expiredTime=expired))
+    r = asyncio.run(TemuClient(CREDS).test_connection())
+    if trecho:
+        assert trecho in (r.info["expira_em_texto"] or "")  # ms convertido para s
+    else:
+        assert r.info["validade_ilegivel"] is True and r.info["expira_em"] is None
+        assert "ilegível" in r.detail
+
+
+def test_testar_conexao_recusa_token_de_outra_loja(temu_http):
+    temu_http(lambda corpo: _info(mallId=999))
+    r = asyncio.run(
+        TemuClient({**CREDS, temu_mod.MALL_ID_FIXADO: "635517739923741"}).test_connection()
+    )
+    assert not r.ok and "999" in r.detail and "635517739923741" in r.detail
+    assert r.info["pronto_para_estoque"] is False
+
+
+def test_testar_conexao_so_fica_pronto_com_loja_local_brasil_e_permissoes(temu_http):
+    temu_http(lambda corpo: _info())
+    assert asyncio.run(TemuClient(CREDS).test_connection()).info["pronto_para_estoque"] is True
+    temu_http(lambda corpo: _info(apiScopeList=["temu.local.sku.list.retrieve"]))
+    r = asyncio.run(TemuClient(CREDS).test_connection())
+    assert r.ok and r.info["pronto_para_estoque"] is False
+    temu_http(lambda corpo: _info(mallType=None))
+    assert asyncio.run(TemuClient(CREDS).test_connection()).info["pronto_para_estoque"] is False
+
+
+def test_criar_token_nao_e_leitura_e_so_sai_pela_troca_do_code(temu_http):
+    falsa = temu_http(
+        lambda corpo: {
+            "success": True,
+            "result": {"accessToken": "t-novo", "mallId": 1, "mallType": 100, "regionId": 29},
+        }
+    )
+    assert "bg.open.accesstoken.create" not in temu_mod._APIS_LEITURA
+    for cliente in (TemuClient(CREDS), TemuClient({**CREDS, STOCK_WRITE_FLAG: True})):
+        with pytest.raises(TemuEscritaBloqueada):
+            asyncio.run(cliente._request("bg.open.accesstoken.create", {"code": "c"}))
+    assert falsa.pedidos == []
+    r = asyncio.run(TemuClient.exchange_authorization_code("app", "seg", "code-1"))
+    assert r["access_token"] == "t-novo"
+    assert falsa.tipos() == ["bg.open.accesstoken.create"]
+
+
 def test_testar_conexao_com_ip_fora_da_lista(temu_http):
     temu_http(lambda corpo: {"success": False, "errorCode": 5000003, "errorMsg": "NOT_IN_IP"})
     r = asyncio.run(TemuClient(CREDS).test_connection())
@@ -423,7 +494,15 @@ def test_estoque_fica_na_faixa_da_temu(temu_http, qty, enviado):
             "temu_150010005",
         ),
         ({"operateResult": False, "msg": "falhou"}, SyncStatus.FATAL, "temu_sku_recusado"),
-        ({}, SyncStatus.FATAL, "temu_sku_recusado"),
+        # Todos os campos do result são opcionais na ficha da API: sucesso
+        # sem o resultado do SKU é "não confirmado", não "recusado".
+        ({}, SyncStatus.RETRYABLE, "temu_sem_confirmacao"),
+        ({"goodsId": int(GOODS), "msg": "ok"}, SyncStatus.RETRYABLE, "temu_sem_confirmacao"),
+        (
+            {"skuStockEditStatusInfoList": [{"skuId": 1, "stockEditStatus": True}]},
+            SyncStatus.RETRYABLE,
+            "temu_sem_confirmacao",
+        ),
         ({"operateResult": True}, SyncStatus.OK, None),
     ],
 )
@@ -432,6 +511,45 @@ def test_envelope_de_sucesso_com_sku_recusado_e_falha(temu_http, resultado, stat
     r = asyncio.run(TemuClient({**CREDS, STOCK_WRITE_FLAG: True}).update_stock(_link(), 1))
     assert r.status == status
     assert r.error_code == codigo
+    if codigo == "temu_sem_confirmacao":
+        assert "recusou" not in r.error_detail and "não confirmou" in r.error_detail
+
+
+@pytest.mark.parametrize(
+    ("resposta", "status", "codigo"),
+    [
+        (
+            {"success": False, "errorCode": 3000004, "errorMsg": "sunset"},
+            SyncStatus.SKIPPED,
+            "temu_conta_3000004",
+        ),
+        (
+            {"success": False, "errorCode": 6000001, "errorMsg": "x"},
+            SyncStatus.SKIPPED,
+            "temu_conta_6000001",
+        ),
+        (httpx.Response(404, text="x"), SyncStatus.SKIPPED, "temu_conta_http_404"),
+        (httpx.Response(200, text="<html/>"), SyncStatus.RETRYABLE, "temu_tentar_de_novo"),
+        (
+            {"success": False, "errorCode": 3000012, "errorMsg": "expired"},
+            SyncStatus.SKIPPED,
+            "temu_conta_3000012",
+        ),
+    ],
+)
+def test_estoque_erro_do_gateway_nao_e_fatal_do_vinculo(temu_http, resposta, status, codigo):
+    temu_http(lambda corpo: resposta)
+    r = asyncio.run(TemuClient({**CREDS, STOCK_WRITE_FLAG: True}).update_stock(_link(), 1))
+    assert (r.status, r.error_code) == (status, codigo)
+    if status == SyncStatus.SKIPPED:
+        assert r.payload == {"erro_de_conta": True}
+
+
+def test_dica_legivel_para_api_aposentada_e_relogio(temu_http):
+    for codigo, trecho in ((3000004, "aposentou"), (3000011, "relógio")):
+        temu_http(lambda corpo, c=codigo: {"success": False, "errorCode": c, "errorMsg": "x"})
+        r = asyncio.run(TemuClient({**CREDS, STOCK_WRITE_FLAG: True}).update_stock(_link(), 1))
+        assert trecho in r.error_detail
 
 
 def test_estoque_erro_de_conta_nao_e_fatal_do_vinculo(temu_http):
@@ -592,12 +710,33 @@ def test_formulario_nao_injeta_a_trava_e_mantem_a_existente():
     with pytest.raises(HTTPException) as e:
         _validated_temu_credentials({**CREDS, "region": "br"})
     assert e.value.detail["code"] == "temu_region_invalid"
-    existente = {**CREDS, STOCK_WRITE_FLAG: True}
-    novo = _validated_temu_credentials(
-        {"access_token": " novo ", "region": "GLOBAL"}, existing=existente
+    teste = {"mall_id": "635517739923741", "pronto_para_estoque": True}
+    existente = {
+        **CREDS,
+        STOCK_WRITE_FLAG: True,
+        temu_mod.ULTIMO_TESTE: teste,
+        temu_mod.MALL_ID_FIXADO: "635517739923741",
+    }
+    # Editar sem trocar credencial (mesmo token, região vazia = global): a
+    # trava fica como estava.
+    igual = _validated_temu_credentials(
+        {"access_token": f" {TOKEN} ", "region": "GLOBAL"}, existing=existente
     )
-    assert novo[STOCK_WRITE_FLAG] is True
-    assert novo["access_token"] == "novo" and novo["region"] == "global"
+    assert igual[STOCK_WRITE_FLAG] is True and igual[temu_mod.ULTIMO_TESTE] == teste
+    # Trocar token, chave, segredo ou região DESLIGA a trava e apaga o teste
+    # (o token novo pode ser de outra loja); a loja fixada fica.
+    for troca in (
+        {"access_token": " novo "},
+        {"app_key": "outra"},
+        {"app_secret": "outro"},
+        {"region": "us"},
+    ):
+        novo = _validated_temu_credentials(troca, existing=existente)
+        assert novo[STOCK_WRITE_FLAG] is False, troca
+        assert temu_mod.ULTIMO_TESTE not in novo
+        assert novo[temu_mod.MALL_ID_FIXADO] == "635517739923741"
+    novo = _validated_temu_credentials({"access_token": " novo "}, existing=existente)
+    assert novo["access_token"] == "novo"
 
 
 # ---------------------------------------------------------------- banco: caminhos de envio
@@ -801,7 +940,9 @@ async def test_importar_anuncios_da_temu_so_le(db, make_user, temu_http):
     u = await make_user()
     integ = await _conta_temu(db, u, ligada=True)
     job = await _job(db, u, BackgroundJobType.IMPORT_LISTINGS)
-    assert isinstance(listings_import._client_for_listings(db, integ), TemuClient)
+    leitor = listings_import._client_for_listings(db, integ)
+    assert isinstance(leitor, temu_mod.TemuListaPorProduto)
+    assert isinstance(leitor.cliente, TemuClient)
 
     await listings_import.run_import_listings(
         db, job_id=job.id, user_id=u.id, integration_id=integ.id
@@ -827,7 +968,10 @@ async def test_importar_anuncios_da_temu_so_le(db, make_user, temu_http):
 # ---------------------------------------------------------------- endpoints
 
 
-async def test_trava_so_admin_liga_e_formulario_nao_mexe(client, db, make_user, auth_as):
+async def test_trava_so_admin_liga_e_formulario_nao_mexe(
+    client, db, make_user, auth_as, temu_http
+):
+    temu_http(lambda corpo: _info())
     admin = await make_user(role=UserRole.ADMIN)
     auth_as(admin)
     r = await client.post(
@@ -849,23 +993,36 @@ async def test_trava_so_admin_liga_e_formulario_nao_mexe(client, db, make_user, 
     assert r.status_code == 200
     assert r.json()["stock_write_enabled"] is False and r.json()["price_write_enabled"] is False
 
+    # Sem um Testar OK do token atual, não liga.
+    r = await client.put(f"/api/integrations/{iid}/temu-writes", json={"stock_write_enabled": True})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "temu_teste_necessario"
+
+    r = await client.post(f"/api/integrations/{iid}/test")
+    assert r.status_code == 200 and r.json()["ok"] is True, r.text
     r = await client.put(f"/api/integrations/{iid}/temu-writes", json={"stock_write_enabled": True})
     assert r.status_code == 200, r.text
     assert r.json()["stock_write_enabled"] is True
+    assert r.json()["loja"] == "635517739923741"
     integ = await db.get(Integration, uuid.UUID(iid))
     await db.refresh(integ)
     creds = decrypt_json(integ.credentials)
     assert creds[STOCK_WRITE_FLAG] is True and creds["app_secret"] == SEGREDO
+    assert creds[temu_mod.MALL_ID_FIXADO] == "635517739923741"
 
-    # Editar as credenciais não apaga a trava nem deixa injetar.
+    # O formulário não injeta a trava; editar sem trocar credencial a mantém.
     r = await client.patch(
         f"/api/integrations/{iid}", json={"credentials": {STOCK_WRITE_FLAG: False}}
     )
     assert r.status_code == 400
+    r = await client.patch(f"/api/integrations/{iid}", json={"name": "barbosa-2"})
+    assert r.status_code == 200 and r.json()["temu_stock_write_enabled"] is True
+    # Trocar o token DESLIGA a trava: o token novo pode ser de outra loja.
     r = await client.patch(f"/api/integrations/{iid}", json={"credentials": {"access_token": "t2"}})
     assert r.status_code == 200, r.text
-    assert r.json()["temu_stock_write_enabled"] is True
+    assert r.json()["temu_stock_write_enabled"] is False
     assert r.json()["last_test_at"] is None
+    r = await client.put(f"/api/integrations/{iid}/temu-writes", json={"stock_write_enabled": True})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "temu_teste_necessario"
 
     r = await client.put(
         f"/api/integrations/{iid}/temu-writes", json={"stock_write_enabled": "sim"}
@@ -928,3 +1085,326 @@ async def test_importar_anuncios_pelo_botao_aceita_temu(
     integ = await _conta_temu(db, admin, ligada=False)
     r = await client.post("/api/listings/import", json={"integration_id": str(integ.id)})
     assert r.status_code == 201, r.text
+
+
+# ---------------------------------------------------------------- correções dos revisores
+
+
+async def _conta_testada(client, db, admin, temu_http, **info_extra):
+    """Conta criada e testada (Testar OK) pela rota, sem ligar a trava."""
+    temu_http(lambda corpo: _info(**info_extra))
+    integ = await _conta_temu(db, admin, ligada=False)
+    r = await client.post(f"/api/integrations/{integ.id}/test")
+    assert r.status_code == 200, r.text
+    return integ, r.json()
+
+
+@pytest.mark.parametrize(
+    ("info_extra", "codigo"),
+    [
+        ({"apiScopeList": ["temu.local.sku.list.retrieve"]}, "temu_loja_nao_pronta"),
+        ({"mallType": None}, "temu_loja_nao_pronta"),
+        ({"regionId": None}, "temu_loja_nao_pronta"),
+        ({"mallType": 1}, "temu_teste_necessario"),
+    ],
+)
+async def test_ligar_a_trava_exige_loja_local_brasil_com_permissoes(
+    client, db, make_user, auth_as, temu_http, info_extra, codigo
+):
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    integ, _ = await _conta_testada(client, db, admin, temu_http, **info_extra)
+    r = await client.put(
+        f"/api/integrations/{integ.id}/temu-writes", json={"stock_write_enabled": True}
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == codigo
+    await db.refresh(integ)
+    assert decrypt_json(integ.credentials).get(STOCK_WRITE_FLAG) is not True
+
+
+async def test_ligar_a_trava_recusa_token_de_outra_loja(client, db, make_user, auth_as, temu_http):
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    integ, _ = await _conta_testada(client, db, admin, temu_http)
+    r = await client.put(
+        f"/api/integrations/{integ.id}/temu-writes", json={"stock_write_enabled": True}
+    )
+    assert r.status_code == 200, r.text
+    # Alguém cola o token de outra loja do mesmo Seller Center: a trava cai
+    # na troca, e o Testar reprova a loja diferente.
+    r = await client.patch(
+        f"/api/integrations/{integ.id}", json={"credentials": {"access_token": "token-loja-b"}}
+    )
+    assert r.json()["temu_stock_write_enabled"] is False
+    temu_http(lambda corpo: _info(mallId=111))
+    r = await client.post(f"/api/integrations/{integ.id}/test")
+    assert r.json()["ok"] is False and "635517739923741" in r.json()["detail"]
+    r = await client.put(
+        f"/api/integrations/{integ.id}/temu-writes", json={"stock_write_enabled": True}
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "temu_teste_necessario"
+    # E se o registro do teste disser outra loja, a trava também não liga.
+    await db.refresh(integ)
+    creds = decrypt_json(integ.credentials)
+    creds[temu_mod.ULTIMO_TESTE] = {"mall_id": "111", "pronto_para_estoque": True}
+    integ.credentials = encrypt_json(creds)
+    integ.last_test_ok = True
+    await db.commit()
+    r = await client.put(
+        f"/api/integrations/{integ.id}/temu-writes", json={"stock_write_enabled": True}
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "temu_loja_diferente"
+
+
+async def test_usuario_comum_troca_token_e_a_trava_desliga(client, db, make_user, auth_as):
+    admin = await make_user(role=UserRole.ADMIN)
+    integ = await _conta_temu(db, admin, ligada=True)
+    comum = await make_user(
+        role=UserRole.USER, permissions={"integracoes": {"view": True, "edit": True}}
+    )
+    auth_as(comum)
+    r = await client.patch(
+        f"/api/integrations/{integ.id}",
+        json={
+            "credentials": {
+                "app_key": "app-B",
+                "app_secret": "segredo-B",
+                "access_token": "token-loja-B",
+                "region": "eu",
+            }
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["temu_stock_write_enabled"] is False
+    await db.refresh(integ)
+    c = decrypt_json(integ.credentials)
+    assert c[STOCK_WRITE_FLAG] is False and c["access_token"] == "token-loja-B"
+
+
+async def test_usuario_de_outra_equipe_nao_edita_a_conta_temu(
+    client, db, make_user, auth_as, monkeypatch
+):
+    from app.routers import integrations as rt
+
+    async def _escopo(session, user):
+        return SimpleNamespace(unrestricted=False, integration_ids=set())
+
+    monkeypatch.setattr(rt, "resolve_team_scope", _escopo)
+    admin = await make_user(role=UserRole.ADMIN)
+    integ = await _conta_temu(db, admin, ligada=True)
+    comum = await make_user(
+        role=UserRole.USER, permissions={"integracoes": {"view": True, "edit": True}}
+    )
+    auth_as(comum)
+    r = await client.patch(
+        f"/api/integrations/{integ.id}", json={"credentials": {"access_token": "outro"}}
+    )
+    assert r.status_code == 404
+    await db.refresh(integ)
+    assert decrypt_json(integ.credentials)["access_token"] == TOKEN
+
+
+async def test_testar_em_corrida_com_troca_de_token_nao_marca_o_token_novo(
+    client, db, make_user, auth_as, monkeypatch
+):
+    liberar = asyncio.Event()
+    tokens_vistos: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        tokens_vistos.append(json.loads(request.content)["access_token"])
+        await liberar.wait()  # o Testar fica "na Temu" enquanto o token é trocado
+        return httpx.Response(200, json=_info(expiredTime=1893456000))
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        temu_mod.httpx,
+        "AsyncClient",
+        lambda **kw: original(transport=httpx.MockTransport(handler), **kw),
+    )
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    integ = await _conta_temu(db, admin, ligada=False)
+
+    tarefa = asyncio.create_task(client.post(f"/api/integrations/{integ.id}/test"))
+    while not tokens_vistos:
+        await asyncio.sleep(0.01)
+    r = await client.patch(
+        f"/api/integrations/{integ.id}", json={"credentials": {"access_token": "token-novo"}}
+    )
+    assert r.status_code == 200 and r.json()["last_test_at"] is None
+    liberar.set()
+    rt_ = await tarefa
+    assert rt_.status_code == 200
+    assert rt_.json()["ok"] is False and rt_.json()["code"] == "temu_credentials_changed"
+    await db.refresh(integ)
+    assert tokens_vistos == [TOKEN]
+    assert integ.last_test_ok is None and integ.token_expires_at is None
+    assert temu_mod.ULTIMO_TESTE not in decrypt_json(integ.credentials)
+
+
+async def test_patch_concorrente_nao_religa_a_trava_que_o_admin_desligou(
+    db, make_user, monkeypatch
+):
+    """PUT /temu-writes (desligar) chega enquanto um PATCH da mesma conta
+    (sem trocar credencial) está no meio: o PATCH segura a linha, o PUT
+    espera, e a trava termina DESLIGADA."""
+    import app.db as app_db
+    from app.routers import integrations as rt
+    from app.schemas.integrations import IntegrationPatch, TemuWritesIn
+
+    admin = await make_user(role=UserRole.ADMIN)
+    integ = await _conta_temu(db, admin, ligada=True)
+
+    s_patch = app_db.SessionLocal()
+    s_put = app_db.SessionLocal()
+    commit_original = s_patch.commit
+    no_commit = asyncio.Event()
+    seguir = asyncio.Event()
+
+    async def commit_pausado():
+        no_commit.set()
+        await seguir.wait()
+        await commit_original()
+
+    monkeypatch.setattr(s_patch, "commit", commit_pausado)
+    try:
+        patch = asyncio.create_task(
+            rt.patch_integration(
+                integ.id,
+                IntegrationPatch(name="barbosa-renomeada", credentials={"region": "global"}),
+                session=s_patch,
+                _u=admin,
+            )
+        )
+        await no_commit.wait()
+        put = asyncio.create_task(
+            rt.temu_write_update(
+                integ.id, TemuWritesIn(stock_write_enabled=False), session=s_put, _u=admin
+            )
+        )
+        await asyncio.sleep(0.3)
+        assert not put.done(), "o PUT não esperou a linha que o PATCH segura"
+        seguir.set()
+        await patch
+        r = await put
+        assert r["stock_write_enabled"] is False
+    finally:
+        seguir.set()
+        await s_patch.close()
+        await s_put.close()
+
+    await db.refresh(integ)
+    assert decrypt_json(integ.credentials).get(STOCK_WRITE_FLAG) is False
+    assert integ.name == "barbosa-renomeada"
+
+
+def _resp_gateway(tipo):
+    def responder(corpo):
+        if tipo == "http404":
+            return httpx.Response(404, text="not found")
+        if tipo == "http400":
+            return httpx.Response(400, text="bad request")
+        if tipo == "naojson":
+            return httpx.Response(200, text="<html>bloqueado</html>")
+        if tipo == "sem_confirmacao":
+            return {"success": True, "errorCode": 1000000, "result": {"msg": "ok"}}
+        return {"success": False, "errorCode": tipo, "errorMsg": f"erro {tipo}"}
+
+    return responder
+
+
+@pytest.mark.parametrize(
+    "tipo",
+    [7000000, 6000001, 3000003, 3000004, 3000000, 3000012, "http404", "http400", "naojson",
+     "sem_confirmacao"],
+)
+async def test_erro_do_gateway_nao_mata_os_vinculos_nem_enche_o_sino(
+    db, make_user, temu_http, tipo
+):
+    temu_http(_resp_gateway(tipo))
+    u = await make_user()
+    integ = await _conta_temu(db, u, ligada=True)
+    p1, l1 = await _produto_com_vinculo(db, u, integ)
+    p2, l2 = await _produto_com_vinculo(db, u, integ, sku_id="17592352673536")
+
+    report = await SyncOrchestrator(db, user_id=u.id, force=True).run([p1, p2])
+    await db.commit()
+    assert report.fatal == 0
+    no_webhook = (
+        await db.execute(
+            select(ProductLink.id).where(
+                ProductLink.integration_id == integ.id,
+                ProductLink.last_sync_status != LinkSyncStatus.FATAL,
+                ProductLink.morto_desde.is_(None),
+            )
+        )
+    ).scalars().all()
+    assert len(no_webhook) == 2, "os vínculos saíram do webhook do Bling"
+    assert len(await _alertas(db)) <= 1, "um alerta por vínculo no sino"
+
+
+def _goods_com_skus_vivos_e_excluido(corpo: dict) -> dict:
+    tipo = corpo["skuSearchType"]
+    base = {"goodsId": "555", "goodsName": "Mala", "outGoodsSn": "a001"}
+    if tipo == "ACTIVE":
+        lista = [
+            {**base, "skuId": "1", "outSkuSn": "a001.ci", "stock": 7, "skuStatus": "Active"},
+            {**base, "skuId": "2", "outSkuSn": "a001.ra", "stock": 5, "skuStatus": "Active"},
+            {"goodsId": "777", "goodsName": "Bolsa", "skuId": "9", "outSkuSn": "b9.ci",
+             "specName": "Preta", "stock": 2, "skuStatus": "Active"},
+        ]
+    elif tipo == "INACTIVE":
+        lista = [{**base, "skuId": "4", "outSkuSn": "a001.pi", "stock": 1, "skuStatus": "InActive"}]
+    elif tipo == "DELETED":
+        lista = [
+            {**base, "skuId": "3", "outSkuSn": "a001.sp", "stock": 0, "skuStatus": "Deleted"},
+            {"goodsId": "888", "goodsName": "Velha", "skuId": "8", "outSkuSn": "v8",
+             "stock": 0, "skuStatus": "Deleted"},
+        ]
+    else:
+        lista = []
+    return {"success": True, "result": {"skuList": lista}}
+
+
+def test_lista_por_produto_junta_os_skus_do_goods():
+    itens = [
+        temu_mod._sku_normalizado(s, t)
+        for t in ("ACTIVE", "INACTIVE", "DELETED")
+        for s in _goods_com_skus_vivos_e_excluido({"skuSearchType": t})["result"]["skuList"]
+    ]
+    por_goods = {i["external_id"]: i for i in temu_mod.agrupar_por_produto(itens)}
+    mala = por_goods["555"]
+    assert (mala["status"], mala["stock"], mala["sku"], mala["title"]) == (
+        "active", 13, "a001", "Mala"
+    )
+    assert len(mala["raw"]["skus"]) == 4
+    bolsa = por_goods["777"]
+    assert (bolsa["status"], bolsa["stock"], bolsa["sku"]) == ("active", 2, "b9.ci")
+    assert bolsa["title"] == "Bolsa — Preta"
+    assert por_goods["888"]["status"] == "closed"
+
+
+async def test_lista_de_anuncios_da_temu_fica_com_o_melhor_status_do_produto(
+    db, make_user, temu_http
+):
+    temu_http(_goods_com_skus_vivos_e_excluido)
+    u = await make_user()
+    integ = await _conta_temu(db, u, ligada=False)
+    job = await _job(db, u, BackgroundJobType.IMPORT_LISTINGS)
+    await listings_import.run_import_listings(
+        db, job_id=job.id, user_id=u.id, integration_id=integ.id
+    )
+    linhas = {
+        row.external_id: row
+        for row in (
+            await db.execute(select(Listing).where(Listing.integration_id == integ.id))
+        ).scalars()
+    }
+    mala = linhas["555"]
+    assert (mala.status.value, mala.sku, mala.stock) == ("active", "a001", 13)
+    # O botão Atualizar (criar_encerrado=False) também: a linha da Mala segue
+    # à venda, e produto todo excluído que o DaVinci não conhecia não entra.
+    resumo = await listings_import.importar_anuncios_conta(db, integ)
+    await db.refresh(mala)
+    assert mala.status.value == "active" and mala.stock == 13
+    assert resumo["updated"] >= 2
