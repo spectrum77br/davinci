@@ -261,7 +261,100 @@ async function principal() {
     assert.ok(script.bindings.AJUDA_TABELA)
   }
 
-  console.log('PASS: ajuda por tela — "?" à esquerda da lua só com ajuda, abre/fecha (toggle), destacado aberto, painel 440px abaixo do topo com rolagem, Esc fecha, ajuda some ao sair, Tabela de Preços com o texto')
+  // ------------------------------------------------ o painel: o cartãozinho vermelho (M-24)
+  {
+    const fonte = web('components/AppAjudaPainel.vue')
+    const { descriptor } = parse(fonte, { filename: 'AppAjudaPainel.vue' })
+    const render = compilarTemplate(descriptor.template.content, 'AppAjudaPainel.vue')
+    const ajuda = { titulo: 'Faturamento', conteudo: [{ titulo: 'Colunas', itens: [
+      { termo: 'Pendências', cartao: true, texto: 'quantos cartões.' },
+      { termo: 'Pedidos', texto: 'os pedidos.' },
+    ] }] }
+    const html = await renderizar(render, { aberta: true, ajuda, topo: 57 })
+    assert.match(html, /<h2[^>]*>Ajuda · Faturamento<\/h2>/)
+    assert.match(html, /<li><span class="mr-1\.5 inline-block h-\[10px\] w-\[7px\] rotate-12 rounded-\[1px\] bg-red-600 align-middle shadow-sm" role="img" aria-label="cartão vermelho" data-cartao><\/span><strong class="font-semibold text-foreground">Pendências<\/strong> — quantos cartões\.<\/li>/,
+      'o cartãozinho vermelho antes de "Pendências"')
+    assert.match(html, /<li><strong class="font-semibold text-foreground">Pedidos<\/strong> — os pedidos\.<\/li>/, 'sem `cartao`, como antes')
+    assert.equal((html.match(/data-cartao/g) || []).length, 1)
+    assert.match(web('composables/useAjuda.ts'), /export type AjudaItem = string \| \{ termo: string; texto: string; cartao\?: boolean \}/)
+  }
+
+  // ------------------------------------------------ a aba Faturamento (M-24)
+  {
+    const filename = path.resolve(__dirname, '../components/FaturamentoPainel.vue')
+    const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filename })
+    assert.deepEqual(errors, [])
+    const setup = descriptor.scriptSetup.content
+    // Registra a ajuda antes do primeiro `await` (a página ainda está montando).
+    const iAjuda = setup.indexOf('const ajuda = computed(() => ajudaFaturamento(isAdmin.value))\nuseAjuda(ajuda)\n')
+    assert.ok(iAjuda > 0, 'o Faturamento registra a ajuda dele')
+    assert.ok(iAjuda < setup.indexOf('\nawait load()'), 'antes do primeiro await')
+    const fonte = ts.createSourceFile(filename, setup, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    const fn = fonte.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === 'ajudaFaturamento')
+    assert.ok(fn, 'ajudaFaturamento existe')
+    const ajudaFaturamento = new Function(`${transpile(fn.getText(fonte))}\nreturn ajudaFaturamento`)()
+    const ADM = ajudaFaturamento(true)
+    const LEITOR = ajudaFaturamento(false)
+    assert.equal(ADM.titulo, 'Faturamento', 'o painel diz "Ajuda · Faturamento"')
+    assert.deepEqual(ADM.conteudo.map((s) => s.titulo), ['Para que serve', 'Como ler as colunas', 'Barra', 'Bom saber'])
+    const secao = (A, t) => A.conteudo.find((s) => s.titulo === t)
+    const termos = (A, t) => secao(A, t).itens.map((i) => i.termo)
+    assert.deepEqual(termos(ADM, 'Como ler as colunas'), ['Conta, Plataforma, Equipe e Tipo', 'Pedidos', 'Faturamento', 'Ticket médio',
+      'Pendências', 'Investimento', '% Investimento', 'Margem (só ADM)'])
+    assert.deepEqual(termos(LEITOR, 'Como ler as colunas'), ['Conta, Plataforma, Equipe e Tipo', 'Pedidos', 'Faturamento', 'Ticket médio',
+      'Pendências', 'Investimento', '% Investimento'], 'Margem (só ADM) só aparece para administrador')
+    assert.equal(secao(ADM, 'Como ler as colunas').itens.find((i) => i.termo === 'Pendências').cartao, true, 'com o cartão vermelho')
+    assert.deepEqual(termos(ADM, 'Barra'), ['Buscar', 'Período', 'Plataforma, Contas e Equipes', 'Atualizar'])
+    assert.equal(secao(ADM, 'Bom saber').itens.length, 2)
+    const tudo = JSON.stringify(ADM)
+    for (const trecho of [
+      'Mostra quanto cada conta vendeu no período: pedidos, faturamento e ticket médio, junto com as pendências da Tabela de Preços e o investimento em Ads e afiliados.',
+      'pedidos Em aberto, Em andamento e Entregues. Cancelados e devolvidos não entram. Cada pedido conta uma vez.',
+      'soma do total dos pedidos, como está no Bling. É o valor bruto: não desconta comissão nem reembolso.',
+      'faturamento ÷ pedidos.',
+      'quantos cartões vermelhos a conta tem na Tabela de Preços (Celular, Eletro e Mala).',
+      'total gasto em Ads e afiliados na conta no período. \\"—\\" quer dizer sem dado.',
+      'investimento ÷ faturamento.',
+      'margens da conta cadastradas na aba Contas, da menor à maior.',
+      'pelo nome da conta.',
+      'por mês ou personalizado (de/até). Vale a data da venda.',
+      'marque o que quer ver. Quem tem equipe só vê as contas dela.',
+      'relê os números. Os pedidos chegam sozinhos do Bling; o botão não busca pedido novo.',
+      'Pedido com etiqueta emitida sai da conta e volta quando fica Em andamento ou Entregue. O total do mês pode cair e subir de novo.',
+      'A linha Total soma só o que está filtrado.',
+    ]) assert.ok(tudo.includes(trecho), `o texto do pedido: ${trecho}`)
+    assert.ok(!JSON.stringify(LEITOR).includes('Margem'), 'nada de Margem para quem não é ADM')
+    assert.doesNotMatch(descriptor.template.content, /v-html/)
+
+    // Com o composable de verdade: na aba Faturamento a página (só Tabela) solta
+    // a dela e o Faturamento registra a sua; ao voltar, fica a da Tabela.
+    const { useAjuda, useAjudaAtual, useAjudaAberta } = carregarComposable(novoEstado())
+    const atual = useAjudaAtual()
+    const aberta = useAjudaAberta()
+    const TABELA = { titulo: 'Tabela de Preços', conteudo: [] }
+    const aba = Vue.ref('tabela')
+    const pagina = Vue.effectScope()
+    pagina.run(() => useAjuda(() => (aba.value === 'tabela' ? TABELA : null)))
+    assert.equal(Vue.toRaw(atual.value), TABELA)
+    aba.value = 'faturamento'
+    await Vue.nextTick()
+    const admin = Vue.ref(true)
+    const painel = Vue.effectScope()
+    painel.run(() => useAjuda(Vue.computed(() => ajudaFaturamento(admin.value))))
+    assert.equal(atual.value.titulo, 'Faturamento', '"?" na aba Faturamento abre a Ajuda · Faturamento')
+    aberta.value = true
+    admin.value = false
+    await Vue.nextTick()
+    assert.ok(!JSON.stringify(atual.value).includes('Margem'), 'deixou de ser ADM: sem o item da Margem')
+    aba.value = 'tabela'
+    await Vue.nextTick()
+    painel.stop()
+    assert.equal(Vue.toRaw(atual.value), TABELA, 'voltou à Tabela: a ajuda dela')
+    pagina.stop()
+    assert.equal(atual.value, null)
+  }
+
+  console.log('PASS: ajuda por tela — "?" à esquerda da lua só com ajuda, abre/fecha (toggle), destacado aberto, painel 440px abaixo do topo com rolagem, Esc fecha, ajuda some ao sair, Tabela de Preços com o texto; Faturamento (M-24) com o texto do pedido, cartão vermelho e Margem só para ADM')
 }
 
 principal().catch((e) => {

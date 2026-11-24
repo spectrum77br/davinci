@@ -3,6 +3,8 @@
 // (AppTopbar) e mostra a ajuda que a página registrou com useAjuda. Fica à
 // direita, abaixo da barra do topo (não a cobre), até o fim da tela, com
 // rolagem própria. Fecha clicando de novo no "?" ou com Esc (sem botão X).
+// M-24 (24/11/2026): item com `cartao` mostra o cartãozinho vermelho da Tabela
+// de Preços antes do termo (a "Pendências" da Ajuda · Faturamento).
 import { onBeforeUnmount, ref, watch } from 'vue'
 
 const ajuda = useAjudaAtual()
@@ -57,7 +59,7 @@ onBeforeUnmount(() => escutar(false))
         >
           <li v-for="(item, i) in secao.itens" :key="i">
             <template v-if="typeof item === 'string'">{{ item }}</template>
-            <template v-else><strong class="font-semibold text-foreground">{{ item.termo }}</strong> — {{ item.texto }}</template>
+            <template v-else><span v-if="item.cartao" class="mr-1.5 inline-block h-[10px] w-[7px] rotate-12 rounded-[1px] bg-red-600 align-middle shadow-sm" role="img" aria-label="cartão vermelho" data-cartao /><strong class="font-semibold text-foreground">{{ item.termo }}</strong> — {{ item.texto }}</template>
           </li>
         </component>
       </section>

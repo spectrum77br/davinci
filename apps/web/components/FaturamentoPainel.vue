@@ -17,6 +17,8 @@
 // As regras de quais pedidos entram e de quem vê quais lojas são as do
 // servidor e não mudaram; Plataforma/Contas/Equipes, a busca e o Total filtram
 // na tela o que o servidor já mandou.
+//
+// M-24 (24/11/2026): o "?" da barra do topo (M-18) abre a "Ajuda · Faturamento".
 import { computed, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
@@ -63,6 +65,56 @@ type FaturamentoOut = {
   equipes?: EquipeOpcao[]
   team: number | null
 }
+
+// ---------------------------------------------------------------- Ajuda (M-24)
+// O texto do pedido (prévia aprovada em 23/11/2026). "Margem (só ADM)" só
+// aparece para administrador.
+function ajudaFaturamento(admin: boolean) {
+  return {
+    titulo: 'Faturamento',
+    conteudo: [
+      {
+        titulo: 'Para que serve',
+        itens: [
+          'Mostra quanto cada conta vendeu no período: pedidos, faturamento e ticket médio, junto com as pendências da Tabela de Preços e o investimento em Ads e afiliados.',
+        ],
+      },
+      {
+        titulo: 'Como ler as colunas',
+        itens: [
+          { termo: 'Conta, Plataforma, Equipe e Tipo', texto: 'a loja, onde ela vende, a equipe e as categorias que ela vende.' },
+          { termo: 'Pedidos', texto: 'pedidos Em aberto, Em andamento e Entregues. Cancelados e devolvidos não entram. Cada pedido conta uma vez.' },
+          { termo: 'Faturamento', texto: 'soma do total dos pedidos, como está no Bling. É o valor bruto: não desconta comissão nem reembolso.' },
+          { termo: 'Ticket médio', texto: 'faturamento ÷ pedidos.' },
+          { termo: 'Pendências', cartao: true, texto: 'quantos cartões vermelhos a conta tem na Tabela de Preços (Celular, Eletro e Mala).' },
+          { termo: 'Investimento', texto: 'total gasto em Ads e afiliados na conta no período. "—" quer dizer sem dado.' },
+          { termo: '% Investimento', texto: 'investimento ÷ faturamento.' },
+          ...(admin
+            ? [{ termo: 'Margem (só ADM)', texto: 'margens da conta cadastradas na aba Contas, da menor à maior.' }]
+            : []),
+        ],
+      },
+      {
+        titulo: 'Barra',
+        itens: [
+          { termo: 'Buscar', texto: 'pelo nome da conta.' },
+          { termo: 'Período', texto: 'por mês ou personalizado (de/até). Vale a data da venda.' },
+          { termo: 'Plataforma, Contas e Equipes', texto: 'marque o que quer ver. Quem tem equipe só vê as contas dela.' },
+          { termo: 'Atualizar', texto: 'relê os números. Os pedidos chegam sozinhos do Bling; o botão não busca pedido novo.' },
+        ],
+      },
+      {
+        titulo: 'Bom saber',
+        itens: [
+          'Pedido com etiqueta emitida sai da conta e volta quando fica Em andamento ou Entregue. O total do mês pode cair e subir de novo.',
+          'A linha Total soma só o que está filtrado.',
+        ],
+      },
+    ],
+  }
+}
+const ajuda = computed(() => ajudaFaturamento(isAdmin.value))
+useAjuda(ajuda)
 
 // ---------------------------------------------------------------- Período ▾
 // Uma caixa por vez: "Por mês" (padrão = mês atual) ou "Personalizado"

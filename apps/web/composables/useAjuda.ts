@@ -5,10 +5,11 @@
 // a página escreve, a barra do topo (AppTopbar) e o painel (AppAjudaPainel) leem.
 //
 // O texto é só texto (sem HTML): seções com título e itens; um item pode ter um
-// termo em negrito na frente ("Excel" — o que ele faz).
+// termo em negrito na frente ("Excel" — o que ele faz) e, antes do termo, o
+// cartãozinho vermelho da Tabela de Preços (`cartao`, M-24: "Pendências").
 import { onScopeDispose, toRaw, toValue, watch, type MaybeRefOrGetter } from 'vue'
 
-export type AjudaItem = string | { termo: string; texto: string }
+export type AjudaItem = string | { termo: string; texto: string; cartao?: boolean }
 
 export interface AjudaSecao {
   titulo: string
