@@ -1263,3 +1263,186 @@ async def test_worker_agenda_a_fraude_a_cada_10_minutos() -> None:
 
     jobs = [c for c in WorkerSettings.cron_jobs if c.name.endswith("devolucao_fraude_auto")]
     assert len(jobs) == 1 and jobs[0].minute == set(range(7, 60, 10))
+
+
+# ── 24/11/2026: "negociação" da Shopee e "não tenho o vídeo" ──────────────
+
+
+async def test_negociacao_so_e_proposta_com_valor_menor_que_o_pedido() -> None:
+    """PENDING_RESPOND sozinho é o próprio pedido de reembolso esperando a loja
+    (308634, 307496, 308570): não é proposta. Só valor menor que o pedido é."""
+    pendente = {"negotiation_status": "PENDING_RESPOND"}
+    assert auto._proposta_de_verdade({"refund_amount": 600}, pendente) == ""
+    assert (
+        auto._proposta_de_verdade(
+            {"refund_amount": 600},
+            pendente | {"latest_offer_amount": 600, "latest_offer_creator": "buyer"},
+        )
+        == ""
+    )
+    assert (
+        auto._proposta_de_verdade({"refund_amount": 1600}, pendente | {"latest_offer_amount": 30})
+        == "R$ 30,00 (o pedido era R$ 1.600,00)"
+    )
+    # Sem o refund_amount do caso: a soma dos itens.
+    itens = {"item": [{"refund_amount": 300}, {"refund_amount": 199.9}]}
+    assert auto._proposta_de_verdade(itens, pendente | {"latest_offer_amount": 100}) == (
+        "R$ 100,00 (o pedido era R$ 499,90)"
+    )
+    # Sem saber o pedido, ou negociação que não espera a loja: não é proposta.
+    assert auto._proposta_de_verdade({}, pendente | {"latest_offer_amount": 30}) == ""
+    assert (
+        auto._proposta_de_verdade(
+            {"refund_amount": 600}, {"negotiation_status": "TERMINATED", "latest_offer_amount": 30}
+        )
+        == ""
+    )
+
+
+def _shopee_com_negociacao(monkeypatch, *, oferta: float | None, status: str = "JUDGING"):
+    from tests.test_chamados_devolucao import _FakeShopee
+
+    fake = _FakeShopee()
+    neg = {"negotiation_status": "PENDING_RESPOND", "latest_solution": "REFUND"}
+    if oferta is not None:
+        neg |= {"latest_offer_amount": oferta, "latest_offer_creator": "buyer"}
+
+    async def _det(return_sn):
+        return {
+            "return_sn": return_sn,
+            "status": status,
+            "return_solution": 1,
+            "needs_logistics": False,
+            "reason": "WRONG_ITEM",
+            "text_reason": "veio um sabonete",
+            "refund_amount": 499.9,
+            "negotiation": neg,
+        }
+
+    fake.get_return_detail = _det
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(cd, "_shopee_client_para", _c)
+    monkeypatch.setattr(cd, "ENFILEIRAR", False)
+    return fake
+
+
+async def test_shopee_pedido_esperando_a_loja_nao_e_negociacao_e_o_chamado_nasce(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """307496/308570: vídeo na mão, negociação PENDING_RESPOND com a oferta = o pedido.
+    Antes ia pra pessoa ("o comprador fez uma proposta"); agora lança e o chamado nasce."""
+    _shopee_com_negociacao(monkeypatch, oferta=499.9)
+    await _caso(
+        db,
+        make_user,
+        "799601",
+        conta="mega",
+        loja="96",
+        acao="",
+        video_link="https://mega.nz/file/caixa799601#k",
+        video_enviado_em=AGORA,
+    )
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1 and r["pra_pessoa"] == 0, r
+    assert auto.NAO_RESPONDE not in ((await _rast(db, "799601")).observacao or "")
+    msg = await _abertura(db, "799601")
+    assert DEFESA in msg.texto
+
+
+async def test_shopee_proposta_de_reembolso_parcial_fica_pra_pessoa_com_o_valor(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    _shopee_com_negociacao(monkeypatch, oferta=30, status="PROCESSING")
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    await _caso(
+        db,
+        make_user,
+        "799602",
+        conta="mega",
+        loja="97",
+        acao="",
+        video_link="https://mega.nz/file/v#k",
+        video_enviado_em=AGORA,
+    )
+    r = await auto.rodada(db)
+    assert r["lancados"] == 0 and r["pra_pessoa"] == 1 and perguntas == [], r
+    obs = (await _rast(db, "799602")).observacao
+    assert "reembolso parcial de R$ 30,00 (o pedido era R$ 499,90)" in obs, obs
+    assert auto.NAO_RESPONDE in obs
+    assert await _lancamentos(db, "799602") == []
+
+
+async def test_equipe_sem_video_o_robo_pede_de_novo_uma_vez(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """309043: a equipe respondeu "Não tô em casa" e o robô parou pra sempre. Agora,
+    12 h depois da resposta, pede de novo (a equipe vê "refazer: …"); se vier sem
+    vídeo outra vez, fica pra pessoa e não pede mais."""
+    await _caso(
+        db,
+        make_user,
+        "799701",
+        fonte="tiktok",
+        acao="SELLER_RESPOND_REFUND",
+        observacao=f"{auto.MARCA} (20/11 19:17): {auto.VIDEO_PEDIDO}.",
+        video_solicitado_em=AGORA - timedelta(days=3, hours=14),
+        video_enviado_em=AGORA - timedelta(days=3),
+        video_sem_motivo="Não tô em casa",
+    )
+    lidos: list[str] = []
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK, lidos))
+    r = await auto.rodada(db)
+    assert r["video_pedido"] == 1 and r["pedidos"]["799701"] == "vídeo pedido de novo", r
+    rast = await _rast(db, "799701")
+    assert (
+        antigo._video_status(
+            link=rast.video_link,
+            solicitado_em=rast.video_solicitado_em,
+            enviado_em=rast.video_enviado_em,
+            sem_motivo=rast.video_sem_motivo,
+        )
+        == "pendente"
+    )
+    assert rast.video_refazer_motivo == 'pedido de novo — a 1ª resposta foi "Não tô em casa"'
+    assert auto.VIDEO_PEDIDO_DE_NOVO in rast.observacao
+    assert auto.NAO_RESPONDE not in rast.observacao and lidos == []
+    # Esperando a equipe: não pede de novo nem lê a plataforma.
+    r = await auto.rodada(db)
+    assert r["esperando_video"] == 1 and r["video_pedido"] == 0 and lidos == []
+    # A 2ª resposta sem vídeo, dias depois: pessoa, sem 3º pedido.
+    rast = await _rast(db, "799701")
+    rast.video_enviado_em = AGORA
+    rast.video_sem_motivo = "não gravamos esse pedido"
+    await db.commit()
+    for quando in (AGORA, AGORA + timedelta(days=2)):
+        r = await auto.rodada(db, agora=quando)
+        assert r["video_pedido"] == 0 and r["pedidos"]["799701"] == "sem vídeo (equipe)", r
+    assert (await _rast(db, "799701")).video_solicitado_em is not None
+
+
+async def test_equipe_sem_video_e_o_video_chega_no_2o_pedido_o_robo_lanca(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    await _caso(
+        db,
+        make_user,
+        "799702",
+        video_solicitado_em=AGORA - timedelta(days=1),
+        video_enviado_em=AGORA - timedelta(hours=13),
+        video_sem_motivo="Não tô em casa",
+    )
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+    agendados = _sem_disparo(monkeypatch)
+    r = await auto.rodada(db)
+    assert r["video_pedido"] == 1, r
+    # A equipe cola o link (a mesma rota da aba Pedidos grava assim).
+    rast = await _rast(db, "799702")
+    rast.video_link = "https://mega.nz/file/depois#k"
+    rast.video_enviado_em = AGORA
+    await db.commit()
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1 and agendados == ["799702"], r

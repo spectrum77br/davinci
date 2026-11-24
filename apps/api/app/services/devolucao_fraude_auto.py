@@ -33,10 +33,11 @@ Dano/defeito e "diferente do anúncio" também viram defesa com o vídeo (Vinici
 16/11, 307238: "teria que responder já, mostrando vídeo e falando que enviamos
 certinho"). Fica pra pessoa (cartão "Fraude: responder à mão"): alegação que não se
 entende, entrega do pedido que não aconteceu (extravio: é compensação),
-"não recebi" sem a entrega confirmada, proposta do comprador (negociação), caso já
-contestado fora do DaVinci, reembolso que a própria loja aceitou (TikTok), "não tenho
-o vídeo" e pedido de vídeo cancelado. A defesa aprovada no "só propor" é a que sai
-quando ele desliga (a IA não é perguntada de novo). O robô
+"não recebi" sem a entrega confirmada, proposta de reembolso parcial na Shopee
+(negociação com valor menor que o pedido), caso já contestado fora do DaVinci,
+reembolso que a própria loja aceitou (TikTok), "não tenho o vídeo" pela 2ª vez (na
+1ª o robô pede de novo 12 h depois) e pedido de vídeo cancelado. A defesa aprovada
+no "só propor" é a que sai quando ele desliga (a IA não é perguntada de novo). O robô
 não mexe em quem uma pessoa já mexeu (lançamento, chamado, "Abrir chamado: Não",
 tirar da Fraude). ML e Amazon ficam de fora nesta etapa.
 
@@ -88,6 +89,11 @@ TETO_LEITURAS = 10
 MARCA = "Fraude automática"
 NAO_RESPONDE = "o sistema não responde esse caso sozinho (responder à mão)"
 VIDEO_PEDIDO = "vídeo da embalagem pedido à equipe"
+VIDEO_PEDIDO_DE_NOVO = "vídeo da embalagem pedido de novo à equipe"
+# "Não tenho o vídeo" da equipe (Vinicius, 24/11/2026 — 309043 parou de vez com "Não
+# tô em casa"): passadas estas horas da resposta, o robô pede o vídeo de novo, UMA
+# vez. Se a resposta vier sem vídeo outra vez, fica pra pessoa como antes.
+PEDIR_DE_NOVO_DEPOIS = timedelta(hours=12)
 ACHADO_EXPEDICAO = "vídeo da embalagem achado na expedição"
 PROPOSTA = "defesa proposta pela IA"
 # A tela (cartão "Fraude: responder à mão", pages/devolucoes.vue) procura este pedaço.
@@ -124,6 +130,8 @@ class Caso:
     transportadora: str = ""
     comprador_mandou_prova: bool | None = None
     prazo: str = ""
+    # Negociação da Shopee: "R$ 30,00 (o pedido era R$ 600,00)" — vai no recado.
+    proposta: str = ""
 
 
 # ── Candidatos ───────────────────────────────────────────────────────────
@@ -269,6 +277,41 @@ def _ddmm(fmt: str) -> str:
     return (fmt or "").split(" ")[0]
 
 
+def _num(v: Any) -> float | None:
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _brl(v: float) -> str:
+    return "R$ " + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _proposta_de_verdade(det: dict, neg: dict) -> str:
+    """A negociação da Shopee tem uma proposta de VALOR esperando a loja? Devolve o
+    texto ("R$ 30,00 (o pedido era R$ 600,00)") ou "".
+
+    24/11/2026: `negotiation_status == PENDING_RESPOND` sozinho NÃO é proposta — no só
+    reembolso da Shopee o próprio pedido do comprador fica como a "oferta" esperando a
+    loja. Conferido na tela em 17/11 (308634: "Em análise pela Shopee", nenhuma
+    proposta de valor) e foi o que parou o 307496 e o 308570 com vídeo na mão.
+    Proposta de verdade = a última oferta (`latest_offer_amount`) MENOR que o
+    reembolso pedido (`refund_amount`, ou a soma do `refund_amount` dos itens):
+    reembolso parcial, que pode valer mais aceitar do que contestar — fica pra pessoa."""
+    if str(neg.get("negotiation_status") or "").strip().upper() != "PENDING_RESPOND":
+        return ""
+    oferta = _num(neg.get("latest_offer_amount"))
+    pedido = _num(det.get("refund_amount"))
+    if pedido is None:
+        itens = det.get("item") if isinstance(det.get("item"), list) else []
+        pedido = _num(sum(_num(i.get("refund_amount")) or 0 for i in itens if isinstance(i, dict)))
+    if oferta is None or pedido is None or oferta >= pedido - 0.01:
+        return ""
+    return f"{_brl(oferta)} (o pedido era {_brl(pedido)})"
+
+
 async def _ler_caso(session: AsyncSession, plataforma: str, rid: str, dev: Devolution) -> Caso:
     """O caso lido agora na plataforma: em que pé está, o que o comprador alegou,
     a entrega do pedido."""
@@ -329,8 +372,9 @@ async def _ler_caso(session: AsyncSession, plataforma: str, rid: str, dev: Devol
         return Caso(situacao=CONTESTADO)
     if status in ("CANCELLED", "CLOSED"):
         return Caso(situacao=CANCELADO)
-    if str(neg.get("negotiation_status") or "").strip().upper() == "PENDING_RESPOND":
-        return Caso(situacao=NEGOCIACAO)
+    proposta = _proposta_de_verdade(det, neg)
+    if proposta:
+        return Caso(situacao=NEGOCIACAO, proposta=proposta)
     if status == "REQUESTED":
         situacao = RESPONDER
     elif status in ("JUDGING", "PROCESSING"):
@@ -438,10 +482,15 @@ async def _analisar(
     if caso.situacao == ACEITO_PELA_LOJA and instrucao:
         caso = Caso(**{**caso.__dict__, "situacao": PAGO})
     if caso.situacao in _POR_SITUACAO:
+        porque = _POR_SITUACAO[caso.situacao]
+        if caso.situacao == NEGOCIACAO and caso.proposta:
+            porque = (
+                f"o comprador propôs reembolso parcial de {caso.proposta} na Shopee — decidir à mão"
+            )
         await _anotar_e_gravar(
             session,
             rast,
-            f"{MARCA} ({_hoje_txt(agora)}): {_POR_SITUACAO[caso.situacao]}; {NAO_RESPONDE}."
+            f"{MARCA} ({_hoje_txt(agora)}): {porque}; {NAO_RESPONDE}."
             + (f" {chave_instr}" if chave_instr else ""),
         )
         resumo.pra_pessoa += 1
@@ -501,6 +550,30 @@ async def _pedir_video(
     await session.commit()
     resumo.video_pedido += 1
     resumo.pedidos[pedido] = "vídeo pedido"
+
+
+async def _pedir_video_de_novo(
+    session: AsyncSession, pedido: str, rast: DevolucaoRastreio, agora: datetime, resumo: Resumo
+) -> None:
+    """A equipe respondeu "não tenho o vídeo" ("Não tô em casa", 309043): pede de novo,
+    uma vez. A equipe vê "refazer: …" com a 1ª resposta (aba Pedidos do Controle de
+    Estoque), igual ao "pedir de novo" do botão."""
+    antes = " ".join((rast.video_sem_motivo or "").split())[:120]
+    rast.video_solicitado_em = agora
+    rast.video_solicitado_por = None
+    rast.video_enviado_em = None
+    rast.video_enviado_por = None
+    rast.video_link = None
+    rast.video_sem_motivo = None
+    rast.video_refazer_motivo = f'pedido de novo — a 1ª resposta foi "{antes}"'
+    _anotar(
+        rast,
+        f'{MARCA} ({_hoje_txt(agora)}): a equipe respondeu sem o vídeo ("{antes}") — '
+        f"{VIDEO_PEDIDO_DE_NOVO}.",
+    )
+    await session.commit()
+    resumo.video_pedido += 1
+    resumo.pedidos[pedido] = "vídeo pedido de novo"
 
 
 async def _lancar(
@@ -638,8 +711,16 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     video = achado
             if not video:
                 if (rast.video_sem_motivo or "").strip():
-                    resumo.pra_pessoa += 1
-                    resumo.pedidos[pedido] = "sem vídeo (equipe)"
+                    respondido = rast.video_enviado_em
+                    if (
+                        VIDEO_PEDIDO_DE_NOVO not in obs
+                        and respondido is not None
+                        and agora - respondido >= PEDIR_DE_NOVO_DEPOIS
+                    ):
+                        await _pedir_video_de_novo(session, pedido, rast, agora, resumo)
+                    else:
+                        resumo.pra_pessoa += 1
+                        resumo.pedidos[pedido] = "sem vídeo (equipe)"
                 elif rast.video_solicitado_em is not None:
                     resumo.esperando_video += 1
                     resumo.pedidos[pedido] = "esperando o vídeo"
