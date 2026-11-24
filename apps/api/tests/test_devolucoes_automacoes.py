@@ -731,10 +731,18 @@ async def test_informar_devolucoes_gate_e_envio(
         get_settings(), "threema_recipient_names", "AAAA1111:Ana", raising=False
     )
     monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
+    # Desde a tarefa 16 (F2/C9c) quem recebe o Informar das Devoluções é
+    # escolhido em Cadastros › Envios Threema (só admin): o PUT da lista
+    # antiga responde 410 e o envio sai para quem está no Cadastro.
+    from app.services.threema_catalogo import K
+    from tests.test_threema_resolver import _usuario, semeado
+
+    ana = await _usuario(db, "ana devolucoes", "AAAA1111")
+    await semeado(db, K.DEVOLUCOES_INFORMAR, ana)
 
     try:
         r = await client.put("/api/informar/devolucoes", json={"recipients": ["AAAA1111"]})
-        assert r.status_code == 200
+        assert r.status_code == 410
         r = await client.post("/api/informar/devolucoes/enviar")
         assert r.status_code == 200
         body = r.json()
