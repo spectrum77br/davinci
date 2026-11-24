@@ -415,6 +415,56 @@ async def test_informar_margem_libera_gerente_por_email(
     assert (await client.post("/api/informar/margem_auto/enviar")).status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_gerente_le_e_envia_mas_nunca_grava_a_lista(
+    client: AsyncClient,
+    db: AsyncSession,
+    auth_as,
+    admin: User,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tarefa 16, C12: o `_EMAILS_EXTRAS` libera só ler e enviar. Nem num
+    contexto que ainda não lê o Cadastro (o código de antes da fatia) o
+    gerente grava a lista: 403 e nada muda; o admin grava."""
+    from sqlalchemy import select
+
+    from app.config import get_settings
+    from app.models import ThreemaInformarConfig
+
+    monkeypatch.setattr(get_settings(), "threema_recipient_names", "ZZZZ9999:Zeca", raising=False)
+    desmigrar(monkeypatch, K.MARGEM_INFORMAR, K.LOGISTICA_AMAZON_INFORMAR)
+    email = "sa.geral@tutamail.com"
+    gerente = User(
+        open_id=f"email:{email}", email=email, role=UserRole.USER, status=UserStatus.ACTIVE
+    )
+    db.add(gerente)
+    await db.commit()
+    await db.refresh(gerente)
+
+    async def _linha(contexto: str) -> str | None:
+        await db.commit()
+        return (
+            await db.execute(
+                select(ThreemaInformarConfig.recipients).where(
+                    ThreemaInformarConfig.contexto == contexto
+                )
+            )
+        ).scalar_one_or_none()
+
+    auth_as(gerente)
+    for contexto in ("margem", "logistica_amazon"):
+        assert (await client.get(f"/api/informar/{contexto}")).status_code == 200, contexto
+        r = await client.put(f"/api/informar/{contexto}", json={"recipients": ["ZZZZ9999"]})
+        assert r.status_code == 403, (contexto, r.text)
+        assert r.json()["detail"]["code"] == "admin_only"
+        assert await _linha(contexto) is None, contexto
+
+    auth_as(admin)
+    r = await client.put("/api/informar/margem", json={"recipients": ["ZZZZ9999"]})
+    assert r.status_code == 200, r.text
+    assert await _linha("margem") == "ZZZZ9999"
+
+
 # ---- contexto margem (relatório dos pendentes) ----
 
 

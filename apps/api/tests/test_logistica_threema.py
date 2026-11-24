@@ -177,19 +177,6 @@ async def test_enviar_threema_ok(
 
 
 @pytest.mark.asyncio
-async def test_threema_destinatarios_lista(
-    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
-):
-    auth_as(admin)
-    r = await client.get("/api/logistica/threema/destinatarios")
-    assert r.status_code == 200, r.text
-    assert r.json() == [
-        {"id": "ABCD1234", "nome": "Londres"},
-        {"id": "EFGH5678", "nome": "EFGH5678"},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_enviar_threema_escolha_avulsa_ignorada_e_pedido(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):

@@ -605,11 +605,9 @@ async def test_rotas_antigas_de_contato_avulso_nao_mudam_quem_recebe(
     chave = K.OUVIDORIA_VIGIA_CORREIOS
     admin, joana, _ = await _pessoas(db)
     await _robo(db, "vigia_correios")
-    await threema.salvar_contato(db, threema_id=ID["roma"], nome="roma")
+    roma = ThreemaContato(threema_id=ID["roma"], nome="roma", ativo=True, origem="tela")
+    db.add(roma)
     await db.commit()
-    roma = (
-        await db.execute(select(ThreemaContato).where(ThreemaContato.threema_id == ID["roma"]))
-    ).scalar_one()
     await semeado(db, chave, joana, roma)
 
     async def _quem() -> tuple:

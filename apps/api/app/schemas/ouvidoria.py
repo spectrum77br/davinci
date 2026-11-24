@@ -14,18 +14,11 @@ StatusFiltro = Literal["abertas", "fechadas", "todas"]
 class DestinatarioOut(BaseModel):
     id: str
     nome: str
-    # De onde veio: usuario (Admin › Usuários) | contato (cadastrado na tela)
-    # | env (lista antiga do servidor). Só o `contato` a tela deixa remover.
-    # Vem preenchida na LISTA do seletor (/threema/destinatarios); no
+    # De onde veio: usuario (Admin › Usuários) | contato (contato externo de
+    # Cadastros › Envios Threema) | env (lista antiga do servidor). Vem
+    # preenchida na LISTA do seletor (/threema/destinatarios); no
     # `threema_destinatarios` do robô (quem ele já avisa) fica vazia.
     origem: str | None = None
-
-
-class ContatoThreemaIn(BaseModel):
-    """Contato avulso do Threema: quem recebe aviso e não tem login."""
-
-    id: str = Field(min_length=1, max_length=16)
-    nome: str = Field(min_length=1, max_length=60)
 
 
 class RodadaOut(BaseModel):

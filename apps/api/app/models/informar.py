@@ -1,8 +1,11 @@
 """Cadastro dos destinatários Threema dos botões INFORMAR (admin-only).
 
 Uma linha por contexto ('logistica' | 'controle_estoque'); `recipients` guarda
-os IDs Threema escolhidos (mesmo formato CSV do `.env`) — aqui persiste QUEM
-recebe cada relatório.
+os IDs Threema escolhidos (mesmo formato CSV do `.env`) — aqui persistia QUEM
+recebe cada relatório. Desde a tarefa 16 (F2 e F3), quem recebe é escolhido em
+Cadastros › Envios Threema, só por admin: as linhas ficam CONGELADAS como a
+configuração antiga (reserva de emergência e fonte da semente; o PUT do
+Informar responde 410). Apagá-las é tarefa futura, 30 dias depois da F4.
 
 A linha de contexto `diretorio` (services/threema.CONTEXTO_CONTATOS) é a
 exceção e guarda outra coisa: os CONTATOS AVULSOS, no formato `ID:Nome` do
@@ -14,8 +17,9 @@ que esta tabela já tirou do arquivo — quem lê é o mesmo
 
 Desde a migration 0507 (tarefa 16, C4) os contatos moram em `threema_contato`
 (Cadastros › Envios Threema). A linha `diretorio` virou ESPELHO: o
-services/threema a reescreve a cada gravação de contato, para que reverter o
-código não perca ninguém. Sai na limpeza da tarefa (C12).
+`threema.espelhar_contatos` a reescreve a cada gravação de contato do
+Cadastro, para que reverter o código não perca ninguém. Sai junto com as
+outras linhas (tarefa futura).
 """
 
 from __future__ import annotations

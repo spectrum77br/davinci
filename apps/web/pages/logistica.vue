@@ -35,8 +35,12 @@ const informarOpen = ref(false)
 // avisos do robô) e Mensagens ao cliente (textos dos e-mails ao comprador).
 const informarAmazonOpen = ref(false)
 const mensagensClienteOpen = ref(false)
-// "Igual ao Margem": admins + o gerente. Espelha _EMAILS_EXTRAS['logistica_amazon']
-// no backend (routers/informar.py) — mudou lá, muda aqui.
+// "Igual ao Margem": admins + o gerente veem quem recebe e usam o "Enviar
+// agora" do Informar da aba Amazon. Escolher quem recebe (o relatório e os
+// avisos do robô) é só de admin, em Cadastros › Envios Threema (tarefa 16).
+// A mesma lista libera as Mensagens ao cliente (e-mails ao comprador, não é
+// Threema). Espelha _EMAILS_EXTRAS['logistica_amazon'] no backend
+// (routers/informar.py, que só libera ler e enviar) — mudou lá, muda aqui.
 const _auth = useAuthStore()
 const INFORMAR_AMAZON_USERS = ['sa.geral@tutamail.com']
 const canInformarAmazon = computed(() => {

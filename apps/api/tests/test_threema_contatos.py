@@ -5,9 +5,11 @@
   linha, não duplica ao rodar de novo e desce apagando só o que copiou;
 * o seletor (Ouvidoria › Robôs e Informar) mostra EXATAMENTE o mesmo de
   antes — comparado com a implementação antiga congelada aqui;
-* salvar e remover gravam na tabela nova e reescrevem a linha antiga como
-  espelho (reverter o código não perde ninguém);
-* contato que um envio ou grupo usa não é apagado: fica inativo.
+* o Cadastro (Cadastros › Envios Threema › Contatos externos, só admin)
+  grava na tabela nova e reescreve a linha antiga como espelho, lida pela
+  implementação antiga igual ao seletor de hoje (reverter o código não perde
+  ninguém). O cadastro de contato avulso pela Ouvidoria saiu na limpeza
+  (C12): as rotas antigas respondem 410 (`test_threema_pontos_ouvidoria`).
 """
 
 # ruff: noqa: S608
@@ -23,14 +25,13 @@ from sqlalchemy import select, text
 from app.models import (
     Base,
     ThreemaContato,
-    ThreemaGrupo,
-    ThreemaGrupoMembro,
     ThreemaInformarConfig,
     User,
     UserRole,
     UserStatus,
 )
-from app.services import threema
+from app.services import threema, threema_envios_edicao
+from app.services.threema_envios_tela import TelaError
 
 _API = Path(__file__).resolve().parent.parent
 _MIGRATION = _API / "alembic" / "versions" / "0514_threema_contatos_copia.py"
@@ -249,13 +250,18 @@ async def test_seletor_da_ouvidoria_mostra_exatamente_o_mesmo(
 
 
 @pytest.mark.asyncio
-async def test_salvar_e_remover_gravam_na_tabela_nova_e_espelham_a_linha(db, monkeypatch):
+async def test_cadastro_grava_na_tabela_nova_e_espelha_a_linha(db, monkeypatch):
     monkeypatch.setattr(threema, "get_settings", lambda: ENV)
     await _cenario(db)
     await _migrar(db)
 
-    await threema.salvar_contato(db, threema_id="tstn0011", nome="  Novo   Contato ")
-    await threema.salvar_contato(db, threema_id="TSTR0001", nome="Roma Renomeado")
+    novo = await threema_envios_edicao.criar_contato(
+        db, threema_id="tstn0011", nome="  Novo   Contato ", observacao=None
+    )
+    roma = (
+        await db.execute(select(ThreemaContato).where(ThreemaContato.threema_id == "TSTR0001"))
+    ).scalar_one()
+    await threema_envios_edicao.editar_contato(db, roma.id, nome="Roma Renomeado")
     await db.commit()
     contatos = {c[0]: c for c in await _contatos_no_banco(db)}
     assert contatos["TSTN0011"] == ("TSTN0011", "Novo Contato", True, "tela")
@@ -264,8 +270,7 @@ async def test_salvar_e_remover_gravam_na_tabela_nova_e_espelham_a_linha(db, mon
     assert await _diretorio_antigo(db) == await threema.diretorio(db)
     assert "TSTN0011:Novo Contato" in (await _linha(db)).split(",")
 
-    await threema.remover_contato(db, "tstn0011")
-    await threema.remover_contato(db, "TSTX9999")  # quem não existe: nada
+    await threema_envios_edicao.apagar_contato(db, novo.id)
     await db.commit()
     assert "TSTN0011" not in {c[0] for c in await _contatos_no_banco(db)}
     assert await _diretorio_antigo(db) == await threema.diretorio(db)
@@ -275,46 +280,27 @@ async def test_salvar_e_remover_gravam_na_tabela_nova_e_espelham_a_linha(db, mon
 @pytest.mark.asyncio
 async def test_espelho_nasce_quando_nao_havia_linha(db, monkeypatch):
     monkeypatch.setattr(threema, "get_settings", lambda: ENV)
-    await threema.salvar_contato(db, threema_id="TSTR0001", nome="Roma")
+    await threema_envios_edicao.criar_contato(
+        db, threema_id="TSTR0001", nome="Roma", observacao=None
+    )
     await db.commit()
     assert await _linha(db) == "TSTR0001:Roma"
     assert await threema.contatos(db) == [{"id": "TSTR0001", "nome": "Roma"}]
 
 
 @pytest.mark.asyncio
-async def test_contato_em_uso_no_cadastro_fica_inativo_em_vez_de_sumir(db, monkeypatch):
-    monkeypatch.setattr(threema, "get_settings", lambda: ENV)
-    await threema.salvar_contato(db, threema_id="TSTR0001", nome="Roma")
-    await db.commit()
-    contato = (await db.execute(select(ThreemaContato))).scalar_one()
-    grupo = ThreemaGrupo(nome="Avisos gerais")
-    db.add(grupo)
-    await db.flush()
-    db.add(ThreemaGrupoMembro(grupo_id=grupo.id, tipo="contato", contato_id=contato.id))
-    await db.commit()
-
-    await threema.remover_contato(db, "TSTR0001")
-    await db.commit()
-    assert await _contatos_no_banco(db) == [("TSTR0001", "Roma", False, "tela")]
-    assert await threema.contatos(db) == []
-    assert all(d["id"] != "TSTR0001" for d in await threema.diretorio(db))
-    assert await _linha(db) == ""
-    # cadastrar de novo reativa
-    await threema.salvar_contato(db, threema_id="TSTR0001", nome="Roma")
-    await db.commit()
-    assert await _contatos_no_banco(db) == [("TSTR0001", "Roma", True, "tela")]
-
-
-@pytest.mark.asyncio
 async def test_validacoes_de_sempre_mais_o_tamanho_do_nome(db):
-    with pytest.raises(threema.ContatoInvalidoError, match="8 letras"):
-        await threema.salvar_contato(db, threema_id="roma", nome="Roma")
-    with pytest.raises(threema.ContatoInvalidoError, match="Dê um nome"):
-        await threema.salvar_contato(db, threema_id="TSTR0001", nome="   ")
-    with pytest.raises(threema.ContatoInvalidoError, match="não pode ter"):
-        await threema.salvar_contato(db, threema_id="TSTR0001", nome="Roma: chefe")
-    with pytest.raises(threema.ContatoInvalidoError, match="até 80"):
-        await threema.salvar_contato(db, threema_id="TSTR0001", nome="x" * 81)
+    async def criar(rid: str, nome: str) -> None:
+        await threema_envios_edicao.criar_contato(db, threema_id=rid, nome=nome, observacao=None)
+
+    with pytest.raises(TelaError, match="8 letras"):
+        await criar("roma", "Roma")
+    with pytest.raises(TelaError, match="Dê um nome"):
+        await criar("TSTR0001", "   ")
+    with pytest.raises(TelaError, match="não pode ter"):
+        await criar("TSTR0001", "Roma: chefe")
+    with pytest.raises(TelaError, match="até 80"):
+        await criar("TSTR0001", "x" * 81)
     assert threema.threema_id_valido(" tstr0001 ")
     assert threema.threema_id_valido("*TSTGW01")
     assert not threema.threema_id_valido("TSTR001")
@@ -326,7 +312,7 @@ async def test_antes_do_alembic_o_seletor_le_a_linha_antiga_sem_500(db, monkeypa
     (0506/0507). Sem `threema_contato`, quem lê os contatos (o seletor da
     Ouvidoria e do Informar, o aviso da IA de Chamado, o teste da Denúncia)
     cai na linha antiga em vez de dar 500, sem envenenar a transação de quem
-    chamou; gravar contato responde a frase (422 na rota)."""
+    chamou."""
     monkeypatch.setattr(threema, "get_settings", lambda: ENV)
     await _cenario(db)
     antes = await _diretorio_antigo(db)
@@ -338,11 +324,6 @@ async def test_antes_do_alembic_o_seletor_le_a_linha_antiga_sem_500(db, monkeypa
         assert await threema.diretorio(db) == antes
         assert await threema.contatos(db) == threema.parse_recipient_directory(LINHA_ANTIGA, None)
         assert threema._TABELA_CONTATO_OK is False  # continua conferindo
-        assert (await db.execute(text("SELECT 1"))).scalar_one() == 1
-        with pytest.raises(threema.ContatoInvalidoError, match="publicação em andamento"):
-            await threema.salvar_contato(db, threema_id="TSTN0011", nome="Novo")
-        with pytest.raises(threema.ContatoInvalidoError, match="publicação em andamento"):
-            await threema.remover_contato(db, "TSTR0001")
         assert (await db.execute(text("SELECT 1"))).scalar_one() == 1
     finally:
         await db.rollback()

@@ -37,9 +37,11 @@ editado no modal do botão. O diretório de opções vem do CADASTRO DE USUÁRIO
 codigos threemas tem que aparecer no para informar das abas que tem"),
 completado pelas entradas legadas do `.env` cujo ID ninguém tem no cadastro.
 Tudo aqui exige admin — botão, cadastro e envio —
-com UMA exceção: os contextos da Margem também liberam o gerente por e-mail
-(_EMAILS_EXTRAS; pedido do Eduardo 01/09: "pro cairo que é gerente pode
-aparecer informar na aba margem").
+com UMA exceção: alguns contextos (a Margem, a aba Amazon, a IA de Chamado e
+a Denúncia) também liberam o gerente por e-mail (_EMAILS_EXTRAS; pedido do
+Eduardo 01/09: "pro cairo que é gerente pode aparecer informar na aba
+margem"). Desde a limpeza da tarefa 16 (C12) essa exceção vale só para LER
+e ENVIAR: gravar a lista é só de admin.
 
 Cadastros › Envios Threema (tarefa 16, F2): quando TODOS os envios que leem
 a lista de um contexto já leem o Cadastro (`migrado=True` no catálogo), quem
@@ -208,10 +210,13 @@ async def _resalvar_sem_mudanca(
     return atual if set(recebidos) in conjuntos else None
 
 
-# Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
-# exceção: o gerente (Cairo) vê e usa o botão de lá (o "Enviar agora", pela
-# API, e quem recebe o aviso automático — escolher, desde a F3/C10b, só
-# admin, em Cadastros › Envios Threema); Logística e Controle de Estoque
+# Não-admins liberados POR CONTEXTO (e-mail minúsculo), só para LER (o GET e
+# o "quem recebe" leve de Cadastros › Envios Threema, que usa esta mesma
+# porta) e ENVIAR (o "Enviar agora"). Gravar a lista é só de admin
+# (`_exige_admin_para_gravar`) — "só ADM altera quem recebe", decisão do dono
+# em 23/11; nas listas que já leem o Cadastro, o PUT responde 410 para todos.
+# Na Margem, o gerente (Cairo) vê e usa o botão de lá (o "Enviar agora", pela
+# API, e vê quem recebe o aviso automático); Logística e Controle de Estoque
 # seguem admin-only. Espelho no front: INFORMAR_MARGEM_USERS em
 # components/MargemPainel.vue — mudou aqui, muda lá.
 _EMAILS_MARGEM = frozenset({"sa.geral@tutamail.com"})
@@ -245,13 +250,20 @@ def _valida_contexto(contexto: str) -> str:
 
 
 def _exige_acesso(user: User, contexto: str) -> None:
-    """Admin sempre; não-admin só se o e-mail estiver liberado pro contexto."""
+    """Ler e enviar: admin sempre; não-admin só se o e-mail estiver liberado
+    pro contexto (`_EMAILS_EXTRAS`)."""
     if user.role == UserRole.ADMIN:
         return
     email = (user.email or "").strip().lower()
     if email in _EMAILS_EXTRAS.get(contexto, frozenset()):
         return
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
+
+
+def _exige_admin_para_gravar(user: User) -> None:
+    """Gravar a lista antiga: só admin (o `_EMAILS_EXTRAS` não vale aqui)."""
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
 
 
 async def _diretorio(session: AsyncSession) -> list[dict[str, str]]:
@@ -336,7 +348,8 @@ async def put_config(
     marcados). Contexto cujos envios já leem o Cadastro: 410 (quem recebe é
     escolhido em Cadastros › Envios Threema, só por admin) — fora o PUT que
     só repete a lista congelada (o "Enviar agora" do modal antigo salva
-    antes de mandar): 200 sem gravar nada."""
+    antes de mandar): 200 sem gravar nada. Gravar (contexto que ainda não lê
+    o Cadastro — desde a F3/C10b, nenhum): só admin."""
     contexto = _valida_contexto(contexto)
     _exige_acesso(user, contexto)
     no_cadastro = _lista_no_cadastro(contexto)
@@ -361,6 +374,7 @@ async def put_config(
                 "envios": [d.chave for d in no_cadastro],
             },
         )
+    _exige_admin_para_gravar(user)
     diretorio = await _diretorio(session)
     validos = {d["id"] for d in diretorio}
     escolhidos = [

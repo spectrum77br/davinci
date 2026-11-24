@@ -49,7 +49,7 @@ import sqlalchemy as sa
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada
+from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada, ThreemaContato
 from app.routers import ouvidoria as router_mod
 from app.services import ouvidoria as svc
 from app.services.threema_catalogo import K
@@ -1096,7 +1096,7 @@ async def test_contato_externo_entra_no_seletor_e_no_campo_do_robo(
     avulso) respondem 410 e não mudam nada."""
     desmigrar(monkeypatch, K.OUVIDORIA_VIGIA_IMPORTACAO)
     await _robo(db)
-    await svc.threema.salvar_contato(db, threema_id="vbs64v3s", nome="roma")
+    db.add(ThreemaContato(threema_id="VBS64V3S", nome="roma", ativo=True, origem="tela"))
     await db.commit()
     editor = await make_user(email="eduardo@davinci-test.com", permissions=_perms(edit=True))
     auth_as(editor)
@@ -1133,7 +1133,7 @@ async def test_contato_avulso_perde_pro_cadastro_do_usuario(client, make_user, a
     editor = await make_user(email="eduardo@davinci-test.com", permissions=_perms(edit=True))
     editor.name = "Eduardo"
     editor.threema = "VBS64V3S"
-    await svc.threema.salvar_contato(db, threema_id="VBS64V3S", nome="roma")
+    db.add(ThreemaContato(threema_id="VBS64V3S", nome="roma", ativo=True, origem="tela"))
     await db.commit()
     auth_as(editor)
 

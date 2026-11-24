@@ -117,7 +117,6 @@ from app.schemas.logistica import (
     StatusRepetidasOut,
     SugestaoIn,
     SugestaoOut,
-    ThreemaDestinatarioOut,
 )
 from app.services import (
     chamados_melhor_envio_abrir,
@@ -840,21 +839,6 @@ async def patch_status(
     await session.commit()
     s = await _load_status(session, s.id)
     return _to_status_out(s, avisos)
-
-
-@router.get("/threema/destinatarios", response_model=list[ThreemaDestinatarioOut])
-async def threema_destinatarios(
-    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
-) -> list[ThreemaDestinatarioOut]:
-    """Lista `[{id, nome}]` dos destinatários do Threema (do `.env`) pro seletor
-    de quem recebe a mensagem."""
-    s = get_settings()
-    return [
-        ThreemaDestinatarioOut(**d)
-        for d in threema.parse_recipient_directory(
-            s.threema_recipient_names, s.threema_recipients
-        )
-    ]
 
 
 @router.post("/status/{status_id}/enviar-threema", response_model=EnviarThreemaOut)

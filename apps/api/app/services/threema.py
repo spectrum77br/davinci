@@ -110,18 +110,16 @@ def parse_recipient_directory(names_raw: str | None, ids_raw: str | None) -> lis
 # mexer no servidor.
 #
 # Desde a migration 0507 (tarefa 16, C4) os contatos moram em
-# `threema_contato` (Cadastros › Envios Threema). A linha antiga
+# `threema_contato` e são cadastrados só em Cadastros › Envios Threema ›
+# Contatos externos, só por admin (`services/threema_envios_edicao`; o
+# cadastro pela Ouvidoria saiu na limpeza, C12). A linha antiga
 # (`threema_informar_config`, contexto `diretorio`, formato `ID:Nome` do
-# `.env`) continua lá como ESPELHO: toda gravação daqui a reescreve com os
-# contatos ativos, para que reverter o código (que lê a linha) não perca
-# ninguém. Sai na limpeza da tarefa (C12).
+# `.env`) continua lá como ESPELHO: cada gravação do Cadastro a reescreve com
+# os contatos ativos (`espelhar_contatos`), para que reverter o código (que lê
+# a linha) não perca ninguém. Sai junto com as fontes antigas (tarefa futura,
+# 30 dias depois da F4).
 CONTEXTO_CONTATOS = "diretorio"
 _THREEMA_ID = re.compile(r"^(?:[A-Z0-9]{8}|\*[A-Z0-9]{7})$")
-_TAM_NOME_CONTATO = 80
-
-
-class ContatoInvalidoError(ValueError):
-    """Frase pronta pra tela (o router devolve 422 com ela)."""
 
 
 # Janela da publicação: o código novo pode subir ANTES do `alembic upgrade
@@ -129,13 +127,8 @@ class ContatoInvalidoError(ValueError):
 # Enquanto `threema_contato` não existe, a LEITURA dos contatos cai na linha
 # antiga (`diretorio`, que a 0507 mantém como espelho) — as telas de sempre
 # (Informar, Ouvidoria › Robôs, aviso da IA de Chamado, teste da Denúncia)
-# não dão 500. Gravar contato nesse intervalo responde 422 com a frase
-# abaixo. A 1ª leitura boa liga a chave e o processo não confere mais.
+# não dão 500. A 1ª leitura boa liga a chave e o processo não confere mais.
 _TABELA_CONTATO_OK = False
-_TABELA_CONTATO_AUSENTE = (
-    "Os contatos externos estão sendo atualizados (publicação em andamento): "
-    "tente de novo em alguns minutos."
-)
 
 
 def _tabela_ausente(exc: BaseException) -> bool:
@@ -201,12 +194,6 @@ async def _contatos_ativos(session):
     return linhas
 
 
-async def _exige_tabela_contato(session) -> None:
-    """Gravar contato antes do alembic: 422 com frase, não 500."""
-    if not _TABELA_CONTATO_OK and await _contatos_ativos(session) is None:
-        raise ContatoInvalidoError(_TABELA_CONTATO_AUSENTE)
-
-
 async def contatos(session) -> list[dict[str, str]]:
     """Contatos externos ativos, `[{id, nome}]` (ordem alfabética). Antes do
     alembic (tabela ausente), os da linha antiga, como era antes da 0507."""
@@ -219,7 +206,8 @@ async def contatos(session) -> list[dict[str, str]]:
 
 async def espelhar_contatos(session) -> None:
     """Reescreve a linha antiga (`diretorio`) com os contatos ativos, no
-    formato de sempre. Sem contato e sem linha, não cria nada."""
+    formato de sempre. Sem contato e sem linha, não cria nada. Quem chama é
+    o Cadastro, a cada gravação de contato (o commit fica com ele)."""
     from app.models import ThreemaInformarConfig
 
     lista = await contatos(session)
@@ -230,73 +218,6 @@ async def espelhar_contatos(session) -> None:
         row = ThreemaInformarConfig(contexto=CONTEXTO_CONTATOS, recipients="")
         session.add(row)
     row.recipients = ",".join(f"{d['id']}:{d['nome']}" for d in lista)
-
-
-async def salvar_contato(session, *, threema_id: str, nome: str) -> list[dict[str, str]]:
-    """Cadastra (ou renomeia, ou reativa) um contato externo. Commit fica com
-    o caller."""
-    from sqlalchemy import select
-
-    from app.models import ThreemaContato
-
-    rid = (threema_id or "").strip().upper()
-    nome = " ".join((nome or "").split())
-    if not _THREEMA_ID.match(rid):
-        raise ContatoInvalidoError(
-            "O ID do Threema tem 8 letras/números (ex.: VBS64V3S) — confira e tente de novo."
-        )
-    if not nome:
-        raise ContatoInvalidoError("Dê um nome ao contato: é ele que aparece na lista.")
-    if ":" in nome or "," in nome or ";" in nome:
-        raise ContatoInvalidoError("O nome não pode ter ':' , ',' nem ';'.")
-    if len(nome) > _TAM_NOME_CONTATO:
-        raise ContatoInvalidoError(f"O nome pode ter até {_TAM_NOME_CONTATO} letras.")
-    await _exige_tabela_contato(session)
-    row = (
-        await session.execute(select(ThreemaContato).where(ThreemaContato.threema_id == rid))
-    ).scalar_one_or_none()
-    if row is None:
-        session.add(ThreemaContato(threema_id=rid, nome=nome, ativo=True, origem="tela"))
-    else:
-        row.nome = nome
-        row.ativo = True
-    await session.flush()
-    await espelhar_contatos(session)
-    await session.flush()
-    return await contatos(session)
-
-
-async def remover_contato(session, threema_id: str) -> None:
-    """Tira o contato externo da lista. Quem veio de Admin › Usuários ou do
-    `.env` não sai por aqui (não é daqui que ele vem). Contato que algum envio
-    ou grupo do Cadastro usa não é apagado (a cascata o tiraria calado de lá):
-    fica inativo — some do seletor e o envio avisa "contato inativo"."""
-    from sqlalchemy import exists, select
-
-    from app.models import ThreemaContato, ThreemaEnvioDestinatario, ThreemaGrupoMembro
-
-    rid = (threema_id or "").strip().upper()
-    await _exige_tabela_contato(session)
-    row = (
-        await session.execute(select(ThreemaContato).where(ThreemaContato.threema_id == rid))
-    ).scalar_one_or_none()
-    if row is None:
-        return
-    em_uso = (
-        await session.execute(
-            select(
-                exists().where(ThreemaEnvioDestinatario.contato_id == row.id)
-                | exists().where(ThreemaGrupoMembro.contato_id == row.id)
-            )
-        )
-    ).scalar_one()
-    if em_uso:
-        row.ativo = False
-    else:
-        await session.delete(row)
-    await session.flush()
-    await espelhar_contatos(session)
-    await session.flush()
 
 
 async def diretorio(session) -> list[dict[str, str]]:
@@ -311,8 +232,8 @@ async def diretorio(session) -> list[dict[str, str]]:
     dá lugar ao nome real. No meio dos dois entram os CONTATOS EXTERNOS
     ativos (`contatos`, tabela `threema_contato` desde a 0507), pra quem
     recebe aviso e não tem login.
-    Cada linha diz de onde veio em `origem` (usuario | contato | env) — é o
-    que deixa a tela oferecer o "remover" só no que ela mesma cadastrou.
+    Cada linha diz de onde veio em `origem` (usuario | contato | env). Só
+    leitura: contato externo se cadastra em Cadastros › Envios Threema.
     Ordem alfabética. Import tardio dos modelos: este módulo é importado pelo
     worker antes do registry do SQLAlchemy fechar.
     """

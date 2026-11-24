@@ -24,7 +24,10 @@ módulo é o NÚCLEO que junta os dois:
 
 Cada fatia (F1–F4) troca o portão `if not <env>: return` do ponto de envio
 por `enviar(K.X, …)` (ou `resolver(K.X)`) no mesmo commit que vira
-`migrado=True`.
+`migrado=True`. Depois da F4 os 47 envios gerenciados do servidor leem o
+Cadastro; as travas da limpeza (C12: `send_to_all` só aqui ou numa marca,
+lista do .env só no legado, chave só do catálogo) estão em
+`tests/test_threema_estatico.py`.
 
 Linha de comando (no container da API):
 
