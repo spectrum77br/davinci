@@ -142,3 +142,30 @@ def snapshot(db):
             }
         )
     return result
+
+
+def usage(db, tags=()):
+    """How many products (not deleted) use each category name and end with each given tag — what
+    DaVinci's Cadastros › Produtos asks before a category or a tag leaves the official list
+    (M-29). Read only; the product → category link stays here and is never changed by DaVinci."""
+    rows = db.execute(
+        "SELECT p.sku, d.data AS details, c.name AS category FROM products p "
+        "LEFT JOIN product_details d ON d.sku=p.sku "
+        "LEFT JOIN own_product_categories pc ON pc.sku=p.sku "
+        "LEFT JOIN own_categories c ON c.id=pc.category_id"
+    )
+    wanted = [t for t in dict.fromkeys(tags) if t]
+    names, without, total, ends = {}, 0, 0, dict.fromkeys(wanted, 0)
+    for row in rows:
+        if row["details"] and json.loads(row["details"]).get("status") == "deleted":
+            continue
+        total += 1
+        if row["category"]:
+            names[row["category"]] = names.get(row["category"], 0) + 1
+        else:
+            without += 1
+        sku = row["sku"].casefold()
+        for tag in wanted:
+            if sku.endswith(tag.casefold()):
+                ends[tag] += 1
+    return {"products": total, "categories": names, "without_category": without, "tags": ends}

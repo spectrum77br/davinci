@@ -580,6 +580,17 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             *fiscal_context(json.loads(row[0])["address"]["uf"], json.loads(row[0])["cnpj"]),
         )
 
+    @app.get("/api/erp-local/catalog/usage")
+    def catalog_usage(tag: list[str] = Query(default=[])):
+        """Products per category name and per SKU ending, for DaVinci's Cadastros › Produtos
+        (M-29): it refuses to drop a category that products still use. Read only."""
+        from app.erp_local import categories
+
+        tags = [t.strip()[:60] for t in tag[:20] if t.strip()]
+        with erp.connection() as db:
+            db.execute("BEGIN")
+            return categories.usage(db, tags)
+
     @app.get("/api/erp-local/products/{sku}/links")
     def product_links(sku: str):
         from app.erp_local import price_table
