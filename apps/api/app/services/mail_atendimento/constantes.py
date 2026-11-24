@@ -145,6 +145,13 @@ CAIXAS_EMAIL_DO_SITE: tuple[tuple[str, str], ...] = (
     (CAIXA_DO_SITE_SAC, "SAC"),
     (CAIXA_DO_SITE_ADMIN, "Admin"),
 )
+# Caixas a mais de um site (24/11/2026): a Charlots tem a do LAUDO de mala avariada
+# por companhia aérea — o chamado do SAC (protocolo CS-…) com o tipo `laudo`
+# (`pedido.tipo_do_chamado`). A caixa sai do TIPO, não do endereço (chega no sac@).
+CAIXA_DO_SITE_LAUDO = "laudo"
+CAIXAS_EXTRAS_DO_SITE: dict[str, tuple[tuple[str, str], ...]] = {
+    "charlots": ((CAIXA_DO_SITE_LAUDO, "Laudo"),),
+}
 ROTULO_CATEGORIA = {
     CATEGORIA_INFORMATIVO: "Informativo",
     CATEGORIA_CHAMADO: "Chamado (Pós-venda)",
@@ -264,11 +271,18 @@ PLATAFORMAS_EMAIL_SO_AVISO = frozenset({"ml", "shopee", "tiktok", "amazon"})
 TIPO_SAC = "sac"
 TIPO_ATACADO = "atacado"
 TIPO_DUVIDAS = "duvidas"
+# O laudo de mala avariada por companhia aérea (Charlots, 24/11/2026): um SAC
+# (protocolo CS-…) com "Laudo de avaria aérea" no assunto (`pedido.tipo_do_chamado`).
+TIPO_LAUDO = "laudo"
 ROTULO_TIPO_CAIXA = {
     TIPO_SAC: "SAC",
     TIPO_ATACADO: "Atacado",
     TIPO_DUVIDAS: "Dúvidas e sugestões",
+    TIPO_LAUDO: "Laudo",
 }
+# O tipo que o PROTOCOLO diz por baixo de cada tipo do chamado: o laudo é um SAC
+# (CS-…) — a caixa "laudo" × o protocolo "sac" não é "tipo × caixa".
+TIPO_BASE = {TIPO_LAUDO: TIPO_SAC}
 
 # Os alertas do CHAMADO (RF6): ficam no cartão do e-mail (`meta.alertas`) e,
 # somados, na conversa (`dados.mail.alertas`) — a faixa do chamado mostra.

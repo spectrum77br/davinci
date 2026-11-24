@@ -172,7 +172,7 @@ const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.g
           {{ g.rotulo }}<span v-if="contagem" class="tabular-nums">{{ numeroDoGrupo(contagem, g.chave) }}</span>
         </button>
       </div>
-      <p class="text-[11px] text-muted-foreground">{{ escolha.site ? `Os e-mails do site para o ${escolha.grupo === 'sac' ? 'sac@' : 'admin@ (e os outros endereços)'} dos últimos ${diasDaBarra} dias, o mais novo primeiro — a resposta sai pelo mesmo endereço.` : `Os e-mails da pasta dos últimos ${diasDaBarra} dias, o mais novo primeiro.` }}</p>
+      <p class="text-[11px] text-muted-foreground">{{ escolha.site ? (escolha.grupo === 'laudo' ? `Os pedidos de laudo de mala avariada (chegam no sac@) dos últimos ${diasDaBarra} dias, o mais novo primeiro — a resposta sai pelo sac@.` : `Os e-mails do site para o ${escolha.grupo === 'sac' ? 'sac@' : 'admin@ (e os outros endereços)'} dos últimos ${diasDaBarra} dias, o mais novo primeiro — a resposta sai pelo mesmo endereço.`) : `Os e-mails da pasta dos últimos ${diasDaBarra} dias, o mais novo primeiro.` }}</p>
     </div>
 
     <div class="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">

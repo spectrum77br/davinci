@@ -26,6 +26,7 @@ do e-mail; nunca gera outro. A Locagil não tem Atacado. Veio do wt-tuta
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from sqlalchemy import or_, select
@@ -251,6 +252,30 @@ def protocolo_fora_do_formato(assunto: str | None, corpo: str | None) -> bool:
         if "-" in valor and re.search(r"\d", valor):
             return True
     return False
+
+
+# O laudo de mala avariada da Charlots (24/11/2026): "[CS-26-0042] Laudo de avaria
+# aérea — …", no e-mail à equipe e na confirmação ao cliente (a resposta dele volta
+# com o mesmo assunto). O site (Sac::MARCADOR_LAUDO) e este texto andam juntos.
+MARCADOR_LAUDO = "laudo de avaria aerea"
+_RE_LAUDO = re.compile(
+    r"^(?:\s*(?:re|res|fw|fwd|enc|rv)\s*:)*\s*\[\s*cs-\d{2}-\d{4,}\s*\]\s*"
+    + re.escape(MARCADOR_LAUDO)
+)
+
+
+def _sem_acento(valor: str | None) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", valor or "") if not unicodedata.combining(c)
+    ).lower()
+
+
+def tipo_do_chamado(prot: Protocolo, assunto: str | None) -> str:
+    """O tipo do CHAMADO: o do protocolo, ou `laudo` no SAC da Charlots com a marca do
+    laudo no começo do assunto ("Re:"/"Fwd:" na frente valem). PURA."""
+    if prot.letra == "C" and prot.tipo == "sac" and _RE_LAUDO.search(_sem_acento(assunto)):
+        return "laudo"
+    return prot.tipo
 
 
 def protocolo(*textos: str | None) -> Protocolo | None:

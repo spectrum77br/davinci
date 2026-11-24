@@ -194,6 +194,38 @@ def test_os_protocolos_dos_assuntos_novos(assunto, numero, letra, tipo):
     assert p is not None and (p.numero, p.letra, p.tipo, p.valido) == (numero, letra, tipo, True)
 
 
+# ─────────────── o laudo de mala avariada da Charlots (24/11/2026) ───────────────
+
+
+@pytest.mark.parametrize(
+    ("assunto", "tipo"),
+    [
+        ("[CS-26-0042] Laudo de avaria aérea — LATAM — Maria", "laudo"),
+        ("[CS-26-0042] Laudo de avaria aérea — recebemos seu pedido — Charlots", "laudo"),
+        ("Re: [CS-26-0042] Laudo de avaria aérea — recebemos seu pedido — Charlots", "laudo"),
+        ("RES: Fwd: [cs-26-0042] laudo de avaria aerea — x", "laudo"),
+        ("[CS-26-0042] SAC — Mala 20 — Maria", "sac"),
+        # A marca fora do começo (ou só no corpo) não faz o laudo.
+        ("[CS-26-0042] SAC — preciso de um laudo de avaria aérea", "sac"),
+        # Só a Charlots tem o laudo, e só no SAC.
+        ("[US-26-0042] Laudo de avaria aérea — Ana", "sac"),
+        ("[CA-26-0001] Laudo de avaria aérea — Boutique", "atacado"),
+    ],
+)
+def test_o_tipo_do_chamado_do_laudo_vem_do_assunto(assunto, tipo):
+    p = pedido.protocolo(assunto)
+    assert p is not None and pedido.tipo_do_chamado(p, assunto) == tipo
+
+
+def test_a_caixa_do_laudo_so_na_charlots():
+    assert [k for k, _ in barra_lojas.caixas_do_site("charlots")] == ["sac", "admin", "laudo"]
+    for site in ("uranyx", "makisa", "7buyers", None):
+        assert [k for k, _ in barra_lojas.caixas_do_site(site)] == ["sac", "admin"], site
+    assert barra_lojas.caixa_do_site("sac@charlots.com.br", "laudo") == "laudo"
+    assert barra_lojas.caixa_do_site("sac@charlots.com.br", "sac") == "sac"
+    assert barra_lojas.caixa_do_site("admin@charlots.com.br", None) == "admin"
+
+
 def test_cliente_pelo_reply_to_so_no_formulario_do_site():
     cad = rotear.Cadastro()
     cad.marcas["uranyx"] = (None, "Uranyx", ("uranyx.com.br",))
@@ -275,6 +307,10 @@ async def test_admin_fora_do_dominio_da_marca_continua_interno(db, cena):
          "CS-26-0123", "sac", "charlots-park"),
         (BREVO_C, "admin@charlots.com.br", "*charlots", "[CA-26-0001] Atacado — Boutique — Grade",
          "CA-26-0001", "atacado", "charlots-park"),
+        # 24/11/2026: o laudo de mala avariada (um SAC CS-… com a marca no assunto).
+        (BREVO_C, "sac@charlots.com.br", "*charlots",
+         "[CS-26-0042] Laudo de avaria aérea — LATAM — Maria", "CS-26-0042", "laudo",
+         "charlots-park"),
     ],
 )
 async def test_formulario_pelo_remetente_tecnico_o_cliente_e_o_reply_to(
@@ -1045,6 +1081,139 @@ async def test_a_pasta_do_site_passa_na_caixa_privada_so_para_mostrar(
     assert (await client.get(f"{EMAIL}/lojas/emails/{ids['codigo']}")).status_code == 404
     r = await client.get(f"{EMAIL}/lojas/emails/{ids['gabrieli']}")
     assert r.status_code == 200 and r.json()["loja"] == "7buyers"
+
+
+async def test_o_laudo_fica_na_caixa_laudo_da_charlots(db, cena, client, admin):
+    await _com_os_enderecos_do_site(db, cena)
+    await _pastas_dos_sites(db, cena)
+    laudo = await entrar(
+        db, cena.geral, pasta="*charlots", de=BREVO_C, para=["sac@charlots.com.br"],
+        reply_to="maria@gmail.com", assunto="[CS-26-0042] Laudo de avaria aérea — LATAM — Maria",
+        corpo="Nome completo: Maria\nTelefone/WhatsApp: (11) 99999-0000\nVoo: LA 3456",
+    )
+    sac = await entrar(
+        db, cena.geral, pasta="*charlots", de=BREVO_C, para=["sac@charlots.com.br"],
+        reply_to="joana@gmail.com", assunto="[CS-26-0043] SAC — Mala 20 — Joana",
+        corpo="Nome completo: Joana\nMensagem: roda quebrada",
+    )
+    await rodar(db)
+    m1 = await meta_de(db, laudo)
+    assert (m1.estado, m1.protocolo, m1.tipo_caixa) == ("gravado", "CS-26-0042", "laudo")
+    c = await conversa(db, m1.conversa_id)
+    assert (c.dados["mail"]["caixa"], c.dados["mail"]["caixa_rotulo"]) == ("laudo", "Laudo")
+    assert not any(a["codigo"] == "tipo_x_caixa" for a in m1.alertas or [])
+    # A cliente responde com OUTRO assunto (o protocolo, sem a marca): fica no laudo.
+    resposta = await entrar(
+        db, cena.geral, pasta="*charlots", de="maria@gmail.com", para=["sac@charlots.com.br"],
+        assunto="CS-26-0042 mais fotos", corpo="Seguem mais fotos.",
+    )
+    await rodar(db)
+    m2 = await meta_de(db, resposta)
+    assert m2.conversa_id == m1.conversa_id and m2.tipo_caixa == "laudo"
+    assert not any(a["codigo"] == "tipo_x_caixa" for a in m2.alertas or [])
+    c = await conversa(db, m1.conversa_id)
+    assert c.dados["mail"]["caixa"] == "laudo"
+    sites = await _sites(client)
+    ch, u = sites["charlots"], sites["uranyx"]
+    assert [x["chave"] for x in ch["caixas"]] == ["sac", "admin", "laudo"]
+    assert [x["chave"] for x in u["caixas"]] == ["sac", "admin"] and "laudo" not in u["grupos"]
+    assert ch["grupos"]["laudo"]["emails"] == 2 and ch["grupos"]["laudo"]["total"] == 1
+    assert ch["grupos"]["sac"]["emails"] == 1 and ch["grupos"]["sac"]["total"] == 1
+    r = await _lista(client, "charlots", "laudo")
+    assert r.status_code == 200, r.text
+    assert {i["id"] for i in r.json()["itens"]} == {str(laudo), str(resposta)}
+    r = await _lista(client, "charlots", "sac")
+    assert [i["id"] for i in r.json()["itens"]] == [str(sac)]
+    assert (await _lista(client, "uranyx", "laudo")).status_code == 422
+    # O filtro da fila "Chamados dos sites" e a contagem por tipo.
+    contagens = (await client.get(f"{EMAIL}/contagens")).json()
+    por_tipo = contagens["chamados_por_tipo"]
+    assert por_tipo["laudo"] == 1 and por_tipo["sac"] == 1
+
+
+async def test_o_laudo_promove_o_chamado_sac_do_mesmo_protocolo(db, cena):
+    await _com_os_enderecos_do_site(db, cena)
+    await _pastas_dos_sites(db, cena)
+    # A resposta da cliente (sem a marca) chegou antes do e-mail à equipe.
+    antes = await entrar(
+        db, cena.geral, pasta="*charlots", de="maria@gmail.com", para=["sac@charlots.com.br"],
+        assunto="[CS-26-0050] dúvida", corpo="Mandei o pedido de laudo.",
+    )
+    await rodar(db)
+    m0 = await meta_de(db, antes)
+    assert m0.tipo_caixa == "sac"
+    depois = await entrar(
+        db, cena.geral, pasta="*charlots", de=BREVO_C, para=["sac@charlots.com.br"],
+        reply_to="maria@gmail.com", assunto="[CS-26-0050] Laudo de avaria aérea — GOL — Maria",
+        corpo="Nome completo: Maria",
+    )
+    await rodar(db)
+    m1 = await meta_de(db, depois)
+    m0 = await meta_de(db, antes)
+    assert m1.conversa_id == m0.conversa_id
+    c = await conversa(db, m1.conversa_id)
+    assert c.dados["mail"]["caixa"] == "laudo"
+    assert (m0.tipo_caixa, m1.tipo_caixa) == ("laudo", "laudo")
+
+
+async def test_agrupar_o_laudo_com_um_sac_deixa_tudo_no_laudo(db, cena, client, admin):
+    await _com_os_enderecos_do_site(db, cena)
+    await _pastas_dos_sites(db, cena)
+    sac = await entrar(
+        db, cena.geral, pasta="*charlots", de=BREVO_C, para=["sac@charlots.com.br"],
+        reply_to="maria@gmail.com", assunto="[CS-26-0060] SAC — Mala 20 — Maria",
+        corpo="Nome completo: Maria\nMensagem: a rodinha quebrou no voo",
+    )
+    await rodar(db)
+    laudo = await entrar(
+        db, cena.geral, pasta="*charlots", de=BREVO_C, para=["sac@charlots.com.br"],
+        reply_to="maria@gmail.com", assunto="[CS-26-0061] Laudo de avaria aérea — GOL — Maria",
+        corpo="Nome completo: Maria",
+    )
+    await rodar(db)
+    ms, ml = await meta_de(db, sac), await meta_de(db, laudo)
+    assert ms.conversa_id != ml.conversa_id and (ms.tipo_caixa, ml.tipo_caixa) == ("sac", "laudo")
+    # O mais antigo (o SAC) fica; o laudo entra nele — e o chamado vira laudo, com os dois e-mails.
+    r = await client.post(
+        f"{EMAIL}/conversas/{ml.conversa_id}/agrupar", json={"conversa_id": str(ms.conversa_id)}
+    )
+    assert r.status_code == 200, r.text
+    ms, ml = await meta_de(db, sac), await meta_de(db, laudo)
+    assert ms.conversa_id == ml.conversa_id
+    c = await conversa(db, ms.conversa_id)
+    assert (c.dados["mail"]["caixa"], c.dados["mail"]["caixa_rotulo"]) == ("laudo", "Laudo")
+    assert (ms.tipo_caixa, ml.tipo_caixa) == ("laudo", "laudo")
+    r = await _lista(client, "charlots", "laudo")
+    assert {i["id"] for i in r.json()["itens"]} == {str(sac), str(laudo)}
+    assert (await _lista(client, "charlots", "sac")).json()["itens"] == []
+
+
+async def test_laudo_cs_na_pasta_de_outra_marca_continua_sac(db, cena):
+    await _com_os_enderecos_do_site(db, cena)
+    await _pastas_dos_sites(db, cena)
+    mid = await entrar(
+        db, cena.geral, pasta="*uranyx", de=BREVO_C, para=["sac@uranyx.com.br"],
+        reply_to="maria@gmail.com", assunto="[CS-26-0070] Laudo de avaria aérea — LATAM — Maria",
+        corpo="Nome completo: Maria",
+    )
+    await rodar(db)
+    m = await meta_de(db, mid)
+    # A caixa "Laudo" é só da Charlots: na Uranyx, fica SAC (com o alerta de outra marca).
+    assert m.tipo_caixa == "sac"
+    assert any(a["codigo"] == "protocolo_outra_marca" for a in m.alertas or [])
+
+
+async def test_o_laudo_responde_como_o_sac(db, cena, client, admin):
+    await _com_os_enderecos_do_site(db, cena)
+    await _pastas_dos_sites(db, cena)
+    _mid, cid = await _chamado(
+        db, cena, pasta="*charlots", de=BREVO_C, para=["sac@charlots.com.br"],
+        reply_to="maria@gmail.com", assunto="[CS-26-0042] Laudo de avaria aérea — LATAM — Maria",
+        corpo="Nome completo: Maria",
+    )
+    await _ligar_envio(db, cena.geral)
+    previa = (await client.get(f"{EMAIL}/conversas/{cid}/previa")).json()
+    assert (previa["de"], previa["para"]) == ("sac@charlots.com.br", "maria@gmail.com")
 
 
 async def test_sac_do_site_na_pasta_cai_no_sac_e_o_resto_no_admin(db, cena, client, admin):

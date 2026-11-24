@@ -112,14 +112,14 @@ async def test_w1_tipo_do_chamado_filtra_a_lista_e_conta_no_resumo(db, cena, cli
 
     # Os números: da aba E-mail (o /resumo é da Caixa e não tem mais chamados).
     contagens = (await client.get(f"{EMAIL}/contagens")).json()
-    assert contagens["chamados_por_tipo"] == {"sac": 1, "atacado": 0, "duvidas": 1}
+    assert contagens["chamados_por_tipo"] == {"sac": 1, "atacado": 0, "duvidas": 1, "laudo": 0}
     assert contagens["chamados"] == 2
     # Fechado sai da conta (como as etiquetas).
     c = await conversa(db, c_duv)
     c.situacao = "fechada"
     await db.commit()
     contagens = (await client.get(f"{EMAIL}/contagens")).json()
-    assert contagens["chamados_por_tipo"] == {"sac": 1, "atacado": 0, "duvidas": 0}
+    assert contagens["chamados_por_tipo"] == {"sac": 1, "atacado": 0, "duvidas": 0, "laudo": 0}
     resumo = (await client.get(f"{API}/resumo")).json()
     assert all("chamados" not in p for p in resumo["plataformas"])
 

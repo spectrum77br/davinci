@@ -108,6 +108,8 @@ export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
   { value: 'sac', label: 'SAC', hint: 'chamados do SAC dos sites (protocolo S: US-26-0001…)' },
   { value: 'atacado', label: 'Atacado', hint: 'chamados de Atacado dos sites (protocolo A: UA-26-0001…)' },
   { value: 'duvidas', label: 'Dúvidas e sugestões', hint: 'chamados de Dúvidas e sugestões dos sites (protocolo DS: UDS-26-0001…)' },
+  // 24/11/2026: o laudo de mala avariada da Charlots — um SAC (CS-26-0001…) com "Laudo de avaria aérea" no assunto.
+  { value: 'laudo', label: 'Laudo', hint: 'pedidos de laudo de mala avariada por companhia aérea (Charlots, protocolo CS-26-0001…)' },
 ]
 // Os números das filas de conversa (GET /api/atendimento/email/contagens).
 // `por_loja` (27/10/2026, `?por_loja=true`): os mesmos números por loja — o

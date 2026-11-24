@@ -74,7 +74,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import case, exists, or_, select
+from sqlalchemy import case, exists, or_, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -196,6 +196,9 @@ from app.services.mail_atendimento.constantes import (
     SEM_LOJA_SEM_ALIAS,
     STATUS_DO_JOB,
     TEXTO_NA_CONVERSA_MAX,
+    TIPO_BASE,
+    TIPO_LAUDO,
+    TIPO_SAC,
     VINCULADO_CHAMADO,
 )
 
@@ -1347,9 +1350,29 @@ async def gravar_na_conversa(
         # O CHAMADO não muda pelo e-mail novo (RF6): o protocolo principal, o
         # tipo e a marca ficam os da conversa — no chamado agrupado, o e-mail
         # com o protocolo do outro não troca o principal (o mais antigo).
+        # O laudo promove o chamado SAC do MESMO protocolo (24/11/2026: a resposta
+        # da cliente chegou antes do e-mail à equipe) — nunca o contrário.
+        promove_laudo = (
+            rota.site
+            and atual.get("caixa") == TIPO_SAC
+            and mail.get("caixa") == TIPO_LAUDO
+            and atual.get("protocolo") == mail.get("protocolo")
+        )
         for chave in _FIXOS_DO_CHAMADO:
+            if promove_laudo and chave in ("caixa", "caixa_rotulo"):
+                continue
             if atual.get(chave):
                 mail.pop(chave, None)
+        if promove_laudo:
+            # Os e-mails que já estavam no chamado vão junto para a caixa do laudo.
+            await session.execute(
+                update(MailMessageMeta)
+                .where(
+                    MailMessageMeta.conversa_id == conversa.id,
+                    MailMessageMeta.tipo_caixa == TIPO_SAC,
+                )
+                .values(tipo_caixa=TIPO_LAUDO)
+            )
         dados[CHAVE] = {**atual, **{k: v for k, v in mail.items() if v is not None}}
         dados["fonte"] = FONTE_TUTA
         conversa.dados = dados
@@ -1400,6 +1423,11 @@ async def gravar_na_conversa(
     meta.conversa_id = conversa.id
     meta.mensagem_id = mensagem.id
     meta.vinculado_por = vinculado_por
+    # O e-mail do chamado do LAUDO fica na caixa do laudo mesmo sem a marca no
+    # assunto (a cliente respondeu com outro assunto; o retorno de entrega) —
+    # vale o tipo da conversa (24/11/2026).
+    if rota.site and dados_mail(conversa).get("caixa") == TIPO_LAUDO:
+        meta.tipo_caixa = TIPO_LAUDO
     return conversa, mensagem
 
 
@@ -1466,11 +1494,16 @@ def _conferir_protocolo(meta: MailMessageMeta, email: Email, rota: rotear.Rota) 
         _alerta(
             meta, ALERTA_PROTOCOLO_OUTRA_MARCA, "a marca do protocolo não é a da caixa que recebeu"
         )
-    if rota.tipo_caixa and rota.tipo_caixa != prot.tipo:
+    # A caixa do laudo (o tipo da conversa, na rota pelo fio) é um SAC por baixo.
+    if rota.tipo_caixa and TIPO_BASE.get(rota.tipo_caixa, rota.tipo_caixa) != prot.tipo:
         # Vale o protocolo (RF6), com alerta.
         _alerta(meta, ALERTA_TIPO_X_CAIXA, f"o tipo do protocolo ({prot.tipo}) não é o da caixa")
-    rota.tipo_caixa = prot.tipo
-    meta.tipo_caixa = prot.tipo
+    # O tipo do CHAMADO: o do protocolo, ou o laudo pelo assunto (24/11/2026) —
+    # só no e-mail que a Charlots recebeu (a caixa "Laudo" é só dela).
+    da_charlots = rota.marca_slug is None or rota.marca_slug in pedido.MARCA_DA_LETRA["C"]
+    tipo = pedido.tipo_do_chamado(prot, email.assunto) if da_charlots else prot.tipo
+    rota.tipo_caixa = tipo
+    meta.tipo_caixa = tipo
 
 
 async def _protocolo_repetido(

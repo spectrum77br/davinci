@@ -332,7 +332,7 @@ async def test_resumo_metricas_e_contagens(db, cena, client, admin):
     assert r.json() == {
         "aguardando": 2,
         "chamados": 1,
-        "chamados_por_tipo": {"sac": 1, "atacado": 0, "duvidas": 0},
+        "chamados_por_tipo": {"sac": 1, "atacado": 0, "duvidas": 0, "laudo": 0},
         "por_tipo_email": {"chamado": 2, "informativo": 0, "venda": 0},
     }
     # Fechou o chamado: sai da contagem dos chamados (e do falta responder).

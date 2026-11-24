@@ -52,7 +52,7 @@ async def test_nao_lidas_tem_a_mesma_regra_da_lista_sem_mudar_totais(db, cena, c
     r = await _contagens(client)
     assert r["nao_lidas"] == {
         "total": 4, "chamados": 3, "aguardando": 4,
-        "chamados_por_tipo": {"sac": 2, "atacado": 1, "duvidas": 0},
+        "chamados_por_tipo": {"sac": 2, "atacado": 1, "duvidas": 0, "laudo": 0},
         "por_tipo_email": {"informativo": 1, "chamado": 3, "venda": 0},
     }
     # Fechada ainda aguardando continua no mesmo recorte do contador operacional.
@@ -88,7 +88,7 @@ async def test_individual_lote_e_importacao_nova_atualizam_so_notificacoes(
     zeradas = await _contagens(client)
     assert zeradas["nao_lidas"] == {
         "total": 0, "chamados": 0, "aguardando": 0,
-        "chamados_por_tipo": {"sac": 0, "atacado": 0, "duvidas": 0},
+        "chamados_por_tipo": {"sac": 0, "atacado": 0, "duvidas": 0, "laudo": 0},
         "por_tipo_email": {"informativo": 0, "chamado": 0, "venda": 0},
     }
     assert _workflow(zeradas) == _workflow(antes)

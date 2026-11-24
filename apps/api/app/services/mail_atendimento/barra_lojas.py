@@ -72,6 +72,7 @@ from app.services.atendimento.constantes import SITES as SITES_DO_ATENDIMENTO
 from app.services.mail_atendimento import codigos, constantes, regras, rotear
 from app.services.mail_atendimento.constantes import (
     CAIXA_DO_SITE_ADMIN,
+    CAIXA_DO_SITE_LAUDO,
     CAIXA_DO_SITE_SAC,
     CATEGORIA_INFORMATIVO,
     CATEGORIA_SITE,
@@ -442,8 +443,11 @@ def sites() -> tuple[Site, ...]:
     return tuple(Site(c, n, tuple(p)) for c, n, p in constantes.SITES_EMAIL_NA_BARRA_DE_LOJAS)
 
 
-def caixas_do_site() -> tuple[tuple[str, str], ...]:
-    return tuple(constantes.CAIXAS_EMAIL_DO_SITE)
+def caixas_do_site(site: str | None = None) -> tuple[tuple[str, str], ...]:
+    """As caixas da linha do site: SAC e Admin, e as do próprio site (`site`: a chave,
+    "charlots" tem a do Laudo). Sem `site`, só as de todos."""
+    base = tuple(constantes.CAIXAS_EMAIL_DO_SITE)
+    return base + tuple(constantes.CAIXAS_EXTRAS_DO_SITE.get(site or "", ())) if site else base
 
 
 def site_da_pasta(
@@ -486,6 +490,14 @@ def caixa_do_alias(alias: str | None) -> str:
     return CAIXA_DO_SITE_SAC if local == CAIXA_DO_SITE_SAC else CAIXA_DO_SITE_ADMIN
 
 
+def caixa_do_site(alias: str | None, tipo: str | None) -> str:
+    """A caixa do site de um e-mail (ou de uma conversa): a do TIPO do chamado quando ele
+    tem caixa própria (o laudo); senão, a do endereço que recebeu. PURA."""
+    if tipo == CAIXA_DO_SITE_LAUDO:
+        return CAIXA_DO_SITE_LAUDO
+    return caixa_do_alias(alias)
+
+
 def caixa_do_email(recebeu: list[str], aliases: set[str]) -> str:
     """A caixa do site pelo 1º endereço DA CAIXA que recebeu (o `alias_recebido` que
     a ponte gravaria: o delivered_to, o Para, o Cc). PURA."""
@@ -507,6 +519,14 @@ def caixa_do_alias_sql(coluna):
     local = func.split_part(func.lower(func.coalesce(coluna, "")), "@", 1)
     return case(
         (local == CAIXA_DO_SITE_SAC, literal(CAIXA_DO_SITE_SAC)), else_=literal(CAIXA_DO_SITE_ADMIN)
+    )
+
+
+def caixa_do_site_sql(coluna_alias, coluna_tipo):
+    """`caixa_do_site` em SQL."""
+    return case(
+        (coluna_tipo == CAIXA_DO_SITE_LAUDO, literal(CAIXA_DO_SITE_LAUDO)),
+        else_=caixa_do_alias_sql(coluna_alias),
     )
 
 
@@ -579,6 +599,6 @@ def email_do_site_sql(
     if caixa:
         # O que precisa ler vem junto: quem chama separa pelo e-mail decifrado.
         precisa = precisa_ler_no_site_sql(m)
-        pela_meta = and_(not_(precisa), caixa_do_alias_sql(m.alias_recebido) == caixa)
+        pela_meta = and_(not_(precisa), caixa_do_site_sql(m.alias_recebido, m.tipo_caixa) == caixa)
         onde.append(or_(pela_meta, precisa))
     return tuple(onde)

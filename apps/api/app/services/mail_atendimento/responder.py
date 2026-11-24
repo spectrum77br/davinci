@@ -109,6 +109,7 @@ from app.services.mail_atendimento.constantes import (
     REMETENTE_NOSSO,
     RESPOSTA_MAX_CARACTERES,
     SEM_LOJA_ENCAMINHADO,
+    TIPO_LAUDO,
 )
 
 logger = structlog.get_logger()
@@ -438,7 +439,12 @@ async def de_alias(
     if conversa.plataforma == PLATAFORMA_SITE and meta.marca_id is not None:
         tipo = ponte.dados_mail(conversa).get("caixa") or meta.tipo_caixa
         if tipo:
-            cadastro = MarcaEmailTipo.SAC if tipo == MarcaEmailTipo.SAC else MarcaEmailTipo.ADMIN
+            # O laudo é um SAC (24/11/2026): responde pelo e-mail do SAC da marca.
+            cadastro = (
+                MarcaEmailTipo.SAC
+                if tipo in (MarcaEmailTipo.SAC, TIPO_LAUDO)
+                else MarcaEmailTipo.ADMIN
+            )
             # A marca do chamado e, depois, a que assina por ela (a Charlots da
             # `charlots-park` tem os e-mails na `poofy` — Cadastros › E-mails).
             marcas = [meta.marca_id]

@@ -59,6 +59,8 @@ from app.services.mail_atendimento.constantes import (
     STATUS_CHAMADO_ABERTO,
     STATUS_CHAMADO_AGUARDANDO,
     STATUS_CHAMADO_RESOLVIDO,
+    TIPO_LAUDO,
+    TIPO_SAC,
 )
 
 MAX_OUTROS = 10
@@ -442,6 +444,22 @@ async def agrupar(
             [*(mail.get("alertas") or []), *(ponte.dados_mail(origem).get("alertas") or [])]
         )
     )
+    # O laudo (24/11/2026): juntar o chamado do laudo com um SAC deixa o destino
+    # na caixa do laudo, com os e-mails dos dois — a caixa da conversa e a dos
+    # e-mails (`mail_message_meta.tipo_caixa`) andam juntas na barra de Sites.
+    caixas = {mail.get("caixa"), ponte.dados_mail(origem).get("caixa")}
+    if TIPO_LAUDO in caixas and caixas <= {TIPO_LAUDO, TIPO_SAC}:
+        mail["caixa"] = TIPO_LAUDO
+        mail["caixa_rotulo"] = ROTULO_TIPO_CAIXA[TIPO_LAUDO]
+        await session.execute(
+            update(MailMessageMeta)
+            .where(
+                MailMessageMeta.conversa_id == destino.id,
+                MailMessageMeta.tipo_caixa == TIPO_SAC,
+            )
+            .values(tipo_caixa=TIPO_LAUDO)
+            .execution_options(synchronize_session=False)
+        )
     dados[ponte.CHAVE] = mail
     destino.dados = dados
     if not destino.comprador_nome and origem.comprador_nome:

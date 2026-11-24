@@ -320,8 +320,9 @@ export function motivosDaCaixaVazia(g: GrupoDaBarra | null | undefined, e: Email
   else if (g?.status === 'sem_categoria') motivos.push(`A pasta ${pasta} está sem categoria: a ponte guarda os e-mails dela sem ligar à loja (E-mail › Pastas).`)
   else if (g?.status === 'outra_categoria') motivos.push(`A pasta ${pasta} é de Chamado: os e-mails dela vão para Pós-venda › Chamados.`)
   if (e?.site) {
-    // O site: a caixa é a do endereço que recebeu (sac@ ou admin@ e os outros).
-    if (!motivos.length) motivos.push(`Nenhum e-mail ${g?.chave === 'sac' ? 'para o sac@' : 'para o admin@ (nem para os outros endereços)'} do site nos últimos ${dias} dias.`)
+    // O site: a caixa é a do endereço que recebeu (sac@ ou admin@ e os outros);
+    // a do Laudo (Charlots, 24/11/2026) é a do tipo do chamado.
+    if (!motivos.length) motivos.push(`Nenhum ${g?.chave === 'laudo' ? 'pedido de laudo de mala avariada' : `e-mail ${g?.chave === 'sac' ? 'para o sac@' : 'para o admin@ (nem para os outros endereços)'}`} do site nos últimos ${dias} dias.`)
     return motivos
   }
   if (e?.alias === 'sem_cadastro') motivos.push('Nenhum e-mail ligado a esta loja — o endereço/alias da loja não está na ponte (Cadastros › Lojas, campo e-mail).')
@@ -775,7 +776,10 @@ function motivo(l: LojaBarra): string {
   }
   if (l.plataforma === 'site') {
     partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
-    if (siteDaLinha(props.sitesEmail, l)) partes.push('A seta mostra os e-mails do site: SAC (sac@) e Admin (admin@ e os outros endereços)')
+    if (siteDaLinha(props.sitesEmail, l)) {
+      const temLaudo = (siteDaLinha(props.sitesEmail, l)?.caixas || []).some((c: { chave: string }) => c.chave === 'laudo')
+      partes.push('A seta mostra os e-mails do site: SAC (sac@) e Admin (admin@ e os outros endereços)' + (temLaudo ? '; Laudo: os pedidos de laudo de mala avariada' : ''))
+    }
   }
   // O Zap: o número chega pela API oficial da Meta (o webhook); sem as duas
   // chaves de envio ligadas, a resposta continua pelo Duoke.

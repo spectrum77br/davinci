@@ -674,7 +674,7 @@ class MarcarTodosLidosIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fila: Literal["chamados", "aguardando", "todas"]
-    tipo_chamado: Literal["sac", "atacado", "duvidas"] | None = None
+    tipo_chamado: Literal["sac", "atacado", "duvidas", "laudo"] | None = None
     tipo_email: Literal["informativo", "chamado", "venda"] | None = None
     q: str | None = Field(default=None, max_length=200, strict=True)
     fechadas: bool = Field(default=False, strict=True)
@@ -1644,11 +1644,14 @@ async def _contagens_dos_sites(
         return []
     pastas = await barra_lojas.pastas_dos_sites(session)
     lista = barra_lojas.sites()
-    chaves_caixa = [k for k, _r in barra_lojas.caixas_do_site()]
     # `nao_lidas` (27/10/2026): a bolinha vermelha do site — a conversa não lida
-    # (`_nao_lida_sql`); `aguardando` continua o "falta responder".
+    # (`_nao_lida_sql`); `aguardando` continua o "falta responder". As caixas de
+    # cada site (24/11/2026: a Charlots tem a do Laudo).
     numeros = {
-        st.chave: {k: {**_conta_vazia(), "nao_lidas": 0} for k in chaves_caixa} for st in lista
+        st.chave: {
+            k: {**_conta_vazia(), "nao_lidas": 0} for k, _r in barra_lojas.caixas_do_site(st.chave)
+        }
+        for st in lista
     }
     todas = pastas.ids()
     if todas:
@@ -1657,7 +1660,10 @@ async def _contagens_dos_sites(
         q = (
             select(
                 pastas.site_sql(u.c.folder_id).label("site"),
-                barra_lojas.caixa_do_alias_sql(u.c.alias).label("caixa"),
+                # A conversa do laudo fica na caixa do laudo (o tipo do chamado).
+                barra_lojas.caixa_do_site_sql(u.c.alias, c.dados["mail"]["caixa"].astext).label(
+                    "caixa"
+                ),
                 (c.situacao != CONVERSA_FECHADA).label("aberta"),
                 c.aguardando_resposta.is_(True).label("esperando"),
                 _nao_lida_sql(c).label("nao_lida"),
@@ -1699,7 +1705,7 @@ async def _contagens_dos_sites(
         qm = (
             select(
                 pastas.site_sql(m.folder_id).label("site"),
-                barra_lojas.caixa_do_alias_sql(m.alias_recebido).label("caixa"),
+                barra_lojas.caixa_do_site_sql(m.alias_recebido, m.tipo_caixa).label("caixa"),
             )
             .join(MailMessage, MailMessage.id == m.message_id)
             .where(*do_site, not_(precisa))
@@ -1722,6 +1728,7 @@ async def _contagens_dos_sites(
                     MailMessage.mailbox_id,
                     m.estado,
                     m.alias_recebido,
+                    m.tipo_caixa,
                 )
                 .join(MailMessage, MailMessage.id == m.message_id)
                 .where(*do_site, precisa)
@@ -1743,7 +1750,9 @@ async def _contagens_dos_sites(
             # a barra desenha uma linha só de e-mail com as caixas.
             "so_email": st.so_email,
             "status": pastas.status.get(st.chave, barra_lojas.SEM_PASTA),
-            "caixas": [{"chave": k, "rotulo": r} for k, r in barra_lojas.caixas_do_site()],
+            "caixas": [
+                {"chave": k, "rotulo": r} for k, r in barra_lojas.caixas_do_site(st.chave)
+            ],
             "emails_30d": sum(g["emails"] for g in numeros[st.chave].values()),
             "grupos": numeros[st.chave],
         }
@@ -1790,26 +1799,28 @@ async def _emails_do_site(
 # (e-mail, estado) → (caixa, esconder): o e-mail da pasta do site que o SQL não
 # separa (`barra_lojas.precisa_ler_no_site_sql`). Nunca muda para o mesmo e-mail
 # no mesmo estado: lembrado no processo (a contagem é lida a cada volta da tela).
-_CLASSES_NO_SITE: dict[tuple[UUID, str], tuple[str, bool]] = {}
+_CLASSES_NO_SITE: dict[tuple[UUID, str, str], tuple[str, bool]] = {}
 _CLASSES_NO_SITE_MAX = 20_000
 
 
 async def _classes_no_site(
-    session: AsyncSession, linhas: list[tuple[UUID, UUID, str | None, str | None]]
+    session: AsyncSession,
+    linhas: list[tuple[UUID, UUID, str | None, str | None, str | None]],
 ) -> dict[UUID, tuple[str, bool]]:
-    """(message_id, mailbox_id, estado, alias) → {message_id: (caixa, escondido)}.
+    """(message_id, mailbox_id, estado, alias, tipo_caixa) → {message_id: (caixa, escondido)}.
 
-    A caixa: a do alias gravado; sem ele, a do 1º endereço da caixa que recebeu
+    A caixa: a do tipo do chamado quando ele tem caixa própria (o laudo); senão, a
+    do alias gravado; sem ele, a do 1º endereço da caixa que recebeu
     (`barra_lojas.caixa_do_email`). Escondido: `barra_lojas.escondido_no_site`
     (a régua estrita da segurança). Só decifra o que ainda não foi lembrado."""
     saida: dict[UUID, tuple[str, bool]] = {}
     faltam = []
-    for mid, mailbox_id, estado, alias in linhas:
-        lembrada = _CLASSES_NO_SITE.get((mid, estado or ""))
+    for mid, mailbox_id, estado, alias, tipo in linhas:
+        lembrada = _CLASSES_NO_SITE.get((mid, estado or "", tipo or ""))
         if lembrada is not None:
             saida[mid] = lembrada
         else:
-            faltam.append((mid, mailbox_id, estado, alias))
+            faltam.append((mid, mailbox_id, estado, alias, tipo))
     if not faltam:
         return saida
     mensagens = {
@@ -1821,12 +1832,14 @@ async def _classes_no_site(
         ).scalars()
     }
     aliases: dict[UUID, set[str]] = {}
-    for mid, mailbox_id, estado, alias in faltam:
+    for mid, mailbox_id, estado, alias, tipo in faltam:
         message = mensagens.get(mid)
         if message is None:
             continue
         email = ponte.decifrar(message)
-        if alias:
+        if tipo == mail_constantes.CAIXA_DO_SITE_LAUDO:
+            caixa = mail_constantes.CAIXA_DO_SITE_LAUDO
+        elif alias:
             caixa = barra_lojas.caixa_do_alias(alias)
         else:
             if mailbox_id not in aliases:
@@ -1836,7 +1849,7 @@ async def _classes_no_site(
         escondido = barra_lojas.escondido_no_site(estado, email.assunto, texto.legivel(email.texto))
         if len(_CLASSES_NO_SITE) >= _CLASSES_NO_SITE_MAX:
             _CLASSES_NO_SITE.clear()
-        _CLASSES_NO_SITE[(mid, estado or "")] = saida[mid] = (caixa, escondido)
+        _CLASSES_NO_SITE[(mid, estado or "", tipo or "")] = saida[mid] = (caixa, escondido)
     return saida
 
 
@@ -1844,7 +1857,7 @@ async def _fica_no_site(session: AsyncSession, linhas: list, caixa: str | None) 
     """As linhas da consulta do site (meta, e-mail, …) que a caixa mostra: o que o SQL
     não separa passa por `_classes_no_site` (a caixa certa, sem o código)."""
     precisam = [
-        (meta.message_id, message.mailbox_id, meta.estado, meta.alias_recebido)
+        (meta.message_id, message.mailbox_id, meta.estado, meta.alias_recebido, meta.tipo_caixa)
         for meta, message, *_r in linhas
         if meta.alias_recebido is None or meta.estado in barra_lojas.ESTADOS_SEM_A_REGUA
     ]
@@ -1987,7 +2000,7 @@ async def emails_da_caixa(
     if site is not None:
         if site not in {st.chave for st in barra_lojas.sites()}:
             raise HTTPException(422, detail={"code": "site_invalido"})
-        if grupo not in {k for k, _r in barra_lojas.caixas_do_site()}:
+        if grupo not in {k for k, _r in barra_lojas.caixas_do_site(site)}:
             raise HTTPException(422, detail={"code": "grupo_email_invalido"})
         if integration_id is not None or store_info_id is not None:
             raise HTTPException(422, detail={"code": "site_ou_loja"})

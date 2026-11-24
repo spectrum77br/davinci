@@ -1938,7 +1938,7 @@ async function principal() {
     const tiposPy = [...(api('services/mail_atendimento/constantes.py').match(/^ROTULO_TIPO_CAIXA = \{([\s\S]*?)^\}/m) || [])[1].matchAll(/^\s+(TIPO_[A-Z]+):/gm)].map((m) => m[1])
     const valorPy = (nome) => (api('services/mail_atendimento/constantes.py').match(new RegExp(`^${nome} = "([a-z]+)"$`, 'm')) || [])[1]
     assert.deepEqual(F.TIPOS_CHAMADO.map((t) => t.value), tiposPy.map(valorPy))
-    assert.deepEqual(F.TIPOS_CHAMADO.map((t) => t.label), ['SAC', 'Atacado', 'Dúvidas e sugestões'])
+    assert.deepEqual(F.TIPOS_CHAMADO.map((t) => t.label), ['SAC', 'Atacado', 'Dúvidas e sugestões', 'Laudo'])
     assert.match(rotasAtd, /^TIPOS_CHAMADO = tuple\(ROTULO_TIPO_CAIXA\)$/m)
     assert.match(rotasAtd, /tipo_chamado: Annotated\[str \| None, Query\(max_length=16\)\] = None,/)
     assert.match(rotasAtd, /return AtendimentoConversa\.dados\["mail"\]\["caixa"\]\.astext/)
