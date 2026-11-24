@@ -282,6 +282,10 @@ MIGRADOS = [
     # e 44, junto com o 15 por causa da reserva `chamados_ia`)
     K.DENUNCIA_RELATORIO_DIARIO,
     K.DENUNCIA_ROBO_PRECISA_ALGUEM,
+    # F2/C9e: Conferência Shopee, Mercado Livre e Amazon (45 a 47)
+    K.MARKETING_CONFERENCIA_SHOPEE,
+    K.MARKETING_CONFERENCIA_ML,
+    K.MARKETING_CONFERENCIA_AMAZON,
 ]
 
 
@@ -298,8 +302,9 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
     seu teste pelo caminho real em `test_threema_pontos_logistica_devolucoes`
     (C8a), `test_threema_pontos_estoque_nf` (C8b),
     `test_threema_pontos_chamados_produtos` (C8c),
-    `test_threema_pontos_informar` (C9a, C9b e C9c) e
-    `test_threema_pontos_chamados_denuncia` (C9d)."""
+    `test_threema_pontos_informar` (C9a, C9b e C9c),
+    `test_threema_pontos_chamados_denuncia` (C9d) e
+    `test_threema_pontos_conferencia` (C9e)."""
     assert {c: CATALOGO[c].ao_desligar for c in MIGRADOS} == {
         # o "Enviar agora" responde 422 enquanto estiver desligado
         K.LOGISTICA_INFORMAR: "recusa",
@@ -346,6 +351,11 @@ def test_ao_desligar_dos_migrados_e_o_comportamento_real_do_ponto():
         K.DENUNCIA_RELATORIO_DIARIO: "descarta",
         # as marcas do Redis são gravadas mesmo sem envio
         K.DENUNCIA_ROBO_PRECISA_ALGUEM: "descarta",
+        # a rodada não é carimbada, mas o varredor só reenvia até 6 h depois
+        # de ela fechar (JANELA_REENVIO): desligado por mais que isso, perde
+        K.MARKETING_CONFERENCIA_SHOPEE: "descarta",
+        K.MARKETING_CONFERENCIA_ML: "descarta",
+        K.MARKETING_CONFERENCIA_AMAZON: "descarta",
     }
 
 

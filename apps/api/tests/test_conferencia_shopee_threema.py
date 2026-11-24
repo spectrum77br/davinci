@@ -7,7 +7,10 @@ daquela execução); manda UMA vez (carimbo), só com a chave DA PLATAFORMA
 ligada (Shopee, ML e Amazon têm cada uma a sua) e alguém cadastrado, e falha
 de envio não carimba; a última loja pelo HTTP avisa, e o Threema que explode
 não derruba o resultado. No ML (afiliados não coletados) a linha diz que o
-investimento é só do Ads.
+investimento é só do Ads. (Aqui o banco não tem a semente do Cadastro: os
+envios usam a configuração antiga — o cadastro `conferencia_shopee` e as
+chaves do .env. O caminho pelo Cadastro, tarefa 16 F2/C9e, está em
+`test_threema_pontos_conferencia`.)
 
 Worker: `conferencia_shopee_agenda` só cria com CONFERENCIA_SHOPEE_CRON (e o
 Marketing ligado), pula com outra coletando; `conferencia_shopee_varrer`
@@ -379,7 +382,8 @@ async def test_threema_que_explode_nao_derruba_o_resultado(client, db, enviados,
     async def _quebra(*a, **k):
         raise RuntimeError("banco do Threema fora")
 
-    monkeypatch.setattr(ta, "destinatarios", _quebra)
+    # quem recebe vem do Cadastro (tarefa 16, F2/C9e): o resolver é que explode
+    monkeypatch.setattr(ta.threema_envios, "resolver", _quebra)
     agente = {"X-Agent-Token": TOKEN}
     job = (await client.post(f"{API}/agent/lease", json={}, headers=agente)).json()["job"]
     r = await client.post(
@@ -459,11 +463,11 @@ async def test_ml_e_amazon_tem_a_chave_propria_do_threema(db, enviados, _config)
     r = await ta.enviar_pendentes(db, AGORA)
     await db.commit()
     assert [x["execucao"] for x in r] == [str(shopee.id)]
-    assert ta.plataformas_ligadas() == ["shopee"]
+    assert await ta.plataformas_ligadas() == ["shopee"]
     # Só a do ML ligada: vai só a do ML.
     _config("conferencia_shopee_threema", False)
     _config("conferencia_ml_threema", True)
-    assert ta.plataformas_ligadas() == ["ml"]
+    assert await ta.plataformas_ligadas() == ["ml"]
     assert (await ta.enviar_pendente(db, amazon, AGORA))["motivo"] == (
         "aviso no Threema desligado"
     )

@@ -14,10 +14,10 @@
 //  - o atalho com `somenteCadastro` (o envio sai de outro lugar) só mostra
 //    quem recebe: sem lista, sem "Salvar" e sem "Enviar agora";
 //  - os painéis migrados (Logística, aba Amazon, Controle de Estoque,
-//    Devoluções — a tela nova e a antiga —, IA de Chamado, jurídico e as duas
-//    da Denúncia) usam o atalho com as chaves do catálogo; o modal de
-//    encaminhar ao jurídico mostra quem recebe pelo Cadastro, não pela lista
-//    antiga.
+//    Devoluções — a tela nova e a antiga —, IA de Chamado, jurídico, as duas
+//    da Denúncia e a Conferência do Marketing, com a chave do marketplace
+//    aberto) usam o atalho com as chaves do catálogo; o modal de encaminhar
+//    ao jurídico mostra quem recebe pelo Cadastro, não pela lista antiga.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -383,9 +383,20 @@ const leve = (extra = {}) => ({
     assert.equal(modaisDenuncia.length, 2)
     assert.match(modaisDenuncia[0], /contexto="denuncia_robo"\s+chave="denuncia\.robo_precisa_alguem"\s+somente-cadastro/)
     assert.match(modaisDenuncia[1], /contexto="denuncia_relatorio"\s+chave="denuncia\.relatorio_diario"\s+somente-cadastro/)
-    for (const modal of [...modaisChamados, ...modaisDenuncia]) {
+    // Marketing › Conferência (C9e, 45 a 47): um envio por marketplace — a
+    // chave do marketplace aberto, só quem recebe
+    const conferencia = fs.readFileSync(path.resolve(__dirname, '../components/MarketingConferencia.vue'), 'utf8')
+    const modaisConferencia = conferencia.match(/<InformarThreemaModal[\s\S]*?\/>/g)
+    assert.equal(modaisConferencia.length, 1)
+    assert.match(modaisConferencia[0], /contexto="conferencia_shopee"\s+:chave="chaveThreema"\s+somente-cadastro/)
+    for (const chave of ['marketing.conferencia_shopee', 'marketing.conferencia_ml', 'marketing.conferencia_amazon']) {
+      assert.ok(conferencia.includes(`'${chave}'`), `no mapa do marketplace: ${chave}`)
+      assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)
+    }
+    for (const modal of [...modaisChamados, ...modaisDenuncia, ...modaisConferencia]) {
       assert.ok(!/Sem ninguém salvo|Sem ninguém marcado/.test(modal), 'sem promessa da lista antiga')
     }
+    assert.ok(!/contexto-auto|enviar-com-auto|A seleção|Quem está marcado/.test(modaisConferencia[0]), 'nada de lista para salvar')
     for (const modal of [...modais, ...modaisEstoque, ...modaisDevolucoes, ...modaisChamados, ...modaisDenuncia]) {
       assert.ok(!/contexto-auto|enviar-com-auto|A seleção|Quem está marcado/.test(modal), 'nada de lista para salvar')
       for (const [, chave] of modal.matchAll(/chave(?:-auto)?="([^"]+)"/g)) {

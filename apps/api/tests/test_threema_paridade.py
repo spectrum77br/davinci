@@ -199,8 +199,31 @@ _ANTES_DA_F2 = {
     K.CHAMADOS_ENCAMINHAR_JURIDICO: lambda db: _linha(db, "juridico"),
     K.DENUNCIA_RELATORIO_DIARIO: lambda db: _linha(db, "denuncia_relatorio"),
     K.DENUNCIA_ROBO_PRECISA_ALGUEM: _denuncia_robo_antes_da_f2,
+    # C9e: conferencia_shopee/threema_aviso.destinatarios — a MESMA linha
+    # `conferencia_shopee` para as três plataformas (45 a 47)
+    **dict.fromkeys(
+        (
+            K.MARKETING_CONFERENCIA_SHOPEE,
+            K.MARKETING_CONFERENCIA_ML,
+            K.MARKETING_CONFERENCIA_AMAZON,
+        ),
+        lambda db: _linha(db, "conferencia_shopee"),
+    ),
 }
 _ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2}
+
+
+def _conferencia_ligada_antes_da_f2(chave: str) -> bool:
+    """conferencia_shopee/threema_aviso.ligado antes da F2/C9e: a chave da
+    plataforma no .env (desligadas de fábrica)."""
+    cfg = get_settings()
+    return bool(
+        {
+            K.MARKETING_CONFERENCIA_SHOPEE: cfg.conferencia_shopee_threema,
+            K.MARKETING_CONFERENCIA_ML: cfg.conferencia_ml_threema,
+            K.MARKETING_CONFERENCIA_AMAZON: cfg.conferencia_amazon_threema,
+        }[chave]
+    )
 
 
 async def _hoje(chave: str, db, monkeypatch) -> list[str]:
@@ -221,9 +244,6 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         K.MARGEM_REAVALIACAO: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_MARGEM_ALTA: lambda: margem_auto_hold._recipients_margem_auto(db),
         K.MARGEM_INFORMAR: lambda: _informar(db, "margem"),
-        K.MARKETING_CONFERENCIA_SHOPEE: lambda: threema_aviso.destinatarios(db),
-        K.MARKETING_CONFERENCIA_ML: lambda: threema_aviso.destinatarios(db),
-        K.MARKETING_CONFERENCIA_AMAZON: lambda: threema_aviso.destinatarios(db),
     }
     r = tabela[chave]()
     if hasattr(r, "__await__"):
@@ -241,13 +261,8 @@ async def _ativo_hoje(chave: str, db) -> bool:
         # margem_auto_hold._alertar_margem_alta
         robo = await db.get(OuvidoriaRobo, "vigia_margem")
         return bool(ouvidoria.config_do_robo(robo, "vigia_margem").get("avisar_margem_alta", False))
-    plataforma = {
-        K.MARKETING_CONFERENCIA_SHOPEE: "shopee",
-        K.MARKETING_CONFERENCIA_ML: "ml",
-        K.MARKETING_CONFERENCIA_AMAZON: "amazon",
-    }.get(chave)
-    if plataforma:
-        return threema_aviso.ligado(plataforma)
+    if chave in threema_aviso.CHAVE_ENVIO.values():
+        return _conferencia_ligada_antes_da_f2(chave)
     return True
 
 
@@ -534,13 +549,22 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         "services/chamados_juridico.py": "ThreemaInformarConfig",
         "services/denuncia_relatorio_threema.py": "ThreemaInformarConfig",
         "services/denuncia_robo_aviso.py": "ThreemaInformarConfig",
+        # F2/C9e: nem a Conferência (a linha do Informar e as chaves do .env)
+        "services/conferencia_shopee/threema_aviso.py": "ThreemaInformarConfig",
     }
     for arquivo in (
         "services/chamados_ia_aviso.py",
         "services/chamados_juridico.py",
         "services/denuncia_relatorio_threema.py",
         "services/denuncia_robo_aviso.py",
+        "services/conferencia_shopee/threema_aviso.py",
     ):
         assert "parse_recipients" not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo
+    # F2/C9e: o liga/desliga da Conferência (as chaves do .env) só no catálogo
+    # e no núcleo — nem o ponto nem o varredor do worker leem mais
+    for arquivo in ("services/conferencia_shopee/threema_aviso.py", "worker.py"):
+        fonte = (_APP / arquivo).read_text(encoding="utf-8")
+        for plataforma in ("shopee", "ml", "amazon"):
+            assert f".conferencia_{plataforma}_threema" not in fonte, (arquivo, plataforma)

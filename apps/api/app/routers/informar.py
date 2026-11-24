@@ -134,7 +134,9 @@ _CONTEXTOS = (
     "denuncia_relatorio",
     # 06/10: aviso da Conferência Shopee quando a rodada fecha (resumo + link
     # do Excel) — services/conferencia_shopee/threema_aviso. A migration 0375
-    # cria a linha vazia: ninguém recebe até alguém escolher.
+    # criou a linha vazia (ninguém recebia até alguém escolher); depois, a
+    # mesma lista para o ML e a Amazon. Congelado desde a F2/C9e (reserva de
+    # emergência): cada marketplace é um envio em Cadastros › Envios Threema.
     "conferencia_shopee",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")

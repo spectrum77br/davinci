@@ -271,7 +271,7 @@ async def _interruptor_legado(d: EnvioDef, session: AsyncSession) -> bool:
         # margem_auto_hold._alertar_margem_alta: a caixinha da config do robô.
         return bool(ouvidoria.config_do_robo(robo, robo_chave).get(chave_config, False))
     if d.interruptor == "proprio" and d.legado.interruptor_env:
-        # conferencia_shopee/threema_aviso.ligado: a chave do .env.
+        # conferencia_shopee/threema_aviso.ligado antes da F2/C9e: a chave do .env.
         return bool(getattr(get_settings(), d.legado.interruptor_env, False))
     return True
 
@@ -861,6 +861,7 @@ async def enviar(
     contexto: str | None = None,
     client=None,
     session: AsyncSession | None = None,
+    um_por_vez: bool = False,
 ) -> dict:
     """Resolve quem recebe e manda. Devolve {sent, failed, via, motivo}.
 
@@ -872,6 +873,12 @@ async def enviar(
       o sino dos admins. NUNCA chama `send_to_all([])`.
     - Exceções do envio sobem como hoje: cada ponto mantém o seu try/except e
       a sua regra de carimbo.
+    - `um_por_vez` (a Conferência, F2/C9e): um `send_to_all` por destinatário
+      (um lote do registro por pessoa, como o ponto já fazia). O
+      `send_to_all` só segura o erro do Threema (ThreemaSendError): um timeout
+      de rede no 2º escaparia depois de o 1º já ter recebido, e o ponto, sem
+      carimbo, reenviaria a todos. Aqui o erro de um (rede ou configuração)
+      vira `failed` daquele e NÃO sobe; a resposta ganha `erro` (o último).
 
     O client sai de `threema.ThreemaClient` (pelo módulo, para os fakes dos
     testes valerem) com o remetente do catálogo, e o `send_to_all` é chamado
@@ -910,15 +917,37 @@ async def enviar(
             "threema_envio_sem_destinatarios", chave=chave, via=res.via, motivo=res.motivo
         )
         return {"sent": [], "failed": [], "via": res.via, "motivo": "sem_destinatarios"}
+    erro: str | None = None
     with threema_registro.envio(chave, escopo=esc, origem=origem, via=res.via):
-        resultado = await cli.send_to_all(texto, list(res.ids))
+        if not um_por_vez:
+            resultado = await cli.send_to_all(texto, list(res.ids))
+        else:
+            resultado = {"sent": [], "failed": []}
+            for rid in res.ids:
+                try:
+                    um = await cli.send_to_all(texto, [rid]) or {}
+                except Exception as exc:  # noqa: BLE001 — um destinatário não derruba os outros
+                    erro = (
+                        str(exc)
+                        if isinstance(exc, threema.ThreemaConfigError)
+                        else f"{type(exc).__name__}: {exc}"[:200]
+                    )
+                    logger.warning(
+                        "threema_envio_um_falhou", chave=chave, para=mascara(rid), erro=erro
+                    )
+                    um = {"sent": [], "failed": [rid]}
+                resultado["sent"] += list(um.get("sent") or [])
+                resultado["failed"] += list(um.get("failed") or [])
     resultado = resultado or {}
-    return {
+    out = {
         "sent": list(resultado.get("sent") or []),
         "failed": list(resultado.get("failed") or []),
         "via": res.via,
         "motivo": None,
     }
+    if um_por_vez:
+        out["erro"] = erro
+    return out
 
 
 # ─────────────────────────────────────────────────────────── semente

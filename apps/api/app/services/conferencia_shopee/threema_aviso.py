@@ -2,15 +2,24 @@
 
 Molde do relatório da Denúncia (services/denuncia_relatorio_threema):
 
-  • só com a chave da plataforma ligada (`ligado`: CONFERENCIA_SHOPEE_THREEMA,
-    CONFERENCIA_ML_THREEMA, CONFERENCIA_AMAZON_THREEMA);
-  • quem recebe: cadastro `conferencia_shopee` do Informar (a migration 0377
-    deixa a linha vazia: ninguém recebe até alguém escolher);
-  • remetente: o ID do Threema de chamados (ThreemaClient(contexto="chamados"),
-    o mesmo da Denúncia) — o Threema não tem remetente de Marketing;
+  • cada plataforma é um envio de Cadastros › Envios Threema (tarefa 16,
+    F2/C9e: `marketing.conferencia_shopee`, `_ml` e `_amazon`, `CHAVE_ENVIO`):
+    quem recebe e o liga/desliga vêm de lá (`ligado`). O `ativo` NULL segue a
+    chave de hoje no .env (CONFERENCIA_SHOPEE_THREEMA, CONFERENCIA_ML_THREEMA,
+    CONFERENCIA_AMAZON_THREEMA). A semente copiou o cadastro
+    `conferencia_shopee` do Informar (o grupo "Conferência", o mesmo nos
+    três), que fica congelado como reserva de emergência; o botão "Quem recebe
+    no Threema" da aba virou atalho (só admin altera quem recebe);
+  • remetente: o do catálogo, o ID do Threema de chamados (o mesmo da
+    Denúncia) — o Threema não tem remetente de Marketing;
   • `threema_enviado_em` na execução carimba o envio: manda UMA vez, mesmo com
-    restart. Sem ninguém cadastrado ou com o envio falhando, não carimba — o
-    varredor do worker tenta de novo enquanto a rodada for recente;
+    restart. Desligado, sem ninguém ou com o envio falhando, não carimba — o
+    varredor do worker tenta de novo enquanto a rodada for recente
+    (`JANELA_REENVIO`, 6 h: desligado por mais que isso, o aviso daquela
+    rodada se perde — o `descarta` do catálogo). Sem ninguém pela
+    configuração antiga (emergência ou sem semente, com a linha vazia) fica
+    calado, como antes; ninguém válido no Cadastro passa pelo núcleo, que
+    grava o registro `ok=false` e acende o sino dos admins;
   • mensagem curta (≤ 3500 bytes, o limite do gateway básico): uma linha por
     grupo + Geral, quem ficou sem dados, afiliados incompletos, o link do
     Excel (baixa SEM login, assinado com o jwt_secret, vale 7 dias e só para
@@ -22,7 +31,9 @@ Mercado Livre e Amazon (07/10/2026): o mesmo aviso e o mesmo cadastro "Quem
 recebe", mas cada marketplace com a SUA chave — CONFERENCIA_ML_THREEMA e
 CONFERENCIA_AMAZON_THREEMA, desligadas de fábrica: ligar a da Shopee depois do
 piloto não começa a mandar o relatório do ML/Amazon (nem as rodadas de teste
-de "Gerar agora") antes de ele ser aprovado. O título diz a plataforma
+de "Gerar agora") antes de ele ser aprovado. Desde a F2/C9e cada marketplace
+é um envio próprio no Cadastro (liga, desliga e quem recebe separados; a
+semente pôs o mesmo grupo nos três). O título diz a plataforma
 ("Conferência Mercado Livre — …"), o link do DaVinci abre a aba dela
 (`&conf=ml`) e métrica com estado sai com o texto do estado ("invest.
 aguardando acesso") em vez de "—". Com UMA das partes do investimento sem
@@ -43,45 +54,49 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import ConferenciaShopeeExecucao, ThreemaInformarConfig
-from app.services import threema, threema_registro
+from app.models import ConferenciaShopeeExecucao
+from app.services import threema_envios
 from app.services.conferencia_shopee import calculo, plataformas, saida
-from app.services.threema_catalogo import K
+from app.services.threema_catalogo import CATALOGO, K
 
 logger = structlog.get_logger()
 
+# A linha do Informar que era a lista dos três avisos (hoje só a reserva de
+# emergência do Cadastro: o `Legado.informar` dos envios, no catálogo).
 CONTEXTO = "conferencia_shopee"
 VALE_LINK = timedelta(days=7)
 # O varredor reenvia o que falhou enquanto a rodada for recente; rodada velha
 # (Threema ligado depois, cadastro feito dias depois) não dispara aviso.
 JANELA_REENVIO = timedelta(hours=6)
 MAX_BYTES = 3500
-# O envio do catálogo (Cadastros › Envios Threema) de cada plataforma: é a
-# marca do registro de cada mensagem (`threema_registro.envio`).
+# O envio do catálogo (Cadastros › Envios Threema) de cada plataforma: quem
+# recebe, o liga/desliga e a marca do registro de cada mensagem.
 CHAVE_ENVIO = {
     "shopee": K.MARKETING_CONFERENCIA_SHOPEE,
     "ml": K.MARKETING_CONFERENCIA_ML,
     "amazon": K.MARKETING_CONFERENCIA_AMAZON,
 }
+DESLIGADO = "aviso no Threema desligado"
 
 
-# ─────────────────────────────────────────────── chave por plataforma
+# ─────────────────────────────────────────────── envio por plataforma
 
 
-def ligado(plataforma: str | None) -> bool:
-    """O aviso desta plataforma está ligado? Cada marketplace tem a sua chave
-    (desligadas de fábrica); plataforma vazia = Shopee (rodada antiga)."""
-    cfg = get_settings()
-    chave = {
-        "shopee": cfg.conferencia_shopee_threema,
-        "ml": cfg.conferencia_ml_threema,
-        "amazon": cfg.conferencia_amazon_threema,
-    }
-    return bool(chave.get(plataformas.de({"plataforma": plataforma}), False))
+def chave_envio(plataforma: str | None) -> str:
+    """O envio desta plataforma; vazia (rodada antiga) ou desconhecida =
+    Shopee."""
+    return CHAVE_ENVIO[plataformas.de({"plataforma": plataforma})]
 
 
-def plataformas_ligadas() -> list[str]:
-    return [p for p in plataformas.PLATAFORMAS if ligado(p)]
+async def ligado(plataforma: str | None, *, session: AsyncSession | None = None) -> bool:
+    """O aviso desta plataforma está ligado? É o liga/desliga do envio dela em
+    Cadastros › Envios Threema; com o `ativo` NULL, a chave de hoje no .env
+    (cada marketplace tem a sua, desligadas de fábrica)."""
+    return await threema_envios.ativo(chave_envio(plataforma), session=session)
+
+
+async def plataformas_ligadas(session: AsyncSession | None = None) -> list[str]:
+    return [p for p in plataformas.PLATAFORMAS if await ligado(p, session=session)]
 
 
 # ─────────────────────────────────────────────── link do Excel (sem login)
@@ -233,54 +248,41 @@ def texto(rel: Mapping[str, Any], link: str, link_davinci: str) -> str:
 # ─────────────────────────────────────────────── envio
 
 
-async def destinatarios(session: AsyncSession) -> list[str]:
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == CONTEXTO)
-        )
-    ).scalar_one_or_none()
-    return threema.parse_recipients(row.recipients if row else "")
+async def _por_que_nao_sai(session: AsyncSession, chave: str) -> str | None:
+    """Por que o aviso NÃO sai agora (None = sai). Quem recebe vem de
+    Cadastros › Envios Threema, com o remetente do catálogo:
 
+    * o canal do remetente desligado no servidor (o `client.disabled` de
+      antes, lido sem criar o cliente aqui);
+    * o envio desligado;
+    * ninguém pela configuração antiga (emergência ou sem semente, com a
+      linha `conferencia_shopee` vazia): calado, como antes.
 
-async def _enviar_um_a_um(
-    client: threema.ThreemaClient, msg: str, alvos: list[str], execucao_id: UUID
-) -> dict:
-    """Um destinatário por vez (como o teste da Denúncia): o send_to_all só
-    segura ThreemaSendError, e um timeout de rede no 2º escapava do laço
-    depois de o 1º já ter recebido — sem carimbo, o varredor reenviava a
-    todos de 10 em 10 min. Basta UM entregue para carimbar.
-
-    Registro (tarefa 16): quem chama marca o envio da plataforma
-    (`CHAVE_ENVIO`) com `threema_registro.envio`."""
-    sent: list[str] = []
-    failed: list[str] = []
-    erro: str | None = None
-    for rid in alvos:
-        try:
-            r = await client.send_to_all(msg, [rid])
-        except threema.ThreemaConfigError as e:
-            r, erro = {"sent": [], "failed": [rid]}, str(e)
-        except Exception as e:  # rede, gateway fora: o aviso nunca derruba quem chamou
-            logger.warning(
-                "conferencia_shopee_threema_erro",
-                execucao=str(execucao_id),
-                para=rid,
-                erro=f"{type(e).__name__}: {e}"[:200],
-            )
-            r, erro = {"sent": [], "failed": [rid]}, f"{type(e).__name__}: {e}"[:200]
-        sent += r.get("sent") or []
-        failed += r.get("failed") or []
-    return {"sent": sent, "failed": failed, "erro": erro}
+    Ninguém válido no Cadastro sai daqui como None: o envio passa pelo núcleo,
+    que grava o registro `ok=false` e acende o sino dos admins."""
+    if threema_envios.canal(CATALOGO[chave].remetente or "chamados") == "desativado":
+        return "Threema de chamados desativado"
+    quem = await threema_envios.resolver(chave, session=session)
+    if not quem.ativo:
+        return DESLIGADO
+    if not quem.ids and quem.motivo != threema_envios.NINGUEM_VALIDO:
+        return "ninguém cadastrado"
+    return None
 
 
 async def enviar_pendente(
     session: AsyncSession, execucao: ConferenciaShopeeExecucao, agora: datetime | None = None
 ) -> dict:
     """Manda o aviso da execução pronta, se ainda não foi. Trava a linha da
-    execução enquanto manda: a rota e o varredor juntos não mandam dois."""
+    execução enquanto manda: a rota e o varredor juntos não mandam dois.
+
+    Um destinatário por vez (`um_por_vez` do núcleo): o `send_to_all` só
+    segura o erro do Threema, e um timeout de rede no 2º escapava depois de o
+    1º já ter recebido — sem carimbo, o varredor reenviava a todos de 10 em
+    10 min. Basta UM entregue para carimbar."""
     agora = agora or datetime.now(UTC)
-    if not ligado(getattr(execucao, "plataforma", None)):
-        return {"enviado": False, "motivo": "aviso no Threema desligado"}
+    if not await ligado(getattr(execucao, "plataforma", None), session=session):
+        return {"enviado": False, "motivo": DESLIGADO}
     row = (
         await session.execute(
             select(ConferenciaShopeeExecucao)
@@ -291,36 +293,48 @@ async def enviar_pendente(
     ).scalar_one_or_none()
     if row is None or row.status != "pronto" or not row.relatorio:
         return {"enviado": False, "motivo": "sem relatório"}
-    if not ligado(row.plataforma):
-        return {"enviado": False, "motivo": "aviso no Threema desligado"}
     if row.threema_enviado_em is not None:
         return {"enviado": False, "motivo": "já enviado"}
-    alvos = await destinatarios(session)
-    client = threema.ThreemaClient(contexto="chamados")
-    if client.disabled or not alvos:
-        motivo = "Threema de chamados desativado" if client.disabled else "ninguém cadastrado"
-        logger.warning(
-            "conferencia_shopee_threema_sem_destino", execucao=str(row.id), motivo=motivo
-        )
+    chave = chave_envio(row.plataforma)
+    motivo = await _por_que_nao_sai(session, chave)
+    if motivo:
+        if motivo != DESLIGADO:
+            logger.warning(
+                "conferencia_shopee_threema_sem_destino", execucao=str(row.id), motivo=motivo
+            )
         return {"enviado": False, "motivo": motivo}
     msg = texto(
         row.relatorio, link_excel(row.id, agora), link_davinci(row.id, row.plataforma)
     )
-    chave = CHAVE_ENVIO.get(plataformas.de({"plataforma": row.plataforma}))
-    with threema_registro.envio(chave):
-        r = await _enviar_um_a_um(client, msg, alvos, row.id)
+    r = await threema_envios.enviar(chave, msg, session=session, um_por_vez=True)
+    if r.get("motivo"):
+        # Desligou entre a leitura e o envio, ou ninguém válido no Cadastro (o
+        # núcleo gravou o registro e acendeu o sino): não carimba — o varredor
+        # tenta de novo enquanto a rodada for recente.
+        if r["motivo"] == threema_envios.DESLIGADO:
+            motivo = DESLIGADO
+        elif r.get("via") == "legado":
+            motivo = "ninguém cadastrado"
+        else:
+            motivo = "ninguém válido para receber"
+        logger.warning("conferencia_shopee_threema_nao_saiu", execucao=str(row.id), motivo=motivo)
+        return {"enviado": False, "motivo": motivo}
     if not r.get("sent"):
         logger.warning(
             "conferencia_shopee_threema_falhou",
             execucao=str(row.id),
-            falhou=r.get("failed"),
+            falhou=len(r.get("failed") or []),
             erro=r.get("erro"),
         )
         return {"enviado": False, "motivo": "envio falhou"}
     row.threema_enviado_em = agora
     await session.flush()
     logger.info(
-        "conferencia_shopee_threema", execucao=str(row.id), sent=r["sent"], failed=r.get("failed")
+        "conferencia_shopee_threema",
+        execucao=str(row.id),
+        sent=len(r["sent"]),
+        failed=len(r.get("failed") or []),
+        via=r.get("via"),
     )
     return {
         "enviado": True,
@@ -335,7 +349,7 @@ async def enviar_pendentes(session: AsyncSession, agora: datetime | None = None)
     foram avisadas (o envio na hora falhou ou não tinha ninguém cadastrado) —
     só das plataformas com o aviso ligado."""
     agora = agora or datetime.now(UTC)
-    ligadas = plataformas_ligadas()
+    ligadas = await plataformas_ligadas(session)
     if not ligadas:
         return []
     pendentes = (

@@ -57,7 +57,8 @@ import {
 const { api } = useApi()
 const toasts = useToasts()
 const canEdit = useCan('marketing', 'edit')
-// O cadastro de quem recebe no Threema (routers/informar.py) é só de admin.
+// Quem recebe no Threema: o botão é só de admin (a porta do Informar
+// `conferencia_shopee`, routers/informar.py).
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const route = useRoute()
@@ -657,6 +658,17 @@ function salvarNome(c: ContaConferencia) {
 
 // ---------- Threema
 
+// Tarefa 16 (F2/C9e): cada marketplace é um envio de Cadastros › Envios
+// Threema — quem recebe e o liga/desliga ficam lá (só admin altera). O botão
+// "Quem recebe no Threema" virou atalho: mostra quem recebe o aviso do
+// marketplace aberto (a lista antiga `conferencia_shopee` dos três ficou
+// congelada no servidor como reserva de emergência).
+const CHAVE_THREEMA: Record<Plataforma, string> = {
+  shopee: 'marketing.conferencia_shopee',
+  ml: 'marketing.conferencia_ml',
+  amazon: 'marketing.conferencia_amazon',
+}
+const chaveThreema = computed(() => CHAVE_THREEMA[plataforma.value])
 const informarAberto = ref(false)
 </script>
 
@@ -1136,11 +1148,14 @@ const informarAberto = ref(false)
       </div>
     </section>
 
+    <!-- Atalho de Cadastros › Envios Threema (tarefa 16, F2/C9e): quem recebe o
+         aviso do marketplace aberto; escolher e ligar/desligar, só admin, lá. -->
     <InformarThreemaModal
       :open="informarAberto"
       contexto="conferencia_shopee"
+      :chave="chaveThreema"
       somente-cadastro
-      descricao="Quem está marcado recebe no Threema o resumo de cada Conferência quando ela termina (Shopee, Mercado Livre e Amazon, cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Celular, Eletro, Mala e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
+      :descricao="`Manda no Threema o resumo da Conferência ${plat.da} quando ela termina (segunda e quarta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Celular, Eletro, Mala e Geral, as contas sem dados e o link do Excel. Shopee, Mercado Livre e Amazon são envios separados, cada um na sua mensagem e com o seu liga/desliga.`"
       @close="informarAberto = false"
     />
   </div>

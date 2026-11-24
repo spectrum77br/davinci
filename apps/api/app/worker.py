@@ -3712,7 +3712,8 @@ async def conferencia_shopee_varrer(ctx: dict) -> None:
     """Conferência Shopee: de 10 em 10 min e a cada restart — rodada que passou do prazo (corte
     + 30 min) marca o que sobrou como `expirada` e fecha o relatório com o que chegou; rodada sem
     loja na fila que ficou aberta também fecha. Depois o aviso no Threema do que ainda não foi
-    (a chave de cada plataforma: `conferencia_shopee_threema`, `conferencia_ml_threema`,
+    (o envio de cada plataforma em Cadastros › Envios Threema, tarefa 16 F2/C9e — `ativo` NULL
+    segue a chave de hoje no .env: `conferencia_shopee_threema`, `conferencia_ml_threema`,
     `conferencia_amazon_threema`; carimbo na execução: manda uma vez)."""
     from app.services.conferencia_shopee import fila, servidor, threema_aviso
 
@@ -3725,11 +3726,12 @@ async def conferencia_shopee_varrer(ctx: dict) -> None:
     paradas = await servidor.enfileirar_paradas(datetime.now(UTC))
     if paradas:
         logger.info("conferencia_servidor_reenfileiradas", execucoes=[str(i) for i in paradas])
-    if not (
-        _settings.conferencia_shopee_threema
-        or _settings.conferencia_ml_threema
-        or _settings.conferencia_amazon_threema
-    ):
+    # Nenhum dos três envios ligado: não procura aviso pendente (era o `if not` das três
+    # chaves do .env; o liga/desliga de cada um agora é o do Cadastro).
+    for chave in threema_aviso.CHAVE_ENVIO.values():
+        if await threema_envios.ativo(chave):
+            break
+    else:
         return
     async with session_scope() as s:
         enviados = await threema_aviso.enviar_pendentes(s, datetime.now(UTC))

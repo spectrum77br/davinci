@@ -8,7 +8,9 @@
   com dedupe diário;
 * desligado não chama nada e não grava registro;
 * `forcar_para` ignora o `ativo` (via `forcado`, origem `teste`);
-* exceção do envio sobe como hoje; o sino nunca derruba o envio.
+* exceção do envio sobe como hoje; o sino nunca derruba o envio;
+* `um_por_vez` (a Conferência): um lote por destinatário, e o erro de um não
+  sobe nem impede os outros.
 """
 
 from __future__ import annotations
@@ -178,6 +180,56 @@ async def test_forcar_para_ignora_o_ativo_e_registra_como_teste(db, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_um_por_vez_a_falha_de_rede_de_um_nao_derruba_os_outros(db, monkeypatch):
+    """`um_por_vez` (a Conferência, F2/C9e): um `send_to_all` — um lote do
+    registro — por destinatário. O timeout de rede no 1º não sobe nem impede
+    o 2º; o erro de configuração também não sobe (vira `failed`)."""
+    chave = K.MARKETING_CONFERENCIA_SHOPEE
+    migrar(monkeypatch, chave)
+    monkeypatch.setattr(get_settings(), "conferencia_shopee_threema", True)
+    a = await _usuario(db, "a", "TSTA0001")
+    b = await _usuario(db, "b", "TSTB0002")
+    await semeado(db, chave, a, b)
+    segredo = "s3cr3t-um-por-vez"
+    cli = _CLIENTE_REAL(gateway_id="*TSTGW01", secret=segredo, contexto="chamados")
+
+    def _resp(request: httpx.Request) -> httpx.Response:
+        if dict(httpx.QueryParams(request.content.decode()))["to"] == "TSTA0001":
+            raise httpx.ConnectTimeout("gateway fora")
+        return httpx.Response(200, text="abc123")
+
+    with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
+        router.post("/send_simple").mock(side_effect=_resp)
+        out = await threema_envios.enviar(chave, "Conferência", client=cli, um_por_vez=True)
+    assert (out["sent"], out["failed"], out["via"], out["motivo"]) == (
+        ["TSTB0002"],
+        ["TSTA0001"],
+        "cadastro",
+        None,
+    )
+    assert out["erro"].startswith("ConnectTimeout")
+    linhas = await _registro(db)
+    assert [(x.envio_chave, x.destinatario_id, x.ok) for x in linhas] == [
+        (chave, "TSTA0001", False),
+        (chave, "TSTB0002", True),
+    ]
+    assert linhas[0].lote_id != linhas[1].lote_id, "um lote por destinatário"
+    assert all(segredo not in (x.erro or "") for x in linhas)
+
+    class _SemConfig(_Fake):
+        async def send_to_all(self, text, destinos):
+            raise threema.ThreemaConfigError("threema_gateway_id_missing")
+
+    monkeypatch.setattr(threema, "ThreemaClient", _SemConfig)
+    out = await threema_envios.enviar(chave, "x", um_por_vez=True)
+    assert (out["sent"], out["failed"], out["erro"]) == (
+        [],
+        ["TSTA0001", "TSTB0002"],
+        "threema_gateway_id_missing",
+    )
+
+
+@pytest.mark.asyncio
 async def test_excecao_do_envio_sobe_como_hoje(db, monkeypatch):
     monkeypatch.setattr(get_settings(), "nf_sem_estoque_threema_recipients", "TSTA0001")
 
@@ -213,8 +265,9 @@ async def test_sino_quebrado_nao_derruba_o_envio(db, monkeypatch):
 # o envio vira `migrado=True` (a chave de cada um é conferida na foto das
 # marcas, `test_threema_registro.py`).
 _USOS_DO_NUCLEO = {
-    # sincronizar no startup; enviar: vigia da automação (F1/C8a, item 6)
-    "worker.py": {"sincronizar", "enviar"},
+    # sincronizar no startup; enviar: vigia da automação (F1/C8a, item 6);
+    # ativo: o portão do varredor da Conferência (F2/C9e, 45 a 47)
+    "worker.py": {"sincronizar", "enviar", "ativo"},
     # F1/C8a: Correios grave e pacote de devolução (5 e 8), loja muda (7),
     # prazo de contestação (9) e códigos do Tuta no servidor (12)
     "services/logistica_track_sync.py": {"enviar"},
@@ -246,6 +299,10 @@ _USOS_DO_NUCLEO = {
     "services/chamados_juridico.py": {"enviar", "resolver", "canal"},
     "services/denuncia_relatorio_threema.py": {"enviar", "resolver", "canal"},
     "services/denuncia_robo_aviso.py": {"enviar", "resolver", "canal"},
+    # F2/C9e: a Conferência (45 a 47): o liga/desliga de cada plataforma
+    # (`ativo`, também no varredor do worker), quem recebe lido antes de
+    # montar a mensagem, o canal do remetente e o envio um por vez.
+    "services/conferencia_shopee/threema_aviso.py": {"enviar", "resolver", "canal", "ativo"},
     # `_regras_com_pessoa` só LÊ as regras com 👤 (o "usa a configuração
     # antiga" dos contatos externos e das regras): não manda nada.
     "services/threema_envios_tela.py": {

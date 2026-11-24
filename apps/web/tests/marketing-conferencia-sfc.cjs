@@ -15,8 +15,10 @@
 //    Mala/Celular/Eletro/Geral), semanas da mais velha pra mais nova, Variação
 //    no fim, as duas colunas de rótulo paradas; tudo de lib/conferencia.ts;
 //  - conta sem dados continua contada (aviso embaixo da tabela);
-//  - só quem edita gera, recalcula, cancela e mexe nas contas; o cadastro do
-//    Threema é só de admin (routers/informar.py);
+//  - só quem edita gera, recalcula, cancela e mexe nas contas; o botão do
+//    Threema é só de admin e, desde a tarefa 16 (F2/C9e), é o atalho de
+//    Cadastros › Envios Threema: mostra quem recebe o aviso do marketplace
+//    aberto (cada um é um envio), sem lista para marcar nem "Salvar";
 //  - um relatório por marketplace (07/10/2026): Shopee | Mercado Livre | Amazon
 //    em cima, ?conf= na URL, ?plataforma= na API, o relatório aberto por link
 //    leva a tela pro marketplace dele, e o que o marketplace não dá aparece
@@ -79,22 +81,43 @@ assert.match(script, /vermelho: 'text-red-600 dark:text-red-400'/)
 assert.match(tpl, /<template v-if="canEdit">[\s\S]{0,900}Gerar agora/, 'Gerar agora só com edit')
 assert.match(tpl, /<Button v-if="isAdmin"[^>]*>\s*<Bell[^>]*\/> Quem recebe no Threema/, 'Threema só admin')
 assert.match(tpl, /<section v-if="canEdit" class="rounded-xl border bg-card">/, 'Contas só com edit')
-assert.match(tpl, /contexto="conferencia_shopee"\s+somente-cadastro/, 'modal do Threema só cadastro')
+// Atalho de Cadastros › Envios Threema (tarefa 16, F2/C9e): a chave do
+// marketplace aberto, só quem recebe (o envio sai quando a rodada fecha).
+assert.match(tpl, /contexto="conferencia_shopee"\s+:chave="chaveThreema"\s+somente-cadastro/, 'modal do Threema em modo atalho')
+assert.match(script, /const chaveThreema = computed\(\(\) => CHAVE_THREEMA\[plataforma\.value\]\)/, 'a chave segue o marketplace aberto')
+{
+  const catalogo = fs.readFileSync(path.resolve(__dirname, '../../api/app/services/threema_catalogo.py'), 'utf8')
+  const mapa = /const CHAVE_THREEMA: Record<Plataforma, string> = \{([\s\S]*?)\}/.exec(script)
+  assert.ok(mapa, 'mapa marketplace → envio')
+  const pares = [...mapa[1].matchAll(/(\w+): '([^']+)'/g)].map((m) => [m[1], m[2]])
+  assert.deepEqual(pares, [
+    ['shopee', 'marketing.conferencia_shopee'],
+    ['ml', 'marketing.conferencia_ml'],
+    ['amazon', 'marketing.conferencia_amazon'],
+  ])
+  for (const [, chave] of pares) assert.ok(catalogo.includes(`= "${chave}"`), `chave do catálogo: ${chave}`)
+}
+// Sem a promessa da lista antiga (marcar, salvar, "sem ninguém marcado").
+{
+  const m = /<InformarThreemaModal[\s\S]*?\/>/.exec(tpl)[0]
+  assert.ok(!/A seleção|Quem está marcado|Sem ninguém marcado|contexto-auto|enviar-com-auto/.test(m), 'nada de lista para salvar')
+}
 assert.match(modal.script, /\| 'conferencia_shopee'/, 'contexto no union do modal')
 // Um relatório por marketplace (07/10/2026): o seletor em cima, ?conf= na URL.
 assert.match(tpl, /role="tablist" aria-label="Marketplace da conferência"/, 'seletor de marketplace')
 assert.match(tpl, /v-for="p in PLATAFORMAS" :key="p\.chave"\s+role="tab" :aria-selected="plataforma === p\.chave"/)
 assert.match(tpl, /@click="trocarPlataforma\(p\.chave\)"/)
 assert.match(script, /const plataforma = ref<Plataforma>\(plataformaValida\(route\.query\.conf\) \?\? 'shopee'\)/, 'lê ?conf=')
-// O mesmo cadastro do Threema serve os 3 (um aviso por marketplace).
-assert.match(tpl, /contexto="conferencia_shopee"[\s\S]{0,200}descricao="[^"]*Shopee, Mercado Livre e Amazon/)
+// Um aviso (e um envio) por marketplace; a descrição diz qual está aberto.
+assert.match(tpl, /contexto="conferencia_shopee"[\s\S]{0,250}:descricao="`[^`]*Conferência \$\{plat\.da\}[^`]*Shopee, Mercado Livre e Amazon são envios separados/)
 // Semana domingo a sábado; roda segunda e quarta às 13:30, as duas com a semana fechada
 // (até 30/10/2026 era terça/quinta com semana segunda a domingo).
 for (const trecho of [
   '<option value="semanal">semana fechada (dom–sáb)</option>',
   '<option value="parcial">parcial (dom até ontem)</option>',
   'A conferência roda segunda e quarta às 13:30, sempre com a semana fechada (domingo a sábado), quando a agenda está ligada.',
-  'cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada',
+  'quando ela termina (segunda e quarta à tarde quando a agenda está ligada)',
+  'cada um na sua mensagem e com o seu liga/desliga',
 ]) assert.ok(tpl.includes(trecho), `na tela: ${trecho}`)
 for (const velho of ['seg–dom', 'seg até ontem', 'terça (semana fechada)', 'quinta (parcial)', 'terça e quinta', 'quarta (parcial)']) {
   assert.ok(!tpl.includes(velho), `texto antigo saiu da tela: ${velho}`)
@@ -370,7 +393,7 @@ const RETORNO = `return {
   tipoNovo, gerando, gerar, recalcular, cancelar, podeAgir, baixar, baixando,
   planilha, blocosCab, semDadosTxt, afiliadosIncompletosTxt,
   contasAberto, contas, contasOrdenadas, contasErro, nomes, salvarConta, salvarNome, salvandoConta,
-  isAdmin, informarAberto, COR,
+  isAdmin, informarAberto, chaveThreema, COR,
   plataforma, plat, plataformaAberta, trocarPlataforma, contasPorIntegracao, semVinculo, COLETA_TXT,
   lojas, integracoes, versaoContas, salvarLoja, salvarIntegracao, usadaPor,
 }`
@@ -1007,8 +1030,11 @@ async function plataformas() {
     const { s } = t
     assert.equal(s.selecionada.value, ID_PRONTO)
     const antes = t.calls.length
+    assert.equal(s.chaveThreema.value, 'marketing.conferencia_shopee')
     s.trocarPlataforma('ml')
     assert.equal(s.plataforma.value, 'ml')
+    // o atalho do Threema mostra quem recebe o aviso do ML (outro envio)
+    assert.equal(s.chaveThreema.value, 'marketing.conferencia_ml')
     assert.equal(s.detalhe.value, null, 'o relatório da Shopee sai na hora')
     assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia', conf: 'ml' } }, '?conf=ml na URL; a execução da Shopee sai')
     await esperar()
@@ -1081,6 +1107,7 @@ async function plataformas() {
     const t = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', conf: 'amazon' }, arquivo: () => Promise.resolve(new Blob(['x'])) })
     const { s } = t
     assert.equal(s.plataforma.value, 'amazon')
+    assert.equal(s.chaveThreema.value, 'marketing.conferencia_amazon')
     assert.deepEqual(urls(t.calls), [`GET ${LISTA_URL('amazon')}`, `GET ${BASE}/execucoes/${ID_AMZ}`])
     const p = s.planilha.value
     for (const l of p.linhas.slice(0, 8)) {

@@ -357,10 +357,10 @@ def test_registro_fica_fora_do_historico_de_alteracoes():
 # ─────────────────────────────────────────────────────────── teste estático
 
 # Funções que chamam `send_to_all` SEM marca própria, porque servem a mais de
-# um envio: TODA chamada delas tem de estar dentro de uma marca.
-_FUNCOES_DE_ENVIO = {
-    ("services/conferencia_shopee/threema_aviso.py", "_enviar_um_a_um"),
-}
+# um envio: TODA chamada delas tem de estar dentro de uma marca. (A última, o
+# `_enviar_um_a_um` da Conferência, saiu na F2/C9e: o envio um por vez é o
+# `um_por_vez` do núcleo do Cadastro.)
+_FUNCOES_DE_ENVIO: set[tuple[str, str]] = set()
 # Funções que servem a mais de um envio JÁ MIGRADO: recebem a chave (`chave=`,
 # só nomeada) e mandam pelo núcleo do Cadastro (`threema_envios.enviar(chave,
 # …)`). Cada CHAMADA delas declara o envio: a chave passada ou o padrão (o
@@ -604,8 +604,12 @@ def test_envio_migrado_so_sai_pelo_cadastro():
     # rota escolhe pelo `migrado` do catálogo (chave dinâmica, conferida pela
     # rota de verdade em `test_threema_pontos_informar`).
     from app.routers import informar as informar_router
+    from app.services.conferencia_shopee import threema_aviso
 
     pelo_cadastro |= {c for c in informar_router._CHAVE_ENVIO.values() if c in migrados}
+    # A Conferência manda pelo Cadastro com a chave da plataforma (F2/C9e;
+    # conferida pelo caminho real em `test_threema_pontos_conferencia`).
+    pelo_cadastro |= {c for c in threema_aviso.CHAVE_ENVIO.values() if c in migrados}
     assert pelo_cadastro == migrados
 
 
@@ -674,8 +678,6 @@ _MARCAS = {
     ("services/margem_auto_hold.py", "_alertar_margem_alta", "K.MARGEM_MARGEM_ALTA"): 1,
     # 29 a 42 (um envio por robô; o mapa robô → chave tem teste próprio)
     ("services/ouvidoria.py", "avisar_pendentes", "chave_ouvidoria(robo_chave)"): 1,
-    # 45 a 47 (o mapa plataforma → chave tem teste próprio)
-    ("services/conferencia_shopee/threema_aviso.py", "enviar_pendente", "chave"): 1,
     # o núcleo do Cadastro (C5): forcar_para e lista resolvida
     ("services/threema_envios.py", "enviar", "chave"): 2,
 }
@@ -730,6 +732,9 @@ _PELO_CADASTRO = {
     ("services/denuncia_relatorio_threema.py", "enviar_pendente", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
     ("services/denuncia_relatorio_threema.py", "enviar_teste", "K.DENUNCIA_RELATORIO_DIARIO"): 1,
     ("services/denuncia_robo_aviso.py", "rodar", "K.DENUNCIA_ROBO_PRECISA_ALGUEM"): 1,
+    # F2/C9e: a Conferência (45 a 47, a chave da plataforma; o mapa plataforma
+    # → chave tem teste próprio)
+    ("services/conferencia_shopee/threema_aviso.py", "enviar_pendente", "chave"): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }

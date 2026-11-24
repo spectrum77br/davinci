@@ -19,8 +19,9 @@
 // "Enviar agora" para quem já podia usar o botão (o mesmo POST /enviar).
 // `chaveAuto`: o envio do aviso automático do mesmo botão (aba Amazon: os
 // prazos que o robô manda), mostrado num segundo bloco. Com
-// `somenteCadastro` (IA de Chamado, jurídico e Denúncia, F2/C9d) o atalho só
-// mostra quem recebe: o envio sai de outro lugar.
+// `somenteCadastro` (IA de Chamado, jurídico e Denúncia, F2/C9d; Conferência,
+// F2/C9e — a chave do marketplace aberto) o atalho só mostra quem recebe: o
+// envio sai de outro lugar.
 import { computed } from 'vue'
 import { Loader2, Send, X } from 'lucide-vue-next'
 import { podeEnviarAgora, type QuemRecebeLeve } from '~/lib/enviosThreema'

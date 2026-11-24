@@ -569,8 +569,11 @@ def _demais() -> list[EnvioDef]:
                 f"Resumo da rodada da Conferência {nome} quando ela fecha, com o link do "
                 "Excel e o da aba no DaVinci. Reenvia por até 6 h se falhar.",
                 "evento", "quando a rodada fecha (varredor de 10 min)", "servidor", "chamados",
+                # Desligado, a rodada não é carimbada: religado em até 6 h
+                # (JANELA_REENVIO), o varredor ainda manda; depois disso, o
+                # aviso daquela rodada se perde.
                 L(informar=("conferencia_shopee",), grupo=G_CONFERENCIA, interruptor_env=env),
-                fatia="F2", leitura="informar:conferencia_shopee",
+                fatia="F2", leitura="informar:conferencia_shopee", migrado=True,
             )
         )
     return [
