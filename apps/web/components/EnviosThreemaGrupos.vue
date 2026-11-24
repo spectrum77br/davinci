@@ -100,9 +100,8 @@ function usadoEm(g: GrupoOut): string {
   <div class="space-y-3">
     <div class="flex flex-wrap items-center gap-2">
       <p class="flex-1 text-sm text-muted-foreground" data-texto-grupos>
-        Mudar um grupo muda quem recebe em todos os envios que o usam. Hoje só os envios do Mac
-        aceitam grupo, e eles só passam a ler a lista daqui quando o Mac ler o Cadastro: até lá,
-        mudar um grupo não muda quem recebe nada.
+        Mudar um grupo muda na hora quem recebe em todos os envios do DaVinci que o usam. Nos
+        envios do Mac, só passa a valer quando o Mac ler o Cadastro (até lá eles usam a lista do Mac).
       </p>
       <button type="button" class="inline-flex h-9 items-center gap-1 rounded-md border px-3 text-sm hover:bg-muted" data-acao="novo-grupo" @click="novo">
         <Plus class="size-4" /> Novo grupo
