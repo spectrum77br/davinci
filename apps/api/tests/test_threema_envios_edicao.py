@@ -397,6 +397,8 @@ def _gateway(monkeypatch):
 async def test_envio_de_teste(db, monkeypatch, client, make_user, auth_as):
     c = await montar(db, monkeypatch)
     admin = await _admin(make_user, auth_as)
+    # o Informar da Logística antes da F2 (o teste não depende da fatia publicada)
+    desmigrar(monkeypatch, K.LOGISTICA_INFORMAR)
     antes = await _legado_de_todos(db)
     # Envio que ainda usa a configuração antiga: nada sai (fase 1 sem envio novo).
     with respx.mock(base_url=threema.THREEMA_API_BASE, assert_all_called=False) as router:

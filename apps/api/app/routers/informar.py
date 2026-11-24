@@ -39,6 +39,15 @@ Tudo aqui exige admin — botão, cadastro e envio —
 com UMA exceção: os contextos da Margem também liberam o gerente por e-mail
 (_EMAILS_EXTRAS; pedido do Eduardo 01/09: "pro cairo que é gerente pode
 aparecer informar na aba margem").
+
+Cadastros › Envios Threema (tarefa 16, F2): quando TODOS os envios que leem
+a lista de um contexto já leem o Cadastro (`migrado=True` no catálogo), quem
+recebe passa a ser escolhido só lá, só por admin. O PUT daquele contexto
+responde 410 (uma aba velha aberta não grava sem efeito), o GET continua
+mostrando a lista antiga (congelada, é a reserva de emergência) e o
+"Enviar agora" manda pelo núcleo do Cadastro (`threema_envios.enviar`), para
+quem pode usar o botão hoje: desligado ou ninguém para receber → 422, como a
+lista vazia de antes.
 """
 from __future__ import annotations
 
@@ -50,7 +59,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user
 from app.models import (
@@ -65,10 +73,17 @@ from app.models import (
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
-from app.services import aprovar_link, informar, ouvidoria, threema, threema_registro
+from app.services import (
+    aprovar_link,
+    informar,
+    ouvidoria,
+    threema,
+    threema_envios,
+    threema_registro,
+)
 from app.services.logistica_ingest import _ids_pendentes
 from app.services.margem_auto_hold import _motivo as _motivo_margem
-from app.services.threema_catalogo import K
+from app.services.threema_catalogo import CATALOGO, EnvioDef, K
 from app.services.verificar_margem import SNAPSHOT_TABLE
 
 logger = structlog.get_logger()
@@ -124,6 +139,23 @@ _CHAVE_ENVIO = {
     "devolucoes": K.DEVOLUCOES_INFORMAR,
     "logistica_amazon": K.LOGISTICA_AMAZON_INFORMAR,
 }
+
+
+def _envios_da_lista(contexto: str) -> list[EnvioDef]:
+    """Os envios do catálogo que leem a lista deste contexto (o `Legado` de
+    cada um): a linha do Informar, ou — no `margem_auto` — a lista "Avisar"
+    do Robô da Margem na Ouvidoria."""
+    if contexto == _CONTEXTO_ROBO_MARGEM:
+        return [d for d in CATALOGO.values() if d.legado.robo == _ROBO_MARGEM]
+    return [d for d in CATALOGO.values() if contexto in d.legado.informar]
+
+
+def _lista_no_cadastro(contexto: str) -> list[EnvioDef]:
+    """Os envios deste contexto quando TODOS já leem o Cadastro (a lista
+    antiga não muda mais nada); vazio enquanto algum ainda a lê."""
+    envios = _envios_da_lista(contexto)
+    return envios if envios and all(d.migrado for d in envios) else []
+
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
 # exceção: o gerente (Cairo) vê e usa o botão de lá (incluindo o cadastro do
@@ -248,9 +280,24 @@ async def put_config(
 ) -> InformarConfigOut:
     """Salva quem recebe o relatório deste contexto. Aceita só IDs que existem
     no diretório (cadastro de usuários + `.env` legado; o modal manda os
-    marcados)."""
+    marcados). Contexto cujos envios já leem o Cadastro: 410 (quem recebe é
+    escolhido em Cadastros › Envios Threema, só por admin)."""
     contexto = _valida_contexto(contexto)
     _exige_acesso(user, contexto)
+    no_cadastro = _lista_no_cadastro(contexto)
+    if no_cadastro:
+        logger.info("informar_config_recusada_no_cadastro", contexto=contexto)
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            detail={
+                "code": "quem_recebe_no_cadastro",
+                "message": (
+                    "Quem recebe agora é escolhido em Cadastros › Envios Threema "
+                    "(só admin). Recarregue a página."
+                ),
+                "envios": [d.chave for d in no_cadastro],
+            },
+        )
     diretorio = await _diretorio(session)
     validos = {d["id"] for d in diretorio}
     escolhidos = [
@@ -533,12 +580,17 @@ async def enviar(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_active_user)],
 ) -> InformarEnviarOut:
-    """Monta o relatório do contexto e manda pros destinatários cadastrados."""
+    """Monta o relatório do contexto e manda pros destinatários cadastrados
+    (envio que já lê o Cadastro: para quem está em Cadastros › Envios
+    Threema)."""
     if contexto not in _CONTEXTOS_ENVIO:  # margem_auto: só o robô envia
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, detail={"code": "contexto_desconhecido"}
         )
     _exige_acesso(user, contexto)
+    chave = _CHAVE_ENVIO[contexto]
+    if CATALOGO[chave].migrado:
+        return await _enviar_pelo_cadastro(contexto, chave, session)
     row = await _config_row(session, contexto)
     recipients = threema.parse_recipients(row.recipients if row else "")
     if not recipients:
@@ -573,6 +625,101 @@ async def enviar(
     return InformarEnviarOut(
         pedidos=total,
         mensagens=len(mensagens),
+        sent=sorted(sent_ok - failed),
+        failed=sorted(failed),
+    )
+
+
+def _sem_destinatarios(*, antiga: bool = False) -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "code": "sem_destinatarios",
+            "message": (
+                "Ninguém recebe este envio pela configuração antiga (emergência)."
+                if antiga
+                else "Ninguém recebe este envio: escolha em Cadastros › Envios Threema."
+            ),
+        },
+    )
+
+
+def _envio_desligado() -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "code": "envio_desligado",
+            "message": "Este envio está desligado em Cadastros › Envios Threema.",
+        },
+    )
+
+
+async def _enviar_pelo_cadastro(
+    contexto: str, chave: str, session: AsyncSession
+) -> InformarEnviarOut:
+    """O "Enviar agora" do envio que já lê o Cadastro (tarefa 16, F2): quem
+    recebe vem de Cadastros › Envios Threema, pelo núcleo
+    (`threema_envios.enviar`, que põe a marca do registro), com o mesmo
+    remetente de antes (o do catálogo = o contexto).
+
+    * Desligado → 422 `envio_desligado` (o `recusa` do catálogo).
+    * Ninguém pela configuração antiga (emergência ou sem semente, com a
+      linha vazia) → 422 `sem_destinatarios`, sem montar nada, como hoje.
+    * Ninguém válido no Cadastro → o núcleo grava o registro `ok=false` e
+      acende o sino dos admins; a rota responde 422 `sem_destinatarios`.
+
+    Cada mensagem passa pelo núcleo (o relatório pode ter várias); se a lista
+    mudar no meio (desligou, esvaziou), as que faltam não saem e o log diz
+    quantas saíram."""
+    res = await threema_envios.resolver(chave, session=session)
+    if not res.ativo:
+        raise _envio_desligado()
+    if not res.ids and res.motivo != threema_envios.NINGUEM_VALIDO:
+        raise _sem_destinatarios(antiga=True)
+    total, mensagens = await _montar_envio(contexto, session)
+    mensagens = mensagens or [_VAZIO[contexto]]
+    sent_ok: set[str] = set()
+    failed: set[str] = set()
+    saiu = 0
+    try:
+        for msg in mensagens:
+            r = await threema_envios.enviar(chave, msg, session=session)
+            if r["motivo"]:
+                if not saiu:
+                    raise (
+                        _envio_desligado()
+                        if r["motivo"] == threema_envios.DESLIGADO
+                        else _sem_destinatarios()
+                    )
+                logger.warning(
+                    "informar_envio_interrompido",
+                    contexto=contexto,
+                    motivo=r["motivo"],
+                    saiu=saiu,
+                    mensagens=len(mensagens),
+                )
+                break
+            saiu += 1
+            sent_ok.update(r["sent"])
+            failed.update(r["failed"])
+    except threema.ThreemaConfigError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "threema_nao_configurado"},
+        ) from exc
+    logger.info(
+        "informar_enviado",
+        contexto=contexto,
+        chave=chave,
+        via=res.via,
+        pedidos=total,
+        mensagens=saiu,
+        sent=sorted(sent_ok - failed),
+        failed=sorted(failed),
+    )
+    return InformarEnviarOut(
+        pedidos=total,
+        mensagens=saiu,
         sent=sorted(sent_ok - failed),
         failed=sorted(failed),
     )

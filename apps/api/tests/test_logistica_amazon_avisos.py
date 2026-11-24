@@ -29,7 +29,10 @@ class FakeThreema:
 
 def _linha(**kw) -> Logistica:
     base = {
-        "data": date(2026, 9, 12),
+        # Dentro da janela de JANELA_DIAS de `pedidos_em_transito`, que conta
+        # a partir de hoje de verdade (uma data fixa aqui envelhecia e o
+        # pedido saía da janela).
+        "data": date.today(),
         "pedido_bling": "296762",
         "pedido_marketplace": "701-3967231-6921832",
         "plataforma": "Amazon",

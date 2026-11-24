@@ -36,7 +36,7 @@ from app.models import (
 )
 from app.services import ouvidoria, threema_envios
 from app.services.threema_catalogo import CATALOGO, ENVIOS, K
-from tests.test_threema_resolver import migrar, semeado
+from tests.test_threema_resolver import desmigrar, migrar, semeado
 from tests.threema_cadastro_apoio import (  # noqa: F401 — fixture
     ID,
     limpar_ouvidoria,
@@ -80,6 +80,8 @@ async def test_lista_mostra_a_configuracao_antiga_com_nomes_e_sem_id(
     db, monkeypatch, client, make_user, auth_as
 ):
     c = await montar(db, monkeypatch)
+    # o Informar da Logística antes da F2 (o teste não depende da fatia publicada)
+    desmigrar(monkeypatch, K.LOGISTICA_INFORMAR)
     await _admin(db, make_user, auth_as)
     r = await client.get("/api/threema/envios")
     assert r.status_code == 200, r.text
@@ -192,6 +194,8 @@ async def test_lista_mostra_a_configuracao_antiga_com_nomes_e_sem_id(
 @pytest.mark.asyncio
 async def test_filtros(db, monkeypatch, client, make_user, auth_as):
     c = await montar(db, monkeypatch)
+    # o Informar da Logística antes da F2 (o teste não depende da fatia publicada)
+    desmigrar(monkeypatch, K.LOGISTICA_INFORMAR)
     await _admin(db, make_user, auth_as)
     ouv = (await client.get("/api/threema/envios", params={"painel": "Ouvidoria"})).json()
     assert {x["painel"] for x in ouv["envios"]} == {"Ouvidoria"}
@@ -386,6 +390,8 @@ async def test_ultimo_lote_e_registros(db, monkeypatch, client, make_user, auth_
 @pytest.mark.asyncio
 async def test_pessoas_e_envios_da_pessoa(db, monkeypatch, client, make_user, auth_as):
     c = await montar(db, monkeypatch)
+    # o Informar da Logística antes da F2 (o teste não depende da fatia publicada)
+    desmigrar(monkeypatch, K.LOGISTICA_INFORMAR)
     await _admin(db, make_user, auth_as)
     r = await client.get("/api/threema/pessoas")
     assert r.status_code == 200

@@ -2939,7 +2939,8 @@ async def logistica_amazon_avisos(ctx: dict) -> None:
     previsão dos Correios vencida, faltam 3 dias para a data máxima da Amazon,
     data máxima vencida (Vinicius 15/09: passado o prazo a Amazon reembolsa o
     cliente e não dá tempo de acionar os Correios). Um aviso por pedido e
-    tipo; quem recebe é o cadastro do botão Informar da aba Amazon."""
+    tipo; quem recebe é o envio "Prazos da Amazon" em Cadastros › Envios
+    Threema."""
     from app.services import logistica_amazon_avisos as svc  # tardio: models
 
     async with session_scope() as s:

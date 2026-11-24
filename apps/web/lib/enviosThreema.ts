@@ -453,3 +453,38 @@ export function textoDesativarContato(c: Pick<ContatoOut, 'nome' | 'usado_em'>):
   linhas.push('Desativar?')
   return linhas.join('\n')
 }
+
+// ─── atalho dos painéis de origem (components/ThreemaQuemRecebe.vue, F2) ───
+
+/** `GET /api/threema/envios/{chave}/quem-recebe`: só os nomes, nunca o ID. */
+export type QuemRecebeLeve = {
+  chave: string
+  nome: string
+  painel: string
+  migrado: boolean
+  ativo: boolean
+  via: string
+  usa_configuracao_antiga: boolean
+  ninguem: boolean
+  nomes: string[]
+  avisos: string[]
+}
+
+/** O envio na tela de Cadastros › Envios Threema (abre a gaveta dele). */
+export function linkDoEnvio(chave: string): string {
+  return `/envios-threema?envio=${encodeURIComponent(chave)}`
+}
+
+/** A linha do atalho: os nomes, o desligado (âmbar) ou o ninguém (vermelho). */
+export function situacaoQuemRecebe(q: QuemRecebeLeve): { tipo: 'ok' | 'desligado' | 'ninguem'; texto: string } {
+  if (!q.ativo) return { tipo: 'desligado', texto: 'Desligado em Cadastros › Envios Threema: não sai para ninguém.' }
+  if (q.ninguem || !q.nomes.length) return { tipo: 'ninguem', texto: 'Ninguém recebe: este aviso não está saindo.' }
+  return { tipo: 'ok', texto: q.nomes.join(', ') }
+}
+
+/** O "Enviar agora" do atalho para com o envio desligado ou sem ninguém (o
+ *  servidor recusaria com 422). Sem a lista carregada (erro de rede), quem
+ *  decide é o servidor. */
+export function podeEnviarAgora(q: QuemRecebeLeve | null): boolean {
+  return !q || situacaoQuemRecebe(q).tipo === 'ok'
+}

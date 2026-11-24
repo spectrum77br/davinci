@@ -103,12 +103,15 @@ async def test_semente_de_todas_as_fatias_e_conferir_sem_diferenca(db, monkeypat
     for d in ENVIOS:
         assert (linhas[d.chave].semeado_em is not None) == (d.chave in gerenciados), d.chave
     # a semente não mexe no liga/desliga, fora o envio cujo desligado de hoje
-    # é o .env vazio: no cenário, só o da soma por família (o .env dele não
-    # tem ninguém, como em produção) nasce desligado
+    # é a lista vazia: no cenário, o da soma por família (o .env dele não tem
+    # ninguém, como em produção) e o prazo de resposta das Devoluções (a linha
+    # `devolucoes_auto` não existe, como em produção) nascem desligados
     assert {d.chave for d in ENVIOS if linhas[d.chave].ativo is not None} == {
-        K.PRODUTOS_VIGIA_SOMA_FAMILIA
+        K.PRODUTOS_VIGIA_SOMA_FAMILIA,
+        K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA,
     }
     assert linhas[K.PRODUTOS_VIGIA_SOMA_FAMILIA].ativo is False
+    assert linhas[K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA].ativo is False
 
 
 @pytest.mark.asyncio
@@ -426,7 +429,7 @@ async def test_env_vazio_nasce_desligado_e_o_sobrescrever_acompanha_a_lista(db, 
     ninguém, com registro e sino a cada rodada — e a conferência dá igual.
     Refeita com gente no .env (`--sobrescrever`, código de antes da fatia),
     volta a NULL (o interruptor de hoje). Envio de outra fonte (o usuário pelo
-    nome, o Informar) não é tocado mesmo vazio."""
+    nome) não é tocado mesmo vazio."""
     await montar(db, monkeypatch, variante="vazias")
     _codigo_antes_da(monkeypatch, "F1")
     chave = K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING
@@ -455,3 +458,66 @@ async def test_env_vazio_nasce_desligado_e_o_sobrescrever_acompanha_a_lista(db, 
     assert linha.ativo is None
     (item,) = await threema_envios.conferir(db, chaves=[chave])
     assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("igual", True, True)
+
+
+@pytest.mark.asyncio
+async def test_linha_do_informar_vazia_de_envio_automatico_nasce_desligada(db, monkeypatch):
+    """F2: a linha do Informar vazia (ou ausente) de um envio AUTOMÁTICO é o
+    desligado de hoje (`if not recipients: return`, calado): a semente grava
+    `ativo=false` e a conferência dá igual. O botão (manual) vazio não: a lista
+    vazia dele é o 422 do "Enviar agora", e o envio fica `ativo` NULL."""
+    await montar(db, monkeypatch, variante="vazias")
+    _codigo_antes_da(monkeypatch, "F2")
+    chaves = [
+        K.LOGISTICA_INFORMAR,
+        K.LOGISTICA_AMAZON_INFORMAR,
+        K.LOGISTICA_AMAZON_PRAZOS,
+        K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA,
+        K.CONTROLE_ESTOQUE_INFORMAR,
+    ]
+    res = await _semear(db, "F2", chaves=chaves, aplicar=True)
+    planos = {p.chave: p for p in res.planos}
+    automaticos = {K.LOGISTICA_AMAZON_PRAZOS, K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA}
+    for chave in chaves:
+        esperado = (False, True) if chave in automaticos else (None, False)
+        assert (planos[chave].ativo, planos[chave].grava_ativo) == esperado, chave
+    texto = "\n".join(threema_envios._texto_semente(res))
+    assert "nasce DESLIGADO (hoje a lista vazia do Informar é o desligado" in texto
+    linhas = {r.chave: r for r in (await db.execute(select(ThreemaEnvio))).scalars()}
+    assert {c: linhas[c].ativo for c in chaves} == {
+        c: (False if c in automaticos else None) for c in chaves
+    }
+    itens = await threema_envios.conferir(db, chaves=chaves)
+    assert [(x.chave, x.situacao) for x in itens] == [(c, "igual") for c in chaves]
+    amazon = next(x for x in itens if x.chave == K.LOGISTICA_AMAZON_PRAZOS)
+    assert (amazon.ativo_legado, amazon.ativo_cadastro, amazon.desligado_pela_lista) == (
+        False,
+        False,
+        True,
+    )
+    # a linha ganhou gente: a semente envelheceu, e o texto diz qual lista
+    row = (
+        await db.execute(
+            select(ThreemaInformarConfig).where(
+                ThreemaInformarConfig.contexto == "logistica_amazon_auto"
+            )
+        )
+    ).scalar_one()
+    row.recipients = ID["joana"]
+    await db.commit()
+    (item,) = await threema_envios.conferir(db, chaves=[K.LOGISTICA_AMAZON_PRAZOS])
+    assert (item.situacao, item.ativo_legado, item.ativo_cadastro) == ("diferente", True, False)
+    # e o contrário: Cadastro ligado sem ninguém com a linha vazia é diferença
+    row.recipients = ""
+    await db.commit()
+    linha = await db.get(ThreemaEnvio, K.LOGISTICA_AMAZON_PRAZOS, populate_existing=True)
+    linha.ativo = None
+    await db.commit()
+    saida: list[str] = []
+    assert (
+        await threema_envios.executar(
+            ["conferir", "--chaves", K.LOGISTICA_AMAZON_PRAZOS], saida.append
+        )
+        == 1
+    )
+    assert "(lista do Informar vazia)" in "\n".join(saida)

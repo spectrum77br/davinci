@@ -3,8 +3,8 @@ ao que cada ponto de envio monta HOJE, para TODOS os envios do servidor
 gerenciados — quem recebe e se está ligado.
 
 "Hoje" é a função antiga de verdade sempre que ela existe
-(`ouvidoria.destinatarios`, `_recipients_margem_auto`, `recipients_auto` da
-Amazon e das Devoluções, `denuncia_robo_aviso.destinatarios` com a reserva
+(`ouvidoria.destinatarios`, `_recipients_margem_auto`, `recipients_auto` das
+Devoluções, `denuncia_robo_aviso.destinatarios` com a reserva
 `chamados_ia`, o `send_to_all` que cai no THREEMA_RECIPIENTS...). Onde a lista é montada no
 meio de uma função maior, a expressão é copiada aqui E um teste confere que
 ela continua no código — se alguém mudar o ponto de envio, este arquivo
@@ -14,8 +14,8 @@ envio capturado.
 
 Envio MIGRADO (o ponto passou a ler o Cadastro): a montagem antiga saiu do
 código e fica aqui como CÓPIA CONGELADA do ponto antes do commit da fatia
-(`_ANTES_DA_F1`). É ela que o `legado` tem de continuar reproduzindo — é a
-reserva de emergência e a fonte da semente.
+(`_ANTES_DA_F1`, `_ANTES_DA_F2`). É ela que o `legado` tem de continuar
+reproduzindo — é a reserva de emergência e a fonte da semente.
 
 Três cenários (`threema_cadastro_apoio`): o "cheio", parecido com produção,
 o "reservas", com as fontes principais vazias, e o "vazias", com toda linha
@@ -32,7 +32,7 @@ import respx
 from sqlalchemy import func, select
 
 from app.config import get_settings
-from app.models import OuvidoriaRobo, User, UserRole
+from app.models import OuvidoriaRobo, ThreemaInformarConfig, User, UserRole
 from app.routers import informar as informar_router
 from app.services import (
     chamados_ia_aviso,
@@ -40,7 +40,6 @@ from app.services import (
     denuncia_relatorio_threema,
     denuncia_robo_aviso,
     devolucao_acao_avisos,
-    logistica_amazon_avisos,
     margem_auto_hold,
     ouvidoria,
     threema,
@@ -136,12 +135,36 @@ async def _informar(db, ctx: str) -> list[str]:
     return P(row.recipients if row else "")
 
 
+async def _amazon_auto_antes_da_f2(db) -> list[str]:
+    """logistica_amazon_avisos.recipients_auto antes da F2/C9a: a linha
+    `logistica_amazon_auto` do Informar (sem linha = ninguém)."""
+    row = (
+        await db.execute(
+            select(ThreemaInformarConfig).where(
+                ThreemaInformarConfig.contexto == "logistica_amazon_auto"
+            )
+        )
+    ).scalar_one_or_none()
+    return P(row.recipients if row else "")
+
+
+# Cópias congeladas dos pontos que a F2 migrou. O "Enviar agora" dos Informar
+# migrados (C9a) lia a linha do contexto na rota (`_config_row` + a expressão
+# de `_EXPRESSOES`, que continua lá para os contextos ainda não migrados).
+_ANTES_DA_F2 = {
+    K.LOGISTICA_INFORMAR: lambda db: _informar(db, "logistica"),
+    K.LOGISTICA_AMAZON_INFORMAR: lambda db: _informar(db, "logistica_amazon"),
+    K.LOGISTICA_AMAZON_PRAZOS: _amazon_auto_antes_da_f2,
+}
+_ANTES = {**_ANTES_DA_F1, **_ANTES_DA_F2}
+
+
 async def _hoje(chave: str, db, monkeypatch) -> list[str]:
     """Quem recebe HOJE o envio `chave`, pelo código de hoje."""
     s = get_settings()
     robo = chave.removeprefix("ouvidoria.")
-    if chave in _ANTES_DA_F1:
-        r = _ANTES_DA_F1[chave](db)
+    if chave in _ANTES:
+        r = _ANTES[chave](db)
         return list(await r if hasattr(r, "__await__") else r)
     if chave.startswith("ouvidoria."):
         # ouvidoria.avisar_pendentes → ouvidoria.destinatarios(robo, chave)
@@ -150,9 +173,6 @@ async def _hoje(chave: str, db, monkeypatch) -> list[str]:
         # sem regra: `parse(rule) or None` → o send_to_all cai no THREEMA_RECIPIENTS
         # (o caminho de verdade, com 👤 e sem, está em test_item_1_por_regra)
         K.LOGISTICA_MENSAGEM_REGRA: lambda: P(s.threema_recipients),
-        K.LOGISTICA_INFORMAR: lambda: _informar(db, "logistica"),
-        K.LOGISTICA_AMAZON_INFORMAR: lambda: _informar(db, "logistica_amazon"),
-        K.LOGISTICA_AMAZON_PRAZOS: lambda: logistica_amazon_avisos.recipients_auto(db),
         K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA: lambda: devolucao_acao_avisos.recipients_auto(db),
         K.DEVOLUCOES_INFORMAR: lambda: _informar(db, "devolucoes"),
         K.CHAMADOS_IA_PARADA: lambda: chamados_ia_aviso.destinatarios(db),
@@ -445,10 +465,13 @@ async def test_botao_da_regra_pela_rota_de_verdade(
 
 
 def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
-    """Todo envio migrado tem a cópia do ponto de antes (`_ANTES_DA_F1`), e o
-    ponto não monta mais a lista: a expressão antiga saiu do código."""
+    """Todo envio migrado tem a cópia do ponto de antes (`_ANTES_DA_F1`,
+    `_ANTES_DA_F2`), e o ponto não monta mais a lista: a expressão antiga
+    saiu do código (no Informar ela fica só para os contextos não migrados:
+    a rota manda o migrado pelo Cadastro, conferido pela rota de verdade em
+    `test_threema_pontos_informar`)."""
     migrados = {d.chave for d in ENVIOS if d.migrado}
-    assert migrados == set(_ANTES_DA_F1)
+    assert migrados == set(_ANTES)
     assert CATALOGO[K.DEVOLUCOES_CODIGOS_TUTA_SERVIDOR].legado.usuario_nome == "thatcher"
     fora = {
         "worker.py": "get_settings().nf_sem_estoque_threema_recipients",
@@ -464,6 +487,8 @@ def test_os_migrados_tem_a_copia_congelada_e_nao_montam_mais_a_lista():
         "services/chamados_tiktok_reembolso.py": "parse_recipients",
         "services/chamados_pendencias.py": "_destinatarios",
         "services/vigia_estoque_familia.py": "threema_recipients",
+        # F2/C9a: os prazos da Amazon não leem mais a linha do Informar
+        "services/logistica_amazon_avisos.py": "parse_recipients",
     }
     for arquivo, expressao in fora.items():
         assert expressao not in (_APP / arquivo).read_text(encoding="utf-8"), arquivo

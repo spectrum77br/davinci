@@ -9,7 +9,19 @@
 // mesma seleção nos dois cadastros (contexto + contextoAuto), pra tudo que
 // sair da Margem ir pras mesmas pessoas. Acesso: admin em todos; 'margem'
 // também libera o gerente (gate no backend, routers/informar.py).
+//
+// MODO ATALHO (Cadastros › Envios Threema, tarefa 16, F2): com `chave` (o
+// envio do catálogo), quem recebe é escolhido só em Cadastros › Envios
+// Threema, só por admin ("só ADM altera quem recebe", decisão do dono em
+// 23/11/2026) — o servidor responde 410 ao PUT da lista daquele contexto.
+// Somem a lista de marcar e o "Salvar"; fica "Quem recebe" (só nomes, de
+// components/ThreemaQuemRecebe.vue, com o link de editar para o admin) e o
+// "Enviar agora" para quem já podia usar o botão (o mesmo POST /enviar).
+// `chaveAuto`: o envio do aviso automático do mesmo botão (aba Amazon: os
+// prazos que o robô manda), mostrado num segundo bloco.
+import { computed } from 'vue'
 import { Loader2, Send, X } from 'lucide-vue-next'
+import { podeEnviarAgora, type QuemRecebeLeve } from '~/lib/enviosThreema'
 
 type Destinatario = { id: string; nome: string }
 type ConfigOut = { contexto: string; recipients: string[]; destinatarios: Destinatario[] }
@@ -31,6 +43,10 @@ const props = defineProps<{
   // Aba Amazon da Logística: a MESMA lista recebe os avisos do robô E o
   // relatório sob demanda — mantém o "Enviar agora" mesmo no modo automático.
   enviarComAuto?: boolean
+  // Modo atalho: o envio do catálogo (ex.: 'logistica.informar') e, se o
+  // botão também cuida de um aviso automático, o envio dele.
+  chave?: string
+  chaveAuto?: string
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -44,11 +60,16 @@ const destinatarios = ref<Destinatario[]>([])
 const selecionados = ref<Set<string>>(new Set())
 const resultado = ref<string | null>(null)
 const erro = ref<string | null>(null)
+// Modo atalho: o que o bloco "Quem recebe" do envio principal leu.
+const atalho = computed(() => !!props.chave)
+const quemPrincipal = ref<QuemRecebeLeve | null>(null)
 
 watch(() => props.open, async (open) => {
   if (!open) return
   resultado.value = null
   erro.value = null
+  quemPrincipal.value = null
+  if (atalho.value) return // quem recebe vem do bloco do Cadastro, sem lista para marcar
   loading.value = true
   try {
     const cfg = await api<ConfigOut>(`/api/informar/${props.contexto}`)
@@ -100,7 +121,8 @@ async function salvarFechar() {
 
 async function enviar() {
   // Salva a seleção atual antes de enviar — o que está marcado é o que vale.
-  if (!(await salvar())) return
+  // No modo atalho não há o que salvar: vale a lista do Cadastro.
+  if (!atalho.value && !(await salvar())) return
   enviando.value = true
   erro.value = null
   resultado.value = null
@@ -110,12 +132,18 @@ async function enviar() {
     resultado.value = r.failed.length
       ? `Enviado (${r.pedidos} pedido(s)${partes}), mas falhou para: ${r.failed.join(', ')}`
       : `Enviado: ${r.pedidos} pedido(s)${partes} para ${r.sent.length} destinatário(s).`
-  } catch {
-    erro.value = 'Falha no envio — confira os destinatários e tente de novo.'
+  } catch (e: any) {
+    // Modo atalho: o servidor diz por quê (envio desligado, ninguém recebe).
+    erro.value = (atalho.value && e?.data?.detail?.message)
+      || 'Falha no envio — confira os destinatários e tente de novo.'
   } finally {
     enviando.value = false
   }
 }
+
+const podeEnviar = computed(() => (atalho.value
+  ? podeEnviarAgora(quemPrincipal.value)
+  : selecionados.value.size > 0))
 </script>
 
 <template>
@@ -133,7 +161,15 @@ async function enviar() {
       </div>
       <p class="text-sm text-muted-foreground">{{ descricao }}</p>
 
-      <div v-if="loading" class="flex items-center gap-2 text-sm text-muted-foreground">
+      <template v-if="atalho && chave">
+        <ThreemaQuemRecebe
+          :chave="chave"
+          :titulo="chaveAuto ? 'Quem recebe o Enviar agora' : 'Quem recebe'"
+          @carregado="quemPrincipal = $event"
+        />
+        <ThreemaQuemRecebe v-if="chaveAuto" :chave="chaveAuto" titulo="Quem recebe os avisos automáticos" />
+      </template>
+      <div v-else-if="loading" class="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 class="size-4 animate-spin" /> Carregando…
       </div>
       <template v-else>
@@ -163,6 +199,7 @@ async function enviar() {
       <div class="flex justify-end gap-2">
         <Button variant="ghost" @click="emit('close')">Fechar</Button>
         <Button
+          v-if="!atalho"
           :variant="contextoAuto ? 'default' : 'outline'"
           :disabled="loading || salvando || enviando"
           @click="salvarFechar"
@@ -173,7 +210,7 @@ async function enviar() {
              (salvo quando a mesma lista também recebe o relatório manual). -->
         <Button
           v-if="(!contextoAuto || enviarComAuto) && !somenteCadastro"
-          :disabled="loading || salvando || enviando || !selecionados.size"
+          :disabled="loading || salvando || enviando || !podeEnviar"
           @click="enviar"
         >
           <Loader2 v-if="enviando" class="size-4 mr-1 animate-spin" />

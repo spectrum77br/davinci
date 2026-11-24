@@ -376,6 +376,9 @@ _FUNCOES_COM_CHAVE = {
 # ali: (arquivo, expressão). Cada uma tem o seu teste de cobertura logo abaixo.
 _CHAVES_DINAMICAS = {
     ("routers/informar.py", "_CHAVE_ENVIO[contexto]"),
+    # O "Enviar agora" do Informar migrado (F2): a chave do contexto, que a
+    # rota tira do mesmo `_CHAVE_ENVIO`.
+    ("routers/informar.py", "chave"),
     ("services/ouvidoria.py", "chave_ouvidoria(robo_chave)"),
     ("services/conferencia_shopee/threema_aviso.py", "chave"),
     # O núcleo do Cadastro (C5): `enviar(chave, …)` valida a chave no catálogo.
@@ -597,6 +600,12 @@ def test_envio_migrado_so_sai_pelo_cadastro():
         elif tipo in ("cadastro", "funcao"):
             pelo_cadastro.add(valor)
     assert soltas == []
+    # O Informar manda pelo Cadastro todo contexto cujo envio está migrado: a
+    # rota escolhe pelo `migrado` do catálogo (chave dinâmica, conferida pela
+    # rota de verdade em `test_threema_pontos_informar`).
+    from app.routers import informar as informar_router
+
+    pelo_cadastro |= {c for c in informar_router._CHAVE_ENVIO.values() if c in migrados}
     assert pelo_cadastro == migrados
 
 
@@ -652,9 +661,9 @@ _MARCAS = {
     ("services/logistica_bling.py", "enviar_threema_em_lote", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     ("routers/logistica.py", "enviar_threema", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
     ("routers/logistica.py", "enviar_threema_pedido", "K.LOGISTICA_MENSAGEM_REGRA"): 1,
-    # itens 2, 3, 11, 17 e 28 (o mapa contexto → chave tem teste próprio)
+    # os Informar ainda não migrados (11, 17 e 28; o mapa contexto → chave
+    # tem teste próprio; os migrados mandam por `_enviar_pelo_cadastro`)
     ("routers/informar.py", "enviar", "_CHAVE_ENVIO[contexto]"): 1,
-    ("services/logistica_amazon_avisos.py", "run", "K.LOGISTICA_AMAZON_PRAZOS"): 1,  # 4
     ("services/devolucao_acao_avisos.py", "run", "K.DEVOLUCOES_PRAZO_RESPOSTA_LOJA"): 1,  # 10
     ("services/chamados_ia_aviso.py", "avisar", "K.CHAMADOS_IA_PARADA"): 1,  # 15
     ("services/chamados_juridico.py", "encaminhar", "K.CHAMADOS_ENCAMINHAR_JURIDICO"): 1,  # 16
@@ -710,6 +719,11 @@ _PELO_CADASTRO = {
         "vigia_estoque_familia_sweep",
         "K.PRODUTOS_VIGIA_SOMA_FAMILIA",
     ): 1,
+    # F2/C9a: o "Enviar agora" dos Informar migrados (2 e 3, a chave do
+    # contexto; os não migrados seguem na marca de `enviar`) e os prazos da
+    # Amazon (4)
+    ("routers/informar.py", "_enviar_pelo_cadastro", "chave"): 1,
+    ("services/logistica_amazon_avisos.py", "run", "K.LOGISTICA_AMAZON_PRAZOS"): 1,
     # o "[TESTE]" da tela (C7), para a lista resolvida com forcar_para
     ("services/threema_envios_edicao.py", "testar", "d.chave"): 1,
 }

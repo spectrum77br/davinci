@@ -277,17 +277,34 @@ async def _interruptor_legado(d: EnvioDef, session: AsyncSession) -> bool:
 
 
 def _lista_vazia_desliga(d: EnvioDef) -> bool:
-    """O desligado de HOJE deste envio é a própria lista do .env vazia: o
-    ponto tinha `if not <env>: return` (os portões de .env, §0.7 do desenho)
-    e não há outra chave de liga/desliga. Com a lista vazia ele fica calado:
-    sem mensagem, sem registro e sem sino (ex.: o item 24, que nasceu vazio
-    de propósito).
+    """O desligado de HOJE deste envio é a própria lista vazia: o ponto tinha
+    `if not <lista>: return` (os portões de .env, §0.7 do desenho) e não há
+    outra chave de liga/desliga. Com a lista vazia ele fica calado: sem
+    mensagem, sem registro e sem sino (ex.: o item 24, que nasceu vazio de
+    propósito).
+
+    Vale para a lista do .env e para a linha do Informar de um envio
+    AUTOMÁTICO (F2: os prazos da Amazon, o prazo de resposta das Devoluções,
+    a IA de Chamado parada e o robô da Denúncia — linha vazia ou ausente =
+    ninguém, calado). Não vale para o botão (`manual`: a lista vazia é o 422
+    do botão, não um desligado), para o liga/desliga de outra fonte (o modo do
+    robô, a chave da conferência no .env) nem para o usuário pelo nome (o 12:
+    "thatcher" sem Threema é falha, não desligado).
 
     No Cadastro, `ativo` NULL vale ligado — e ligado sem ninguém grava o
     registro `ok=false` e acende o sino dos admins a cada rodada. Por isso a
     semente grava `ativo=false` quando a lista de hoje sai vazia, e a
     conferência trata o legado vazio desses envios como desligado."""
-    return d.interruptor == "proprio" and bool(d.legado.envs) and not d.legado.interruptor_env
+    if d.interruptor != "proprio" or d.legado.interruptor_env:
+        return False
+    if d.legado.envs:
+        return True
+    return bool(d.legado.informar) and d.frequencia_tipo != "manual"
+
+
+def _lista_de_hoje(d: EnvioDef) -> str:
+    """De onde vem a lista que, vazia, é o desligado de hoje (textos)."""
+    return "do .env" if d.legado.envs else "do Informar"
 
 
 async def _ids_legado(d: EnvioDef, escopo: str | None, session: AsyncSession):
@@ -1077,8 +1094,9 @@ async def semear(
     - Envio com `Legado.grupo`: a lista vira o grupo (mesmo nome com pessoas
       diferentes, na rodada ou no banco, PARA com erro e nada é gravado).
     - Não mexe em `ativo` (NULL = interruptor de hoje), fora o envio cujo
-      desligado de hoje é a lista do .env vazia (`_lista_vazia_desliga`):
-      com a lista de hoje vazia ele nasce `ativo=false` (calado, como hoje;
+      desligado de hoje é a lista vazia (`_lista_vazia_desliga`: o .env, ou a
+      linha do Informar de um envio automático): com a lista de hoje vazia
+      ele nasce `ativo=false` (calado, como hoje;
       NULL seria "ligado com ninguém", com registro e sino a cada rodada) e,
       com gente, `ativo` NULL. Carimba `semeado_em`.
     - Chave já semeada fica como está (rodar duas vezes não muda nada), a
@@ -1303,8 +1321,8 @@ def _texto_semente(res: ResultadoSemente) -> list[str]:
         quem = ", ".join(f"{r.nome} ({mascara(r.threema_id)})" for r in p.refs) or "ninguém"
         via = f"grupo '{p.grupo}': " if p.grupo else ""
         desligado = (
-            " — nasce DESLIGADO (hoje a lista vazia do .env é o desligado; ligue na tela"
-            " quando escolher alguém)"
+            f" — nasce DESLIGADO (hoje a lista vazia {_lista_de_hoje(CATALOGO[p.chave])} é o"
+            " desligado; ligue na tela quando escolher alguém)"
             if p.grava_ativo and p.ativo is False
             else ""
         )
@@ -1334,7 +1352,8 @@ class Conferencia:
     so_no_cadastro: list[Destino] = field(default_factory=list)
     ativo_legado: bool = True
     ativo_cadastro: bool | None = None
-    # O legado está desligado só porque a lista do .env está vazia.
+    # O legado está desligado só porque a lista de hoje (.env ou linha do
+    # Informar, `_lista_vazia_desliga`) está vazia.
     desligado_pela_lista: bool = False
 
 
@@ -1343,8 +1362,9 @@ async def conferir(
 ) -> list[Conferencia]:
     """Compara, por chave e escopo, `legado(chave)` com a expansão do
     Cadastro (quem recebe e se está ligado). Chave sem semente sai como
-    `sem_semente` (usa o legado). No envio de `_lista_vazia_desliga`, o .env
-    vazio conta como desligado: Cadastro ligado sem ninguém é diferença.
+    `sem_semente` (usa o legado). No envio de `_lista_vazia_desliga`, a lista
+    de hoje vazia conta como desligado: Cadastro ligado sem ninguém é
+    diferença.
     Só leitura (fora a sincronização)."""
     selecionadas = _selecionar(fatia, chaves)
     await sincronizar(session)
@@ -1381,7 +1401,7 @@ async def conferir(
             )
         for esc in escopos:
             leg = await legado(d.chave, escopo=esc, session=session)
-            # Lista do .env vazia = o desligado de hoje desses envios: o
+            # Lista de hoje vazia = o desligado de hoje desses envios: o
             # Cadastro tem de estar desligado também (ligado com ninguém
             # acende o sino a cada rodada, o que hoje não acontece).
             leg_ativo = leg.ativo and (bool(leg.ids) or not _lista_vazia_desliga(d))
@@ -1434,7 +1454,7 @@ def _texto_conferencia(itens: Sequence[Conferencia]) -> list[str]:
             ligado = (
                 ""
                 if c.ativo_legado
-                else " · desligado hoje (lista do .env vazia)"
+                else f" · desligado hoje (lista {_lista_de_hoje(CATALOGO[c.chave])} vazia)"
                 if c.desligado_pela_lista
                 else " · desligado hoje"
             )
@@ -1458,7 +1478,11 @@ def _texto_conferencia(itens: Sequence[Conferencia]) -> list[str]:
             if c.ativo_legado != c.ativo_cadastro:
                 partes.append(
                     f"ligado: legado={'sim' if c.ativo_legado else 'não'}"
-                    + (" (lista do .env vazia)" if c.desligado_pela_lista else "")
+                    + (
+                        f" (lista {_lista_de_hoje(CATALOGO[c.chave])} vazia)"
+                        if c.desligado_pela_lista
+                        else ""
+                    )
                     + f", Cadastro={'sim' if c.ativo_cadastro else 'não'}"
                     + (
                         " — desligue em Cadastros › Envios Threema (ligado sem ninguém"

@@ -12,10 +12,11 @@ pedido e por tipo:
 - `prazo_3d`: faltam DIAS_ANTES_PRAZO dias para a data máxima da Amazon;
 - `prazo_vencido`: a data máxima passou sem entrega.
 
-Quem recebe é o cadastro `logistica_amazon_auto` do modal Informar da aba
-Amazon (threema_informar_config) — mesmo mecanismo do aviso automático da
-Margem. O botão também manda, sob demanda, a lista dos pedidos de Envio
-próprio em trânsito (`linhas_informar`, contexto `logistica_amazon`).
+Quem recebe é o envio "Prazos da Amazon" de Cadastros › Envios Threema
+(tarefa 16, F2; a semente copiou o cadastro `logistica_amazon_auto` do modal
+Informar da aba Amazon, que fica congelado como reserva de emergência). O
+botão também manda, sob demanda, a lista dos pedidos de Envio próprio em
+trânsito (`linhas_informar`, contexto `logistica_amazon`).
 
 Temu (26/11/2026): a mesma regra vale lá — passado o prazo de entrega a Temu
 reembolsa o cliente sem devolução (306833: prazo 17/11, reembolso 18/11, pacote
@@ -34,8 +35,8 @@ import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Logistica, ThreemaInformarConfig
-from app.services import logistica_amazon_canal, logistica_rules, threema, threema_registro
+from app.models import Logistica
+from app.services import logistica_amazon_canal, logistica_rules, threema_envios
 from app.services.threema_catalogo import K
 
 logger = structlog.get_logger()
@@ -43,6 +44,8 @@ logger = structlog.get_logger()
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 CONTEXTO_MANUAL = "logistica_amazon"
+# A linha do Informar que era a lista dos avisos (hoje só a reserva de
+# emergência do Cadastro: `Legado.informar` do envio, no catálogo).
 CONTEXTO_AUTO = "logistica_amazon_auto"
 
 DIAS_ANTES_PRAZO = 3
@@ -290,21 +293,23 @@ def mensagem_aviso(row: Logistica, tipo: str, hoje: date | None = None) -> str:
     return "\n".join(linhas)
 
 
-async def recipients_auto(session: AsyncSession) -> list[str]:
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == CONTEXTO_AUTO)
-        )
-    ).scalar_one_or_none()
-    return threema.parse_recipients(row.recipients if row else "")
-
-
 async def run(
     session: AsyncSession, *, hoje: date | None = None, client: Any = None
 ) -> dict[str, int]:
-    """Uma rodada do robô: manda os avisos devidos e carimba cada um. Sem
-    destinatários cadastrados não manda (e não carimba — quando alguém for
-    cadastrado, os avisos pendentes saem na rodada seguinte)."""
+    """Uma rodada do robô: manda os avisos devidos e carimba cada um.
+
+    Quem recebe vem de Cadastros › Envios Threema (`K.LOGISTICA_AMAZON_PRAZOS`,
+    remetente "logistica"), lido ANTES do laço:
+
+    * desligado: não manda e não carimba — ao religar, os pendentes saem de
+      uma vez (o `acumula` do catálogo), uma mensagem por aviso;
+    * ninguém pela configuração antiga (emergência ou sem semente, com a
+      linha vazia): não manda nem carimba, calado, como hoje;
+    * ninguém válido no Cadastro: o 1º aviso passa pelo núcleo, que grava o
+      registro `ok=false` e acende o sino dos admins; nada é carimbado (quando
+      alguém for posto na lista, os pendentes saem na rodada seguinte).
+
+    Falha de envio não carimba (tenta na rodada seguinte)."""
     hoje = hoje or hoje_brt()
     resumo = {"pedidos": 0, "avisos": 0, "enviados": 0, "falhas": 0, "sem_destinatarios": 0}
     rows = await pedidos_em_transito(session, temu=True)
@@ -313,18 +318,24 @@ async def run(
     resumo["avisos"] = len(pendentes)
     if not pendentes:
         return resumo
-    recipients = await recipients_auto(session)
-    if not recipients:
-        resumo["sem_destinatarios"] = 1
-        logger.warning("logistica_amazon_avisos_sem_destinatarios", pendentes=len(pendentes))
+    quem = await threema_envios.resolver(K.LOGISTICA_AMAZON_PRAZOS, session=session)
+    if not quem.ativo:
+        resumo["desligado"] = 1
+        logger.info("logistica_amazon_avisos_desligado", pendentes=len(pendentes), via=quem.via)
         return resumo
-    client = client or threema.ThreemaClient(contexto="logistica")
+    if not quem.ids and quem.motivo != threema_envios.NINGUEM_VALIDO:
+        resumo["sem_destinatarios"] = 1
+        logger.warning(
+            "logistica_amazon_avisos_sem_destinatarios", pendentes=len(pendentes), via=quem.via
+        )
+        return resumo
     agora = datetime.now(UTC)
     for row, tipo in pendentes:
         texto = mensagem_aviso(row, tipo, hoje)
         try:
-            with threema_registro.envio(K.LOGISTICA_AMAZON_PRAZOS):
-                res = await client.send_to_all(texto, recipients)
+            res = await threema_envios.enviar(
+                K.LOGISTICA_AMAZON_PRAZOS, texto, session=session, client=client
+            )
         except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima
             resumo["falhas"] += 1
             logger.warning(
@@ -334,6 +345,16 @@ async def run(
                 err=str(e)[:200],
             )
             continue
+        if res.get("motivo"):
+            # Desligou ou ficou sem ninguém no meio da rodada (no ninguém
+            # válido o núcleo já registrou e acendeu o sino): o que falta
+            # fica para a próxima, sem carimbo.
+            desligou = res["motivo"] == threema_envios.DESLIGADO
+            resumo["desligado" if desligou else "sem_destinatarios"] = 1
+            logger.warning(
+                "logistica_amazon_avisos_nao_saiu", motivo=res["motivo"], pedido=row.pedido_bling
+            )
+            break
         if res.get("sent"):
             setattr(row, _CARIMBO[tipo], agora)
             resumo["enviados"] += 1
@@ -341,8 +362,8 @@ async def run(
                 "logistica_amazon_aviso_enviado",
                 pedido=row.pedido_bling,
                 tipo=tipo,
-                sent=res.get("sent"),
-                failed=res.get("failed"),
+                sent=len(res.get("sent") or []),
+                failed=len(res.get("failed") or []),
             )
         else:
             resumo["falhas"] += 1

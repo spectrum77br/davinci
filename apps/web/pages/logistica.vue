@@ -5308,13 +5308,15 @@ async function aplicarStatusBling(c: Logistica) {
       </div>
     </div>
 
-    <!-- Aba Amazon: Informar (avisos de prazo do robô + lista sob demanda) -->
+    <!-- Aba Amazon: Informar (avisos de prazo do robô + lista sob demanda).
+         Atalho de Cadastros › Envios Threema (tarefa 16, F2): quem recebe se
+         escolhe lá, só admin; o "Enviar agora" segue para quem usa o botão. -->
     <InformarThreemaModal
       :open="informarAmazonOpen"
       contexto="logistica_amazon"
-      contexto-auto="logistica_amazon_auto"
-      enviar-com-auto
-      descricao="Quem está marcado recebe no Threema os avisos automáticos do Envio próprio da Amazon: previsão dos Correios vencida, 3 dias antes da data máxima da Amazon e data máxima vencida sem entrega. 'Enviar agora' manda a lista dos pedidos de Envio próprio em trânsito. A seleção fica salva."
+      chave="logistica.amazon_informar"
+      chave-auto="logistica.amazon_prazos"
+      descricao="O robô avisa no Threema, sozinho, os prazos do Envio próprio da Amazon: previsão dos Correios vencida, 3 dias antes da data máxima da Amazon e data máxima vencida sem entrega. 'Enviar agora' manda a lista dos pedidos de Envio próprio em trânsito."
       @close="informarAmazonOpen = false"
     />
     <MensagensClienteModal
@@ -5323,11 +5325,13 @@ async function aplicarStatusBling(c: Logistica) {
       @close="mensagensClienteOpen = false"
     />
 
-    <!-- Modal do botão INFORMAR (admin-only) -->
+    <!-- Modal do botão INFORMAR (admin-only). Atalho de Cadastros › Envios
+         Threema (tarefa 16, F2): quem recebe se escolhe lá. -->
     <InformarThreemaModal
       :open="informarOpen"
       contexto="logistica"
-      descricao="Manda via Threema a lista dos pedidos acompanhados no painel, no formato: pedido marketplace - conta - status plataforma - status bling. A seleção de destinatários fica salva."
+      chave="logistica.informar"
+      descricao="Manda via Threema a lista dos pedidos acompanhados no painel, no formato: pedido marketplace - conta - status plataforma - status bling."
       @close="informarOpen = false"
     />
 

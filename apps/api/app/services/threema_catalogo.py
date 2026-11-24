@@ -265,7 +265,7 @@ def _servidor() -> list[EnvioDef]:
             "status da plataforma e do Bling).",
             "manual", "botão Informar › Enviar agora", "servidor", "logistica",
             L(informar=("logistica",)), ao_desligar="recusa", fatia="F2",
-            leitura="informar:logistica",
+            leitura="informar:logistica", migrado=True,
         ),
         E(
             K.LOGISTICA_AMAZON_INFORMAR, "Logística", "Amazon", "Informar da aba Amazon",
@@ -273,15 +273,17 @@ def _servidor() -> list[EnvioDef]:
             "previsão dos Correios e a data máxima da Amazon.",
             "manual", "botão Informar › Enviar agora", "servidor", "logistica_amazon",
             L(informar=("logistica_amazon",), grupo=G_AMAZON), ao_desligar="recusa",
-            fatia="F2", leitura="informar:logistica_amazon",
+            fatia="F2", leitura="informar:logistica_amazon", migrado=True,
         ),
         E(
             K.LOGISTICA_AMAZON_PRAZOS, "Logística", "Amazon", "Prazos da Amazon",
             "Avisos do robô da aba Amazon: previsão de entrega vencida, 3 dias antes do "
             "prazo e prazo vencido. Uma mensagem por aviso.",
             "horario", "08:06 e 16:06", "servidor", "logistica",
+            # Desligado, nada é carimbado: ao religar sai uma mensagem por
+            # aviso pendente (os carimbos `aviso_*_at` só gravam o que saiu).
             L(informar=("logistica_amazon_auto",), grupo=G_AMAZON), ao_desligar="acumula",
-            fatia="F2", leitura="informar:logistica_amazon_auto",
+            fatia="F2", leitura="informar:logistica_amazon_auto", migrado=True,
         ),
         E(
             K.LOGISTICA_CORREIOS_GRAVE, "Logística", None, "Ocorrência grave dos Correios",
