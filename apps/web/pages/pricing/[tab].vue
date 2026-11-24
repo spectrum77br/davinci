@@ -9,6 +9,11 @@ import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka
 import { isoToday } from '~/lib/date'
 import { ordenarCategorias } from '~/lib/categorias'
 import {
+  MOTIVO_ANUNCIO, cartoesDaGrade, celulaComparavel, divergenciasDaConferencia, margemDaResposta,
+  tipoSemAnuncio,
+  type CelulaConferida, type Divergencia, type MargemConferencia,
+} from '~/lib/cartaoVermelho'
+import {
   calcularReposicao, explicarReposicao, prazoDias, reposicaoPorPeca, textoFormulaReposicao,
 } from '~/utils/reposicao'
 
@@ -3016,26 +3021,9 @@ function tituloReposicao(prodId: string): string {
 // foi para o servidor (Geral + por produto). M-7 (18/11/2026): "Conferir
 // anúncios" é de todos; quem não é administrador vê no balão a data e o
 // andamento, sem as contas que não leram (o servidor não manda o resumo).
-type AnuncioConferido = {
-  anuncio: string
-  variacao: string | null
-  preco: number | null
-  preco_promocional: number | null
-  ativo: boolean | null
-  motivo: string | null
-}
-type CelulaConferida = {
-  pricing_account_id: string
-  pricing_product_id: string
-  preco_tabela: number | null
-  situacao: 'conferida' | 'sem_anuncio' | 'erro_conta' | 'nao_suportada'
-  motivo: string | null
-  conferido_em: string
-  anuncios: AnuncioConferido[]
-  // O job que gravou a célula (null em linha antiga, sem job, ou conferida
-  // sozinha pelo clique no cartão — M-15).
-  job_id: string | null
-}
+// Os tipos da conferência (AnuncioConferido, CelulaConferida, MargemConferencia,
+// Divergencia) e a regra do cartão vermelho moram em lib/cartaoVermelho.ts
+// desde a M-22 (24/11/2026): o Faturamento conta as Pendências com ela.
 // POST /api/pricing/conferencia/celula (M-15): a célula como ficou gravada
 // (null = não manda mais preço e saiu) ou o erro da leitura (nada gravado).
 type ConferirCelulaResposta = {
@@ -3063,20 +3051,6 @@ type JobConferencia = {
   // Revisão M-14: conferência só de algumas contas → quantas; null = inteira.
   parcial?: number | null
 }
-// Margem da conferência (M-2, 17/11/2026): no servidor e igual para todos
-// (decisão do Eduardo). Uma Geral por departamento (padrão 5%) e um % próprio
-// por produto — produto com desconto ganha a margem dele e para de aparecer
-// como irregular. As caixas "Geral" e "Por produto" também ficam gravadas.
-// `produtos`: pricing_product_id → %, só os do departamento. `pode_editar` =
-// administrador (PUT /conferencia/margem e /conferencia/margem/produto/{id}).
-type MargemConferencia = {
-  department: string
-  margem_pct: number
-  geral_ligada: boolean
-  por_produto_ligada: boolean
-  produtos: Record<string, number>
-  pode_editar: boolean
-}
 // `ultimo_concluido`: o último job do departamento que terminou bem.
 // `margem` e `pode_conferir` vêm desde o M-2 (pode_conferir = todos desde o M-7).
 type ConferenciaResposta = {
@@ -3090,8 +3064,6 @@ type ConferenciaResposta = {
   sem_vinculo?: { pricing_account_id: string; pricing_product_id: string }[] | null
 }
 
-// Sem linha no banco o servidor manda 5% com as duas caixas ligadas.
-const MARGEM_PADRAO = 5
 const CHAVE_OCULTAR_KITS = 'precos.ocultarKits'
 const CHAVE_OCULTAR_ESTOQUE = 'precos.ocultarEstoque'
 const conferencia = ref<ConferenciaResposta | null>(null)
@@ -3130,25 +3102,7 @@ const conferenciaRodando = computed(() => {
   return s === 'pending' || s === 'running'
 })
 
-// A margem como a tela usa: números de verdade (o NUMERIC pode vir como texto)
-// e o padrão do servidor no que faltar. Servidor sem o campo: 5%, as duas
-// caixas ligadas e ninguém edita.
-function margemDaResposta(bruta: Partial<MargemConferencia> | null | undefined, dep: string): MargemConferencia {
-  const produtos: Record<string, number> = {}
-  for (const [id, v] of Object.entries(bruta?.produtos ?? {})) {
-    const n = Number(v)
-    if (v != null && Number.isFinite(n)) produtos[id] = n
-  }
-  const pct = Number(bruta?.margem_pct)
-  return {
-    department: bruta?.department ?? dep,
-    margem_pct: bruta?.margem_pct != null && Number.isFinite(pct) ? pct : MARGEM_PADRAO,
-    geral_ligada: bruta?.geral_ligada ?? true,
-    por_produto_ligada: bruta?.por_produto_ligada ?? true,
-    produtos,
-    pode_editar: bruta?.pode_editar ?? false,
-  }
-}
+// A margem como a tela usa (margemDaResposta, lib/cartaoVermelho.ts).
 
 async function carregarConferencia() {
   if (import.meta.server || desmontado) return
@@ -3516,52 +3470,10 @@ const conferenciaPorCelula = computed(() => {
   return m
 })
 
-// A margem que vale para a linha: o % próprio do produto (com "Por produto"
-// ligado), senão a Geral (com "Geral" ligado), senão nenhuma — a linha não é
-// conferida (sem (!) e sem o motivo "fora da margem" no cartão vermelho).
-function margemDaLinha(m: MargemConferencia | null | undefined, pricingProductId: string): number | null {
-  if (!m) return null
-  if (m.por_produto_ligada) {
-    const propria = m.produtos?.[pricingProductId]
-    if (propria != null && Number.isFinite(Number(propria))) return Number(propria)
-  }
-  if (!m.geral_ligada) return null
-  const geral = Number(m.margem_pct)
-  return Number.isFinite(geral) ? geral : null
-}
-
-type Divergencia = {
-  tabela: number
-  fora: AnuncioConferido[]
-  conferidoEm: string
-  // Anúncios da célula sem preço lido (o balão do (!) avisa).
-  naoLidos: number
-  anuncios: number
-  // A margem usada na linha (a do produto ou a Geral), para o balão.
-  margem: number
-}
-
-// Anúncios cuja diferença para o preço da Tabela passa da margem (em %). Na
-// margem exata não marca; a folga de 1e-9 evita (!) por arredondamento.
-function anunciosForaDaMargem(
-  anuncios: AnuncioConferido[],
-  tabela: number,
-  margemPct: number,
-): AnuncioConferido[] {
-  if (!(tabela > 0)) return []
-  return anuncios.filter(
-    (a) => a.preco != null && (Math.abs(a.preco - tabela) / tabela) * 100 > margemPct + 1e-9,
-  )
-}
-
-// Célula que a grade mostra com preço que vai para o marketplace (NA/SV/
-// desligada ou sem preço não tem o que comparar).
-function celulaComparavel(prodId: string, accId: string): GridCell | null {
-  const c = cellOf(prodId, accId)
-  if (!c || c.price == null || c.cell_status === 'NA' || c.cell_status === 'SV' || c.source === 'disabled') {
-    return null
-  }
-  return c
+// Margem da linha, (!) e cartão vermelho: lib/cartaoVermelho.ts (M-22).
+// A célula que a grade mostra com preço que vai para o marketplace.
+function celulaComparavelDaGrade(prodId: string, accId: string): GridCell | null {
+  return celulaComparavel(cellOf(prodId, accId))
 }
 
 // Compara com o preço ATUAL da célula (o da Tabela agora), não com o da hora
@@ -3569,197 +3481,30 @@ function celulaComparavel(prodId: string, accId: string): GridCell | null {
 // departamento certo carregadas.
 // Calculado uma vez para a grade inteira (a célula só consulta o mapa).
 const divergencias = computed(() => {
-  const m = new Map<string, Divergencia>()
   const mg = margem.value
-  if (!mg || mg.department !== department.value || !gradePronta.value) return m
-  for (const conf of conferencia.value?.celulas ?? []) {
-    if (conf.situacao !== 'conferida') continue
-    const margemLinha = margemDaLinha(mg, conf.pricing_product_id)
-    if (margemLinha == null) continue
-    const c = celulaComparavel(conf.pricing_product_id, conf.pricing_account_id)
-    if (!c) continue
-    const tabela = Number(c.price)
-    const fora = anunciosForaDaMargem(conf.anuncios, tabela, margemLinha)
-    if (fora.length) {
-      m.set(`${conf.pricing_product_id}::${conf.pricing_account_id}`, {
-        tabela,
-        fora,
-        conferidoEm: conf.conferido_em,
-        naoLidos: anunciosNaoLidos(conf).length,
-        anuncios: conf.anuncios.length,
-        margem: margemLinha,
-      })
-    }
-  }
-  return m
+  if (!mg || mg.department !== department.value || !gradePronta.value) return new Map<string, Divergencia>()
+  return divergenciasDaConferencia(conferencia.value?.celulas ?? [], mg, celulaComparavelDaGrade)
 })
 
 function divergenciaDe(prodId: string, accId: string): Divergencia | null {
   return divergencias.value.get(`${prodId}::${accId}`) ?? null
 }
 
-function anunciosNaoLidos(conf: CelulaConferida): AnuncioConferido[] {
-  return conf.anuncios.filter((a) => a.preco == null)
-}
-
-// "Sem anúncio": o servidor grava um texto (situacao 'sem_anuncio' da
-// conferência e `texto` do bloqueio do catálogo no /grid) — MOTIVO_SEM_INTEGRACAO
-// e MOTIVO_SEM_VINCULO (services/pricing/conferencia.py) e os do catálogo
-// (TEXTO_BLOQUEIO e o da conta de kit sem integração, services/pricing/
-// anuncios.py). Outro texto é anúncio que o envio pula ('fora_do_envio':
-// pausado, em revisão, sincronizado, só catálogo...).
-type TipoSemAnuncio = 'sem_integracao' | 'sem_anuncio' | 'catalogo_nao_lido' | 'fora_do_envio'
-const MOTIVO_SEM_INTEGRACAO = 'conta sem integração'
-const MOTIVO_SEM_VINCULO = 'sem anúncio vinculado'
-const PREFIXOS_SEM_INTEGRACAO = ['Conta de kit sem integração']
-const PREFIXOS_SEM_VINCULO = ['Sem anúncio de catálogo vinculado']
-const PREFIXOS_CATALOGO_NAO_LIDO = ['Marca de catálogo ainda não lida']
-
-function tipoSemAnuncio(motivo: string | null): TipoSemAnuncio {
-  const m = motivo ?? ''
-  if (m === MOTIVO_SEM_INTEGRACAO || PREFIXOS_SEM_INTEGRACAO.some((p) => m.startsWith(p))) return 'sem_integracao'
-  if (!m || m === MOTIVO_SEM_VINCULO || PREFIXOS_SEM_VINCULO.some((p) => m.startsWith(p))) return 'sem_anuncio'
-  if (PREFIXOS_CATALOGO_NAO_LIDO.some((p) => m.startsWith(p))) return 'catalogo_nao_lido'
-  return 'fora_do_envio'
-}
-
-// ---------- Cartão vermelho (M-3, 17/11/2026)
-// Retângulo vermelho pequeno, à esquerda do aviãozinho, quando a célula tem
-// algum destes problemas (o balão lista os motivos):
-//   a) a conta não tem integração no DaVinci (na coluna de catálogo, a conta
-//      de kit dela) — token vencido não conta;
-//   b) não há anúncio vinculado (não repete quando já é o a);
-//   c) há anúncio vinculado inativo (pausado, em revisão, encerrado, inativo
-//      ou excluído) — basta um, e o balão diz qual;
-//   d) o último envio de preço deu erro;
-//   e) o preço do anúncio está fora da margem (a do produto ou a Geral).
-// Vem do /grid (integração, cell_status, bloqueio do catálogo) e da última
-// conferência (anúncios lidos ao vivo; "sem anúncio vinculado" na coluna de
-// kit). Bloqueio do catálogo que é regra do envio (sincronizado, mesmo
-// anúncio, sem tipo, sem preço de catálogo, só catálogo, marca ainda não
-// lida) não é defeito: sem cartão.
-type EntradaCartao = {
-  // A conta que diz se há integração: na coluna de catálogo, a BASE (a
-  // filha nunca tem integration_id).
-  conta: { integration_id: string | null } | null | undefined
-  celula: Pick<GridCell, 'cell_status' | 'catalogo'> | null | undefined
-  conferida: CelulaConferida | null | undefined
-  divergencia: Divergencia | null | undefined
-}
-const CARTAO_SEM_INTEGRACAO = 'Conta sem integração no DaVinci'
-const CARTAO_SEM_ANUNCIO = 'Sem anúncio vinculado nesta conta'
-const CARTAO_ERRO_ENVIO = 'O último envio de preço deu erro'
-// Anúncios inativos listados no balão; o resto vira "e mais N".
-const CARTAO_INATIVOS_NO_BALAO = 3
-const BLOQUEIOS_ANUNCIO_INATIVO = new Set(['pausado', 'em_revisao', 'encerrado'])
-// Status gravado do anúncio de catálogo → bloqueio (o _MOTIVO_POR_STATUS de
-// services/pricing/anuncios.py; 'inactive' é anúncio parado pelo ML).
-const BLOQUEIO_POR_STATUS: Record<string, string> = {
-  paused: 'pausado',
-  inactive: 'pausado',
-  under_review: 'em_revisao',
-  closed: 'encerrado',
-}
-// Texto da conferência que é anúncio inativo (e não regra do envio): ML
-// encerrado/moderado, Shopee/TikTok excluído, catálogo pausado/em revisão.
-const PADRAO_ANUNCIO_INATIVO = /pausad|em revis|encerrad|exclu[íi]d|modera/i
-
-function motivosDoCartao(e: EntradaCartao): string[] {
-  const motivos: string[] = []
-  const somar = (m: string) => {
-    if (!motivos.includes(m)) motivos.push(m)
-  }
-  const cat = e.celula?.catalogo ?? null
-  const conf = e.conferida ?? null
-
-  // a) Conta sem integração (inclusive a coluna de catálogo de uma conta de
-  // kit sem integração).
-  const semIntegracao = (!!e.conta && e.conta.integration_id == null)
-    || (cat?.bloqueio === 'sem_anuncio' && tipoSemAnuncio(cat.texto) === 'sem_integracao')
-  if (semIntegracao) somar(CARTAO_SEM_INTEGRACAO)
-
-  // b) Sem anúncio vinculado. Célula com `catalogo` (coluna de catálogo, ou
-  // de kit que só tem anúncio de catálogo): quem diz é o /grid. Coluna de kit:
-  // a conferência, ou o envio que gravou no_link.
-  if (!semIntegracao) {
-    const semVinculo = e.celula?.cell_status === 'no_link' || (cat
-      ? cat.bloqueio === 'sem_anuncio' && tipoSemAnuncio(cat.texto) === 'sem_anuncio'
-      : conf?.situacao === 'sem_anuncio' && tipoSemAnuncio(conf.motivo) === 'sem_anuncio')
-    if (semVinculo) somar(CARTAO_SEM_ANUNCIO)
-  }
-
-  // c) Anúncio vinculado inativo.
-  const inativos: string[] = []
-  for (const an of cat?.anuncios ?? []) {
-    // 'so_catalogo': o anúncio é da coluna Catálogo, não desta.
-    if (an.bloqueio === 'so_catalogo') continue
-    const bloqueio = an.bloqueio && BLOQUEIOS_ANUNCIO_INATIVO.has(an.bloqueio)
-      ? an.bloqueio
-      : BLOQUEIO_POR_STATUS[(an.status ?? '').toLowerCase()]
-    if (bloqueio) inativos.push(`Anúncio de catálogo ${an.external_id} ${MOTIVO_ANUNCIO[bloqueio] ?? bloqueio}`)
-  }
-  if (!inativos.length && cat?.bloqueio && BLOQUEIOS_ANUNCIO_INATIVO.has(cat.bloqueio)) {
-    inativos.push(`Anúncio de catálogo ${MOTIVO_ANUNCIO[cat.bloqueio] ?? cat.bloqueio}`)
-  }
-  // O que a conferência leu ao vivo: inativo, ou sem preço porque foi
-  // encerrado/excluído/moderado.
-  for (const a of conf?.anuncios ?? []) {
-    const motivoInativo = a.motivo && PADRAO_ANUNCIO_INATIVO.test(a.motivo) ? a.motivo : null
-    if (a.ativo !== false && !(a.preco == null && motivoInativo)) continue
-    const variacao = a.variacao ? ` (variação ${a.variacao})` : ''
-    const detalhe = motivoInativo
-      ? motivoInativo.replace(/\s*—\s*o envio pula$/, '')
-      : 'inativo no marketplace (pausado, em revisão ou fora do ar)'
-    inativos.push(`Anúncio ${a.anuncio}${variacao}: ${detalhe}`)
-  }
-  // "Fora do envio" da conferência: só pausado/em revisão/encerrado é motivo
-  // (sincronizado, mesmo anúncio, só catálogo... são regra do envio).
-  if (!cat && conf?.situacao === 'sem_anuncio' && tipoSemAnuncio(conf.motivo) === 'fora_do_envio'
-    && PADRAO_ANUNCIO_INATIVO.test(conf.motivo ?? '')) {
-    inativos.push(conf.motivo!)
-  }
-  for (const m of inativos.slice(0, CARTAO_INATIVOS_NO_BALAO)) somar(m)
-  if (inativos.length > CARTAO_INATIVOS_NO_BALAO) {
-    somar(`… e mais ${inativos.length - CARTAO_INATIVOS_NO_BALAO} anúncio(s) inativo(s)`)
-  }
-
-  // d) O último envio deu erro (o texto do erro não fica guardado).
-  if (e.celula?.cell_status === 'error') somar(CARTAO_ERRO_ENVIO)
-
-  // e) Fora da margem da linha.
-  const d = e.divergencia
-  if (d && d.fora.length) {
-    const a = d.fora[0]
-    const dif = ((a.preco! - d.tabela) / d.tabela) * 100
-    const mais = d.fora.length > 1 ? ` (e mais ${d.fora.length - 1})` : ''
-    somar(
-      `Preço do anúncio fora da margem de ${fmtPct(d.margem)}%: anúncio ${Math.round(a.preco!)} × Tabela ${Math.round(d.tabela)}`
-      + ` (${dif > 0 ? '+' : ''}${dif.toFixed(1).replace('.', ',')}%)${mais}`,
-    )
-  }
-  return motivos
-}
-
 // Os motivos de cada célula da grade (produto::conta), já juntos para o
 // balão. Calculado uma vez para a grade inteira, como `divergencias`; vale
-// também para célula sem preço (conta sem integração: cartão em todas).
+// também para célula sem preço (conta sem integração: cartão em todas). A
+// regra (motivosDoCartao) é a de lib/cartaoVermelho.ts, a mesma das
+// Pendências do Faturamento (M-22).
 const cartoes = computed(() => {
-  const m = new Map<string, string>()
-  if (!gradePronta.value || !grid.value) return m
-  for (const acc of grid.value.accounts) {
-    const conta = contaParametros(acc)
-    for (const prod of grid.value.products) {
-      const chave = `${prod.id}::${acc.id}`
-      const motivos = motivosDoCartao({
-        conta,
-        celula: cellMap.value.get(chave),
-        conferida: conferenciaPorCelula.value.get(chave),
-        divergencia: divergencias.value.get(chave),
-      })
-      if (motivos.length) m.set(chave, motivos.join('\n'))
-    }
-  }
-  return m
+  if (!gradePronta.value || !grid.value) return new Map<string, string>()
+  return cartoesDaGrade({
+    contas: grid.value.accounts,
+    produtos: grid.value.products,
+    contaParametros: (acc) => contaParametros(acc as Account),
+    celulaDe: (chave) => cellMap.value.get(chave),
+    conferidaDe: (chave) => conferenciaPorCelula.value.get(chave),
+    divergenciaDe: (chave) => divergencias.value.get(chave),
+  })
 })
 
 function cartaoDe(prodId: string, accId: string): string | null {
@@ -4327,15 +4072,7 @@ const MOTIVOS_BLOQUEIO: Record<string, string> = {
   so_catalogo: 'Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo',
 }
 
-// Motivo curto por anúncio (campo `bloqueio` de cada anúncio do /grid).
-const MOTIVO_ANUNCIO: Record<string, string> = {
-  mesmo_anuncio: 'outra linha também manda preço',
-  sincronizado: 'sincronizado',
-  pausado: 'pausado',
-  em_revisao: 'em revisão',
-  encerrado: 'encerrado',
-  so_catalogo: 'vai pela coluna Catálogo',
-}
+// MOTIVO_ANUNCIO (motivo curto por anúncio): lib/cartaoVermelho.ts.
 
 function catalogoBloqueado(prodId: string, accId: string): CatalogoCelula | null {
   const cat = cellOf(prodId, accId)?.catalogo

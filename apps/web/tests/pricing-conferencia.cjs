@@ -13,14 +13,22 @@ const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filena
 assert.deepEqual(errors, [])
 const source = ts.createSourceFile(filename, descriptor.scriptSetup.content,
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-const node = source.statements.find((s) =>
-  ts.isFunctionDeclaration(s) && s.name?.text === 'anunciosForaDaMargem')
-assert.ok(node, 'anunciosForaDaMargem existe na página')
-const out = ts.transpileModule(node.getText(source), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022 }, reportDiagnostics: true,
+// M-22 (24/11/2026): a regra do (!) e do cartão vermelho saiu da página para
+// lib/cartaoVermelho.ts (a mesma das Pendências do Faturamento). A página
+// importa de lá; os testes abaixo rodam o módulo de verdade.
+const libFonte = fs.readFileSync(path.resolve(__dirname, '../lib/cartaoVermelho.ts'), 'utf8')
+const libOut = ts.transpileModule(libFonte, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true,
 })
-assert.deepEqual(out.diagnostics, [])
-const fora = new Function(`${out.outputText}\nreturn anunciosForaDaMargem`)()
+assert.deepEqual(libOut.diagnostics, [])
+const L = {}
+new Function('exports', 'require', libOut.outputText)(L, () => { throw new Error('lib/cartaoVermelho.ts não importa nada') })
+assert.match(descriptor.scriptSetup.content, /from '~\/lib\/cartaoVermelho'/, 'a página usa a regra do módulo')
+for (const nome of ['motivosDoCartao', 'tipoSemAnuncio', 'margemDaLinha', 'anunciosForaDaMargem', 'margemDaResposta']) {
+  assert.ok(!source.statements.some((s) => ts.isFunctionDeclaration(s) && s.name?.text === nome),
+    `${nome} não tem cópia na página`)
+}
+const fora = L.anunciosForaDaMargem
 
 const a = (preco, anuncio = 'MLB1') => ({ anuncio, variacao: null, preco, preco_promocional: null, ativo: true, motivo: null })
 
@@ -98,14 +106,9 @@ const pegarConst = (nome) => {
 
 // Margem da linha (M-2, 17/11/2026): o % do produto com "Por produto" ligado,
 // senão a Geral com "Geral" ligado, senão nenhuma (a linha não é conferida).
-const margens = new Function([
-  pegarConst('MARGEM_PADRAO'),
-  pegar('margemDaLinha'),
-  pegar('margemDaResposta'),
-  pegar('lerPct'),
-  'return { margemDaLinha, margemDaResposta, lerPct }',
-].join('\n'))()
-const { margemDaLinha, margemDaResposta, lerPct } = margens
+const lerPct = new Function(`${pegar('lerPct')}\nreturn lerPct`)()
+const { margemDaLinha, margemDaResposta } = L
+assert.equal(L.MARGEM_PADRAO, 5)
 const mg = (geral_ligada, por_produto_ligada) => ({
   department: 'celular', margem_pct: 5, geral_ligada, por_produto_ligada, produtos: { p1: 12, p0: 0 }, pode_editar: true,
 })
@@ -142,14 +145,7 @@ assert.equal(lerPct('abc'), undefined)
 console.log('pricing conferencia margem da linha ok')
 
 // Cartão vermelho (M-3, 17/11/2026): os motivos a–e, do /grid e da conferência.
-const motivosDoCartao = new Function('fmtPct', [
-  ...['MOTIVO_SEM_INTEGRACAO', 'MOTIVO_SEM_VINCULO', 'PREFIXOS_SEM_INTEGRACAO', 'PREFIXOS_SEM_VINCULO',
-    'PREFIXOS_CATALOGO_NAO_LIDO', 'MOTIVO_ANUNCIO', 'CARTAO_SEM_INTEGRACAO', 'CARTAO_SEM_ANUNCIO',
-    'CARTAO_ERRO_ENVIO', 'CARTAO_INATIVOS_NO_BALAO', 'BLOQUEIOS_ANUNCIO_INATIVO', 'BLOQUEIO_POR_STATUS',
-    'PADRAO_ANUNCIO_INATIVO'].map(pegarConst),
-  ...['tipoSemAnuncio', 'motivosDoCartao'].map(pegar),
-  'return motivosDoCartao',
-].join('\n'))(fmtPct)
+const { motivosDoCartao } = L
 const SEM_INTEGRACAO = 'Conta sem integração no DaVinci'
 const SEM_ANUNCIO = 'Sem anúncio vinculado nesta conta'
 const ERRO_ENVIO = 'O último envio de preço deu erro'
@@ -318,14 +314,10 @@ console.log('pricing conferencia template ok')
   // Quem pode conferir e conta com integração: clicável. Sem permissão, conta
   // sem integração (ou catálogo de conta de kit sem integração): só o motivo.
   const conferivel = ({ pode = true, integ = 'I1', catalogo = null } = {}) => new Function(
-    'conferencia', 'contaParametros', 'cellOf',
-    [
-      ...['MOTIVO_SEM_INTEGRACAO', 'MOTIVO_SEM_VINCULO', 'PREFIXOS_SEM_INTEGRACAO', 'PREFIXOS_SEM_VINCULO',
-        'PREFIXOS_CATALOGO_NAO_LIDO'].map(pegarConst),
-      ...['tipoSemAnuncio', 'celulaConferivel'].map(pegar),
-      'return celulaConferivel',
-    ].join('\n'),
-  )({ value: { pode_conferir: pode } }, () => ({ integration_id: integ }), () => ({ cell_status: 'auto', catalogo }))('P1', { id: 'C1' })
+    'conferencia', 'contaParametros', 'cellOf', 'tipoSemAnuncio',
+    [pegar('celulaConferivel'), 'return celulaConferivel'].join('\n'),
+  )({ value: { pode_conferir: pode } }, () => ({ integration_id: integ }), () => ({ cell_status: 'auto', catalogo }),
+    L.tipoSemAnuncio)('P1', { id: 'C1' })
   assert.equal(conferivel(), true)
   assert.equal(conferivel({ pode: false }), false)
   assert.equal(conferivel({ integ: null }), false)
