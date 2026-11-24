@@ -14,7 +14,8 @@
 //  - cada tela que lista as três: Tabela de Preços (botões, inclusive os que
 //    vêm de /api/segments, que no banco estão Celular, Mala, Eletro),
 //    Marketing › Conferência (colunas e o select do grupo da conta),
-//    Horários dos anúncios, Importação, Produtos, Garantias, Faturamento,
+//    Horários dos anúncios, Importação, Produtos, Garantias, Faturamento (chips
+//    da coluna Tipo e as Pendências, M-22),
 //    Lojas (tipos e faturador por tipo), Cadastros › Segmentos;
 //  - varredura: qualquer lista do código com Celular e outra categoria fora
 //    da ordem quebra este teste (para não voltar a divergir). As listas de
@@ -123,7 +124,6 @@ for (const [rel, ancora, esperado] of [
   ['pages/pricing/[tab].vue', 'const DEPARTMENTS_FALLBACK', ORDEM],
   ['pages/importacao.vue', 'const CATEGORIAS =', ORDEM],
   ['pages/produtos.vue', 'const DEPARTAMENTOS:', ORDEM],
-  ['components/FaturamentoPainel.vue', 'const departmentOptions =', ORDEM],
   ['components/MarketingHorarios.vue', 'const SEGMENTOS:', ORDEM],
   ['pages/store-info.vue', 'const DEPARTMENTS =', ORDEM],
   ['pages/store-info.vue', 'const TIPO_OPTIONS:', ORDEM],
@@ -140,6 +140,12 @@ for (const [rel, ancora, esperado] of [
   assert.match(lojas, /const DEPT_ORDER = \[\.\.\.ORDEM_CATEGORIAS, 'catalogo', 'shein'\]/, 'Lojas: faturador por tipo')
   assert.match(lojas, /v-for="d in tiposEmOrdem\(row\)"/, 'Lojas: os tipos do cartão')
   assert.match(lojas, /v-for="d in tiposEmOrdem\(row\)\.filter/, 'Lojas: as etiquetas da coluna Tipo')
+  // Faturamento (M-22, 24/11/2026): o select Tipo saiu; os chips da coluna Tipo
+  // e as Pendências (as três categorias) vêm da lista única.
+  const fat = ler('components/FaturamentoPainel.vue')
+  assert.match(fat, /import \{ ORDEM_CATEGORIAS, ROTULO_CATEGORIA, ordenarCategorias \} from '~\/lib\/categorias'/)
+  assert.match(fat, /return ordenarCategorias\(r\.departments \?\? \[\]\)/, 'Faturamento: os chips de Tipo')
+  assert.match(fat, /Promise\.all\(ORDEM_CATEGORIAS\.map\(/, 'Faturamento: as Pendências de Celular, Eletro e Mala')
   const imp = ler('pages/importacao.vue')
   assert.match(imp, /const CATEGORIAS = ordenarCategorias\(\[/, 'Importação pela lista única')
   // Horários: abre na primeira opção (Celular), não mais em Mala.
