@@ -81,8 +81,8 @@ function setTab(t: Tab) {
 }
 
 // Ajuda da tela (M-18, 23/11/2026): o "?" da barra do topo abre este texto num
-// painel à direita. Por enquanto só a aba Tabela de Preços (Celular/Mala/Eletro);
-// nas abas Contas, Produtos e no Faturamento o "?" some.
+// painel à direita. Abas Tabela de Preços e Contas (M-59), nas três categorias;
+// na aba Produtos o "?" some. O Faturamento registra a dele (FaturamentoPainel).
 const AJUDA_TABELA = {
   titulo: 'Tabela de Preços',
   conteudo: [
@@ -134,7 +134,67 @@ const AJUDA_TABELA = {
     },
   ],
 }
-useAjuda(() => (tab.value === 'tabela' ? AJUDA_TABELA : null))
+// Ajuda da aba Contas (M-59, 25/11/2026): o mesmo painel e o mesmo formato da
+// Tabela de Preços. "(ADM)": colunas que só o administrador muda (Kit, Comissão
+// e marg/frete ele também é o único que vê; Custo total todos veem).
+const AJUDA_CONTAS = {
+  titulo: 'Contas',
+  conteudo: [
+    {
+      titulo: 'Para que serve',
+      itens: [
+        'Guarda, para cada conta de marketplace, a comissão, as margens e os fretes que a Tabela de Preços usa para calcular o preço.',
+        'Cada linha é uma conta; a do Mercado Livre vale para Clássico e Premium.',
+      ],
+    },
+    {
+      titulo: 'Colunas',
+      itens: [
+        { termo: 'Plataforma e Conta', texto: 'o marketplace e o nome da conta.' },
+        { termo: 'Catálogo ML', texto: 'só nas contas do Mercado Livre: Ativo ou Inativo; clique para ligar ou desligar o catálogo. As margens próprias do catálogo, só o ADM muda.' },
+        { termo: 'Equipe', texto: 'número da equipe que vê a conta; vem da loja ou da integração ligada a ela. Sem nenhuma, aparece "Sem equipe".' },
+        { termo: 'Kit (ADM)', texto: 'qual dos kits de custo da aba Produtos a conta usa.' },
+        { termo: 'Comissão (ADM)', texto: '% da plataforma. No ML aparece Clássico · Premium; clique para mudar.' },
+        { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) por tipo de produto; são eles que formam o preço.' },
+        { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
+        { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela para ver o % por produto e o gasto por dia.' },
+        { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem.' },
+      ],
+    },
+    {
+      titulo: 'Barra de botões',
+      itens: [
+        { termo: 'Buscar', texto: 'procura a conta pelo nome, plataforma ou e-mail.' },
+        { termo: 'Plataforma e Contas', texto: 'escolhem quais linhas aparecem.' },
+        { termo: 'Layout', texto: 'mostra ou esconde Catálogo ML, Equipe, Kit, Comissão e Obs.' },
+        { termo: 'Equipes', texto: 'mostra só as contas das equipes marcadas (ou "Sem equipe").' },
+        { termo: 'Excel', texto: 'baixa as contas que estão na tela (busca e filtros), só com as colunas à mostra.' },
+        { termo: 'Vincular Integrações', texto: 'liga as contas sem integração à conexão do marketplace; não troca vínculo que já existe.' },
+        { termo: 'Adicionar Conta', texto: 'cria uma conta nova; no ML ela já nasce com Clássico e Premium, com a comissão usual da categoria.' },
+      ],
+    },
+    {
+      titulo: 'Passo a passo',
+      numerada: true,
+      itens: [
+        'Crie a conta em Adicionar Conta.',
+        'Preencha kit, comissão, margens e fretes (ADM).',
+        'Clique em Vincular Integrações.',
+        'Confira se a Equipe apareceu.',
+        'Volte à aba Tabela de Preços e use Atualizar › Conferir.',
+      ],
+    },
+    {
+      titulo: 'Observação',
+      itens: [
+        'Afiliado, Desconto, Ads e Custo total não mudam o preço da Tabela.',
+        'Conta sem integração não envia preço e acende o cartão vermelho.',
+        'Mudar as contas, Vincular Integrações e Adicionar Conta exigem a permissão de editar Contas.',
+      ],
+    },
+  ],
+}
+useAjuda(() => (tab.value === 'tabela' ? AJUDA_TABELA : tab.value === 'contas' ? AJUDA_CONTAS : null))
 
 // Quem vê o quê na linha dos botões: os departamentos (e as sub-abas) são da
 // Tabela de Preços; o botão Faturamento, da permissão Faturamento.

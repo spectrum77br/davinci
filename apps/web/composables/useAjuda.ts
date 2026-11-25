@@ -36,7 +36,8 @@ export function useAjudaAberta() {
 
 /**
  * A página registra a sua ajuda. Aceita um valor, ref ou função: quando vira
- * null (ex.: outra aba da mesma página) a ajuda sai. Ao sair da página também.
+ * null (ex.: a aba Produtos) a ajuda sai. Ao sair da página também. Quando
+ * troca por outra ajuda, o painel aberto fica aberto com o texto novo.
  * Só apaga se a ajuda da tela ainda for a desta página — a próxima página pode
  * já ter registrado a dela antes desta desmontar.
  */
@@ -59,6 +60,14 @@ export function useAjuda(ajuda: MaybeRefOrGetter<Ajuda | null | undefined>) {
   watch(
     () => toValue(ajuda),
     (nova) => {
+      // Trocou de uma ajuda para outra na mesma página (ex.: aba Tabela de
+      // Preços → aba Contas, M-59): o painel aberto continua aberto e o texto
+      // acompanha a aba.
+      if (nova && minha && toRaw(atual.value) === minha) {
+        minha = toRaw(nova)
+        atual.value = minha
+        return
+      }
       soltar()
       if (nova) {
         minha = toRaw(nova)

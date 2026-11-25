@@ -101,6 +101,32 @@ async function principal() {
     pagina.stop()
     assert.equal(atual.value, null)
 
+    // M-59: duas abas com ajuda (Tabela de Preços e Contas). Trocar de aba com
+    // o painel aberto: continua aberto e o texto acompanha a aba.
+    const C = { titulo: 'Contas', conteudo: [] }
+    const aba2 = Vue.ref('tabela')
+    const pagina2 = Vue.effectScope()
+    pagina2.run(() => useAjuda(() => (aba2.value === 'tabela' ? A : aba2.value === 'contas' ? C : null)))
+    aberta.value = true
+    aba2.value = 'contas'
+    await Vue.nextTick()
+    assert.equal(Vue.toRaw(atual.value), C, 'aba Contas: a ajuda dela')
+    assert.equal(aberta.value, true, 'o painel aberto continua aberto')
+    aba2.value = 'tabela'
+    await Vue.nextTick()
+    assert.equal(Vue.toRaw(atual.value), A, 'voltou à Tabela: o texto acompanha')
+    assert.equal(aberta.value, true)
+    aba2.value = 'produtos'
+    await Vue.nextTick()
+    assert.equal(atual.value, null, 'aba Produtos: sem ajuda')
+    assert.equal(aberta.value, false, 'e o painel fecha')
+    aba2.value = 'contas'
+    await Vue.nextTick()
+    assert.equal(Vue.toRaw(atual.value), C)
+    assert.equal(aberta.value, false, 'voltou de uma aba sem ajuda: fechado')
+    pagina2.stop()
+    assert.equal(atual.value, null)
+
     // No servidor não registra: a barra do topo já saiu sem o "?" (hidratação igual).
     const servidor = carregarComposable(novoEstado(), false)
     const escopo = Vue.effectScope()
@@ -235,7 +261,8 @@ async function principal() {
     const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filename })
     assert.deepEqual(errors, [])
     const setup = descriptor.scriptSetup.content
-    assert.match(setup, /\nuseAjuda\(\(\) => \(tab\.value === 'tabela' \? AJUDA_TABELA : null\)\)\n/, 'só na aba Tabela de Preços')
+    assert.match(setup, /\nuseAjuda\(\(\) => \(tab\.value === 'tabela' \? AJUDA_TABELA : tab\.value === 'contas' \? AJUDA_CONTAS : null\)\)\n/,
+      'nas abas Tabela de Preços e Contas (M-59); na Produtos, nada')
     const fonte = ts.createSourceFile(filename, setup, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
     const st = fonte.statements.find((s) => ts.isVariableStatement(s)
       && s.declarationList.declarations.some((d) => d.name.getText(fonte) === 'AJUDA_TABELA'))
@@ -256,9 +283,34 @@ async function principal() {
       'permissão de editar a Tabela de Preços']) {
       assert.ok(tudo.includes(trecho), `o texto fala de: ${trecho}`)
     }
+    // M-59: a ajuda da aba Contas, no mesmo formato.
+    const stC = fonte.statements.find((s) => ts.isVariableStatement(s)
+      && s.declarationList.declarations.some((d) => d.name.getText(fonte) === 'AJUDA_CONTAS'))
+    assert.ok(stC, 'AJUDA_CONTAS existe na página')
+    const CONTAS = new Function(`${transpile(stC.getText(fonte))}\nreturn AJUDA_CONTAS`)()
+    assert.equal(CONTAS.titulo, 'Contas', 'o painel diz "Ajuda · Contas"')
+    assert.deepEqual(CONTAS.conteudo.map((s) => s.titulo), ['Para que serve', 'Colunas', 'Barra de botões', 'Passo a passo', 'Observação'])
+    const secaoC = (t) => CONTAS.conteudo.find((s) => s.titulo === t)
+    const termosC = (t) => secaoC(t).itens.map((i) => i.termo)
+    assert.deepEqual(termosC('Colunas'), ['Plataforma e Conta', 'Catálogo ML', 'Equipe', 'Kit (ADM)', 'Comissão (ADM)',
+      'marg e frete (ADM)', 'Afiliado e Desconto', 'Ads', 'Custo total (ADM)'])
+    assert.deepEqual(termosC('Barra de botões'), ['Buscar', 'Plataforma e Contas', 'Layout', 'Equipes', 'Excel',
+      'Vincular Integrações', 'Adicionar Conta'])
+    assert.equal(secaoC('Passo a passo').numerada, true)
+    assert.equal(secaoC('Passo a passo').itens.length, 5)
+    for (const i of [...secaoC('Colunas').itens, ...secaoC('Barra de botões').itens]) {
+      assert.equal(typeof i.texto, 'string', `${i.termo}: termo em negrito + explicação`)
+    }
+    const tudoC = JSON.stringify(CONTAS)
+    for (const trecho of ['vale para Clássico e Premium', 'só nas contas do Mercado Livre', 'Sem equipe',
+      'nome, plataforma ou e-mail', 'busca e filtros', 'só com as colunas à mostra', 'não troca vínculo que já existe',
+      'já nasce com Clássico e Premium', 'Atualizar › Conferir', 'não mudam o preço da Tabela', 'permissão de editar Contas']) {
+      assert.ok(tudoC.includes(trecho), `o texto da aba Contas fala de: ${trecho}`)
+    }
     // O SFC inteiro continua compilando.
     const script = compileScript(descriptor, { id: 'pricing-tab', inlineTemplate: false })
     assert.ok(script.bindings.AJUDA_TABELA)
+    assert.ok(script.bindings.AJUDA_CONTAS)
   }
 
   // ------------------------------------------------ o painel: o cartãozinho vermelho (M-24)
@@ -358,7 +410,7 @@ async function principal() {
     assert.equal(atual.value, null)
   }
 
-  console.log('PASS: ajuda por tela — "?" à esquerda da lua só com ajuda, abre/fecha (toggle), destacado aberto, painel 440px abaixo do topo com rolagem, Esc fecha, ajuda some ao sair, Tabela de Preços com o texto; Faturamento (M-24) com o texto do pedido, cartão vermelho e Margem só para ADM')
+  console.log('PASS: ajuda por tela — "?" à esquerda da lua só com ajuda, abre/fecha (toggle), destacado aberto, painel 440px abaixo do topo com rolagem, Esc fecha, ajuda some ao sair, Tabela de Preços e Contas (M-59) com o texto, painel aberto acompanha a aba; Faturamento (M-24) com o texto do pedido, cartão vermelho e Margem só para ADM')
 }
 
 principal().catch((e) => {
