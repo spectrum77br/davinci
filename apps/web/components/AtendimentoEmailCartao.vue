@@ -55,7 +55,9 @@ export type EmailDaMensagem = {
   codigo?: string | null
 }
 
-export type AnexoDoEmail = { id: string; tamanho: number | null; filename?: string | null; content_type?: string | null }
+// `midia` (25/11/2026, só no e-mail do chamado do site): a foto ou o vídeo que vira
+// miniatura na conversa (pelo que o e-mail declara; a rota confere os bytes).
+export type AnexoDoEmail = { id: string; tamanho: number | null; filename?: string | null; content_type?: string | null; midia?: 'imagem' | 'video' | null }
 export type CartaoEmail = {
   id: string
   estado: string
@@ -99,6 +101,8 @@ export type CartaoEmail = {
   texto?: string | null
   links_removidos?: number
   anexos?: AnexoDoEmail[]
+  // O aviso do chamado do site: o arquivo grande demais para vir anexado (só o link do site).
+  arquivos_so_pelo_link?: { nome: string; tamanho: string }[]
 }
 export type PedidoSugerido = {
   numero: string
@@ -201,6 +205,37 @@ export function tamanhoLegivel(bytes: number | null | undefined): string {
 // O anexo SÓ baixa (octet-stream, nosniff, CSP sandbox: nunca abre aqui).
 export function urlDoAnexo(id: string): string {
   return `/api/atendimento/email/anexos/${encodeURIComponent(id)}`
+}
+
+// A FOTO e o VÍDEO do cliente no chamado do SITE (25/11/2026, `midia_site`): a rota
+// da conversa entrega a foto como veio e o vídeo convertido para MP4 (H.264 + AAC,
+// o que o Chrome toca); `?capa=1` é a miniatura do vídeo (JPEG).
+export function urlDaMidiaDoSite(conversaId: string, anexoId: string, capa = false): string {
+  return `/api/atendimento/email/conversas/${encodeURIComponent(conversaId)}/midias/${encodeURIComponent(anexoId)}${capa ? '?capa=1' : ''}`
+}
+export type MidiaDoEmail = { chave: string; tipo: 'imagem' | 'video'; url: string; capa: string | null; nome: string; tamanho: string }
+// O id do anexo é o UUID da Central (o servidor confere de novo).
+const RE_ID_DO_ANEXO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// As miniaturas do e-mail: as fotos e os vídeos, na ordem do formulário do site
+// ("US-26-0006-01-produto.jpg" … "-05-video.mov"); sem a conversa (quem não a
+// abre), nenhuma.
+export function midiasDoCartao(c: Pick<CartaoEmail, 'conversa_id' | 'anexos'> | null | undefined): MidiaDoEmail[] {
+  const conversa = c?.conversa_id
+  if (!conversa) return []
+  return (c?.anexos || [])
+    .filter((a) => !!a && (a.midia === 'imagem' || a.midia === 'video') && RE_ID_DO_ANEXO.test(String(a.id || '')))
+    .sort((a, b) => String(a.filename || '').localeCompare(String(b.filename || ''), 'pt-BR', { numeric: true }))
+    .map((a): MidiaDoEmail => {
+      const video = a.midia === 'video'
+      return {
+        chave: a.id,
+        tipo: video ? 'video' : 'imagem',
+        url: urlDaMidiaDoSite(conversa, a.id),
+        capa: video ? urlDaMidiaDoSite(conversa, a.id, true) : null,
+        nome: a.filename || (video ? 'vídeo' : 'foto'),
+        tamanho: tamanhoLegivel(a.tamanho),
+      }
+    })
 }
 
 // A nossa resposta: "sac@marca → cliente@x · modo de teste · na fila do Mac".

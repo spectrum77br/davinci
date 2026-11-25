@@ -1318,6 +1318,10 @@ function soCartao(m: Mensagem) {
 // O vídeo do comprador na devolução do TikTok (18/11/2026) abre no mesmo visor.
 const imagemAberta = ref<{ url: string; nome: string; tipo?: 'imagem' | 'video' } | null>(null)
 onKeyStroke('Escape', () => { imagemAberta.value = null })
+// O vídeo do visor que não carregou (25/11/2026): a frase no lugar da tela preta.
+// Cada abertura começa de novo.
+const visorFalhou = ref(false)
+watch(imagemAberta, () => { visorFalhou.value = false })
 // As fotos da avaliação (cartão e painel) abrem no mesmo visor.
 function abrirImagem(i: { url: string; nome: string; tipo?: 'imagem' | 'video' }) {
   imagemAberta.value = i
@@ -4393,6 +4397,9 @@ watch(() => props.conversaId, (novo, velho) => {
                     <span v-else class="rounded border bg-background px-2 py-0.5 text-xs text-muted-foreground">{{ pc.nome }}</span>
                   </template>
                 </div>
+                <!-- A foto e o vídeo do cliente no chamado do SITE (25/11/2026): vêm anexados ao
+                     aviso; a miniatura abre no visor grande e o vídeo toca (convertido para MP4). -->
+                <AtendimentoEmailMidias v-if="l.m.email && cartaoDe(l.m)" :cartao="cartaoDe(l.m)!" :class="l.m.apagada ? 'opacity-60' : ''" @abrir="abrirImagem" />
                 <!-- A frase diz o que fazer; o código cru (para o suporte) fica no title. -->
                 <div v-if="l.m.status === 'falhou' && !l.m.apagada" class="mt-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-700 dark:text-red-300" :title="l.m.erro || ''">
                   {{ erroDoBalao(l.m) }}
@@ -5125,7 +5132,11 @@ watch(() => props.conversaId, (novo, velho) => {
       :aria-label="imagemAberta.nome"
       @click.self="imagemAberta = null"
     >
-      <video v-if="imagemAberta.tipo === 'video'" :src="imagemAberta.url" :aria-label="imagemAberta.nome" controls autoplay playsinline class="max-h-[88vh] max-w-full rounded-md bg-black shadow-2xl" data-visor-video />
+      <video v-if="imagemAberta.tipo === 'video' && !visorFalhou" :src="imagemAberta.url" :aria-label="imagemAberta.nome" controls autoplay playsinline class="max-h-[88vh] max-w-full rounded-md bg-black shadow-2xl" data-visor-video @error="visorFalhou = true" />
+      <!-- O vídeo que não carregou (25/11/2026): dizer, em vez da tela preta parada. -->
+      <div v-else-if="imagemAberta.tipo === 'video'" class="max-w-sm rounded-md bg-white/10 px-4 py-3 text-center text-sm text-white" role="alert" data-visor-erro>
+        Não deu para tocar este vídeo aqui. O arquivo original continua na mensagem (no e-mail: "ver o e-mail inteiro" › Anexos).
+      </div>
       <img v-else :src="imagemAberta.url" :alt="imagemAberta.nome" referrerpolicy="no-referrer" class="max-h-[88vh] max-w-full rounded-md object-contain shadow-2xl" />
       <div class="absolute right-3 top-3 flex items-center gap-2">
         <a :href="imagemAberta.url" target="_blank" rel="noopener noreferrer" class="rounded-md bg-white/15 px-2 py-1 text-xs text-white hover:bg-white/25">abrir original</a>
