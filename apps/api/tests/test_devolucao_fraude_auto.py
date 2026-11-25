@@ -349,7 +349,9 @@ async def test_entra_todo_so_reembolso_da_fraude_com_prazo_ou_sem(db: AsyncSessi
     await _caso(db, make_user, "790006", tipo="RETURN", fila="fraude")
     await _caso(db, make_user, "790007", abrir_chamado=False)  # "Abrir chamado: Não"
     await _caso(db, make_user, "790008", situacao="545902")  # Bling fora de Aguardando
-    await _caso(db, make_user, "790010", fonte="ml", acao="SELLER_RESPOND_REFUND", loja="90")
+    # ML (25/11/2026): a reclamação sem devolução entra (o robô só propõe a defesa).
+    await _caso(db, make_user, "790010", fonte="ml", acao="", loja="90")
+    await _logistica_ml(db, "790010")  # reclamação aberta no ML
     await _caso(db, make_user, "790011")
     db.add(Devolution(pedido_bling="790011", conta="mini", sku="a17.sp"))  # já lançado
     await _caso(db, make_user, "790012")
@@ -360,7 +362,7 @@ async def test_entra_todo_so_reembolso_da_fraude_com_prazo_ou_sem(db: AsyncSessi
     await _caso(db, make_user, "790014", fila="fraude")  # só reembolso fixado na Fraude: entra
     await db.commit()
     lista = await auto.candidatos(db)
-    assert sorted(lista) == ["790001", "790002", "790003", "790009", "790014"]
+    assert sorted(lista) == ["790001", "790002", "790003", "790009", "790010", "790014"]
     # Quem a plataforma ainda espera responder vem primeiro (o teto da rodada).
     assert set(lista[:3]) == {"790001", "790002", "790014"}
 
@@ -1634,3 +1636,252 @@ async def test_voltou_pra_fraude_depois_do_cancelamento_do_robo_pede_de_novo(
     await db.commit()
     r = await auto.rodada(db, agora=depois + timedelta(minutes=10))
     assert r["video_pedido"] == 0 and r["pedidos"]["799807"] == "pedido de vídeo cancelado", r
+
+
+# ── Mercado Livre: reclamação sem devolução, passo 1 = só propõe (25/11/2026) ──
+
+
+class _FakeML:
+    """O cliente do ML de mentira: a reclamação, as mensagens e o motivo."""
+
+    def __init__(
+        self,
+        claim: dict | Exception,
+        mensagens: list | Exception | None = None,
+        nome: str = "",
+    ):
+        self.claim, self.mensagens, self.nome = claim, mensagens or [], nome
+        self.lidas = 0
+
+    async def get_claim(self, claim_id):
+        self.lidas += 1
+        if isinstance(self.claim, Exception):
+            raise self.claim
+        return self.claim
+
+    async def mensagens_da_reclamacao(self, claim_id):
+        if isinstance(self.mensagens, Exception):
+            raise self.mensagens
+        return self.mensagens
+
+    async def motivo_de_reclamacao(self, reason_id):
+        return {"id": reason_id, "name": self.nome, "detail": "detalhe do ML"}
+
+
+def _claim_ml(
+    *,
+    status: str = "opened",
+    stage: str = "claim",
+    tipo: str = "mediations",
+    acoes: tuple[str, ...] = ("send_message_to_complainant", "open_dispute"),
+    beneficiado: str | None = None,
+    fechou: str | None = None,
+) -> dict:
+    prazo = (AGORA + timedelta(days=2)).isoformat()
+    claim = {
+        "id": 5001,
+        "type": tipo,
+        "status": status,
+        "stage": stage,
+        "reason_id": "PDD9939",
+        "resource": "order",
+        "players": [
+            {"role": "complainant", "type": "buyer", "available_actions": []},
+            {
+                "role": "respondent",
+                "type": "seller",
+                "available_actions": [
+                    {"action": a, "mandatory": a == "open_dispute", "due_date": prazo}
+                    for a in acoes
+                ],
+            },
+        ],
+    }
+    if beneficiado:
+        claim["resolution"] = {"benefited": [beneficiado], "closed_by": fechou or "mediator"}
+    return claim
+
+
+def _usa_ml(monkeypatch, fake: _FakeML | None) -> None:
+    """Troca o cliente do ML (o da renovação segura do token); None = sem integração."""
+
+    async def _cliente(session, dev):
+        return fake
+
+    monkeypatch.setattr(auto, "_ml_cliente", _cliente)
+
+
+async def _logistica_ml(
+    db: AsyncSession,
+    pedido: str,
+    *,
+    reclamacao: str = "opened",
+    entregue_em: datetime | None = AGORA - timedelta(days=20),
+) -> None:
+    from app.models import Logistica
+
+    db.add(
+        Logistica(
+            pedido_bling=pedido,
+            plataforma="Mercado Livre",
+            conta="barbosa",
+            meli_status={
+                "ship_status": "delivered",
+                "claim_stage": "claim",
+                "claim_status": reclamacao,
+            },
+            entregue_em=entregue_em,
+        )
+    )
+    await db.commit()
+
+
+async def test_ml_so_reclamacao_aberta_entra_e_fica_depois_da_tiktok_e_shopee(
+    db: AsyncSession, make_user
+):
+    await _caso(db, make_user, "799910", fonte="ml", acao="", loja="93")
+    await _logistica_ml(db, "799910")
+    await _caso(db, make_user, "799911", fonte="ml", acao="", loja="93")
+    await _logistica_ml(db, "799911", reclamacao="closed")  # encerrada: fora
+    await _caso(db, make_user, "799912", fonte="ml", acao="", loja="93")  # sem Logística: fora
+    await _caso(db, make_user, "799919", acao="", prazo=AGORA - timedelta(days=3))  # Shopee
+    assert await auto.candidatos(db) == ["799919", "799910"]
+
+
+async def test_ml_le_motivo_mensagens_entrega_e_o_que_o_ml_deixa_fazer(
+    db: AsyncSession, monkeypatch
+):
+    # Entregue às 22:30 de 05/11 em São Paulo (01:30 de 06/11 em UTC).
+    await _logistica_ml(db, "799901", entregue_em=datetime(2026, 11, 6, 1, 30, tzinfo=UTC))
+    mensagens = [
+        {
+            "sender_role": "complainant",
+            "receiver_role": "respondent",
+            "message": "veio outro",
+            "attachments": [{"filename": "foto.jpg"}],
+        },
+        {"sender_role": "complainant", "receiver_role": "respondent", "message": "celular velho"},
+    ]
+    _usa_ml(monkeypatch, _FakeML(_claim_ml(), mensagens, nome="different_item_other"))
+    dev = Devolution(pedido_bling="799901", conta="barbosa", sku="dg018.pi")
+
+    caso = await auto._ler_caso(db, "ml", "5001", dev)
+    assert caso.situacao == auto.RESPONDER
+    assert caso.codigo == "Recebeu outro produto (PDD9939)"
+    assert caso.texto == "veio outro celular velho"
+    assert caso.comprador_mandou_prova is True and caso.ida_entregue is True
+    assert caso.entregue_em == "05/11" and caso.prazo
+    assert "reclamação com o comprador" in caso.detalhe
+    assert "pedir a mediação do ML" in caso.detalhe and "prazo" in caso.detalhe
+
+
+async def test_ml_situacoes_da_reclamacao(db: AsyncSession, monkeypatch):
+    dev = Devolution(pedido_bling="799902", conta="barbosa", sku="dg018.pi")
+
+    async def ler(claim, mensagens=None):
+        _usa_ml(monkeypatch, _FakeML(claim, mensagens, nome="not_working_item"))
+        return await auto._ler_caso(db, "ml", "5001", dev)
+
+    # O ML mediando sem pedir nada à loja: analisando.
+    assert (await ler(_claim_ml(stage="dispute", acoes=()))).situacao == auto.EM_ANALISE
+    # Mediando e a loja pode falar com o mediador: responder.
+    caso = await ler(_claim_ml(stage="dispute", acoes=("send_message_to_mediator",)))
+    assert caso.situacao == auto.RESPONDER and "o ML está mediando" in caso.detalhe
+    # Encerrada a favor do comprador: pago; se quem encerrou foi a loja, ela aceitou.
+    pago = _claim_ml(status="closed", acoes=(), beneficiado="complainant")
+    assert (await ler(pago)).situacao == auto.PAGO
+    aceito = _claim_ml(status="closed", acoes=(), beneficiado="complainant", fechou="respondent")
+    assert (await ler(aceito)).situacao == auto.ACEITO_PELA_LOJA
+    # Encerrada a favor da loja (ou sem reembolso): nada a fazer.
+    loja = _claim_ml(status="closed", acoes=(), beneficiado="respondent")
+    assert (await ler(loja)).situacao == auto.CANCELADO
+    # Alguém da loja já falou com o mediador fora do DaVinci.
+    falou = [{"sender_role": "respondent", "receiver_role": "mediator", "message": "segue"}]
+    assert (await ler(_claim_ml(stage="dispute"), falou)).situacao == auto.CONTESTADO
+    # Sem conseguir ler as mensagens não dá pra saber se já falaram: tenta depois.
+    assert (await ler(_claim_ml(), RuntimeError("500"))).situacao == auto.SEM_CASO
+    # Cancelamento não é caso do robô (vai pra pessoa uma vez); devolução/troca tem pacote
+    # (o sync corrige); API fora (conta bloqueada): tenta depois.
+    cancel = await ler(_claim_ml(tipo="cancel_purchase"))
+    assert cancel.situacao == auto.FORA and "cancelamento" in cancel.detalhe
+    assert (await ler(_claim_ml(tipo="returns"))).situacao == auto.SEM_CASO
+    assert (await ler(RuntimeError("403"))).situacao == auto.SEM_CASO
+    # Conta sem integração do ML: pessoa.
+    _usa_ml(monkeypatch, None)
+    sem = await auto._ler_caso(db, "ml", "5001", dev)
+    assert sem.situacao == auto.FORA and "não está ligada" in sem.detalhe
+
+
+async def test_ml_le_a_reclamacao_antes_de_pedir_o_video(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """Cancelamento, conta bloqueada ou API fora não travam a equipe com pedido de vídeo."""
+    for pedido in ("799920", "799921", "799922"):
+        await _caso(db, make_user, pedido, fonte="ml", acao="", conta="barbosa", loja="94")
+        await _logistica_ml(db, pedido)
+    fakes = {
+        "RET799920": _FakeML(_claim_ml(), nome="not_working_item"),
+        "RET799921": _FakeML(_claim_ml(tipo="cancel_purchase")),
+        "RET799922": _FakeML(RuntimeError("403 bloqueada")),
+    }
+
+    async def _le(session, plataforma, rid, dev):
+        _usa_ml(monkeypatch, fakes[rid])
+        return await auto._ler_caso_ml(session, rid, dev)
+
+    monkeypatch.setattr(auto, "_ler_caso", _le)
+
+    r = await auto.rodada(db)
+    assert r["video_pedido"] == 1 and r["pedidos"]["799920"] == "vídeo pedido", r
+    assert _status_video(await _rast(db, "799920")) == "pendente"
+    # Cancelamento: pessoa, uma vez, sem vídeo.
+    rast = await _rast(db, "799921")
+    assert _status_video(rast) == "nao_solicitado" and auto.NAO_RESPONDE in rast.observacao
+    # Bloqueada: nada pra equipe, tenta de novo na próxima.
+    assert _status_video(await _rast(db, "799922")) == "nao_solicitado"
+    assert r["pedidos"]["799922"] == "caso não lido agora"
+    r = await auto.rodada(db)
+    assert r["pedidos"]["799921"] == "pessoa (já avisado)"
+    assert r["pedidos"]["799920"] == "esperando o vídeo" and fakes["RET799920"].lidas == 1
+
+
+async def test_ml_com_video_so_propoe_mesmo_ligado_e_a_tiktok_lanca(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """Passo 1 do ML: a IA escreve a defesa e ela fica na Observação com o que o ML deixa
+    a loja fazer — nada é lançado nem vai pro ML. A TikTok da mesma rodada segue igual."""
+    video = {"video_link": "https://mega.nz/file/v#k", "video_enviado_em": AGORA}
+    await _caso(db, make_user, "799903", fonte="ml", acao="", conta="barbosa", loja="91", **video)
+    await _logistica_ml(db, "799903")
+    await _caso(
+        db, make_user, "799904", fonte="tiktok", acao="SELLER_RESPOND_REFUND", loja="92", **video
+    )
+    lidos_ia: list[str] = []
+    _ia(monkeypatch, lidos=lidos_ia)
+    ml = auto.Caso(
+        situacao=auto.RESPONDER,
+        codigo="Recebeu outro produto (PDD9939)",
+        texto="veio outro",
+        ida_entregue=True,
+        detalhe="Mercado Livre: reclamação com o comprador (sem o ML); a loja pode: pedir a "
+        "mediação do ML",
+    )
+
+    async def _le(session, plataforma, rid, dev):
+        return ml if plataforma == "ml" else _OK
+
+    monkeypatch.setattr(auto, "_ler_caso", _le)
+    agendados = _sem_disparo(monkeypatch)
+
+    r = await auto.rodada(db)
+    assert r["propostos"] == 1 and r["lancados"] == 1, r
+    assert r["pedidos"]["799903"].startswith("proposto:")
+    assert await _lancamentos(db, "799903") == [] and agendados == ["799904"]
+    obs = (await _rast(db, "799903")).observacao
+    assert auto.PROPOSTA in obs and "pedir a mediação do ML" in obs
+    # A defesa proposta continua legível pro passo 2 (o que ele aprovar é o que sai).
+    assert auto.proposta_anterior(obs) == ("Golpe", DEFESA)
+    assert any("Plataforma: Mercado Livre" in t for t in lidos_ia)
+    # Próximas rodadas: não pergunta de novo, espera o OK.
+    r = await auto.rodada(db)
+    assert r["pedidos"]["799903"] == "proposta escrita (esperando o OK)" and r["propostos"] == 0

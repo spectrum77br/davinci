@@ -8,8 +8,9 @@ painel fraude tem que abrir chamado… [a IA] solicita os vídeos e, chegando v�
 analisa, faz o lançamento e abre chamado". O chamado é sempre uma DEFESA contra o
 que o comprador alegou ("chegou um sabonete"), nunca "não recebemos a devolução".
 
-Quem entra: o pedido do painel Fraude da TikTok ou da Shopee — a própria plataforma
-diz que é SÓ REEMBOLSO (TikTok `return_type=REFUND`; Shopee `needs_logistics=false`),
+Quem entra: o pedido do painel Fraude da TikTok, da Shopee ou do ML — a própria
+plataforma diz que é SÓ REEMBOLSO (TikTok `return_type=REFUND`; Shopee
+`needs_logistics=false`; ML reclamação sem devolução),
 o mesmo sinal do painel — aberto, em Aguardando Devolução, sem lançamento, sem
 chamado e sem "Abrir chamado: Não". Com prazo de resposta correndo ou não: o caso
 que a plataforma já reembolsou ou está analisando também ganha a defesa.
@@ -39,7 +40,16 @@ reembolso que a própria loja aceitou (TikTok), "não tenho o vídeo" pela 2ª v
 1ª o robô pede de novo 12 h depois) e pedido de vídeo cancelado. A defesa aprovada
 no "só propor" é a que sai quando ele desliga (a IA não é perguntada de novo). O robô
 não mexe em quem uma pessoa já mexeu (lançamento, chamado, "Abrir chamado: Não",
-tirar da Fraude). ML e Amazon ficam de fora nesta etapa.
+tirar da Fraude). Amazon fica de fora.
+
+Mercado Livre (Vinicius, 25/11/2026 — 306785, reclamação sem devolução parada na
+Fraude: "Pode começar" o passo 1): a reclamação do ML sem pacote de volta já chega à
+Fraude como só reembolso (`logistica_meli._so_reembolso`, com o nº da reclamação). O
+robô pede o vídeo igual, lê a reclamação (motivo do ML, mensagens do comprador, em
+que pé está, o que o ML deixa a loja fazer e até quando) e a IA escreve a defesa —
+mas no ML, por ora, SÓ PROPÕE (`ML_SO_PROPOR`): a defesa fica na Observação e nada
+vai pro ML. Abrir a mediação não tem volta; o passo 2 (mandar sozinho) vem depois de
+ele aprovar algumas defesas.
 
 Saiu da Fraude com o vídeo ainda pedido (Vinicius, 25/11/2026 — 308495: a entrega
 falhou, o pacote voltou pela ida e o pedido foi pro Acompanhamento, mas o pedido de
@@ -62,7 +72,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import bindparam, text
+from sqlalchemy import bindparam, select, text
 
 from app.config import get_settings
 from app.models import DevolucaoRastreio, Devolution, EstoquePedidoVideo
@@ -83,6 +93,9 @@ PROPOR = "propor"
 # True = só PROPÕE a defesa (Observação do pedido) em vez de lançar. Vinicius,
 # 16/11/2026: "não precisa por trava, pode colocar para rodar direto".
 SO_PROPOR = False
+# Mercado Livre (25/11/2026): só PROPÕE a defesa, mesmo com o robô ligado — nada vai
+# pro ML (abrir a mediação não tem volta). Desligar = passo 2, com o OK do Vinicius.
+ML_SO_PROPOR = True
 
 CONDICAO = "Não devolvido"
 # Ações em que a plataforma espera a nossa resposta (vão primeiro na fila da rodada).
@@ -123,6 +136,9 @@ CANCELADO = "cancelado"
 NEGOCIACAO = "negociacao"
 ACEITO_PELA_LOJA = "aceito_pela_loja"
 SEM_CASO = ""  # não deu pra ler / não é mais só reembolso: tenta na próxima rodada
+# ML: não é caso do robô de vez (cancelamento, conta sem integração) — fica pra pessoa
+# com o porquê em `Caso.detalhe` e não é relido.
+FORA = "fora"
 
 
 def modo() -> str:
@@ -147,6 +163,8 @@ class Caso:
     prazo: str = ""
     # Negociação da Shopee: "R$ 30,00 (o pedido era R$ 600,00)" — vai no recado.
     proposta: str = ""
+    # ML: em que pé está e o que o ML deixa a loja fazer — vai no recado da proposta.
+    detalhe: str = ""
 
 
 # ── Candidatos ───────────────────────────────────────────────────────────
@@ -154,12 +172,18 @@ class Caso:
 _CANDIDATOS_SQL = f"""
 SELECT r.pedido_bling, r.fonte_auto, r.devolucao_id_auto
 FROM "{SCHEMA}".devolucao_rastreio r
-WHERE lower(COALESCE(r.fonte_auto, '')) IN ('tiktok', 'shopee')
+WHERE lower(COALESCE(r.fonte_auto, '')) IN ('tiktok', 'shopee', 'ml')
   AND COALESCE(btrim(r.devolucao_id_auto), '') <> ''
   -- Só reembolso pela própria plataforma (o mesmo sinal do painel Fraude) e
   -- ninguém tirou da Fraude. Caso COM pacote que alguém pôs na Fraude na mão
   -- ("chegou vazio") é outro fluxo: fica com a pessoa.
   AND upper(COALESCE(r.devolucao_tipo_auto, '')) = 'REFUND'
+  -- ML (25/11/2026): só a reclamação ABERTA (a Logística lê o claim). A encerrada
+  -- continua REFUND no sync e ficaria na lista pra sempre.
+  AND (lower(COALESCE(r.fonte_auto, '')) <> 'ml' OR EXISTS (
+        SELECT 1 FROM "{SCHEMA}".logistica l
+        WHERE l.pedido_bling = r.pedido_bling
+          AND lower(COALESCE(l.meli_status->>'claim_status', '')) = 'opened'))
   AND lower(COALESCE(r.fila_manual, '')) <> 'acompanhamento'
   AND r.abrir_chamado IS DISTINCT FROM false
   AND EXISTS (SELECT 1 FROM "{SCHEMA}".bling_orders bo
@@ -174,6 +198,8 @@ WHERE lower(COALESCE(r.fonte_auto, '')) IN ('tiktok', 'shopee')
 -- Primeiro quem a plataforma ainda espera responder (prazo correndo).
 ORDER BY COALESCE(upper(COALESCE(r.acao_auto, '')) IN :acoes
                   AND r.prazo_acao_auto > :agora, false) DESC,
+         -- O ML (passo 1, só propõe) não toma as leituras da TikTok/Shopee.
+         lower(COALESCE(r.fonte_auto, '')) = 'ml',
          r.prazo_acao_auto NULLS LAST, r.pedido_bling
 """
 _SQL = text(_CANDIDATOS_SQL).bindparams(bindparam("acoes", expanding=True))
@@ -357,12 +383,199 @@ def _proposta_de_verdade(det: dict, neg: dict) -> str:
     return f"{_brl(oferta)} (o pedido era {_brl(pedido)})"
 
 
+# O que o ML deixa a LOJA fazer na reclamação (`players[respondent].available_actions`),
+# em português — vai no recado da proposta (passo 1 do ML: ver o que dá pra responder).
+_ACOES_ML = {
+    "send_message_to_complainant": "mandar mensagem ao comprador",
+    "send_message_to_mediator": "mandar mensagem ao mediador",
+    "open_dispute": "pedir a mediação do ML",
+    "refund": "reembolsar",
+    "allow_return": "aceitar a devolução",
+    "allow_partial_refund": "oferecer reembolso parcial",
+}
+_RESPONDE_ML = ("send_message_to_mediator", "open_dispute")
+# O nome que a IA da defesa lê (`defesa_ia.Fatos.plataforma`).
+_NOME_PLATAFORMA = {"tiktok": "TikTok Shop", "shopee": "Shopee", "ml": "Mercado Livre"}
+
+
+async def _entrega_ml(session: AsyncSession, dev: Devolution) -> tuple[bool | None, str]:
+    """A ida do pedido pela Logística: (entregue?, "dd/mm"). Sem linha = (None, "")."""
+    from app.models import Logistica  # tardio: evita ciclo
+
+    pb = (dev.pedido_bling or "").strip()
+    if not pb:
+        return None, ""
+    row = (
+        (
+            await session.execute(
+                select(Logistica).where(Logistica.pedido_bling == pb).order_by(Logistica.created_at)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is None:
+        return None, ""
+    ms = row.meli_status if isinstance(row.meli_status, dict) else {}
+    envio = str(ms.get("ship_status") or "").strip().lower()
+    if envio == "delivered" or row.entregue_em is not None:
+        # "dd/mm" em São Paulo (entrega das 21h às 24h não vira o dia seguinte).
+        return True, _hoje_txt(row.entregue_em)[:5] if row.entregue_em else ""
+    if envio in ("not_delivered", "returning_to_sender", "returned", "cancelled"):
+        return False, ""
+    return None, ""
+
+
+async def _ler_caso_ml(session: AsyncSession, claim_id: str, dev: Devolution) -> Caso:
+    """A reclamação do ML (sem devolução) lida agora. Mesmas situações da TikTok/Shopee:
+    a loja ainda pode responder (pedir a mediação / falar com o mediador), o ML está
+    mediando sem pedir nada à loja, já reembolsou o comprador, a própria loja aceitou,
+    a loja já falou com o mediador fora do DaVinci, encerrada sem reembolso."""
+    from app.services.atendimento import reclamacoes as rec
+
+    client = await _ml_cliente(session, dev)
+    if client is None:
+        return Caso(situacao=FORA, detalhe="a conta do Mercado Livre não está ligada ao DaVinci")
+    try:
+        claim = await client.get_claim(claim_id)
+    except Exception as e:  # noqa: BLE001 — conta bloqueada / API fora: tenta na próxima
+        logger.warning("devolucao_fraude_auto_ml_claim_falhou", claim_id=claim_id, err=str(e)[:200])
+        return Caso(situacao=SEM_CASO)
+    tipo = str(claim.get("type") or "").strip().lower()
+    if tipo in rec.TIPOS_ML_IGNORADOS:
+        return Caso(
+            situacao=FORA,
+            detalhe="no Mercado Livre é um cancelamento, não uma reclamação de só reembolso",
+        )
+    if tipo in rec.TIPOS_ML_DEVOLUCAO:
+        # Devolução/troca: tem pacote. O sync pôs REFUND por uma leitura que falhou e
+        # corrige sozinho — não é defesa de só reembolso.
+        return Caso(situacao=SEM_CASO)
+    if not rec.esta_aberta(claim):
+        res = claim.get("resolution") if isinstance(claim.get("resolution"), dict) else {}
+        if rec.decisao(claim) != "a favor do comprador":
+            return Caso(situacao=CANCELADO)  # encerrada sem reembolso ao comprador
+        por_loja = str(res.get("closed_by") or "").strip().lower() == "respondent"
+        situacao = ACEITO_PELA_LOJA if por_loja else PAGO
+    else:
+        acoes = {str(a.get("action") or "").strip().lower() for a in rec.acoes_da_loja(claim)}
+        situacao = RESPONDER if acoes & set(_RESPONDE_ML) else EM_ANALISE
+    try:
+        # A que LEVANTA no erro: sem ler as mensagens não dá pra saber se a loja já
+        # falou com o mediador (nem o que o comprador escreveu) — tenta na próxima.
+        mensagens = await client.mensagens_da_reclamacao(claim_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("devolucao_fraude_auto_ml_msgs_falhou", claim_id=claim_id, err=str(e)[:200])
+        return Caso(situacao=SEM_CASO)
+    do_comprador = [
+        m for m in mensagens if str(m.get("sender_role") or "").strip().lower() == "complainant"
+    ]
+    if any(
+        str(m.get("sender_role") or "").strip().lower() == "respondent"
+        and str(m.get("receiver_role") or "").strip().lower() == "mediator"
+        for m in mensagens
+    ):
+        return Caso(situacao=CONTESTADO)  # alguém da loja já falou com o mediador
+    reason_id = str(claim.get("reason_id") or "").strip()
+    motivo = ""
+    if reason_id:
+        try:
+            corpo = await client.motivo_de_reclamacao(reason_id)
+        except Exception:  # noqa: BLE001
+            corpo = {}
+        nome = str(corpo.get("name") or "").strip()
+        motivo = rec.MOTIVOS_ML.get(nome) or str(corpo.get("detail") or "").strip() or nome
+    texto = " ".join(
+        " ".join(str(m.get("message") or "").split()) for m in do_comprador[-3:]
+    ).strip()
+    acao, prazo = rec.acao_pendente(claim)
+    etapa = (
+        "o ML está mediando"
+        if str(claim.get("stage") or "").lower() == "dispute"
+        else ("reclamação com o comprador (sem o ML)")
+    )
+    pode = sorted(
+        {
+            _ACOES_ML.get(a, a)
+            for a in (str(x.get("action") or "").strip().lower() for x in rec.acoes_da_loja(claim))
+            if a
+        }
+    )
+    detalhe = (
+        f"Mercado Livre: {etapa}"
+        + (f"; a loja pode: {', '.join(pode)}" if pode and rec.esta_aberta(claim) else "")
+        + (f"; prazo {_fmt_ml(prazo)}" if prazo and acao else "")
+    )
+    entregue, entregue_em = await _entrega_ml(session, dev)
+    return Caso(
+        situacao=situacao,
+        codigo=f"{motivo} ({reason_id})" if motivo and reason_id else (motivo or reason_id),
+        texto=texto,
+        ida_entregue=entregue,
+        entregue_em=entregue_em,
+        comprador_mandou_prova=any(m.get("attachments") for m in do_comprador),
+        prazo=_fmt_ml(prazo) if prazo else "",
+        detalhe=detalhe,
+    )
+
+
+def _fmt_ml(quando: datetime | None) -> str:
+    """ "dd/mm HH:MM" em São Paulo. PURA."""
+    if quando is None:
+        return ""
+    return _hoje_txt(quando)
+
+
+async def _ml_cliente(session: AsyncSession, dev: Devolution) -> Any | None:
+    """O cliente do ML da conta do pedido com a renovação de token SEGURA do
+    atendimento (grava o token novo numa sessão própria, com trava): a rodada desfaz
+    a sessão quando um pedido falha, e o refresh token do ML só vale uma vez — perder
+    o novo desligaria a loja. None = a conta não tem integração do ML."""
+    from app.services import chamados_devolucao as cd
+    from app.services import logistica_meli
+    from app.services.atendimento.clientes import cliente_da_integracao
+
+    for conta in await cd._contas_candidatas(session, None, dev):
+        integ = await logistica_meli._ml_integration_for_conta(session, conta)
+        if integ is not None:
+            return await cliente_da_integracao(integ)
+    return None
+
+
+def _rotulo_sem_caso(plataforma: str, caso: Caso) -> str:
+    """O que vai no resumo da rodada quando não há o que responder agora. PURA."""
+    if caso.situacao != CANCELADO:
+        return "caso não lido agora"
+    if plataforma == "ml":
+        return "reclamação do ML encerrada sem reembolso"
+    return "o comprador cancelou"
+
+
+async def _fora_do_robo(
+    session: AsyncSession,
+    rast: DevolucaoRastreio,
+    caso: Caso,
+    agora: datetime,
+    resumo: Resumo,
+    pedido: str,
+) -> None:
+    """Não é caso do robô de vez (ML: cancelamento, conta sem integração): fica pra
+    pessoa com o porquê e não é relido (NAO_RESPONDE)."""
+    await _anotar_e_gravar(
+        session, rast, f"{MARCA} ({_hoje_txt(agora)}): {caso.detalhe} — {NAO_RESPONDE}."
+    )
+    resumo.pra_pessoa += 1
+    resumo.pedidos[pedido] = f"pessoa: {caso.detalhe}"
+
+
 async def _ler_caso(session: AsyncSession, plataforma: str, rid: str, dev: Devolution) -> Caso:
     """O caso lido agora na plataforma: em que pé está, o que o comprador alegou,
     a entrega do pedido."""
     from app.services import chamados_devolucao as cd
     from app.services import chamados_tiktok_reembolso as vig
 
+    if plataforma == "ml":
+        return await _ler_caso_ml(session, rid, dev)
     if plataforma == "tiktok":
         client = await cd._tiktok_client_para(session, None, dev)
         caso = cd._caso_so_reembolso(await cd._casos_tiktok(client, dev), rid)
@@ -489,7 +702,7 @@ def _o_que(caso: Caso, resumo: str = "") -> str:
 _POR_SITUACAO = {
     CONTESTADO: "o caso já foi contestado na plataforma fora do DaVinci — registrar o lançamento e o chamado à mão",
     NEGOCIACAO: "o comprador fez uma proposta na Shopee (negociação) — decidir à mão",
-    ACEITO_PELA_LOJA: "a própria loja aceitou o reembolso no Seller Center — conferir se é pra contestar",
+    ACEITO_PELA_LOJA: "a própria loja aceitou o reembolso na plataforma — conferir se é pra contestar",
 }
 
 
@@ -516,13 +729,14 @@ async def _analisar(
     rascunho = _linha(pecas[0], motivo="", video="")
     resumo.leituras += 1
     caso = await _ler_caso(session, plataforma, linha.devolucao_id_auto.strip(), rascunho)
+    if caso.situacao == FORA:
+        await _fora_do_robo(session, rast, caso, agora, resumo, pedido)
+        return None
     if caso.situacao in (SEM_CASO, CANCELADO):
         # Cancelado pelo comprador / não é mais só reembolso / leitura vazia: o sync
         # de 30 min tira da lista; senão, tenta de novo na próxima rodada.
         resumo.sem_resposta_pendente += 1
-        resumo.pedidos[pedido] = (
-            "o comprador cancelou" if caso.situacao == CANCELADO else "caso não lido agora"
-        )
+        resumo.pedidos[pedido] = _rotulo_sem_caso(plataforma, caso)
         return None
     if caso.situacao == ACEITO_PELA_LOJA and instrucao:
         caso = Caso(**{**caso.__dict__, "situacao": PAGO})
@@ -536,6 +750,7 @@ async def _analisar(
             session,
             rast,
             f"{MARCA} ({_hoje_txt(agora)}): {porque}; {NAO_RESPONDE}."
+            + (f" ({caso.detalhe})" if caso.detalhe else "")
             + (f" {chave_instr}" if chave_instr else ""),
         )
         resumo.pra_pessoa += 1
@@ -551,7 +766,7 @@ async def _analisar(
         return None
     resumo.analises += 1
     fatos = defesa_ia.Fatos(
-        plataforma="TikTok Shop" if plataforma == "tiktok" else "Shopee",
+        plataforma=_NOME_PLATAFORMA.get(plataforma, "Shopee"),
         situacao=caso.situacao,
         codigo=caso.codigo,
         texto=caso.texto,
@@ -569,7 +784,9 @@ async def _analisar(
             session,
             rast,
             f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso, decisao.resumo)}" — '
-            f"{decisao.pessoa}; {NAO_RESPONDE}." + (f" {chave_instr}" if chave_instr else ""),
+            f"{decisao.pessoa}; {NAO_RESPONDE}."
+            + (f" ({caso.detalhe})" if caso.detalhe else "")
+            + (f" {chave_instr}" if chave_instr else ""),
         )
         resumo.pra_pessoa += 1
         resumo.pedidos[pedido] = f"pessoa: {decisao.pessoa}"
@@ -742,6 +959,35 @@ async def _cancelar_video_de_quem_saiu(
             logger.error("devolucao_fraude_auto_falhou", pedido_bling=pedido, err=str(e)[:200])
 
 
+async def _ml_pode_pedir_video(
+    session: AsyncSession, linha: Any, rast: DevolucaoRastreio, agora: datetime, resumo: Resumo
+) -> bool:
+    """ML (25/11/2026): a reclamação é lida antes do pedido de vídeo. Só pede quando
+    ela está lá pra ser respondida; o que não é caso do robô vai pra pessoa uma vez;
+    leitura que falhou (conta bloqueada, API fora) tenta na próxima rodada sem pedir
+    nada à equipe. Conta no teto de leituras da rodada."""
+    pedido = linha.pedido_bling
+    if resumo.leituras >= TETO_LEITURAS:
+        resumo.pedidos.setdefault(pedido, "fica pra próxima rodada")
+        return False
+    pecas = await _pecas(session, pedido)
+    if not pecas:
+        resumo.pedidos[pedido] = "sem peças na busca"
+        return False
+    resumo.leituras += 1
+    caso = await _ler_caso(
+        session, "ml", linha.devolucao_id_auto.strip(), _linha(pecas[0], motivo="", video="")
+    )
+    if caso.situacao == FORA:
+        await _fora_do_robo(session, rast, caso, agora, resumo, pedido)
+        return False
+    if caso.situacao in (SEM_CASO, CANCELADO):
+        resumo.sem_resposta_pendente += 1
+        resumo.pedidos[pedido] = _rotulo_sem_caso("ml", caso)
+        return False
+    return True
+
+
 async def _lancar(
     session: AsyncSession,
     linha: Any,
@@ -787,7 +1033,8 @@ async def _lancar(
             rast,
             f'{MARCA} ({_hoje_txt(agora)}): {PROPOSTA} (motivo "{decisao.motivo}") — o comprador '
             f'alega "{_o_que(caso, decisao.resumo)}"; defesa: "{decisao.defesa}". '
-            "Esperando o OK pra lançar e abrir o chamado.",
+            "Esperando o OK pra lançar e abrir o chamado."
+            + (f" ({caso.detalhe})" if caso.detalhe else ""),
         )
         resumo.propostos += 1
         resumo.pedidos[pedido] = f"proposto: {decisao.motivo}"
@@ -908,13 +1155,22 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     # a leitura do rastreio da ida que falhou nesta meia hora.
                     resumo.pedidos[pedido] = "voltou pra Fraude há pouco (espera pra pedir)"
                 else:
+                    # ML: lê a reclamação ANTES de pedir o vídeo — cancelamento, conta
+                    # sem integração ou bloqueada não podem travar a equipe à toa.
+                    ml = (linha.fonte_auto or "").strip().lower() == "ml"
+                    if ml and not await _ml_pode_pedir_video(session, linha, rast, agora, resumo):
+                        continue
                     await _pedir_video(
                         session, pedido, rast, agora, resumo, voltou=_cancelado_pelo_robo(obs)
                     )
                 continue
             if m not in (LIGADO, PROPOR):
                 continue
-            if m == PROPOR and PROPOSTA in obs:
+            # ML: só propõe mesmo com o robô ligado (ML_SO_PROPOR, 25/11/2026).
+            propor = m == PROPOR or (
+                ML_SO_PROPOR and (linha.fonte_auto or "").strip().lower() == "ml"
+            )
+            if propor and PROPOSTA in obs:
                 resumo.pedidos[pedido] = "proposta escrita (esperando o OK)"
                 continue
             if (
@@ -931,7 +1187,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                 rast,
                 agora,
                 resumo,
-                so_propor=m == PROPOR,
+                so_propor=propor,
                 instrucao=instr if com_instrucao else "",
                 chave_instr=chave_instr if com_instrucao else "",
             )
