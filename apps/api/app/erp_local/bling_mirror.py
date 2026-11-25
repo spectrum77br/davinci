@@ -389,6 +389,91 @@ def attribute(erp, now=None):
     return {"pairs": paired}
 
 
+# Exits from before the pairing (or that found no order in time): the orders whose store marked
+# them shipped (DaVinci's Logística, the store's own time, never an estimate) in the minutes
+# before the exit, in the order they shipped, as many units as the exit has.
+HISTORY_SQL = (
+    "SELECT coalesce(json_agg(t),'[]') FROM (SELECT pedido_bling AS number,"
+    " status_datas->'logistics_status'->>'em' AS logistics,"
+    " status_datas->'logistics_status'->>'fonte' AS logistics_source,"
+    " status_datas->'order_status'->>'em' AS ordered,"
+    " status_datas->'order_status'->>'fonte' AS ordered_source"
+    " FROM davinci.logistica WHERE data >= current_date - 30 AND pedido_bling IS NOT NULL) t"
+)
+HISTORY_BEFORE, HISTORY_AFTER = timedelta(minutes=15), timedelta(minutes=2)
+
+
+def _when(value):
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else None
+
+
+def attribute_history(erp, reader=read_local, now=None):
+    times = {}
+    for row in reader(HISTORY_SQL) or []:
+        for key in ("logistics", "ordered"):
+            moment = _when(row.get(key)) if row.get(key + "_source") == "plataforma" else None
+            if moment and str(row.get("number") or "") not in times:
+                times[str(row["number"])] = moment
+    moment = now or datetime.fromisoformat(erp.now())
+    paired = 0
+    with erp.connection() as db:
+        db.executescript(SCHEMA)
+        db.execute("BEGIN IMMEDIATE")
+        mirrored = {
+            r["number"]: (r["store_number"], r["situation"])
+            for r in db.execute("SELECT number,store_number,situation FROM bling_mirror_orders")
+        }
+        taken = {r[0] for r in db.execute("SELECT DISTINCT number FROM movement_orders")}
+        units = {}
+        for number, shipped in times.items():
+            store_number, situation = mirrored.get(number, (None, None))
+            if not store_number or number in taken or situation in NOT_SHIPPED:
+                continue
+            for line in items(db, store_number):
+                for code, amount in _parts(db, line["sku"], Decimal(line["quantity"])).items():
+                    units.setdefault(code, []).append([shipped, number, amount])
+        for pending in units.values():
+            pending.sort(key=lambda u: (u[0], u[1]))
+        exits = db.execute(
+            "SELECT m.id,m.sku,m.created_at,m.physical_delta,(SELECT coalesce(sum(CAST(o.quantity"
+            " AS REAL)),0) FROM movement_orders o WHERE o.movement_id=m.id) AS done FROM movements"
+            " m WHERE m.reason=? AND CAST(m.physical_delta AS REAL)<0 AND m.created_at<? "
+            "ORDER BY m.created_at,m.id",
+            (REASON, (moment - PAIR_WINDOW).isoformat()),
+        ).fetchall()
+        for row in exits:
+            pending = units.get(row["sku"])
+            at = _when(row["created_at"])
+            if not pending or not at:
+                continue
+            left = -Decimal(row["physical_delta"]) - Decimal(str(row["done"]))
+            for unit in pending:
+                if left <= 0:
+                    break
+                if unit[2] <= 0 or not at - HISTORY_BEFORE <= unit[0] <= at + HISTORY_AFTER:
+                    continue
+                take = min(left, unit[2])
+                db.execute(
+                    "INSERT INTO movement_orders VALUES (?,?,?,'historico') ON CONFLICT"
+                    "(movement_id,number) DO UPDATE SET quantity=CAST(CAST(quantity AS REAL)+"
+                    "CAST(excluded.quantity AS REAL) AS TEXT)",
+                    (row["id"], unit[1], str(take)),
+                )
+                unit[2] -= take
+                left -= take
+                paired += 1
+        db.commit()
+    return {"pairs": paired}
+
+
+_HISTORY_EVERY = timedelta(hours=6)
+_history_at = None
+
+
 def run(erp, reader=read_local):
     """One pass: stock and situations, each on its own so one failing keeps the other; then each
     new exit gets the order that caused it."""
@@ -405,4 +490,12 @@ def run(erp, reader=read_local):
         report["pedidos"] = attribute(erp)
     except ERPError as error:
         report["pedidos"] = {"state": error.code}
+    global _history_at
+    moment = datetime.fromisoformat(erp.now())
+    if _history_at is None or moment - _history_at >= _HISTORY_EVERY:
+        _history_at = moment
+        try:
+            report["pedidos_antigos"] = attribute_history(erp, reader)
+        except ERPError as error:
+            report["pedidos_antigos"] = {"state": error.code}
     return report

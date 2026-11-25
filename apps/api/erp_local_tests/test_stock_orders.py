@@ -131,3 +131,49 @@ def test_the_stock_route_lists_the_orders_of_each_exit(tmp_path):
     exit_item = next(i for i in items if Decimal(i["physical_delta"]) == -2)
     assert sorted(o["number"] for o in exit_item["orders"]) == ["310204", "310306"]
     assert all(i["orders"] == [] for i in items if i is not exit_item)
+
+
+def test_old_exits_get_the_orders_the_store_shipped_just_before_them(erp):
+    from datetime import datetime, timedelta
+
+    link(erp, "demo.aparelho", "100")
+    shipped = [
+        order("A1", "310204", "15"),
+        order("A2", "310306", "15"),
+        order("A3", "310181", "15"),
+        order("A4", "310288", "15"),
+    ]
+    round_(erp, 9, 0, shipped)  # opening, the orders already shipped: no pairing then
+    start = last_id(erp)
+    round_(erp, 8, 0, shipped)  # 11:32, one exit
+    round_(erp, 6, 0, shipped)  # 11:38, two exits merged
+    with erp.connection() as db:
+        first, merged = [
+            datetime.fromisoformat(r[0])
+            for r in db.execute(
+                "SELECT created_at FROM movements WHERE id>? AND reason=? ORDER BY id",
+                (start, bling_mirror.REASON),
+            )
+        ]
+    at = (first - timedelta(seconds=40)).isoformat()
+    logistica = [
+        {"number": "310204", "logistics": at, "logistics_source": "plataforma"},
+        {
+            "number": "310181",
+            "logistics": (first - timedelta(seconds=30)).isoformat(),
+            "logistics_source": "plataforma",
+        },
+        {
+            "number": "310306",
+            "ordered": (first - timedelta(seconds=28)).isoformat(),
+            "ordered_source": "plataforma",
+        },
+        # An estimated time never pairs (310288 on 24/11: DaVinci only guessed it).
+        {"number": "310288", "ordered": at, "ordered_source": "aprox"},
+    ]
+    later = merged + timedelta(hours=1)
+    report = bling_mirror.attribute_history(erp, lambda _sql: logistica, now=later)
+    assert report["pairs"] == 3
+    assert exits(erp, start) == [(-1, ["310204"]), (-2, ["310181", "310306"])]
+    # Run again: nothing is paired twice.
+    assert bling_mirror.attribute_history(erp, lambda _sql: logistica, now=later)["pairs"] == 0
