@@ -1,4 +1,5 @@
-"""Quem abre o DaVinci ERP (Marco, 18/11/2026: thorfinn e heisenberg; 23/11/2026: harry potter).
+"""Quem abre o DaVinci ERP (Marco, 18/11/2026: thorfinn e heisenberg; 23/11/2026: harry potter;
+25/11/2026: joana dark, para Produtos 2 e Pedidos 2).
 
 Admin E (e-mail em `ERP_USUARIOS` ou id em `LIBERADOS_POR_ID`); com a lista do .env vazia, vale a
 do App Uranyx (`APP_URANYX_USUARIOS`), que é exatamente thorfinn e heisenberg. Quem o Marco libera
@@ -21,6 +22,7 @@ def usuarios_liberados() -> frozenset[str]:
 LIBERADOS_POR_ID = frozenset(
     {
         "439ac041-2a38-4457-a2e4-61bf79ca8533",  # harry potter, 23/11/2026
+        "cea25322-c4e5-4b82-b8e3-56029cc948e4",  # joana dark, 25/11/2026
     }
 )
 

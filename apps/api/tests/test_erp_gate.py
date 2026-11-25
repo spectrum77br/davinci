@@ -60,4 +60,8 @@ def test_liberado_pelo_id_entra_fora_das_listas_e_so_sendo_admin(monkeypatch):
     assert not erp_acesso.liberado(
         SimpleNamespace(id=harry, role=UserRole.USER, email="h@exemplo.com")
     )
+    joana = "cea25322-c4e5-4b82-b8e3-56029cc948e4"  # 25/11/2026, Produtos 2 e Pedidos 2
+    assert erp_acesso.liberado(
+        SimpleNamespace(id=joana, role=UserRole.ADMIN, email="j@exemplo.com")
+    )
     assert not erp_acesso.liberado(SimpleNamespace(id="u1", role=UserRole.ADMIN, email="x@y.com"))
