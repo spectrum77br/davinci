@@ -198,6 +198,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                         db,
                         actor,
                         access.route_area(path),
+                        admin_only=path in access.ADMIN_ROUTES,
                         role=role,
                         write=not path.startswith(access.FOLLOW_POSTS),
                     )
@@ -660,6 +661,27 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         from app.erp_local.product_images import upload
 
         return upload(erp, await request.body(), name)
+
+    def _actor(request):
+        """Behind the gate, the proxy says who is acting; a direct request cannot claim that."""
+        forwarded = request.headers.get("x-erp-actor")
+        return forwarded if forwarded and access.enforced() else None
+
+    @app.post("/api/erp-local/catalog/bulk-category")
+    def bulk_category(request: Request, body: dict = Body(...)):
+        """Produtos 2 › Configuração: one category for the selected products (M-45). Accepted
+        with consulta on (consulta.CONSULTA_WRITES); the category stays in the ERP."""
+        from app.erp_local import categories
+
+        return categories.bulk_assign(erp, body, _actor(request))
+
+    @app.post("/api/erp-local/catalog/bulk-price")
+    def bulk_price(request: Request, body: dict = Body(...)):
+        """Produtos 2 › Configuração: the ERP's own price of the selected products (M-47).
+        Accepted with consulta on; sent to no store and no listing."""
+        from app.erp_local import product_actions
+
+        return product_actions.bulk_price(erp, body, _actor(request))
 
     @app.get("/api/erp-local/catalog/images")
     def catalog_image_library(

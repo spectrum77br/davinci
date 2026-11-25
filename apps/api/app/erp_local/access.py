@@ -57,6 +57,12 @@ FOLLOW = "acompanhamento"
 OPERATE = "operacao"
 # Reading actions a follower may still run: labels, tracking and papers of the stores' sales.
 FOLLOW_POSTS = ("/api/erp-local/store-sales/",)
+# Changes made in mass from Produtos 2 › Configuração (M-45, M-47): administrators only, in
+# Cadastros (ROUTE_AREAS: /api/erp-local/catalog). They are the writes consulta lets through.
+ADMIN_ROUTES = (
+    "/api/erp-local/catalog/bulk-category",
+    "/api/erp-local/catalog/bulk-price",
+)
 # What each area keeps out of the page data for people without it.
 STATE_AREAS = {
     "finance": "financeiro",
