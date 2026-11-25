@@ -2294,6 +2294,44 @@ async def _kit_components_for_skus(
     return out
 
 
+_TAMANHO_INICIAL_RE = re.compile(r"^([0-9]+)")
+
+
+def _tamanhos_sem_peca(kit_sku: str, comps: list[dict]) -> list[str]:
+    """Kit de mala cujo SKU diz os tamanhos (`b027.12.24` = 12 + 24) e cuja
+    composição ATUAL no Bling perdeu um deles. Acontece quando a peça é
+    excluída no Bling depois da venda: o Bling tira a peça da estrutura do kit
+    e o cache `bling_kit_components` fica só com o resto (308307, 25/11/2026:
+    a b027.24, excluída em 18/11, sumiu do kit b027.12.24 e a devolução só
+    mostrava a mala 12; 16 de 719 kits de mala estavam assim).
+
+    Devolve os SKUs `base.tamanho` que faltam, um por unidade, na ordem do
+    SKU. Só conta peças da MESMA base (`b027.*`), pelo número do tamanho
+    (`b027.24us` vale como 24); outras peças do kit (ex.: `z002800.mala`)
+    ficam fora da conta. SKU que não é de mala com tamanhos → nada."""
+    partes = (kit_sku or "").strip().lower().split(".")
+    if not (
+        len(partes) >= 3
+        and _MALA_BASE_RE.match(partes[0])
+        and all(_MALA_SIZE_RE.match(p) for p in partes[1:])
+    ):
+        return []
+    base = partes[0]
+    tem: dict[str, int] = {}
+    for c in comps:
+        cp = (c.get("sku") or "").strip().lower().split(".")
+        m = _TAMANHO_INICIAL_RE.match(cp[1]) if len(cp) >= 2 and cp[0] == base else None
+        if m:
+            tem[m.group(1)] = tem.get(m.group(1), 0) + max(1, int(c.get("qty") or 1))
+    faltam: list[str] = []
+    for t in partes[1:]:
+        if tem.get(t, 0) > 0:
+            tem[t] -= 1
+        else:
+            faltam.append(f"{base}.{t}")
+    return faltam
+
+
 async def _split_kit_composition(
     session: AsyncSession, rows: list[dict]
 ) -> list[dict]:
@@ -2332,6 +2370,27 @@ async def _split_kit_composition(
                         "sku": c["sku"],
                         "produtos": c["name"] or r.get("produtos"),
                         "custo_produto": cost,
+                        "quantidade": 1,
+                        "_compound": True,
+                    })
+            # Peça que o SKU do kit diz ter e a composição de HOJE perdeu
+            # (excluída no Bling depois da venda): volta como unidade própria.
+            faltam = _tamanhos_sem_peca(r.get("sku") or "", comps)
+            if faltam:
+                logger.info(
+                    "devolucao_kit_peca_fora_da_composicao",
+                    pedido_bling=r.get("pedido_bling"), kit=r.get("sku"), faltam=faltam,
+                )
+                # Custo: o do catálogo entra depois (linha `_compound`); este é
+                # só o fallback, igual ao `_split_mala_sizes`.
+                tamanhos = len((r.get("sku") or "").strip().split(".")) - 1
+                fallback = base_cost / tamanhos if base_cost and tamanhos > 0 else base_cost
+                for sku_falta in faltam:
+                    out.append({
+                        **r,
+                        "sku": sku_falta,
+                        "produtos": r.get("produtos"),
+                        "custo_produto": fallback,
                         "quantidade": 1,
                         "_compound": True,
                     })
