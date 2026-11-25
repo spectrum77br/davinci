@@ -529,6 +529,18 @@ async def test_difal_da_shopee_vai_pro_pedido_do_texto(db, make_user):
     )
     assert difal["tipo"] == "imposto" and difal["classificacao"] is None
     assert difal["pedido_marketplace"] == "261012ABCDEF12" and difal["debito"] == Decimal("9.90")
+    # 25/11: o texto novo da Shopee põe um traço antes do nº
+    com_traco = transacao_para_movimento(
+        _tx(
+            96,
+            "ADJUSTMENT_CENTER_DEDUCT",
+            -3.38,
+            100.0,
+            _epoch(d, 10),
+            description=texto.format("- 2608126UN2USQU"),
+        )
+    )
+    assert com_traco["tipo"] == "imposto" and com_traco["pedido_marketplace"] == "2608126UN2USQU"
     sem_numero = transacao_para_movimento(
         _tx(
             92,

@@ -88,12 +88,14 @@ def e_imposto_difal(descricao: str | None) -> bool:
     return "diferencial de al" in d and "icms" in d
 
 
-_PEDIDO_NO_TEXTO = re.compile(r"pedido\s+([0-9A-Z]{12,20})\b", re.IGNORECASE)
+_PEDIDO_NO_TEXTO = re.compile(r"pedido\s*(?:-\s*)?([0-9A-Z]{12,20})\b", re.IGNORECASE)
 
 
 def pedido_do_difal(descricao: str | None) -> str | None:
     """O nº do pedido no texto do DIFAL: "… cobrada pelo fisco governamental durante
-    fiscalização referente ao pedido 260831R8U3CKK1" (09/11: as 45 linhas desde 24/10)."""
+    fiscalização referente ao pedido 260831R8U3CKK1" (09/11: as 45 linhas desde 24/10).
+    25/11: a Shopee passou a escrever "referente ao pedido - 2608126UN2USQU" (com o
+    traço); as 4 linhas de 24/11 ficaram sem dono por isso."""
     if not e_imposto_difal(descricao):
         return None
     achado = _PEDIDO_NO_TEXTO.search(descricao or "")
