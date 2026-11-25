@@ -2665,6 +2665,76 @@ def test_situacao_nada_liberou_mas_mexeu_dinheiro_e_bling_excluido_e_previsao_es
     assert out["situacao"] == "aguardando" and out["motivo"] is None
 
 
+def test_tiktok_devolvido_antes_de_liquidar_nao_e_vencido():
+    """Poofy (tiktok) 307730 (25/11, Vinicius: "esse pedido tá estranho"): a TikTok fez o
+    reembolso rápido ao comprador em 18/11, antes de liquidar, e a estimativa dela ficou
+    −12,58 (o frete que fica com a loja). Não há repasse a cobrar: é aguardando, com o
+    motivo dito, até 30 dias depois da previsão; depois volta a vencido."""
+    from app.routers.conciliacao import (
+        ROTULO_DEVOLVIDO_ANTES,
+        devolvido_antes_de_liquidar,
+        rotulo_situacao,
+    )
+
+    loja = ConciliacaoLoja(
+        platform=IntegrationPlatform.TIKTOK, conta="x", inicio=date(2026, 10, 24)
+    )
+    loja.integration_id = None
+    venda = MarketplaceOrderFinancial(net_amount=Decimal("-12.58"), status="estimated", raw={})
+    base = {
+        "agora": datetime(2026, 11, 25, 12, tzinfo=UTC),
+        "data_pedido": datetime(2026, 11, 6, 15, tzinfo=UTC),
+        "bling_total": Decimal("158.60"),
+        "venda": venda,
+        "previsao": datetime(2026, 11, 17, 16, 52, tzinfo=UTC),
+        "fatura": {},
+        "plataforma": "tiktok",
+    }
+    out = calc.situacao_do_pedido(movs_extrato=[], **base)
+    assert out["situacao"] == "aguardando"
+    assert out["motivo"] == (
+        "a TikTok devolveu o dinheiro ao comprador antes de liquidar: "
+        "a liquidação vai descontar 12.58"
+    )
+    assert out["dif_previsto_recebido"] is None
+
+    # 30 dias depois da previsão sem liquidar: vencido, e o motivo conta o porquê
+    tarde = {**base, "agora": datetime(2026, 12, 20, 12, tzinfo=UTC)}
+    out = calc.situacao_do_pedido(movs_extrato=[], **tarde)
+    assert out["situacao"] == "vencido"
+    assert out["motivo"] == (
+        "previsão de liberação era 17/11 · a TikTok devolveu o dinheiro ao comprador e "
+        "não liquidou (deve descontar 12.58)"
+    )
+
+    # a liquidação negativa chegou: bateu (e a etapa pede a decisão do custo)
+    liquidou = _mov(
+        loja, "venda_liberada", datetime(2026, 11, 28, 12, tzinfo=UTC), debito="12.58"
+    )
+    out = calc.situacao_do_pedido(movs_extrato=[liquidou], **base)
+    assert out["situacao"] == "bateu" and out["recebido"] == Decimal("-12.58")
+
+    # estimativa positiva continua vencendo como antes
+    positiva = MarketplaceOrderFinancial(net_amount=Decimal("128.50"), raw={})
+    out = calc.situacao_do_pedido(movs_extrato=[], **{**base, "venda": positiva})
+    assert out["situacao"] == "vencido"
+    assert out["motivo"] == "previsão de liberação era 17/11"
+
+    # Shopee com escrow negativo fica como estava (só a TikTok mudou)
+    out = calc.situacao_do_pedido(movs_extrato=[], **{**base, "plataforma": "shopee"})
+    assert out["situacao"] == "vencido"
+
+    # rótulo da tela
+    p = ConciliacaoPedido(
+        situacao="aguardando", venda_liquido=Decimal("-12.58"), liberado_em=None
+    )
+    assert devolvido_antes_de_liquidar(p) is True
+    assert rotulo_situacao(p) == ROTULO_DEVOLVIDO_ANTES
+    p2 = ConciliacaoPedido(situacao="aguardando", venda_liquido=Decimal("90"), liberado_em=None)
+    assert devolvido_antes_de_liquidar(p2) is False
+    assert rotulo_situacao(p2) == "Aguardando liberação"
+
+
 def test_ml_tarifa_devolvida_antes_de_liberar_segue_aguardando():
     """jlas2 307414 (10/11): a mediação fechou com reembolso parcial ao comprador e o ML
     devolveu 15,00 de tarifa (6,62 + 8,38) antes de liberar os 628,06. É aguardando
