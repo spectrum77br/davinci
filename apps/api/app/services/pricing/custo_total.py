@@ -12,6 +12,11 @@ O Ads da soma é o MAIOR % que pode valer para algum produto da conta:
 Sem nenhum, 0. (Sem linha em `pricing_ads_conta` = as duas caixas ligadas e
 sem % Geral, como no resto do Ads.)
 
+Só contam os produtos que a janela de Ads mostra (os do departamento da conta,
+`produtos_do_departamento`, a mesma condição do GET /api/pricing/ads): linha de
+produto que mudou de departamento fica órfã em `pricing_ads_produto`, a janela
+não mostra nem deixa apagar, e não pode travar a conta (revisão da M-56).
+
 A trava fica no servidor, em toda gravação que mexe na soma (PATCH da conta,
 PUT do Ads da conta e PUT do Ads de produto), sempre com o estado que FICARIA
 gravado; se estoura, nada é gravado (422 `custo_total_estourado`).
@@ -23,10 +28,11 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
-from app.models import PricingAdsConta, PricingAdsProduto
+from app.models import PricingAccount, PricingAdsConta, PricingAdsProduto, PricingProduct, Segment
 
 ZERO = Decimal("0")
 
@@ -66,9 +72,24 @@ class EstadoAds:
         return replace(self, produtos=produtos)
 
 
+def produtos_do_departamento(stmt: Select, root_id: UUID | ColumnElement) -> Select:
+    """Restringe `stmt` (um SELECT sobre `pricing_products`) aos produtos do
+    departamento `root_id` — os que a janela de Ads lista (GET /api/pricing/ads)
+    e os únicos em que o PUT do Ads de produto grava. Um lugar só, para a soma
+    do Custo total não divergir do que a janela mostra."""
+    return stmt.join(Segment, Segment.id == PricingProduct.segment_id).where(
+        Segment.parent_id == root_id
+    )
+
+
 async def estado_ads(session: AsyncSession, account_id: UUID) -> EstadoAds:
     """O Ads gravado da conta (lido do banco, sem cache do ORM: o PUT da Geral
-    grava por INSERT … ON CONFLICT, que a sessão não enxerga)."""
+    grava por INSERT … ON CONFLICT, que a sessão não enxerga). Produto fora do
+    departamento da conta não conta (ver o topo)."""
+    raiz_da_conta = (
+        select(PricingAccount.segment_id).where(PricingAccount.id == account_id).scalar_subquery()
+    )
+    do_departamento = produtos_do_departamento(select(PricingProduct.id), raiz_da_conta)
     geral = (
         await session.execute(
             select(PricingAdsConta)
@@ -81,7 +102,10 @@ async def estado_ads(session: AsyncSession, account_id: UUID) -> EstadoAds:
         for p in (
             await session.execute(
                 select(PricingAdsProduto)
-                .where(PricingAdsProduto.pricing_account_id == account_id)
+                .where(
+                    PricingAdsProduto.pricing_account_id == account_id,
+                    PricingAdsProduto.pricing_product_id.in_(do_departamento),
+                )
                 .execution_options(populate_existing=True)
             )
         ).scalars()

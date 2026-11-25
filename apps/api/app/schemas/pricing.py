@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -22,10 +22,23 @@ def _dia_mes(valor: str) -> str:
     return valor
 
 
+def duas_casas(valor: Decimal | None) -> Decimal | None:
+    """% com as 2 casas do banco (NUMERIC(5,2)), arredondado meio para cima.
+
+    Revisão da M-56 (25/11/2026): a conferência do Custo total tem de usar o
+    valor que FICA gravado; sem isto, 3,333 + 3,333 + 3,333 = 9,999 passava num
+    teto de 9,99 e o banco gravava 3,33 × 3 = 9,99 (ou o contrário: a mensagem
+    mostrava um número que não é o gravado)."""
+    if valor is None:
+        return None
+    return valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 # "26/06" (sem ano) e % de 0 a 100 (4 = 4%; o banco guarda 2 casas) — o mesmo
-# CHECK do banco (migration 0502); fora disso, 422 em vez de erro do banco.
+# CHECK do banco (migration 0502); fora disso, 422 em vez de erro do banco. O %
+# já sai com as 2 casas do banco (`duas_casas`).
 DiaMes = Annotated[str, AfterValidator(_dia_mes)]
-PctConta = Annotated[Decimal, Field(ge=0, le=100)]
+PctConta = Annotated[Decimal, Field(ge=0, le=100), AfterValidator(duas_casas)]
 
 
 class PricingAccountBase(BaseModel):

@@ -47,7 +47,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,9 +71,10 @@ from app.routers.pricing import (
     _recusar_custo_total_estourado,
     _resolve_root_segment_id,
 )
+from app.schemas.pricing import duas_casas
 from app.services.marketing.horarios_contas import chave_nome
 from app.services.pricing.anuncios import CANAL_CATALOGO
-from app.services.pricing.custo_total import estado_ads
+from app.services.pricing.custo_total import estado_ads, produtos_do_departamento
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
@@ -86,7 +87,9 @@ PLATAFORMA_NO_MARKETING = {
 }
 JANELA_REAL_DIAS = 7
 
-Pct = Annotated[Decimal | None, Field(ge=0, le=100)]
+# O % sai com as 2 casas do banco (NUMERIC(5,2)) antes da conferência do Custo
+# total: o conferido é o gravado (revisão da M-56).
+Pct = Annotated[Decimal | None, Field(ge=0, le=100), AfterValidator(duas_casas)]
 Gasto = Annotated[Decimal | None, Field(ge=0, lt=Decimal("10000000000"))]
 
 
@@ -258,10 +261,9 @@ async def ver_ads(
     ]
     produtos = (
         await session.execute(
-            select(PricingProduct.id, PricingProduct.sku, PricingProduct.name)
-            .join(Segment, Segment.id == PricingProduct.segment_id)
-            .where(Segment.parent_id == root_id)
-            .order_by(PricingProduct.name, PricingProduct.sku)
+            produtos_do_departamento(
+                select(PricingProduct.id, PricingProduct.sku, PricingProduct.name), root_id
+            ).order_by(PricingProduct.name, PricingProduct.sku)
         )
     ).all()
     return AdsOut(

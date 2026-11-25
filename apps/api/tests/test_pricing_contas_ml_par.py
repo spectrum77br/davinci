@@ -749,6 +749,164 @@ async def test_quem_nao_e_admin_ve_o_custo_total_mas_nao_grava(
     assert Decimal(filha["desconto_pct"]) == Decimal("5")
 
 
+# ============================================ revisão (M-53/M-56)
+
+
+async def test_patch_nao_deixa_linha_ml_de_kit_sem_tipo(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Conta ML só nasce pelo + Adicionar Conta (com o par). O PATCH não vira
+    outra plataforma em ML nem apaga o tipo da ML sem par (nexus); editar os
+    outros campos da nexus continua valendo."""
+    auth_as(cena.admin)
+    r = await client.post(
+        "/api/pricing/accounts",
+        json={"name": "kfa", "platform": "shopee", "department": "celular"},
+    )
+    assert r.status_code == 201, r.text
+    shopee = f"/api/pricing/accounts/{r.json()['id']}"
+    for mudanca in (
+        {"platform": "mercadolivre"},
+        {"platform": "mercadolivre", "listing_type": CLASSICO},
+    ):
+        r = await client.patch(shopee, json={**mudanca, "observation": "não grava"})
+        assert r.status_code == 400, (mudanca, r.text)
+        assert r.json()["detail"]["code"] == "tipo_obrigatorio"
+        assert "+ Adicionar Conta" in r.json()["detail"]["message"]
+    # A Shopee segue editável.
+    assert (await client.patch(shopee, json={"observation": "ok"})).status_code == 200
+
+    nexus = PricingAccount(
+        user_id=cena.admin.id,
+        name="nexus",
+        platform=PricingPlatform.ML,
+        segment_id=cena.raizes["mala"].id,
+        listing_type=PREMIUM,
+    )
+    db.add(nexus)
+    await db.commit()
+    url = f"/api/pricing/accounts/{nexus.id}"
+    for mudanca in ({"listing_type": None}, {"listing_type": ""}, {"listing_type": "  "}):
+        r = await client.patch(url, json={**mudanca, "observation": "não grava"})
+        assert r.status_code == 400, (mudanca, r.text)
+        assert r.json()["detail"]["code"] == "tipo_obrigatorio"
+    # Os outros campos da nexus (e o mesmo tipo de sempre) continuam valendo.
+    r = await client.patch(url, json={"observation": "Mala", "listing_type": PREMIUM})
+    assert r.status_code == 200, r.text
+    r = await client.patch(url, json={"afiliado_pct": 3})
+    assert r.status_code == 200, r.text
+    linhas = (
+        (
+            await db.execute(
+                select(PricingAccount)
+                .where(PricingAccount.canal != CANAL_CATALOGO)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {(a.name, a.platform, a.listing_type, a.observation) for a in linhas} == {
+        ("kfa", PricingPlatform.SHOPEE, None, "ok"),
+        ("nexus", PricingPlatform.ML, PREMIUM, "Mala"),
+    }
+
+
+async def test_ads_de_produto_fora_do_departamento_nao_conta_no_custo_total(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Produto que mudou de departamento deixa a linha órfã no Ads da conta:
+    a janela não mostra nem deixa apagar, e a soma do Custo total ignora."""
+    auth_as(cena.admin)
+    corpo = await _criar_ml(client)
+    url = f"/api/pricing/accounts/{corpo['id']}"
+    ads = f"/api/pricing/ads/{corpo['id']}"
+    r = await client.put(f"{ads}/produto/{cena.produto.id}", json={"pode_gastar_pct": 8})
+    assert r.status_code == 200, r.text
+    r = await client.patch(url, json={"custo_total_pct": 5})
+    assert r.status_code == 422, r.text
+    assert "Ads 8%" in r.json()["detail"]["mensagem"]
+
+    # O produto vai para a Mala: some da janela do Celular, mas a linha fica.
+    produto = await db.get(PricingProduct, cena.produto.id)
+    produto.segment_id = cena.folhas["mala"][0].id
+    await db.commit()
+    r = await client.get("/api/pricing/ads", params={"department": "celular"})
+    assert r.status_code == 200, r.text
+    assert [p["id"] for p in r.json()["produtos"]] == [str(cena.produto_b.id)]
+    assert len((await db.execute(select(PricingAdsProduto))).scalars().all()) == 2
+
+    # A linha órfã não trava mais a conta (nas duas linhas do par).
+    r = await client.patch(url, json={"custo_total_pct": 5})
+    assert r.status_code == 200, r.text
+    # O produto que a janela mostra continua contando.
+    r = await client.put(f"{ads}/produto/{cena.produto_b.id}", json={"pode_gastar_pct": 5})
+    assert r.status_code == 200, r.text
+    r = await client.put(f"{ads}/produto/{cena.produto_b.id}", json={"pode_gastar_pct": 6})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 0% + Desconto 0% + Ads 6% = 6%. Passa do Custo total (5%). Não gravado."
+    )
+    r = await client.put(ads, json={"pode_gastar_pct": 5})
+    assert r.status_code == 200, r.text
+
+
+async def test_custo_total_confere_o_valor_com_as_2_casas_do_banco(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """O banco grava NUMERIC(5,2): a conferência usa o valor arredondado (meio
+    para cima), que é o que fica gravado, e a mensagem mostra esse valor."""
+    auth_as(cena.admin)
+    corpo = await _criar_ml(client)
+    url = f"/api/pricing/accounts/{corpo['id']}"
+    ads = f"/api/pricing/ads/{corpo['id']}"
+    # 3,333 × 3 = 9,999 passaria de 9,99; gravado é 3,33 × 3 = 9,99: cabe.
+    r = await client.patch(url, json={"custo_total_pct": 9.99, "afiliado_pct": 3.333})
+    assert r.status_code == 200, r.text
+    assert (await client.patch(url, json={"desconto_pct": 3.333})).status_code == 200
+    r = await client.put(ads, json={"pode_gastar_pct": 3.333})
+    assert r.status_code == 200, r.text
+    assert r.json()["pode_gastar_pct"] == 3.33
+    # 3,335 vira 3,34 (meio para cima): 3,34 + 3,33 + 3,33 = 10 > 9,99.
+    r = await client.patch(url, json={"afiliado_pct": 3.335})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 3,34% + Desconto 3,33% + Ads 3,33% = 10%. Passa do Custo total (9,99%)."
+        " Não gravado."
+    )
+    # O teto também: 9,985 vira 9,99 e cabe; 9,984 vira 9,98 e não.
+    assert (await client.patch(url, json={"custo_total_pct": 9.985})).status_code == 200
+    r = await client.patch(url, json={"custo_total_pct": 9.984})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"].endswith("Passa do Custo total (9,98%). Não gravado.")
+    # Ads de produto: 3,334 vira 3,33 e cabe; 3,335 vira 3,34 e não.
+    produto = f"{ads}/produto/{cena.produto.id}"
+    assert (await client.put(produto, json={"pode_gastar_pct": 3.334})).status_code == 200
+    r = await client.put(produto, json={"pode_gastar_pct": 3.335})
+    assert r.status_code == 422, r.text
+    assert "Ads 3,34%" in r.json()["detail"]["mensagem"]
+
+    par = await _par(db, corpo["par_id"])
+    for linha in par.values():
+        assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+            Decimal("3.33"),
+            Decimal("3.33"),
+            Decimal("9.99"),
+        )
+    gerais = (
+        (await db.execute(select(PricingAdsConta).execution_options(populate_existing=True)))
+        .scalars()
+        .all()
+    )
+    assert {g.pode_gastar_pct for g in gerais} == {Decimal("3.33")}
+    produtos = (
+        (await db.execute(select(PricingAdsProduto).execution_options(populate_existing=True)))
+        .scalars()
+        .all()
+    )
+    assert {p.pode_gastar_pct for p in produtos} == {Decimal("3.33")}
+
+
 async def test_banco_so_aceita_desconto_e_custo_total_de_0_a_100_e_um_tipo_por_par(
     db: AsyncSession, cena
 ):

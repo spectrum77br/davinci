@@ -622,6 +622,36 @@ def _recusar_troca_de_tipo_no_par(row: PricingAccount, data: dict) -> None:
         )
 
 
+def _recusar_ml_sem_tipo(row: PricingAccount, data: dict) -> None:
+    """Linha ML de kit não fica sem tipo pelo PATCH (revisão da M-53).
+
+    A conta do Mercado Livre nasce pelo "+ Adicionar Conta", já com o Clássico
+    e o Premium (`_novo_par_ml`). O PATCH não vira outra plataforma em ML (a
+    linha ficaria sozinha e, em geral, sem tipo) nem apaga o tipo de uma ML sem
+    par (ex.: a nexus, só Premium). Editar os outros campos dessas contas
+    continua valendo; o par já é barrado antes (`_recusar_troca_de_tipo_no_par`)."""
+    plataforma = data.get("platform") or row.platform
+    if row.canal != CANAL_KIT or plataforma != PricingPlatform.ML:
+        return
+    vira_ml = row.platform != PricingPlatform.ML
+    apaga_tipo = (
+        "listing_type" in data
+        and data["listing_type"] != row.listing_type
+        and ml_listing_type_for_account(data["listing_type"]) is None
+    )
+    if vira_ml or apaga_tipo:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "tipo_obrigatorio",
+                "message": (
+                    "Conta do Mercado Livre se cria pelo + Adicionar Conta "
+                    "(nasce com Clássico e Premium)."
+                ),
+            },
+        )
+
+
 async def _gravar_na_conta(session: AsyncSession, conta: PricingAccount, dados: dict) -> None:
     """Grava os campos numa linha de kit e acompanha a coluna de catálogo.
 
@@ -1018,6 +1048,7 @@ async def patch_account(
     if "platform" in data and data["platform"] is not None:
         data["platform"] = _coerce_platform(data["platform"])
     _recusar_troca_de_tipo_no_par(row, data)
+    _recusar_ml_sem_tipo(row, data)
     # Translate legacy department-string into segment_id; explicit segment_id
     # wins if both are present.
     dept_str = data.pop("department", None)
