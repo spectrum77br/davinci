@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import session_scope
 from app.models import (
     Devolution,
+    EstoqueEntrada,
     EstoqueTransferencia,
     EstoqueTransferenciaLinha,
     PrioridadeEstoqueMovimento,
@@ -57,6 +58,7 @@ from app.services.devolution_stock_return import (
     _do_post_de_estoque,
     _falha_sem_envio,
 )
+from app.services.sku_tag_envio import numeracao_do_sku, tag_do_sku, tags_de_envio
 from app.services.sku_tags import SUFFIX_TAGS
 
 logger = structlog.get_logger()
@@ -242,13 +244,38 @@ def _custo_do_destino(destino: Product, origem: Product) -> Decimal | None:
     return None
 
 
-async def conferir(session: AsyncSession, client: Any, linhas: list[dict]) -> list[dict]:
+def erros_mesma_numeracao(origem: str, destino: str, tags: list[str]) -> list[str]:
+    """Regra do "Transferir" do Produtos 2 (M-44): só entre lotes do MESMO
+    produto — numeração igual (o código sem a tag de envio) e tag diferente.
+    `dg019.ra → dg019.sp` e `z2819 → z2819.sp` passam; `dg107.ci → dg108.ci`
+    (outra numeração) e `dg019.ra → dg019.ra` (mesma tag) não."""
+    if not origem or not destino:
+        return []
+    if numeracao_do_sku(origem, tags) != numeracao_do_sku(destino, tags):
+        return [f"{origem} → {destino}: a numeração precisa ser a mesma"]
+    if tag_do_sku(origem, tags) == tag_do_sku(destino, tags):
+        return [f"{origem} → {destino}: as tags precisam ser diferentes"]
+    return []
+
+
+async def conferir(
+    session: AsyncSession,
+    client: Any,
+    linhas: list[dict],
+    *,
+    mesma_numeracao: bool = False,
+) -> list[dict]:
     """Confere as linhas SEM lançar nada: produtos, kit, saldo disponível ao
     vivo da origem (somando as linhas da mesma origem). Cada linha volta com
-    `erros` (vazio = pode transferir) e os números para a tela."""
+    `erros` (vazio = pode transferir) e os números para a tela.
+
+    `mesma_numeracao` (botão "Transferir" do Produtos 2, M-44): cada linha só
+    passa entre lotes do mesmo produto (`erros_mesma_numeracao`). Sem ele (a
+    tela do Controle de Estoque) a regra é a de sempre."""
     skus = {norm(x.get("origem")) for x in linhas} | {norm(x.get("destino")) for x in linhas}
     produtos = await produtos_por_sku(session, skus)
     kits = await _kits(session, skus)
+    tags = await tags_de_envio(session) if mesma_numeracao else []
     ids_origem = {
         int(produtos[norm(x.get("origem"))].bling_product_id)
         for x in linhas
@@ -277,6 +304,8 @@ async def conferir(session: AsyncSession, client: Any, linhas: list[dict]) -> li
             erros.append("Preencha a origem e o destino.")
         elif origem == destino:
             erros.append("Origem e destino são o mesmo SKU.")
+        if mesma_numeracao:
+            erros.extend(erros_mesma_numeracao(origem, destino, tags))
         po, pd = produtos.get(origem), produtos.get(destino)
         for sku, prod, papel in ((origem, po, "origem"), (destino, pd, "destino")):
             if not sku or prod is not None:
@@ -346,14 +375,16 @@ async def criar(
     user_nome: str | None,
     observacao: str | None,
     linhas: list[dict],
+    mesma_numeracao: bool = False,
 ) -> tuple[EstoqueTransferencia, bool]:
     """Grava a transferência (sem lançar). Mesma `idem_key` = a mesma
     transferência de antes (`False` no 2º item): a tela repetiu o POST.
-    Linha que não passa na conferência → TransferenciaInvalidaError e nada gravado."""
+    Linha que não passa na conferência → TransferenciaInvalidaError e nada gravado.
+    `mesma_numeracao`: a regra do Produtos 2 (ver `conferir`)."""
     existente = await por_idem(session, idem_key)
     if existente is not None:
         return existente, False
-    conferidas = await conferir(session, client, linhas)
+    conferidas = await conferir(session, client, linhas, mesma_numeracao=mesma_numeracao)
     if any(c["erros"] for c in conferidas):
         raise TransferenciaInvalidaError(
             [{k: v for k, v in c.items() if not k.startswith("_")} for c in conferidas]
@@ -710,19 +741,26 @@ async def executar(client: Any, transferencia_id: UUID) -> None:
 # ── Conferência da ENTRADA no extrato e tentativas (worker) ──────────────
 
 
-async def _conferir_entrada(
-    session: AsyncSession, linha: EstoqueTransferenciaLinha, agora: datetime
-) -> str | None:
-    """Entrada "conferindo": procura o E no espelho do extrato a partir da
-    tentativa (movimento de antes do POST nunca é dela). Confirma só quando
-    sobra candidato depois de descontar quem mais pode ser dono de uma entrada
-    igual (outra transferência, devolução, robô de prioridade). Erro aqui é o
-    lado seguro — a peça falta, não sobra. 10 min sem achar: sem_confirmacao."""
-    pid = int(linha.destino_bling_id)
-    qtd = int(linha.quantidade)
-    t0 = linha.entrada_tentativa_at or linha.updated_at or agora
+async def procurar_entrada_no_extrato(
+    session: AsyncSession,
+    *,
+    pid: int,
+    qtd: int,
+    t0: datetime,
+    linha_id: UUID | None = None,
+    entrada_id: UUID | None = None,
+) -> UUID | None:
+    """O movimento E do espelho do extrato que é desta entrada, ou None.
+
+    Procura a partir da tentativa (movimento de antes do POST nunca é dela) e
+    só devolve quando sobra candidato depois de descontar quem mais pode ser
+    dono de uma entrada igual (outra transferência, devolução, robô de
+    prioridade, entrada avulsa do "Incluir" — M-43). `linha_id`/`entrada_id`
+    = quem está conferindo (não conta como concorrente de si mesmo). Usado
+    pela entrada da transferência e pela entrada avulsa (estoque_entrada)."""
     de, ate = t0, t0 + _JANELA
     tl = EstoqueTransferenciaLinha
+    ea = EstoqueEntrada
 
     usados_transf = (
         (
@@ -744,23 +782,24 @@ async def _conferir_entrada(
         .scalars()
         .all()
     )
-    usados = {u for u in (*usados_transf, *usados_dev) if u is not None}
+    usados_avulsa = (
+        (await session.execute(select(ea.mov_ref).where(ea.mov_ref.is_not(None)))).scalars().all()
+    )
+    usados = {u for u in (*usados_transf, *usados_dev, *usados_avulsa) if u is not None}
     # Donos possíveis de um E igual, tentados um pouco antes (o movimento
     # deles pode cair dentro da janela desta) ou dentro dela.
     de_dono = t0 - _JANELA
+    filtro_transf = [
+        tl.destino_bling_id == pid,
+        tl.quantidade == qtd,
+        tl.entrada_status.in_((OK, CONFERINDO, ENVIANDO)),
+        tl.entrada_mov_ref.is_(None),
+        tl.entrada_tentativa_at.between(de_dono, ate),
+    ]
+    if linha_id is not None:
+        filtro_transf.append(tl.id != linha_id)
     n_transf = (
-        await session.execute(
-            select(func.count())
-            .select_from(tl)
-            .where(
-                tl.id != linha.id,
-                tl.destino_bling_id == pid,
-                tl.quantidade == qtd,
-                tl.entrada_status.in_((OK, CONFERINDO, ENVIANDO)),
-                tl.entrada_mov_ref.is_(None),
-                tl.entrada_tentativa_at.between(de_dono, ate),
-            )
-        )
+        await session.execute(select(func.count()).select_from(tl).where(*filtro_transf))
     ).scalar_one()
     quando = func.coalesce(Devolution.estoque_tentativa_at, Devolution.data_devolvido_estoque)
     n_dev = (
@@ -793,6 +832,18 @@ async def _conferir_entrada(
             )
         )
     ).scalar_one()
+    filtro_avulsa = [
+        ea.bling_product_id == pid,
+        ea.quantidade == qtd,
+        ea.status.in_((OK, CONFERINDO, ENVIANDO)),
+        ea.mov_ref.is_(None),
+        ea.tentativa_at.between(de_dono, ate),
+    ]
+    if entrada_id is not None:
+        filtro_avulsa.append(ea.id != entrada_id)
+    n_avulsa = (
+        await session.execute(select(func.count()).select_from(ea).where(*filtro_avulsa))
+    ).scalar_one()
     candidatos = [
         c
         for c in (
@@ -811,9 +862,25 @@ async def _conferir_entrada(
         .all()
         if c not in usados
     ]
-    if len(candidatos) > int(n_transf) + int(n_dev) + int(n_robo):
+    if len(candidatos) > int(n_transf) + int(n_dev) + int(n_robo) + int(n_avulsa):
+        return candidatos[0]
+    return None
+
+
+async def _conferir_entrada(
+    session: AsyncSession, linha: EstoqueTransferenciaLinha, agora: datetime
+) -> str | None:
+    """Entrada "conferindo": procura o E no espelho do extrato a partir da
+    tentativa (`procurar_entrada_no_extrato`). Erro aqui é o lado seguro — a
+    peça falta, não sobra. 10 min sem achar: sem_confirmacao."""
+    qtd = int(linha.quantidade)
+    t0 = linha.entrada_tentativa_at or linha.updated_at or agora
+    achado = await procurar_entrada_no_extrato(
+        session, pid=int(linha.destino_bling_id), qtd=qtd, t0=t0, linha_id=linha.id
+    )
+    if achado is not None:
         linha.entrada_status = OK
-        linha.entrada_mov_ref = candidatos[0]
+        linha.entrada_mov_ref = achado
         linha.entrada_lancada_at = agora
         linha.entrada_erro = None
         return OK

@@ -280,3 +280,34 @@ async def test_webhook_dedupes_duplicate_delivery(
         )
     ).scalars().all()
     assert len(jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_bling_renomeou_o_codigo_o_davinci_acompanha(
+    db: AsyncSession, client: AsyncClient, user: User
+) -> None:
+    """O Bling manda o código NOVO de um produto achado pelo id: a linha local
+    troca de SKU (caso a017.pi → a017.cd). Desde o M-46 a lógica mora em
+    services/produto_renomeio.py, compartilhada com o "Trocar a tag" — o
+    comportamento do webhook é o mesmo."""
+    antigo = f"ren-{uuid.uuid4().hex[:6]}.pi"
+    novo = antigo[:-3] + ".cd"
+    p, _link = await _make_product_with_bling_link(db, user, sku=antigo, bling_id=4343)
+    p.stock = 5
+    await db.commit()
+    # Saldo igual: o handler grava e sai ("stock_unchanged") sem enfileirar nada.
+    body = _stock_event_body(sku=novo, bling_id=4343, stock=5)
+    r = await client.post(
+        "/api/webhooks/bling",
+        content=body,
+        headers={
+            "X-Bling-Signature": _sign(body),
+            "X-Bling-Event": "produto.estoque.alterado",
+            "X-Bling-Delivery": uuid.uuid4().hex,
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json().get("ignored") == "stock_unchanged"
+    await db.refresh(p)
+    assert p.sku == novo

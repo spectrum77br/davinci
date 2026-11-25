@@ -38,7 +38,6 @@ from app.models import (
     DmMensagem,
     IntegrationPlatform,
     LinkSyncStatus,
-    Product,
     ProductLink,
     RedeSocial,
     StockMovement,
@@ -57,6 +56,7 @@ from app.models.instagram_dm import (
 )
 from app.redis_client import redis
 from app.services import dm_alerta
+from app.services.produto_renomeio import aplicar_codigo_do_bling, resolver_produto
 from app.worker_pool import get_arq_pool, get_arq_sync_pool
 
 logger = structlog.get_logger()
@@ -253,37 +253,9 @@ async def _claim_delivery(delivery_key: str) -> bool:
     return bool(await redis.set(redis_key, "1", nx=True, ex=DEDUPE_TTL_SECONDS))
 
 
-async def _resolve_product(
-    session: AsyncSession,
-    *,
-    sku: str | None,
-    bling_product_id: int | None,
-) -> Product | None:
-    if sku:
-        prod = (
-            await session.execute(select(Product).where(Product.sku == sku).limit(1))
-        ).scalar_one_or_none()
-        if prod is not None:
-            return prod
-    if bling_product_id is not None:
-        prod = (
-            await session.execute(
-                select(Product).where(Product.bling_product_id == bling_product_id).limit(1)
-            )
-        ).scalar_one_or_none()
-        if prod is not None:
-            return prod
-        link = (
-            await session.execute(
-                select(ProductLink).where(
-                    ProductLink.platform == IntegrationPlatform.BLING,
-                    ProductLink.external_id == str(bling_product_id),
-                ).limit(1)
-            )
-        ).scalar_one_or_none()
-        if link is not None:
-            return await session.get(Product, link.product_id)
-    return None
+# O produto do aviso (pelo SKU, pelo id do Bling ou pelo vínculo) mora em
+# services/produto_renomeio.py: o "Trocar a tag" (M-46) usa o mesmo caminho.
+_resolve_product = resolver_produto
 
 
 async def _resolve_bling_user_id(session: AsyncSession) -> UUID | None:
@@ -436,20 +408,9 @@ async def receive_bling_webhook(
     # bling_product_id/link (não por SKU), o payload traz o codigo NOVO e a
     # linha local ainda tem o antigo — espelha aqui, senão o SKU velho vira
     # fantasma duplicado no Controle de Estoque e o novo "não existe" nas
-    # devoluções (caso a017.pi → a017.cd, 13/ago/2026).
-    if (
-        product is not None
-        and sku
-        and bling_product_id is not None
-        and (product.sku or "").strip() != sku
-    ):
-        logger.info(
-            "bling_webhook_sku_renamed",
-            old=product.sku,
-            new=sku,
-            bling_product_id=bling_product_id,
-        )
-        product.sku = sku
+    # devoluções (caso a017.pi → a017.cd, 13/ago/2026). Compartilhado com o
+    # "Trocar a tag" do Produtos 2 (M-46): services/produto_renomeio.py.
+    aplicar_codigo_do_bling(product, sku, bling_product_id)
 
     # ── Intelligent threshold logic (matches SSH behavior) ──
     # Old approach: drop all webhooks with stock > 10.

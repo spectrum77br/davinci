@@ -59,12 +59,13 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, union
 
 from app.config import get_settings
 from app.models import (
     BlingOrder,
     Devolution,
+    EstoqueEntrada,
     EstoqueTransferenciaLinha,
     Integration,
     MargemAudit,
@@ -1020,14 +1021,34 @@ async def conferir_entradas_pendentes(
                     )
                 )
             ).one()
-            concorrentes = int(n_dev or 0) + int(n_robo or 0) + int(n_transf or 0)
-            inicio_busca = min(
-                x for x in (t0, primeira_dev, primeira_robo, primeira_transf) if x is not None
+            # Entrada avulsa do "Incluir" (Produtos 2, M-43) no mesmo produto e
+            # quantidade, perto da tentativa: idem.
+            ea = EstoqueEntrada
+            n_avulsa, primeira_avulsa = (
+                await session.execute(
+                    select(func.count(), func.min(ea.tentativa_at))
+                    .select_from(ea)
+                    .where(
+                        ea.bling_product_id == int(pid),
+                        ea.quantidade == qty,
+                        ea.status.in_(("ok", "conferindo", "enviando")),
+                        ea.mov_ref.is_(None),
+                        ea.tentativa_at.between(de, ate),
+                    )
+                )
+            ).one()
+            concorrentes = (
+                int(n_dev or 0) + int(n_robo or 0) + int(n_transf or 0) + int(n_avulsa or 0)
             )
-            usados = (
-                select(Devolution.estoque_mov_ref)
-                .where(Devolution.estoque_mov_ref.is_not(None))
-                .union(select(tl.entrada_mov_ref).where(tl.entrada_mov_ref.is_not(None)))
+            inicio_busca = min(
+                x
+                for x in (t0, primeira_dev, primeira_robo, primeira_transf, primeira_avulsa)
+                if x is not None
+            )
+            usados = union(
+                select(Devolution.estoque_mov_ref).where(Devolution.estoque_mov_ref.is_not(None)),
+                select(tl.entrada_mov_ref).where(tl.entrada_mov_ref.is_not(None)),
+                select(ea.mov_ref).where(ea.mov_ref.is_not(None)),
             )
             candidatos = (
                 (

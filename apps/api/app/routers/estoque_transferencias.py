@@ -8,6 +8,10 @@ passo de cada lançamento em `services/estoque_transferencia.py`.
   POST /api/estoque/transferencias               grava e lança (Idempotency-Key)
   GET  /api/estoque/transferencias               últimas transferências
   POST /api/estoque/transferencias/linhas/{id}/resolver   já lançou | tentar de novo
+
+O botão "Transferir" do Produtos 2 (M-44, 25/11/2026) usa as mesmas rotas com
+`"mesma_numeracao": true` no corpo: só entre lotes do mesmo produto (mesma
+numeração, tag diferente), conferido aqui. Sem o campo, nada muda.
 """
 
 from __future__ import annotations
@@ -43,6 +47,10 @@ class LinhaIn(BaseModel):
 
 class ConferirIn(BaseModel):
     linhas: list[LinhaIn] = Field(..., min_length=1, max_length=svc.MAX_LINHAS)
+    # Botão "Transferir" do Produtos 2 (M-44): só entre lotes do mesmo produto
+    # (mesma numeração, tag diferente), conferido aqui no servidor. Sem o
+    # campo (Controle de Estoque) a regra é a de sempre.
+    mesma_numeracao: bool = False
 
 
 class TransferirIn(ConferirIn):
@@ -168,7 +176,12 @@ async def buscar_produtos(
 async def conferir(body: ConferirIn, session: Sessao, _u: Admin) -> dict:
     client = await _client(session)
     try:
-        linhas = await svc.conferir(session, client, [x.model_dump() for x in body.linhas])
+        linhas = await svc.conferir(
+            session,
+            client,
+            [x.model_dump() for x in body.linhas],
+            mesma_numeracao=body.mesma_numeracao,
+        )
     except Exception as exc:  # noqa: BLE001 — leitura do saldo no Bling
         logger.warning("estoque_transferencia_conferir_falhou", erro=str(exc)[:200])
         raise HTTPException(
@@ -203,6 +216,7 @@ async def transferir(
             user_nome=user.name or user.email,
             observacao=body.observacao,
             linhas=[x.model_dump() for x in body.linhas],
+            mesma_numeracao=body.mesma_numeracao,
         )
     except svc.TransferenciaInvalidaError as exc:
         raise HTTPException(

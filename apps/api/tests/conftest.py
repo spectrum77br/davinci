@@ -595,6 +595,10 @@ _CLEANUP_TABLES = (
     # 0453: linhas antes do cabeçalho (FK); o cabeçalho antes de users.
     "estoque_transferencia_linhas",
     "estoque_transferencias",
+    # 0510 (M-43/M-46): entradas do "Incluir" e trocas de tag (itens antes do cabeçalho).
+    "estoque_entradas",
+    "produto_trocas_tag_itens",
+    "produto_trocas_tag",
     "margens",
     "chamado_anexo",
     "chamado_mensagem",

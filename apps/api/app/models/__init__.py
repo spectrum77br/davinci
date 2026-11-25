@@ -316,6 +316,7 @@ from app.models.pricing_conferencia import (
     PricingConferenciaMargemProduto,
 )
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
+from app.models.estoque_entrada import EstoqueEntrada
 from app.models.estoque_transferencia import EstoqueTransferencia, EstoqueTransferenciaLinha
 from app.models.product import (
     BackgroundJob,
@@ -325,6 +326,7 @@ from app.models.product import (
     ProductLink,
 )
 from app.models.produto_cadastro import ProdutoCadastro, ProdutoCadastroTipo
+from app.models.produto_troca_tag import ProdutoTrocaTag, ProdutoTrocaTagItem
 from app.models.refund import Refund
 from app.models.segment import Segment, SegmentSpecialDate
 from app.models.situacao_bling import SituacaoBling
@@ -517,6 +519,7 @@ __all__ = [
     "HistoricoEvento",
     "MargemAudit",
     "PrioridadeEstoqueMovimento",
+    "EstoqueEntrada",
     "EstoqueTransferencia",
     "EstoqueTransferenciaLinha",
     "MargemSaldoManual",
@@ -570,6 +573,8 @@ __all__ = [
     "OrganizarPrevia",
     "ProdutoCadastro",
     "ProdutoCadastroTipo",
+    "ProdutoTrocaTag",
+    "ProdutoTrocaTagItem",
     "OuvidoriaOcorrencia",
     "OuvidoriaRobo",
     "OuvidoriaRodada",
