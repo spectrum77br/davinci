@@ -93,7 +93,7 @@ async def test_ninguem_valido_nao_chama_grava_registro_e_acende_o_sino_uma_vez_p
 ):
     chave = K.CONTROLE_ESTOQUE_NF_SEM_LEITURA_BLING
     migrar(monkeypatch, chave)
-    admin = await _usuario(db, "admin", "TSTA0001", role=UserRole.ADMIN)
+    await _usuario(db, "admin", "TSTA0001", role=UserRole.ADMIN)
     await _usuario(
         db, "admin suspenso", "TSTA0002", role=UserRole.ADMIN, status=UserStatus.SUSPENDED
     )
@@ -116,7 +116,8 @@ async def test_ninguem_valido_nao_chama_grava_registro_e_acende_o_sino_uma_vez_p
     )
     assert linha.contexto == "estoque" and linha.titulo == "Bling sem responder"
     alertas = await _alertas(db)
-    assert [a.user_id for a in alertas] == [admin.id]
+    # M-19 (main): UM alerta ADM (todo administrador vê), sem user_id
+    assert [(a.user_id, a.escopo) for a in alertas] == [(None, "adm")]
     a = alertas[0]
     assert a.dedupe_key == f"threema_ninguem:{chave}:{threema_envios._dia_brt()}"
     assert "Bling sem responder o estoque" in a.title

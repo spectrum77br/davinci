@@ -791,43 +791,30 @@ def _dia_brt() -> str:
 
 
 async def _sino_ninguem(d: EnvioDef, res: Resolucao) -> None:
-    """Acende o sino de cada admin ativo (com Telegram), um por envio e dia.
+    """Acende o sino dos administradores, um por envio e dia. M-19 (main, 23/11/2026): UM alerta
+    ADM, que todo administrador vê (antes, uma cópia por administrador).
     Melhor esforço: o sino nunca derruba o ponto de envio."""
     from app import db as _db
     from app.models import AlertSeverity, AlertType
+    from app.models.alert import ESCOPO_ADM
     from app.services.alerts import emit_alert
 
     try:
         async with asyncio.timeout(_TIMEOUT_SINO_S), _db.session_scope() as s:
-            admins = (
-                (
-                    await s.execute(
-                        select(User.id).where(
-                            User.role == UserRole.ADMIN,
-                            User.status == UserStatus.ACTIVE,
-                            User.disabled_at.is_(None),
-                            User.open_id.notlike("system:%"),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
             detalhe = "; ".join(res.avisos[:5])
-            for uid in admins:
-                await emit_alert(
-                    s,
-                    user_id=uid,
-                    type=AlertType.GENERIC,
-                    severity=AlertSeverity.ERROR,
-                    title=f"Threema: ninguém recebe '{d.nome}'",
-                    message=(
-                        "Este aviso não está saindo: ninguém da lista em Cadastros › Envios "
-                        "Threema tem Threema válido e ativo." + (f" ({detalhe})" if detalhe else "")
-                    ),
-                    payload={"chave": d.chave, "escopo": res.escopo, "link": "/envios-threema"},
-                    dedupe_key=f"threema_ninguem:{d.chave}:{_dia_brt()}",
-                )
+            await emit_alert(
+                s,
+                type=AlertType.GENERIC,
+                severity=AlertSeverity.ERROR,
+                title=f"Threema: ninguém recebe '{d.nome}'",
+                message=(
+                    "Este aviso não está saindo: ninguém da lista em Cadastros › Envios "
+                    "Threema tem Threema válido e ativo." + (f" ({detalhe})" if detalhe else "")
+                ),
+                payload={"chave": d.chave, "escopo": res.escopo, "link": "/envios-threema"},
+                dedupe_key=f"threema_ninguem:{d.chave}:{_dia_brt()}",
+                escopo=ESCOPO_ADM,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("threema_sino_ninguem_falhou", chave=d.chave, erro=type(exc).__name__)
 
