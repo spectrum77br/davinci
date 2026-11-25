@@ -253,18 +253,31 @@ async function loadSegments() {
 // remap (e.g. swap Acessórios/Diversos for one specific account).
 const slotPopoverAccountId = ref<string | null>(null)
 const slotPopoverValues = ref<Array<string | null>>([null, null, null, null, null])
+// Como a janela abriu (para mandar só o que a pessoa mudou) e, na conta ML com
+// par, em que campos o Clássico e o Premium estão diferentes.
+const slotPopoverAbertos = ref<Array<string | null>>([null, null, null, null, null])
+const slotPopoverDiferentes = ref<boolean[]>([false, false, false, false, false])
 const slotPopoverSaving = ref(false)
 const slotPopoverError = ref<string | null>(null)
 
+// Conta ML com par (M-53): cada campo abre com o slot do Clássico, ou o do
+// Premium se o do Clássico está vazio (atlas/fiore têm o Clássico sem slots e
+// o Premium preenchido). Os dois preenchidos e diferentes → aviso no campo.
 function openSlotPopover(acc: Account) {
+  const par = parDe(acc)
+  const valores: Array<string | null> = []
+  const diferentes: boolean[] = []
+  for (let i = 1; i <= 5; i++) {
+    const k = `slot${i}_segment_id`
+    const c: string | null = ((par ? par.classico : acc) as any)[k] ?? null
+    const p: string | null = par ? ((par.premium as any)[k] ?? null) : null
+    valores.push(c ?? p)
+    diferentes.push(c != null && p != null && c !== p)
+  }
   slotPopoverAccountId.value = acc.id
-  slotPopoverValues.value = [
-    acc.slot1_segment_id,
-    acc.slot2_segment_id,
-    acc.slot3_segment_id,
-    acc.slot4_segment_id,
-    acc.slot5_segment_id,
-  ]
+  slotPopoverValues.value = valores
+  slotPopoverAbertos.value = [...valores]
+  slotPopoverDiferentes.value = diferentes
   slotPopoverError.value = null
 }
 function closeSlotPopover() {
@@ -277,18 +290,36 @@ function segmentChildrenFor(acc: Account): SegmentRow[] {
     .filter((s) => s.parent_id === acc.segment_id && s.active)
     .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
 }
+// Conta ML com par: só vão os slots que a pessoa mudou (o servidor copia para
+// o Premium; mandar os 5 apagaria os do Premium que a janela não mostrou) e,
+// nada mudado, não grava nada. Conta sem par: os 5, como sempre.
 async function saveSlotPopover(accId: string) {
+  const acc = accounts.value.find((a) => a.id === accId)
+  const par = acc ? parDe(acc) : null
+  const body: Record<string, string | null> = {}
+  for (let i = 0; i < 5; i++) {
+    if (!par || slotPopoverValues.value[i] !== slotPopoverAbertos.value[i]) {
+      body[`slot${i + 1}_segment_id`] = slotPopoverValues.value[i]
+    }
+  }
+  if (!Object.keys(body).length) {
+    closeSlotPopover()
+    return
+  }
   slotPopoverSaving.value = true
   slotPopoverError.value = null
   try {
-    const body: Record<string, string | null> = {}
-    for (let i = 0; i < 5; i++) body[`slot${i + 1}_segment_id`] = slotPopoverValues.value[i]
     const updated = await api<Account>(`/api/pricing/accounts/${accId}`, {
       method: 'PATCH',
       body,
     })
     const idx = accounts.value.findIndex((a) => a.id === accId)
     if (idx >= 0) accounts.value[idx] = updated
+    // O servidor gravou os mesmos slots no Premium: a cópia local acompanha.
+    if (par) {
+      const campos = Object.keys(body).flatMap((k) => [k, k.replace('_id', '_name')])
+      espelharNaIrma(idx >= 0 ? accounts.value[idx] : updated, campos)
+    }
     closeSlotPopover()
   } catch (e: any) {
     slotPopoverError.value = e?.data?.detail?.code ?? 'save_failed'
@@ -309,6 +340,16 @@ const PLATFORMS = [
   { value: 'temu', label: 'Temu' },
   { value: 'tiktok', label: 'TikTok' },
 ] as const
+
+// Troca de plataforma na célula: conta ML só nasce pelo "+ Adicionar Conta"
+// (com Clássico e Premium juntos), então "ML" só aparece para quem já é do ML
+// (o servidor recusa a troca para ML com 400 tipo_obrigatorio).
+function plataformasDaTroca(acc: Account) {
+  return PLATFORMS.filter((p) => p.value !== 'mercadolivre' || acc.platform === 'mercadolivre')
+}
+
+// Recusa do servidor na troca de plataforma: a mensagem dele, no campo.
+const erroPlataforma = ref<{ id: string; mensagem: string } | null>(null)
 
 function platformLabel(p: string) {
   return PLATFORMS.find((x) => x.value === p)?.label ?? p
@@ -729,7 +770,7 @@ function textoErroComissaoMl(e: any): string {
   const status = e?.status ?? e?.response?.status
   if (d?.code === 'sem_par') return 'Esta conta não tem Clássico e Premium juntos — recarregue a página.'
   if (status === 403) return 'Só o administrador muda a comissão.'
-  if (status === 422) return 'Use um número de 0 a 100, ex.: 14 ou 16,5.'
+  if (status === 422) return 'Use um número de 0 a 99,99, ex.: 14 ou 16,5.'
   return d?.mensagem || d?.message || 'Não foi possível salvar; tente de novo.'
 }
 
@@ -739,12 +780,15 @@ async function salvarComissaoMl() {
   if (!par || !isAdmin.value || comissaoMlSalvando.value) return
   const body: { classico: number | null; premium: number | null } = { classico: null, premium: null }
   for (const tipo of ['classico', 'premium'] as const) {
+    // 100% (ou o que arredonda para 100%) o servidor recusa: a comissão é
+    // menor que o preço.
     const v = lerPct(comissaoMlValores[tipo].replace('%', ''))
-    if (v === undefined) {
-      comissaoMlErro.value = `${tipo === 'classico' ? 'Clássico' : 'Premium'}: use um número de 0 a 100, ex.: 14 ou 16,5.`
+    const fracao = v == null ? null : Number((v / 100).toFixed(4))
+    if (v === undefined || (fracao != null && fracao >= 1)) {
+      comissaoMlErro.value = `${tipo === 'classico' ? 'Clássico' : 'Premium'}: use um número de 0 a 99,99, ex.: 14 ou 16,5.`
       return
     }
-    body[tipo] = v == null ? null : Number((v / 100).toFixed(4))
+    body[tipo] = fracao
   }
   const igual = (v: string | number | null, novo: number | null) =>
     (v == null || v === '' ? null : Number(Number(v).toFixed(4))) === novo
@@ -1627,6 +1671,14 @@ function erroAdsDaLinhaGeral(accId: string): string | null {
   return erroAdsEm(accId, 'geral:ads_por_produto_ligada') ? null : erroAdsEm(accId, 'geral:', true)
 }
 
+// A linha do Ads (a do produto ou a Geral) está na janela aberta desta conta?
+function linhaAdsNaTela(accId: string, prodId?: string): boolean {
+  if (typeof document === 'undefined') return false
+  const painel = document.querySelector(`[data-ads-painel="${accId}"]`)
+  if (!painel) return false
+  return !!painel.querySelector(prodId ? `[data-ads-produto-linha="${prodId}"]` : '[data-ads-geral]')
+}
+
 async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: string) {
   const r = ads.value
   if (!r?.pode_editar) return
@@ -1656,9 +1708,10 @@ async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: str
     const estouro = erroCustoTotalDe(e)
     if (estouro) {
       erroAds.value = { accId, chave: chaveAds(mudanca, prodId), mensagem: estouro }
-      // Recusa do campo gravado ao fechar a janela: sem a janela, vai no aviso.
-      const aberta = typeof document !== 'undefined' && !!document.querySelector(`[data-ads-painel="${accId}"]`)
-      if (!aberta) toast.error('Não salvou o Ads', estouro)
+      // O aviso junto do campo só basta se a linha recusada está na janela
+      // aberta. Janela fechada (gravou ao fechar) ou produto escondido pela
+      // busca: vai também no aviso solto.
+      if (!linhaAdsNaTela(accId, prodId)) toast.error('Não salvou o Ads', estouro)
     } else {
       toast.error('Não salvou o Ads', textoErroAds(e))
     }
@@ -1715,6 +1768,7 @@ function startEditAccount(acc: Account, field: string) {
     commitEditAccount()
   }
   editing.value = { id: acc.id, field }
+  if (field === 'platform' && erroPlataforma.value?.id === acc.id) erroPlataforma.value = null
   // Na coluna de catálogo a margem editada é a própria (vazio = a da conta).
   const raw = ehCatalogo(acc) && field.startsWith('margin')
     ? acc.margens_catalogo?.[field.slice('margin'.length)] ?? null
@@ -1847,6 +1901,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
       accounts.value = accounts.value.filter((x) => !(ehCatalogo(x) && x.conta_base_id === id))
     }
     if (erroCustoTotal.value?.id === id) erroCustoTotal.value = null
+    if (field === 'platform' && erroPlataforma.value?.id === id) erroPlataforma.value = null
     flash(id, field)
   } catch (e: any) {
     // M-56: passou do Custo total — nada gravado; o campo volta ao anterior,
@@ -1855,6 +1910,14 @@ async function _patchAccount(id: string, field: string, raw: string) {
     if (estouro) {
       Object.assign(acc, antes)
       erroCustoTotal.value = { id, campo: field, mensagem: estouro }
+      return
+    }
+    // Troca de plataforma recusada (ex.: 400 tipo_obrigatorio, para ML): o
+    // valor volta e a mensagem do servidor fica na célula.
+    const d = e?.data?.detail
+    if (field === 'platform' && (e?.status ?? e?.response?.status) === 400 && (d?.message || d?.mensagem)) {
+      Object.assign(acc, antes)
+      erroPlataforma.value = { id, mensagem: d.message || d.mensagem }
       return
     }
     accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
@@ -1949,12 +2012,18 @@ const catalogoJanelaAtivo = ref(false)
 const catalogoJanelaMargens = ref(false) // botão Margens aberto
 const catalogoJanelaUsarDaConta = ref(true)
 const catalogoJanelaValores = ref<string[]>([])
+// Como a janela abriu: Salvar só manda as margens dos campos cujo texto mudou
+// (ou todas, se a caixa "Usar as margens da conta" mudou). Nada mudou = nada
+// de margem vai ao servidor.
+let catalogoJanelaUsarAberto = true
+let catalogoJanelaValoresAbertos: string[] = []
 const catalogoJanelaSalvando = ref(false)
 const catalogoJanelaErro = ref('')
 
-// 0.44 → "44,0" (o formato da janela de antes); sem margem → "".
+// 0.44 → "44"; 0.4425 → "44,25"; 0.445 → "44,5" (até 2 casas, sem zeros à
+// direita: abrir e salvar não arredonda a margem gravada); sem margem → "".
 function textoMargemCatalogo(m: number | null): string {
-  return m == null ? '' : (m * 100).toFixed(1).replace('.', ',')
+  return m == null ? '' : (m * 100).toFixed(2).replace(/\.?0+$/, '').replace('.', ',')
 }
 
 // A margem da conta de kit, em cinza nos campos travados ("44,0" ou "—").
@@ -1971,6 +2040,8 @@ function abrirCatalogo(acc: Account) {
   catalogoJanelaValores.value = Array.from({ length: nTiposAba.value }, (_, i) =>
     textoMargemCatalogo(filha ? margemPropria(filha, i + 1) : null),
   )
+  catalogoJanelaUsarAberto = catalogoJanelaUsarDaConta.value
+  catalogoJanelaValoresAbertos = [...catalogoJanelaValores.value]
   catalogoJanelaErro.value = ''
   catalogoJanelaId.value = acc.id
 }
@@ -2019,7 +2090,11 @@ async function salvarCatalogo() {
   if (isAdmin.value && ativo) {
     margens = {}
     const nomes = TYPE_HEADERS.value[department.value] ?? []
+    const mudouCaixa = catalogoJanelaUsarDaConta.value !== catalogoJanelaUsarAberto
     for (let i = 0; i < catalogoJanelaValores.value.length; i++) {
+      // Caixa igual: só os campos que a pessoa mexeu (com a caixa marcada os
+      // campos estão travados, então nenhum).
+      if (!mudouCaixa && (catalogoJanelaUsarDaConta.value || catalogoJanelaValores.value[i] === catalogoJanelaValoresAbertos[i])) continue
       let valor: string | null = null
       const raw = catalogoJanelaUsarDaConta.value ? '' : (catalogoJanelaValores.value[i] || '').replace('%', '').trim()
       if (raw) {
@@ -5734,6 +5809,7 @@ watch(department, async () => {
                 :class="{
                   'cursor-pointer': !parDe(acc),
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'platform'),
+                  'ring-1 ring-destructive ring-inset': erroPlataforma?.id === acc.id && !isEditing(acc.id, 'platform'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'platform'),
                 }"
                 :title="parDe(acc) ? 'Conta do ML com Clássico e Premium (as duas colunas na Tabela de Preços)' : undefined"
@@ -5749,12 +5825,18 @@ watch(department, async () => {
                   @change="commitEditAccount"
                   @keydown.escape.prevent="cancelEdit"
                 >
-                  <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
+                  <option v-for="p in plataformasDaTroca(acc)" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
                 <template v-else>
                   <span>{{ platformLabel(acc.platform) }}</span>
                   <span v-if="tipoDaContaSolta(acc)" class="ml-1 text-muted-foreground" data-tipo-conta-solta>{{ tipoDaContaSolta(acc) }}</span>
                 </template>
+                <p
+                  v-if="erroPlataforma?.id === acc.id"
+                  class="mt-0.5 whitespace-normal text-[11px] leading-snug text-destructive"
+                  role="alert"
+                  data-erro-plataforma
+                >{{ erroPlataforma?.mensagem }}</p>
               </td>
               <!-- conta (o nome, como está cadastrado; M-52: segunda coluna) -->
               <td
@@ -5798,22 +5880,30 @@ watch(department, async () => {
                     Slots desta conta · {{ DEPARTMENTS.find(d => d.value === acc.department)?.label }}
                   </div>
                   <div class="space-y-1.5">
-                    <div v-for="i in 5" :key="i" class="flex items-center gap-2">
-                      <span class="text-[10px] text-muted-foreground w-12 shrink-0">
-                        slot{{ i }}<br/>
-                        <span class="opacity-70">m{{ i }}/f{{ i }}</span>
-                      </span>
-                      <select
-                        v-model="slotPopoverValues[i - 1]"
-                        class="flex-1 text-xs border rounded px-1.5 py-1 bg-background"
-                      >
-                        <option :value="null">— sem vínculo —</option>
-                        <option
-                          v-for="seg in segmentChildrenFor(acc)"
-                          :key="seg.id"
-                          :value="seg.id"
-                        >{{ seg.name }}</option>
-                      </select>
+                    <div v-for="i in 5" :key="i">
+                      <div class="flex items-center gap-2">
+                        <span class="text-[10px] text-muted-foreground w-12 shrink-0">
+                          slot{{ i }}<br/>
+                          <span class="opacity-70">m{{ i }}/f{{ i }}</span>
+                        </span>
+                        <select
+                          v-model="slotPopoverValues[i - 1]"
+                          class="flex-1 text-xs border rounded px-1.5 py-1 bg-background"
+                        >
+                          <option :value="null">— sem vínculo —</option>
+                          <option
+                            v-for="seg in segmentChildrenFor(acc)"
+                            :key="seg.id"
+                            :value="seg.id"
+                          >{{ seg.name }}</option>
+                        </select>
+                      </div>
+                      <!-- Conta ML com par: Clássico e Premium com slots diferentes aqui. -->
+                      <p
+                        v-if="slotPopoverDiferentes[i - 1]"
+                        class="pl-14 pt-0.5 text-[10px] leading-snug text-amber-700 dark:text-amber-400"
+                        data-aviso-slot-diferente
+                      >Clássico e Premium estão diferentes neste campo; salvar grava o mesmo nos dois.</p>
                     </div>
                   </div>
                   <p v-if="slotPopoverError" class="text-[10px] text-red-600 mt-1.5">{{ slotPopoverError }}</p>

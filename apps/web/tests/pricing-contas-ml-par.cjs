@@ -76,7 +76,7 @@ const f = new Function('accounts', 'isAdmin', 'canEditContas', 'platformLabel', 
   funcao('salvarComissaoMl'),
   computado('accountsByDept'),
   `return { linhasPorPar, parDe, escondidaNaAba, irmaDe, tituloConta, tipoDaContaSolta, comissaoPadraoMl, espelharNaIrma,
-    comissaoMlId, comissaoMlValores, comissaoMlErro, textoComissao, textoComissaoPar, abrirComissaoMl, fecharComissaoMl, salvarComissaoMl, accountsByDept }`,
+    comissaoMlId, comissaoMlValores, comissaoMlErro, textoComissao, textoErroComissaoMl, textoComissaoPar, abrirComissaoMl, fecharComissaoMl, salvarComissaoMl, accountsByDept }`,
 ].join('\n')))(accounts, isAdmin, canEditContas, platformLabel, rotuloTipo, api, flash, (o) => o, ref)
 
 const conta = (id, extra = {}) => ({
@@ -140,8 +140,17 @@ console.log('pricing contas ML par: par ok')
   f.comissaoMlValores.classico = '16,5'
   f.comissaoMlValores.premium = 'abc'
   await f.salvarComissaoMl()
-  assert.match(f.comissaoMlErro.value, /^Premium: use um número de 0 a 100/)
+  assert.equal(f.comissaoMlErro.value, 'Premium: use um número de 0 a 99,99, ex.: 14 ou 16,5.')
   assert.equal(pedidos.length, 0)
+  // 100% o servidor recusa (a comissão é menor que o preço): a janela já recusa.
+  for (const cem of ['100', '100,0', '99,99999']) {
+    f.comissaoMlValores.premium = cem
+    f.comissaoMlErro.value = ''
+    await f.salvarComissaoMl()
+    assert.equal(f.comissaoMlErro.value, 'Premium: use um número de 0 a 99,99, ex.: 14 ou 16,5.', cem)
+    assert.equal(pedidos.length, 0, cem)
+  }
+  assert.equal(f.textoErroComissaoMl({ status: 422, data: { detail: [] } }), 'Use um número de 0 a 99,99, ex.: 14 ou 16,5.')
 
   f.comissaoMlValores.premium = '21'
   respostas = [{ classico: { ...fpC, commission: '0.1650' }, premium: { ...fpP, commission: '0.2100' } }]
@@ -174,6 +183,8 @@ console.log('pricing contas ML par: par ok')
   await catalogo()
   await excluirECriar()
   await estouroNaTabela()
+  await slots()
+  await plataforma()
   template()
   console.log('pricing-contas-ml-par: ok')
 })().catch((e) => {
@@ -204,11 +215,11 @@ async function catalogo() {
       funcao('temMargemPropria'),
       constante('catalogoJanelaId'), constante('catalogoJanelaAtivo'), constante('catalogoJanelaMargens'),
       constante('catalogoJanelaUsarDaConta'), constante('catalogoJanelaValores'), constante('catalogoJanelaSalvando'),
-      constante('catalogoJanelaErro'),
+      constante('catalogoJanelaErro'), constante('catalogoJanelaUsarAberto'), constante('catalogoJanelaValoresAbertos'),
       funcao('textoMargemCatalogo'), funcao('margemDaContaTexto'), funcao('abrirCatalogo'), funcao('fecharCatalogo'),
       funcao('tituloCatalogoDaConta'), funcao('textoErroCatalogo'), funcao('salvarCatalogo'),
       `return { catalogoJanelaId, catalogoJanelaAtivo, catalogoJanelaUsarDaConta, catalogoJanelaValores, catalogoJanelaErro,
-        margemDaContaTexto, abrirCatalogo, fecharCatalogo, tituloCatalogoDaConta, salvarCatalogo, catalogoAtivo }`,
+        margemDaContaTexto, abrirCatalogo, fecharCatalogo, tituloCatalogoDaConta, salvarCatalogo, catalogoAtivo, textoMargemCatalogo }`,
     ].join('\n')))(accounts, isAdmin, canEditContas, api, flash, ref, loadAccounts, confirm, toast,
     department, TYPE_HEADERS, nTiposAba, fmtMargin, platformLabel, rotuloTipo, (a) => a.name, () => 'Acessórios 64.0%')
 
@@ -255,13 +266,43 @@ async function catalogo() {
   g.abrirCatalogo(fpC)
   assert.equal(g.catalogoJanelaAtivo.value, true)
   assert.equal(g.catalogoJanelaUsarDaConta.value, false)
-  assert.deepEqual(g.catalogoJanelaValores.value, ['64,0', '44,0', '', ''])
+  assert.deepEqual(g.catalogoJanelaValores.value, ['64', '44', '', ''])
+  // Salvar sem mexer: nenhuma margem vai ao servidor.
+  await g.salvarCatalogo()
+  assert.equal(pedidos.length, 0, 'nada mudou: sem PATCH')
+  assert.equal(g.catalogoJanelaId.value, null)
+  g.abrirCatalogo(fpC)
   // "Usar as margens da conta": grava vazio (null) só onde havia margem própria.
   g.catalogoJanelaUsarDaConta.value = true
   respostas = [{}]
   await g.salvarCatalogo()
   assert.deepEqual(pedidos.pop(), ['/api/pricing/accounts/fpCat', 'PATCH', { margin1: null, margin2: null }])
   assert.equal(recarregou, 1)
+
+  // Margem com 2 casas (0,4425): abre "44,25" (antes "44,3") e Salvar sem
+  // mexer não regrava arredondada; mexer num campo manda só ele.
+  assert.equal(g.textoMargemCatalogo(0.4425), '44,25')
+  assert.equal(g.textoMargemCatalogo(0.445), '44,5')
+  assert.equal(g.textoMargemCatalogo(0.4), '40')
+  assert.equal(g.textoMargemCatalogo(null), '')
+  accounts.value = [fpC, fpP, { ...fpCat, margens_catalogo: { 1: '0.4425', 2: '0.3000', 3: null, 4: null } }, kfa]
+  g.abrirCatalogo(fpC)
+  assert.deepEqual(g.catalogoJanelaValores.value, ['44,25', '30', '', ''])
+  await g.salvarCatalogo()
+  assert.equal(pedidos.length, 0, 'nada mudou: sem PATCH')
+  g.abrirCatalogo(fpC)
+  g.catalogoJanelaValores.value = ['44,25', '31', '', '']
+  respostas = [{}]
+  await g.salvarCatalogo()
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/accounts/fpCat', 'PATCH', { margin2: '0.3100' }], 'só o campo mexido')
+  // Desmarcar e marcar de novo a caixa (volta como abriu): nada vai.
+  accounts.value = [fpC, fpP, { ...fpCat, margens_catalogo: { 1: '0.4425', 2: null, 3: null, 4: null } }, kfa]
+  g.abrirCatalogo(fpC)
+  g.catalogoJanelaUsarDaConta.value = true
+  g.catalogoJanelaUsarDaConta.value = false
+  await g.salvarCatalogo()
+  assert.equal(pedidos.length, 0)
+  accounts.value = contasDepois.slice()
 
   // Margem inválida: não grava e avisa na janela.
   g.abrirCatalogo(fpC)
@@ -359,14 +400,14 @@ async function estouroNaTabela() {
   const erroCustoTotal = ref(null)
   let recarregou = 0
   const loadAccounts = async () => { recarregou++ }
-  const p = new Function('accounts', 'api', 'flash', 'accountsErr', 'erroCustoTotal', 'loadAccounts', 'confirm', js([
+  const p = new Function('accounts', 'api', 'flash', 'accountsErr', 'erroCustoTotal', 'loadAccounts', 'confirm', 'erroPlataforma', js([
     funcao('ehCatalogo'), funcao('ordemTipo'), funcao('lerPct'), funcao('parseDec'),
     computado('linhasPorPar'), funcao('parDe'), funcao('irmaDe'),
     constante('CAMPOS_SO_DA_LINHA'), funcao('espelharNaIrma'),
     computado('catalogoPorBase'), funcao('catalogoAtivo'),
     funcao('erroCustoTotalDe'), funcao('_patchAccount'),
     'return _patchAccount',
-  ].join('\n')))(accounts, api, flash, accountsErr, erroCustoTotal, loadAccounts, () => true)
+  ].join('\n')))(accounts, api, flash, accountsErr, erroCustoTotal, loadAccounts, () => true, ref(null))
   fpC.afiliado_pct = '4.00'
   fpP.afiliado_pct = '4.00'
   fpC.desconto_pct = null
@@ -394,7 +435,112 @@ async function estouroNaTabela() {
   console.log('pricing contas ML par: custo total ok')
 }
 
-// ---------- 6) template
+// ---------- 6) janela de Slots da conta ML com par: abre com o Premium onde o
+// Clássico está vazio, avisa se os dois diferem e só manda o que mudou
+async function slots() {
+  const p = new Function('accounts', 'api', 'ref', js([
+    funcao('ehCatalogo'), funcao('ordemTipo'),
+    computado('linhasPorPar'), funcao('parDe'), funcao('irmaDe'),
+    constante('CAMPOS_SO_DA_LINHA'), funcao('espelharNaIrma'),
+    constante('slotPopoverAccountId'), constante('slotPopoverValues'), constante('slotPopoverAbertos'),
+    constante('slotPopoverDiferentes'), constante('slotPopoverSaving'), constante('slotPopoverError'),
+    funcao('openSlotPopover'), funcao('closeSlotPopover'), funcao('saveSlotPopover'),
+    `return { slotPopoverAccountId, slotPopoverValues, slotPopoverDiferentes, slotPopoverError,
+      openSlotPopover, closeSlotPopover, saveSlotPopover }`,
+  ].join('\n')))(accounts, api, ref)
+  const sl = (v) => Object.fromEntries([1, 2, 3, 4, 5].map((n, i) => [[`slot${n}_segment_id`, v[i]], [`slot${n}_segment_name`, v[i] && `nome-${v[i]}`]]).flat())
+  // atlas: Clássico sem slots, Premium preenchido (como em produção);
+  // slot5 diferente nos dois.
+  const atC = conta('atC', { name: 'atlas', listing_type: 'ml classico', par_id: 'P9', ...sl([null, null, null, null, 'x5']) })
+  const atP = conta('atP', { name: 'atlas', listing_type: 'ml premium', par_id: 'P9', ...sl(['s1', 's2', null, 's4', 'y5']) })
+  const solta = conta('solta', { platform: 'amazon', ...sl(['a1', null, null, null, null]) })
+  accounts.value = [atP, atC, solta]
+  p.openSlotPopover(atC)
+  assert.equal(p.slotPopoverAccountId.value, 'atC')
+  assert.deepEqual(p.slotPopoverValues.value, ['s1', 's2', null, 's4', 'x5'], 'vazio no Clássico: abre com o do Premium')
+  assert.deepEqual(p.slotPopoverDiferentes.value, [false, false, false, false, true], 'aviso só no campo com os dois diferentes')
+  // Salvar sem mexer: nada vai (antes mandava os 5 e apagava os do Premium).
+  await p.saveSlotPopover('atC')
+  assert.equal(pedidos.length, 0)
+  assert.equal(p.slotPopoverAccountId.value, null)
+  // Muda só o slot3: só ele vai; a irmã local acompanha (id e nome).
+  p.openSlotPopover(atC)
+  p.slotPopoverValues.value[2] = 's3'
+  respostas = [{ ...atC, slot3_segment_id: 's3', slot3_segment_name: 'nome-s3' }]
+  await p.saveSlotPopover('atC')
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/accounts/atC', 'PATCH', { slot3_segment_id: 's3' }])
+  const atC2 = accounts.value.find((a) => a.id === 'atC')
+  assert.equal(atC2.slot3_segment_id, 's3')
+  assert.equal(atP.slot3_segment_id, 's3', 'Premium local acompanha')
+  assert.equal(atP.slot3_segment_name, 'nome-s3')
+  assert.equal(atP.slot1_segment_id, 's1', 'o que não mudou fica')
+  assert.equal(atP.slot5_segment_id, 'y5')
+  assert.equal(atP.commission, null)
+  // Limpar um campo também é mudança (vai null).
+  p.openSlotPopover(atC2)
+  p.slotPopoverValues.value[0] = null
+  respostas = [{ ...atC2, slot1_segment_id: null, slot1_segment_name: null }]
+  await p.saveSlotPopover('atC')
+  assert.deepEqual(pedidos.pop()[2], { slot1_segment_id: null })
+  assert.equal(atP.slot1_segment_id, null)
+  // Conta sem par: como sempre (os 5, mesmo sem mudar nada), sem aviso.
+  p.openSlotPopover(solta)
+  assert.deepEqual(p.slotPopoverDiferentes.value, [false, false, false, false, false])
+  respostas = [{ ...solta }]
+  await p.saveSlotPopover('solta')
+  assert.deepEqual(pedidos.pop()[2], { slot1_segment_id: 'a1', slot2_segment_id: null, slot3_segment_id: null, slot4_segment_id: null, slot5_segment_id: null })
+  // Recusa: a janela fica aberta com o código.
+  p.openSlotPopover(atC2)
+  p.slotPopoverValues.value[1] = 'zz'
+  respostas = [Object.assign(new Error('x'), { status: 400, data: { detail: { code: 'slot_invalido' } } })]
+  await p.saveSlotPopover('atC')
+  assert.equal(p.slotPopoverError.value, 'slot_invalido')
+  assert.equal(p.slotPopoverAccountId.value, 'atC')
+  pedidos.length = 0
+  p.closeSlotPopover()
+  console.log('pricing contas ML par: slots ok')
+}
+
+// ---------- 7) troca de plataforma: "ML" só para quem já é do ML; o 400 do
+// servidor (tipo_obrigatorio) aparece no campo
+async function plataforma() {
+  const PLATS = new Function(js([constante('PLATFORMS'), funcao('plataformasDaTroca'), 'return plataformasDaTroca'].join('\n')))()
+  const amz = conta('amz', { platform: 'amazon' })
+  const mlSolta = conta('mlSolta', { listing_type: 'ml premium' })
+  assert.ok(!PLATS(amz).some((x) => x.value === 'mercadolivre'), 'conta Amazon: sem ML na lista')
+  assert.ok(PLATS(amz).some((x) => x.value === 'amazon'))
+  assert.ok(PLATS(mlSolta).some((x) => x.value === 'mercadolivre'), 'conta ML: o valor atual continua')
+
+  const accountsErr = ref(null)
+  const erroPlataforma = ref(null)
+  let recarregou = 0
+  const p = new Function('accounts', 'api', 'flash', 'accountsErr', 'erroCustoTotal', 'loadAccounts', 'confirm', 'erroPlataforma', js([
+    funcao('ehCatalogo'), funcao('ordemTipo'), funcao('lerPct'), funcao('parseDec'),
+    computado('linhasPorPar'), funcao('parDe'), funcao('irmaDe'),
+    constante('CAMPOS_SO_DA_LINHA'), funcao('espelharNaIrma'),
+    computado('catalogoPorBase'), funcao('catalogoAtivo'),
+    funcao('erroCustoTotalDe'), funcao('_patchAccount'),
+    'return _patchAccount',
+  ].join('\n')))(accounts, api, flash, accountsErr, ref(null), async () => { recarregou++ }, () => true, erroPlataforma)
+  accounts.value = [amz]
+  const MSG = 'Conta do ML nasce pelo + Adicionar Conta, com Clássico e Premium.'
+  respostas = [Object.assign(new Error('x'), { status: 400, data: { detail: { code: 'tipo_obrigatorio', message: MSG } } })]
+  await p('amz', 'platform', 'mercadolivre')
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/accounts/amz', 'PATCH', { platform: 'mercadolivre' }])
+  assert.equal(amz.platform, 'amazon', 'volta ao anterior')
+  assert.deepEqual(erroPlataforma.value, { id: 'amz', mensagem: MSG })
+  assert.equal(accountsErr.value, null, 'no campo, não na faixa geral')
+  assert.equal(recarregou, 0)
+  // Troca aceita: o erro sai.
+  respostas = [{ ...amz, platform: 'shopee', conta_catalogo_id: null }]
+  await p('amz', 'platform', 'shopee')
+  assert.equal(amz.platform, 'shopee')
+  assert.equal(erroPlataforma.value, null)
+  pedidos.length = 0
+  console.log('pricing contas ML par: plataforma ok')
+}
+
+// ---------- 8) template
 function template() {
   const tpl = descriptor.template.content
   const contas = tpl.slice(tpl.indexOf("tab === 'contas'"), tpl.indexOf("tab === 'produtos'"))
@@ -409,6 +555,14 @@ function template() {
   assert.match(linha, /<td\s+class="border border-border px-2 py-1\.5 text-xs text-left whitespace-nowrap"[\s\S]*?data-coluna-plataforma/)
   assert.match(linha, /data-tipo-conta-solta>\{\{ tipoDaContaSolta\(acc\) \}\}/)
   assert.ok(!contas.includes('definirTipoMl') && !contas.includes('rotuloTipoMl'))
+  // T5: a troca de plataforma usa a lista sem ML; o erro do servidor no campo.
+  const celPlat = linha.slice(linha.indexOf('<td\n                class="border border-border px-2 py-1.5 text-xs text-left whitespace-nowrap"'), linha.indexOf('<!-- conta (o nome'))
+  assert.ok(celPlat.includes('<option v-for="p in plataformasDaTroca(acc)" :key="p.value" :value="p.value">{{ p.label }}</option>'))
+  assert.match(celPlat, /v-if="erroPlataforma\?\.id === acc\.id"[\s\S]*?role="alert"[\s\S]*?data-erro-plataforma\s*>\{\{ erroPlataforma\?\.mensagem \}\}<\/p>/)
+  assert.ok(celPlat.includes("'ring-1 ring-destructive ring-inset': erroPlataforma?.id === acc.id"))
+  // T1: aviso do campo de slot com Clássico e Premium diferentes.
+  const slotsTpl = linha.slice(linha.indexOf('v-if="slotPopoverAccountId === acc.id"'), linha.indexOf('saveSlotPopover(acc.id)'))
+  assert.match(slotsTpl, /v-if="slotPopoverDiferentes\[i - 1\]"[\s\S]*?>Clássico e Premium estão diferentes neste campo; salvar grava o mesmo nos dois\.<\/p>/)
   // Linha de adicionar: Plataforma, Conta; ML mostra a comissão da categoria.
   const add = contas.slice(contas.indexOf('<!-- add row'), contas.indexOf('<!-- data rows grouped'))
   assert.ok(add.indexOf('v-model="newAcc.platform"') < add.indexOf('id="new-acc-name"'))

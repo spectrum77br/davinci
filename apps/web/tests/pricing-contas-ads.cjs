@@ -56,7 +56,7 @@ const f = new Function('ads', 'podeEditarAds', 'buscaAdsProduto', 'seqAdsConta',
   funcao('parseDec'), funcao('lerPct'), funcao('adsDa'), funcao('pctGeralAds'), funcao('pctDoProdutoAds'),
   funcao('roasMinimo'), funcao('fmtRoas'), funcao('fmtGasto'), funcao('lerGasto'), funcao('produtosDoAds'),
   funcao('textoErroAds'), funcao('erroCustoTotalDe'), funcao('chaveAds'), funcao('erroAdsEm'), funcao('erroAdsDaLinhaGeral'),
-  funcao('gravarAds'), funcao('gravarCampoAds'),
+  funcao('linhaAdsNaTela'), funcao('gravarAds'), funcao('gravarCampoAds'),
   'return { ADS_PADRAO, adsDa, pctGeralAds, pctDoProdutoAds, roasMinimo, fmtRoas, fmtGasto, lerGasto, produtosDoAds, gravarAds, gravarCampoAds, chaveAds, erroAdsEm, erroAdsDaLinhaGeral }',
 ].join('\n')))(ads, podeEditarAds, buscaAdsProduto, seqAdsConta, toast, api, flash, erroAds)
 
@@ -161,7 +161,10 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     status: 422, data: { detail: { code: 'custo_total_estourado', mensagem: MSG } },
   })
   const nPedidos = pedidos.length
-  globalThis.document = { querySelector: (sel) => (sel === '[data-ads-painel="c1"]' ? {} : null) }
+  // A janela aberta da c1 com a linha Geral e as dos produtos que a busca mostra.
+  const linhasNaJanela = new Set(['[data-ads-geral]', '[data-ads-produto-linha="p2"]'])
+  const painelC1 = { querySelector: (sel) => (linhasNaJanela.has(sel) ? {} : null) }
+  globalThis.document = { querySelector: (sel) => (sel === '[data-ads-painel="c1"]' ? painelC1 : null) }
   resposta = estouro()
   f.gravarCampoAds(campo('10', { adsConta: 'c1', adsCampo: 'pode_gastar_pct' }))
   assert.equal(ads.value.contas.c1.pode_gastar_pct, 10, 'já na tela')
@@ -184,6 +187,13 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   assert.equal(erroAds.value.chave, 'produto:p2:pode_gastar_pct')
   assert.equal(f.erroAdsEm('c1', 'produto:p2:', true), MSG)
   assert.equal(f.erroAdsEm('c1', 'produto:p1:', true), null)
+  assert.equal(avisos.length, 0, 'produto na janela: o aviso fica junto dele')
+  // Produto que a busca escondeu: o aviso da linha não aparece, então vai
+  // também no aviso solto (antes sumia sem aviso).
+  resposta = estouro()
+  await f.gravarAds('c1', { pode_gastar_pct: 30 }, 'p3')
+  assert.equal(erroAds.value.chave, 'produto:p3:pode_gastar_pct')
+  assert.equal(avisos.pop(), `Não salvou o Ads | ${MSG}`)
   // Gravado no fechar da janela (sem a janela na tela): vai também no aviso solto.
   globalThis.document = { querySelector: () => null }
   resposta = estouro()
