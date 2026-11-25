@@ -457,12 +457,18 @@ type Account = {
   ads: string | null
   coupon: string | null
   offer: string | null
-  // M-11 (18/11/2026): campos próprios da aba Contas ("26/06" e % de 0 a 100;
-  // o % vem como texto decimal do servidor, "4.00").
-  desconto_ate: string | null
-  cupom_ate: string | null
+  // M-11 (18/11/2026): campos próprios da aba Contas (% de 0 a 100; vem como
+  // texto decimal do servidor, "4.00"). Desconto até, Cupom até e Oferta
+  // limite saíram da tela na M-55 (25/11/2026); ficam no banco, fora da tela.
   afiliado_pct: string | number | null
-  oferta_limite_pct: string | number | null
+  // M-55: Desconto (%), só anotação como o Afiliado. M-56: Custo total (%) =
+  // teto de Afiliado + Desconto + Ads, conferido no servidor; todos veem, só o
+  // ADM muda. Nenhum dos dois entra no preço.
+  desconto_pct?: string | number | null
+  custo_total_pct?: string | number | null
+  // M-53 (25/11/2026, migration 0511): o mesmo valor no Clássico e no Premium
+  // da mesma conta ML de kit; nas outras linhas, null.
+  par_id?: string | null
   has_password: boolean
   integration_id: string | null
   segment_id: string | null
@@ -595,15 +601,6 @@ function podeTerCatalogo(acc: Account): boolean {
   return acc.platform === 'mercadolivre' && !ehCatalogo(acc)
 }
 
-// Margens do catálogo (07/10/2026, Eduardo: "clicar e aparecer a opção para
-// colocar as margens, dentro do lugar do catálogo"): o botão "Margens" ao lado
-// do Catálogo ML abre uma janelinha com a margem própria por tipo. Vazio = usa
-// a margem da conta; comissão e frete são sempre os da conta.
-const margensCatalogoConta = ref<Account | null>(null) // a conta de kit
-const margensCatalogoValores = ref<string[]>([])
-const margensCatalogoSalvando = ref(false)
-const margensCatalogoErro = ref<string | null>(null)
-
 function temMargemPropria(acc: Account): boolean {
   const filha = catalogoPorBase.value.get(acc.id)
   if (!filha) return false
@@ -611,66 +608,174 @@ function temMargemPropria(acc: Account): boolean {
   return false
 }
 
-function abrirMargensCatalogo(acc: Account) {
-  const filha = catalogoPorBase.value.get(acc.id)
-  if (!filha) return
-  margensCatalogoErro.value = null
-  margensCatalogoValores.value = Array.from({ length: nTiposAba.value }, (_, i) => {
-    const m = margemPropria(filha, i + 1)
-    return m == null ? '' : (m * 100).toFixed(1).replace('.', ',')
-  })
-  margensCatalogoConta.value = acc
-}
-
-function fecharMargensCatalogo() {
-  if (margensCatalogoSalvando.value) return
-  margensCatalogoConta.value = null
-  margensCatalogoErro.value = null
-}
-
-async function salvarMargensCatalogo() {
-  const acc = margensCatalogoConta.value
-  const filha = acc ? catalogoPorBase.value.get(acc.id) : undefined
-  if (!acc || !filha || !canEditContas.value) return
-  const nomes = TYPE_HEADERS.value[department.value] ?? []
-  const body: Record<string, string | null> = {}
-  for (let i = 0; i < margensCatalogoValores.value.length; i++) {
-    const raw = (margensCatalogoValores.value[i] || '').replace('%', '').trim()
-    let valor: string | null = null
-    if (raw) {
-      const pct = parseDec(raw)
-      if (Number.isNaN(pct)) {
-        margensCatalogoErro.value = `Margem inválida em ${nomes[i] ?? `tipo ${i + 1}`}`
-        return
-      }
-      valor = (pct / 100).toFixed(4)
-    }
-    const atual = margemPropria(filha, i + 1)
-    if ((atual == null ? null : atual.toFixed(4)) !== valor) body[`margin${i + 1}`] = valor
+// =========================================================== conta ML em uma linha (M-53)
+// Clássico e Premium da mesma conta do ML são duas linhas em pricing_accounts
+// com o mesmo par_id. A aba Contas mostra UMA linha (a do Clássico) e grava
+// nela; o servidor repete na do Premium — menos a comissão, que é de cada tipo
+// e vai pela janela da Comissão. A grade da Tabela de Preços continua com as
+// duas colunas (ela lê o /grid, não esta lista).
+const linhasPorPar = computed(() => {
+  const m = new Map<string, Account[]>()
+  for (const a of accounts.value) {
+    if (ehCatalogo(a) || !a.par_id) continue
+    const linhas = m.get(a.par_id)
+    if (linhas) linhas.push(a)
+    else m.set(a.par_id, [a])
   }
-  if (!Object.keys(body).length) {
-    fecharMargensCatalogo()
+  for (const linhas of m.values()) linhas.sort((a, b) => ordemTipo(a) - ordemTipo(b))
+  return m
+})
+
+type ParMl = { classico: Account; premium: Account }
+
+// As duas linhas da conta (Clássico primeiro). null = conta sem par na lista:
+// aparece sozinha, como antes, com o tipo dela ao lado de "ML".
+function parDe(acc: Account): ParMl | null {
+  if (!acc.par_id || ehCatalogo(acc)) return null
+  const linhas = linhasPorPar.value.get(acc.par_id)
+  if (!linhas || linhas.length < 2) return null
+  return { classico: linhas[0], premium: linhas[1] }
+}
+
+// A linha do Premium não aparece na aba Contas (nem nos contadores).
+function escondidaNaAba(acc: Account): boolean {
+  const par = parDe(acc)
+  return !!par && par.classico.id !== acc.id
+}
+
+function irmaDe(acc: Account): Account | null {
+  const par = parDe(acc)
+  if (!par) return null
+  return par.classico.id === acc.id ? par.premium : par.classico
+}
+
+// Título das janelas da conta (Comissão, Catálogo, Ads): plataforma + conta,
+// com o nome como está cadastrado — "ML forpaper", "Amazon kfa".
+function tituloConta(acc: Account): string {
+  return `${platformLabel(acc.platform)} ${acc.name}`
+}
+
+// Conta do ML sem par na lista: a coluna Tipo ML saiu (M-53), então o tipo
+// dela aparece ao lado de "ML" na coluna Plataforma.
+function tipoDaContaSolta(acc: Account): string {
+  if (acc.platform !== 'mercadolivre' || ehCatalogo(acc) || parDe(acc)) return ''
+  const t = rotuloTipo(acc)
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : 'sem tipo'
+}
+
+// Com que comissão a conta ML nasce (o servidor decide pela categoria e
+// ignora a do corpo; a linha de adicionar conta só mostra).
+function comissaoPadraoMl(dept: string): string {
+  return dept === 'mala' ? '14% · 19%' : '11% · 16%'
+}
+
+// O servidor repete na linha do Premium o que foi gravado no Clássico (menos
+// comissão e ordem): a cópia local acompanha, para a irmã não ficar velha.
+const CAMPOS_SO_DA_LINHA = new Set(['commission', 'sort_order', 'listing_type', 'platform'])
+function espelharNaIrma(acc: Account, campos: string[]) {
+  const irma = irmaDe(acc)
+  if (!irma) return
+  for (const k of campos) if (!CAMPOS_SO_DA_LINHA.has(k)) (irma as any)[k] = (acc as any)[k]
+}
+
+// ---------- Comissão da conta ML (M-53): "14% · 19%" (Clássico · Premium).
+// O ADM clica e abre a janelinha "ML forpaper" com os dois campos; só grava no
+// Salvar, pelo PUT /comissao-ml (frações, as duas linhas numa transação).
+const TIPOS_COMISSAO_ML = [
+  { chave: 'classico', rotulo: 'Clássico' },
+  { chave: 'premium', rotulo: 'Premium' },
+] as const
+const comissaoMlId = ref<string | null>(null) // a linha do Clássico
+const comissaoMlValores = reactive({ classico: '', premium: '' })
+const comissaoMlSalvando = ref(false)
+const comissaoMlErro = ref('')
+
+// 0.14 → "14"; 0.165 → "16,5"; vazio → "".
+function textoComissao(v: string | number | null): string {
+  const n = v == null || v === '' ? null : Number(v)
+  if (n == null || Number.isNaN(n)) return ''
+  return (n * 100).toFixed(2).replace(/\.?0+$/, '').replace('.', ',')
+}
+
+// A célula do par: "14% · 19%" (Clássico · Premium); com decimal, "15,5%".
+function textoComissaoPar(par: ParMl): string {
+  const pct = (v: string | number | null) => (textoComissao(v) ? `${textoComissao(v)}%` : '—')
+  return `${pct(par.classico.commission)} · ${pct(par.premium.commission)}`
+}
+
+function abrirComissaoMl(acc: Account) {
+  const par = parDe(acc)
+  if (!par || !isAdmin.value) return
+  comissaoMlValores.classico = textoComissao(par.classico.commission)
+  comissaoMlValores.premium = textoComissao(par.premium.commission)
+  comissaoMlErro.value = ''
+  comissaoMlId.value = acc.id
+}
+
+function fecharComissaoMl() {
+  if (comissaoMlSalvando.value) return
+  comissaoMlId.value = null
+  comissaoMlErro.value = ''
+}
+
+function alternarJanelaComissao(acc: Account, aberta: boolean) {
+  if (aberta) abrirComissaoMl(acc)
+  else fecharComissaoMl()
+}
+
+function textoErroComissaoMl(e: any): string {
+  const d = e?.data?.detail
+  const status = e?.status ?? e?.response?.status
+  if (d?.code === 'sem_par') return 'Esta conta não tem Clássico e Premium juntos — recarregue a página.'
+  if (status === 403) return 'Só o administrador muda a comissão.'
+  if (status === 422) return 'Use um número de 0 a 100, ex.: 14 ou 16,5.'
+  return d?.mensagem || d?.message || 'Não foi possível salvar; tente de novo.'
+}
+
+async function salvarComissaoMl() {
+  const acc = accounts.value.find((a) => a.id === comissaoMlId.value)
+  const par = acc ? parDe(acc) : null
+  if (!par || !isAdmin.value || comissaoMlSalvando.value) return
+  const body: { classico: number | null; premium: number | null } = { classico: null, premium: null }
+  for (const tipo of ['classico', 'premium'] as const) {
+    const v = lerPct(comissaoMlValores[tipo].replace('%', ''))
+    if (v === undefined) {
+      comissaoMlErro.value = `${tipo === 'classico' ? 'Clássico' : 'Premium'}: use um número de 0 a 100, ex.: 14 ou 16,5.`
+      return
+    }
+    body[tipo] = v == null ? null : Number((v / 100).toFixed(4))
+  }
+  const igual = (v: string | number | null, novo: number | null) =>
+    (v == null || v === '' ? null : Number(Number(v).toFixed(4))) === novo
+  if (igual(par.classico.commission, body.classico) && igual(par.premium.commission, body.premium)) {
+    fecharComissaoMl()
     return
   }
-  margensCatalogoSalvando.value = true
-  margensCatalogoErro.value = null
+  comissaoMlSalvando.value = true
+  comissaoMlErro.value = ''
   try {
-    const updated = await api<Account>(`/api/pricing/accounts/${filha.id}`, { method: 'PATCH', body })
-    Object.assign(filha, updated)
-    flash(acc.id, 'catalogo')
-    margensCatalogoSalvando.value = false
-    fecharMargensCatalogo()
+    const r = await api<{ classico: Account; premium: Account }>(
+      `/api/pricing/accounts/${par.classico.id}/comissao-ml`,
+      { method: 'PUT', body },
+    )
+    Object.assign(par.classico, r.classico)
+    Object.assign(par.premium, r.premium)
+    flash(par.classico.id, 'commission')
+    comissaoMlSalvando.value = false
+    fecharComissaoMl()
   } catch (e: any) {
-    margensCatalogoErro.value = e?.data?.detail?.message ?? e?.data?.detail?.code ?? 'Não foi possível salvar'
+    comissaoMlErro.value = textoErroComissaoMl(e)
   } finally {
-    margensCatalogoSalvando.value = false
+    comissaoMlSalvando.value = false
   }
 }
 
 const accountsByDept = computed(() => {
   const m: Record<DeptKey, Account[]> = { celular: [], mala: [], eletro: [] }
   for (const a of accounts.value) {
-    if (ehCatalogo(a)) continue
+    // A coluna de catálogo e a linha do Premium de uma conta ML com par não
+    // são contas próprias na aba Contas (nem nos contadores — M-53).
+    if (ehCatalogo(a) || escondidaNaAba(a)) continue
     const k = a.department as DeptKey
     if (!m[k]) m[k] = []
     m[k].push(a)
@@ -689,10 +794,10 @@ const accountsCurrent = computed(() => accountsByDept.value[department.value] ??
 const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).length)
 
 // Colunas da tabela da aba Contas (o colspan das linhas de grupo e de aviso):
-// Nome, Plataforma, Tipo ML, Catálogo ML, Equipe, [Kit, Comissão e os pares
-// marg/frete — só ADM, M-10], as anotações e a lixeira.
+// Plataforma, Conta, Catálogo ML, Equipe, [Kit, Comissão e os pares
+// marg/frete — só ADM, M-10], as anotações e a lixeira. (Tipo ML saiu na M-53.)
 const colunasContas = computed(() =>
-  5 + (isAdmin.value ? 2 + nTiposAba.value * 2 : 0) + STORE_NOTE_FIELDS.length + 1,
+  4 + (isAdmin.value ? 2 + nTiposAba.value * 2 : 0) + STORE_NOTE_FIELDS.length + 1,
 )
 
 // SSH-style contas filters
@@ -1241,36 +1346,28 @@ async function focusEditInput() {
 
 // =========================================================== account inline edit
 
-// Anotações da conta na aba Contas. `observation` é a "Obs"; Ads abre o
-// painel do M-12 (gravado à parte, não no texto `ads`). Desconto até / Cupom até ("dd/mm") e Afiliado / Oferta limite (%)
-// são campos próprios, sempre à mostra e fora do cálculo (M-11, 18/11/2026,
-// migration 0502); os textos antigos discount/affiliate/coupon/offer ficam no
-// banco, fora da tela.
-type TipoAnotacao = 'data' | 'pct'
-type CampoAnotacao = { key: string; label: string; tipo?: TipoAnotacao; titulo?: string }
+// Anotações da conta na aba Contas, nesta ordem (M-55, 25/11/2026): Afiliado |
+// Desconto | Ads | Custo total | Obs. `observation` é a "Obs"; Ads abre o
+// painel do M-12 (gravado à parte, não no texto `ads`). Afiliado, Desconto e
+// Custo total são % próprios, sempre à mostra e fora do cálculo do preço.
+// Desconto até, Cupom até e Oferta limite saíram da tela (ficam no banco), e os
+// textos antigos discount/affiliate/coupon/offer também ficam só no banco.
+// `soAdmin`: todos veem, só o ADM muda (Custo total, M-56).
+type CampoAnotacao = { key: string; label: string; tipo?: 'pct'; soAdmin?: boolean; titulo?: string }
 const STORE_NOTE_FIELDS: CampoAnotacao[] = [
-  { key: 'desconto_ate', label: 'Desconto até', tipo: 'data', titulo: 'Até que dia e mês vai o desconto da conta' },
   { key: 'afiliado_pct', label: 'Afiliado', tipo: 'pct', titulo: 'Quanto pode gastar com afiliado (%)' },
-  { key: 'ads', label: 'Ads', titulo: 'Quanto a conta pode gastar em Ads (%), o ROAS mínimo e o gasto por dia — clique na célula' },
-  { key: 'cupom_ate', label: 'Cupom até', tipo: 'data', titulo: 'Até que dia e mês vai o cupom da conta' },
-  { key: 'oferta_limite_pct', label: 'Oferta limite', tipo: 'pct', titulo: 'Limite de oferta que pode colocar (%)' },
+  { key: 'desconto_pct', label: 'Desconto', tipo: 'pct', titulo: 'Desconto da conta (%) — só anotação, fora do cálculo do preço' },
+  { key: 'ads', label: 'Ads', titulo: '% Geral que a conta pode gastar em Ads — clique para abrir o Ads (gasto por dia e % por produto)' },
+  {
+    key: 'custo_total_pct', label: 'Custo total', tipo: 'pct', soAdmin: true,
+    titulo: 'Teto de Afiliado + Desconto + Ads (%). Vazio = sem teto. Só o administrador muda',
+  },
   { key: 'observation', label: 'Obs' },
 ]
 
-const DIAS_NO_MES = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-
-// Desconto até / Cupom até: "26/06", "26.06", "26,06" (teclado do celular),
-// "26/6" → "26/06" (sem ano: 29/02 vale). Vazio → null; dia ou mês que não
-// existe → undefined (não grava).
-function lerDiaMes(raw: string): string | null | undefined {
-  const s = raw.trim()
-  if (!s) return null
-  const m = /^(\d{1,2})\s*[./,-]\s*(\d{1,2})$/.exec(s)
-  if (!m) return undefined
-  const dia = Number(m[1])
-  const mes = Number(m[2])
-  if (mes < 1 || mes > 12 || dia < 1 || dia > DIAS_NO_MES[mes - 1]) return undefined
-  return `${String(dia).padStart(2, '0')}/${String(mes).padStart(2, '0')}`
+// Quem muda o campo: Custo total só o ADM; os outros, quem edita Contas.
+function podeEditarAnotacao(f: CampoAnotacao): boolean {
+  return f.soAdmin ? isAdmin.value : canEditContas.value
 }
 
 function textoAnotacao(acc: Account, f: CampoAnotacao): string {
@@ -1279,23 +1376,38 @@ function textoAnotacao(acc: Account, f: CampoAnotacao): string {
   return f.tipo === 'pct' ? String(Number(v)).replace('.', ',') : String(v)
 }
 
-// Campos próprios: gravam ao sair do campo (o Enter tira o foco). Afiliado e
-// Oferta limite usam o `lerPct` da margem (só número de 0 a 100, com decimal).
-// Valor inválido volta ao que estava, com aviso; igual ao atual não grava.
+// M-56: o servidor recusa (422 custo_total_estourado) a gravação que faria
+// Afiliado + Desconto + Ads passar do Custo total. O campo fica com a borda
+// vermelha, o aviso do servidor aparece junto dele e o valor volta ao anterior.
+type ErroCustoTotal = { id: string; campo: string; mensagem: string }
+const erroCustoTotal = ref<ErroCustoTotal | null>(null)
+
+function erroCustoTotalDe(e: any): string | null {
+  const d = e?.data?.detail
+  if (d?.code !== 'custo_total_estourado') return null
+  return d.mensagem || 'Passa do Custo total. Não gravado.'
+}
+
+function estourouCustoTotal(acc: Account, campo: string): string | null {
+  const e = erroCustoTotal.value
+  return e && e.id === acc.id && e.campo === campo ? e.mensagem : null
+}
+
+// Campos próprios: gravam ao sair do campo (o Enter tira o foco), com o
+// `lerPct` da margem (só número de 0 a 100, com decimal). Valor inválido volta
+// ao que estava, com aviso; igual ao atual não grava.
 function gravarAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
-  if (!canEditContas.value) return
+  if (!podeEditarAnotacao(f)) return
   const el = ev.target as HTMLInputElement
-  const valor = f.tipo === 'data' ? lerDiaMes(el.value) : lerPct(el.value)
+  const valor = lerPct(el.value)
   if (valor === undefined) {
-    toast.error(
-      `${f.label}: valor inválido`,
-      f.tipo === 'data' ? 'Use dia e mês que existem, ex.: 26/06' : 'Use só número de 0 a 100, ex.: 4 ou 4,5',
-    )
+    toast.error(`${f.label}: valor inválido`, 'Use só número de 0 a 100, ex.: 4 ou 4,5')
     el.value = textoAnotacao(acc, f)
     return
   }
   el.value = valor == null ? '' : String(valor).replace('.', ',')
   if (el.value === textoAnotacao(acc, f)) return
+  if (estourouCustoTotal(acc, f.key)) erroCustoTotal.value = null
   void _patchAccount(acc.id, f.key, el.value)
 }
 
@@ -1306,13 +1418,14 @@ function desfazerAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
 }
 
 // ---------- Ads da aba Contas (M-12, 18/11/2026; migration 0503)
-// A célula Ads vira o botão "2%  ROAS 50 ▾" e abre um painel igual ao da
-// Margem: [x] Geral (% que pode gastar, ROAS mínimo = 100 ÷ % calculado e
-// gasto por dia em R$), "% gasto real" e "ROAS real" da conta nos últimos 7
-// dias (lidos do Marketing; sem dado = "—", nunca estimado) e [x] Por produto
-// (% e gasto por dia de cada produto do departamento; % vazio = usa a Geral).
-// Grava no servidor ao sair do campo, com Enter ou ao fechar; quem não edita
-// Contas só vê. Fora do cálculo de preço. O texto antigo (`ads`) fica no banco.
+// A célula Ads é a caixinha com o % Geral (M-55, 25/11/2026) e abre o painel
+// "Amazon kfa" (M-57): cabeçalho Produto | Pode gastar (%) | ROAS mínimo |
+// Gasto por dia (R$), a linha [x] Geral na mesma grade (ROAS mínimo = 100 ÷ %
+// calculado) e [x] Por produto (% e gasto por dia de cada produto do
+// departamento; % vazio = usa a Geral). O "% gasto real" e o "ROAS real"
+// continuam no Marketing, fora da janela. Grava no servidor ao sair do campo,
+// com Enter ou ao fechar; quem não edita Contas só vê. Fora do cálculo de
+// preço. O texto antigo (`ads`) fica no banco.
 type AdsValores = { pode_gastar_pct: number | null; gasto_dia: number | null }
 type AdsConta = AdsValores & {
   ads_geral_ligada: boolean
@@ -1414,6 +1527,27 @@ function textoErroAds(e: any): string {
   return 'Tente de novo; voltou ao que está salvo.'
 }
 
+// Custo total estourado na janela de Ads (M-56): o aviso fica junto do campo
+// que foi recusado. `chave` = "geral:<campo>" ou "produto:<id>:<campo>".
+const erroAds = ref<{ accId: string; chave: string; mensagem: string } | null>(null)
+
+function chaveAds(mudanca: Partial<AdsConta>, prodId?: string): string {
+  return `${prodId ? `produto:${prodId}` : 'geral'}:${Object.keys(mudanca).join(',')}`
+}
+
+// Aviso para mostrar num lugar da janela: a chave exata ou um começo dela.
+function erroAdsEm(accId: string, chave: string, comeco = false): string | null {
+  const e = erroAds.value
+  if (!e || e.accId !== accId) return null
+  return (comeco ? e.chave.startsWith(chave) : e.chave === chave) ? e.mensagem : null
+}
+
+// O aviso da linha Geral (% , gasto por dia ou a caixa Geral) — a caixa "Por
+// produto" tem o aviso dela, embaixo dela.
+function erroAdsDaLinhaGeral(accId: string): string | null {
+  return erroAdsEm(accId, 'geral:ads_por_produto_ligada') ? null : erroAdsEm(accId, 'geral:', true)
+}
+
 async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: string) {
   const r = ads.value
   if (!r?.pode_editar) return
@@ -1437,9 +1571,18 @@ async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: str
   try {
     const salvo = await api<AdsConta>(url, { method: 'PUT', body: mudanca })
     if (ads.value?.department === dep && seqAdsConta[accId] === seq) ads.value.contas[accId] = salvo
+    if (erroAds.value?.accId === accId) erroAds.value = null
     flash(accId, 'ads')
   } catch (e: any) {
-    toast.error('Não salvou o Ads', textoErroAds(e))
+    const estouro = erroCustoTotalDe(e)
+    if (estouro) {
+      erroAds.value = { accId, chave: chaveAds(mudanca, prodId), mensagem: estouro }
+      // Recusa do campo gravado ao fechar a janela: sem a janela, vai no aviso.
+      const aberta = typeof document !== 'undefined' && !!document.querySelector(`[data-ads-painel="${accId}"]`)
+      if (!aberta) toast.error('Não salvou o Ads', estouro)
+    } else {
+      toast.error('Não salvou o Ads', textoErroAds(e))
+    }
     if (ads.value?.department === dep && seqAdsConta[accId] === seq) ads.value.contas[accId] = antes
   }
 }
@@ -1472,6 +1615,7 @@ function gravarCampoAds(ev: Event) {
 function abrirOuFecharAds(aberto: boolean) {
   if (aberto) {
     buscaAdsProduto.value = ''
+    erroAds.value = null
     return
   }
   if (typeof document === 'undefined') return
@@ -1552,7 +1696,9 @@ async function _patchAccount(id: string, field: string, raw: string) {
     if (!raw) return
     payload.name = raw
   } else if (field === 'platform') {
-    if (!raw || raw === acc.platform) return
+    // Conta ML com Clássico e Premium não troca de plataforma por aqui (o par
+    // ficaria meio ML, meio outra plataforma).
+    if (!raw || raw === acc.platform || parDe(acc)) return
     // Sair do ML apaga a coluna de catálogo da conta no servidor (e os preços
     // fixados à mão nela): pede confirmação, igual ao Desligar.
     if (
@@ -1592,13 +1738,9 @@ async function _patchAccount(id: string, field: string, raw: string) {
       if (Number.isNaN(n)) return
       payload[field] = n
     }
-  } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'offer' || field === 'email' || field === 'phone' || field === 'listing_type') {
+  } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'offer' || field === 'email' || field === 'phone') {
     payload[field] = raw || null
-  } else if (field === 'desconto_ate' || field === 'cupom_ate') {
-    const v = lerDiaMes(raw)
-    if (v === undefined) return
-    payload[field] = v
-  } else if (field === 'afiliado_pct' || field === 'oferta_limite_pct') {
+  } else if (field === 'afiliado_pct' || field === 'desconto_pct' || field === 'custo_total_pct') {
     const v = lerPct(raw)
     if (v === undefined) return
     payload[field] = v
@@ -1607,6 +1749,8 @@ async function _patchAccount(id: string, field: string, raw: string) {
   }
 
   // Optimistic update: paint the new value before the round-trip.
+  const antes: Record<string, unknown> = {}
+  for (const k of Object.keys(payload)) antes[k] = (acc as any)[k]
   Object.assign(acc, payload)
 
   try {
@@ -1615,14 +1759,25 @@ async function _patchAccount(id: string, field: string, raw: string) {
       body: payload,
     })
     Object.assign(acc, updated)
+    // Conta ML com par: o servidor gravou o mesmo no Premium (M-53).
+    espelharNaIrma(acc, Object.keys(payload))
     // O servidor apagou a coluna de catálogo (conta saiu do ML): tira ela da
     // lista local, senão o controle continua "Ligado" quando a conta volta
     // para o ML.
     if (!updated.conta_catalogo_id) {
       accounts.value = accounts.value.filter((x) => !(ehCatalogo(x) && x.conta_base_id === id))
     }
+    if (erroCustoTotal.value?.id === id) erroCustoTotal.value = null
     flash(id, field)
   } catch (e: any) {
+    // M-56: passou do Custo total — nada gravado; o campo volta ao anterior,
+    // com a borda vermelha e o aviso do servidor junto dele.
+    const estouro = erroCustoTotalDe(e)
+    if (estouro) {
+      Object.assign(acc, antes)
+      erroCustoTotal.value = { id, campo: field, mensagem: estouro }
+      return
+    }
     accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
     // Reload to revert the optimistic update on failure.
     await loadAccounts()
@@ -1657,12 +1812,18 @@ async function _patchMargemCatalogo(filha: Account, field: string, raw: string) 
   }
 }
 
+// Conta ML com par (M-53): uma confirmação só; o servidor exclui o Clássico e o
+// Premium (e os catálogos deles).
 async function deleteAccount(a: Account) {
-  const avisoCatalogo = catalogoAtivo(a) ? '\n\nO Catálogo ML desta conta também sai.' : ''
-  if (!confirm(`Excluir conta "${nomeComTipo(a)}"?${avisoCatalogo}`)) return
+  const par = parDe(a)
+  const linhas = par ? [par.classico, par.premium] : [a]
+  const avisoPar = par ? '\n\nSaem o Clássico e o Premium desta conta (as duas colunas da Tabela de Preços).' : ''
+  const avisoCatalogo = linhas.some(catalogoAtivo) ? '\n\nO Catálogo ML desta conta também sai.' : ''
+  if (!confirm(`Excluir conta "${par ? a.name : nomeComTipo(a)}"?${avisoPar}${avisoCatalogo}`)) return
   try {
     await api(`/api/pricing/accounts/${a.id}`, { method: 'DELETE' })
-    accounts.value = accounts.value.filter((x) => x.id !== a.id && x.conta_base_id !== a.id)
+    const ids = new Set(linhas.map((x) => x.id))
+    accounts.value = accounts.value.filter((x) => !ids.has(x.id) && !(x.conta_base_id && ids.has(x.conta_base_id)))
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'delete_failed'
   }
@@ -1692,88 +1853,153 @@ async function autoMatchAccounts() {
   }
 }
 
-// =========================================================== tipo ML + Catálogo ML
+// =========================================================== Catálogo ML da conta (M-54)
 
-// Tipo do anúncio ML da conta (listing_type). Preenchido, a coluna só manda
-// preço para anúncios desse tipo (clássico = gold_special, premium =
-// gold_pro); vazio = manda para os dois. O Catálogo ML exige o tipo.
-// Grava no mesmo formato das contas que já têm tipo ("ml classico").
-const TIPOS_ML = [
-  { value: 'ml classico', label: 'Clássico' },
-  { value: 'ml premium', label: 'Premium' },
-]
-// Variações que a API entende igual (sku_match._ML_LISTING_TYPE_MAP).
-const APELIDOS_TIPO_ML: Record<string, string> = {
-  'ml classico': 'ml classico',
-  'ml clássico': 'ml classico',
-  classico: 'ml classico',
-  'clássico': 'ml classico',
-  'ml premium': 'ml premium',
-  premium: 'ml premium',
+// A célula "Catálogo ML" mostra "Ativo" ou "Inativo" e abre a janela da conta
+// ("ML forpaper"): [x] Catálogo ativo e, para o ADM, o botão Margens com
+// [x] Usar as margens da conta + um % por tipo da categoria. Nada grava antes
+// do Salvar. A escolha vale para a CONTA: grava pelo id do Clássico e o
+// servidor faz o mesmo no Premium (liga/desliga as duas colunas de catálogo e
+// copia as margens para a do Premium). Ativo → Inativo pede confirmação, porque
+// desligar APAGA as colunas de catálogo, com os preços fixados à mão e as
+// margens próprias. Margem em branco (ou "Usar as margens da conta") grava
+// null = o catálogo usa a margem da conta; comissão e frete são sempre os da
+// conta.
+const catalogoJanelaId = ref<string | null>(null) // a linha (Clássico) da janela aberta
+const catalogoJanelaAtivo = ref(false)
+const catalogoJanelaMargens = ref(false) // botão Margens aberto
+const catalogoJanelaUsarDaConta = ref(true)
+const catalogoJanelaValores = ref<string[]>([])
+const catalogoJanelaSalvando = ref(false)
+const catalogoJanelaErro = ref('')
+
+// 0.44 → "44,0" (o formato da janela de antes); sem margem → "".
+function textoMargemCatalogo(m: number | null): string {
+  return m == null ? '' : (m * 100).toFixed(1).replace('.', ',')
 }
 
-function tipoMlDe(acc: Account): string {
-  const v = (acc.listing_type || '').trim()
-  return v ? APELIDOS_TIPO_ML[v.toLowerCase()] ?? v : ''
+// A margem da conta de kit, em cinza nos campos travados ("44,0" ou "—").
+function margemDaContaTexto(acc: Account, t: number): string {
+  return fmtMargin((acc as any)[`margin${t}`]).replace('%', '').replace('.', ',')
 }
 
-function rotuloTipoMl(acc: Account): string {
-  const v = tipoMlDe(acc)
-  return TIPOS_ML.find((o) => o.value === v)?.label ?? (v || '— sem tipo')
+function abrirCatalogo(acc: Account) {
+  if (!canEditContas.value || !podeTerCatalogo(acc)) return
+  const filha = catalogoPorBase.value.get(acc.id)
+  catalogoJanelaAtivo.value = catalogoAtivo(acc)
+  catalogoJanelaMargens.value = false
+  catalogoJanelaUsarDaConta.value = !temMargemPropria(acc)
+  catalogoJanelaValores.value = Array.from({ length: nTiposAba.value }, (_, i) =>
+    textoMargemCatalogo(filha ? margemPropria(filha, i + 1) : null),
+  )
+  catalogoJanelaErro.value = ''
+  catalogoJanelaId.value = acc.id
 }
 
-// Texto que a API não reconhece continua aparecendo como está (e conta como
-// sem tipo para o envio).
-function opcoesTipoMl(acc: Account): { value: string; label: string }[] {
-  const v = tipoMlDe(acc)
-  if (v && !TIPOS_ML.some((o) => o.value === v)) return [{ value: v, label: v }, ...TIPOS_ML]
-  return TIPOS_ML
+// Fechar (Cancelar, Esc, clique fora) descarta o que não foi salvo.
+function fecharCatalogo() {
+  if (catalogoJanelaSalvando.value) return
+  catalogoJanelaId.value = null
+  catalogoJanelaErro.value = ''
 }
 
-function definirTipoMl(acc: Account, valor: string) {
-  if (tipoMlDe(acc) === valor) return
-  void _patchAccount(acc.id, 'listing_type', valor)
+// Balão da célula: o estado e, para o ADM, as margens próprias do catálogo.
+function tituloCatalogoDaConta(acc: Account): string {
+  if (!catalogoAtivo(acc)) return 'Catálogo ML inativo — clique para ativar'
+  const filha = catalogoPorBase.value.get(acc.id)
+  if (isAdmin.value && filha && temMargemPropria(acc)) {
+    return `Catálogo ML ativo — margens próprias: ${resumoMargemPropria(filha)}`
+  }
+  return 'Catálogo ML ativo — clique para mudar'
 }
 
-const catalogoBusy = ref<Set<string>>(new Set())
-// Erro do último liga/desliga, mostrado embaixo do controle da própria linha.
-const catalogoErro = ref<Record<string, string>>({})
+function alternarJanelaCatalogo(acc: Account, aberta: boolean) {
+  if (aberta) abrirCatalogo(acc)
+  else fecharCatalogo()
+}
 
-// POST /api/pricing/accounts/{id}/catalogo {ativo}: ligar cria a coluna de
-// catálogo da conta (filha); desligar apaga (e os preços fixados nela).
-async function alternarCatalogo(acc: Account) {
-  if (!canEditContas.value || catalogoBusy.value.has(acc.id)) return
-  const ativo = !catalogoAtivo(acc)
+function textoErroCatalogo(e: any): string {
+  const d = e?.data?.detail
+  if (d?.code === 'tipo_obrigatorio') return 'Esta conta está sem tipo (clássico/premium); o catálogo não pode ser ativado.'
+  if (d?.code === 'catalogo_desencontrado') {
+    return 'O catálogo do Clássico e o do Premium estão desencontrados; nada foi gravado. Recarregue a página e, se continuar, avise o suporte.'
+  }
+  if ((e?.status ?? e?.response?.status) === 403) return 'Sem permissão para mudar o catálogo desta conta.'
+  return d?.mensagem || d?.message || d?.code || 'Não foi possível salvar; tente de novo.'
+}
+
+async function salvarCatalogo() {
+  const acc = accounts.value.find((a) => a.id === catalogoJanelaId.value)
+  if (!acc || !canEditContas.value || catalogoJanelaSalvando.value) return
+  const par = parDe(acc)
+  const ativoAntes = catalogoAtivo(acc)
+  const ativo = catalogoJanelaAtivo.value
+  // Margens: só o ADM e só com o catálogo ativo. "Usar as margens da conta"
+  // grava null em todos os tipos; desmarcada, o campo vazio também é null.
+  let margens: Record<string, string | null> | null = null
+  if (isAdmin.value && ativo) {
+    margens = {}
+    const nomes = TYPE_HEADERS.value[department.value] ?? []
+    for (let i = 0; i < catalogoJanelaValores.value.length; i++) {
+      let valor: string | null = null
+      const raw = catalogoJanelaUsarDaConta.value ? '' : (catalogoJanelaValores.value[i] || '').replace('%', '').trim()
+      if (raw) {
+        const pct = parseDec(raw)
+        if (Number.isNaN(pct)) {
+          catalogoJanelaErro.value = `Margem inválida em ${nomes[i] ?? `tipo ${i + 1}`}`
+          return
+        }
+        valor = (pct / 100).toFixed(4)
+      }
+      margens[`margin${i + 1}`] = valor
+    }
+  }
   if (
-    !ativo &&
+    ativoAntes && !ativo &&
     !confirm(
-      `Desligar o Catálogo ML de "${nomeComTipo(acc)}"?\n\n` +
-        'As colunas de catálogo desta conta saem da Tabela de Preços; os preços fixados à mão e as margens próprias do catálogo são apagados.',
+      `Desativar o Catálogo ML de "${par ? acc.name : nomeComTipo(acc)}"?\n\n` +
+        (par
+          ? 'As colunas de catálogo do Clássico e do Premium desta conta saem da Tabela de Preços; os preços fixados à mão e as margens próprias do catálogo (dos dois tipos) são apagados.'
+          : 'As colunas de catálogo desta conta saem da Tabela de Preços; os preços fixados à mão e as margens próprias do catálogo são apagados.'),
     )
   ) return
-  catalogoBusy.value.add(acc.id)
-  const { [acc.id]: _limpo, ...outrosErros } = catalogoErro.value
-  catalogoErro.value = outrosErros
+  catalogoJanelaSalvando.value = true
+  catalogoJanelaErro.value = ''
+  let mudou = false
   try {
-    await api(`/api/pricing/accounts/${acc.id}/catalogo`, {
-      method: 'POST',
-      body: { ativo },
-    })
-    await loadAccounts()
-    flash(acc.id, 'catalogo')
-    toast.success(
-      ativo ? 'Catálogo ML ligado' : 'Catálogo ML desligado',
-      `${acc.name}${acc.listing_type ? ` (${acc.listing_type})` : ''}${ativo ? ': coluna nova no grupo ML Catálogo da Tabela de Preços' : ''}`,
-    )
+    if (ativo !== ativoAntes) {
+      await api(`/api/pricing/accounts/${acc.id}/catalogo`, { method: 'POST', body: { ativo } })
+      mudou = true
+      await loadAccounts()
+      toast.success(
+        ativo ? 'Catálogo ML ativado' : 'Catálogo ML desativado',
+        `${tituloConta(acc)}${ativo ? ': colunas novas no grupo ML Catálogo da Tabela de Preços' : ''}`,
+      )
+    }
+    // A coluna de catálogo do Clássico (nova, se acabou de ativar): só as
+    // margens que mudaram; o servidor copia para a do Premium.
+    const filha = margens ? catalogoPorBase.value.get(acc.id) : undefined
+    if (margens && filha) {
+      const body: Record<string, string | null> = {}
+      for (const [campo, valor] of Object.entries(margens)) {
+        const atual = margemPropria(filha, Number(campo.slice('margin'.length)))
+        if ((atual == null ? null : atual.toFixed(4)) !== valor) body[campo] = valor
+      }
+      if (Object.keys(body).length) {
+        await api(`/api/pricing/accounts/${filha.id}`, { method: 'PATCH', body })
+        mudou = true
+        await loadAccounts()
+      }
+    }
+    if (mudou) flash(acc.id, 'catalogo')
+    catalogoJanelaSalvando.value = false
+    fecharCatalogo()
   } catch (e: any) {
-    const d = e?.data?.detail
-    const msg = d?.code === 'tipo_obrigatorio'
-      ? 'Preencha o tipo (clássico/premium) desta conta antes de ativar o catálogo'
-      : d?.message || d?.code || e?.message || 'Não foi possível salvar'
-    catalogoErro.value = { ...catalogoErro.value, [acc.id]: msg }
-    toast.error('Catálogo ML', msg)
+    // Se ativou e só a margem falhou, a lista já foi relida (mostra "Ativo") e
+    // a janela fica aberta para tentar a margem de novo.
+    catalogoJanelaErro.value = textoErroCatalogo(e)
   } finally {
-    catalogoBusy.value.delete(acc.id)
+    catalogoJanelaSalvando.value = false
   }
 }
 
@@ -1804,13 +2030,19 @@ async function submitNewAcc() {
       platform: newAcc.platform,
       department: department.value,
     }
+    // ML (M-53): a conta nasce com Clássico e Premium, sem ninguém escolher
+    // tipo, e com a comissão usual da categoria em cada um (o servidor decide;
+    // o ADM troca depois na janela da Comissão).
+    const ehMl = newAcc.platform === 'mercadolivre'
     // Kit e comissão só o ADM manda (M-10): sem eles a conta nasce no Kit 1.
     if (isAdmin.value) {
       body.kit_number = newAcc.kit_number || 1
-      if (newAcc.commission) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
+      if (newAcc.commission && !ehMl) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
     }
     const created = await api<Account>('/api/pricing/accounts', { method: 'POST', body })
-    accounts.value.push(created)
+    // ML: a resposta é o Clássico; o Premium vem relendo a lista.
+    if (ehMl) await loadAccounts()
+    if (!accounts.value.some((a) => a.id === created.id)) accounts.value.push(created)
     // Conta nova nasce sem loja (= sem equipe): se os filtros a esconderiam,
     // "Sem equipe" e a plataforma dela voltam a ficar marcados para ela aparecer.
     if (!passaFiltroEquipe(created, contasEquipesDesmarcadas.value)) {
@@ -5108,17 +5340,16 @@ watch(department, async () => {
         <table class="w-full text-sm border-collapse">
           <thead class="sticky top-0 bg-muted z-10">
             <!-- Cabeçalho no formato da Tabela de Preços (M-9): 11px, peso 600,
-                 linha de 14px, centralizado; Nome e Obs à esquerda, como o conteúdo. -->
+                 linha de 14px, centralizado; Plataforma, Conta e Obs à esquerda,
+                 como o conteúdo. M-52 (25/11/2026): Plataforma e depois Conta,
+                 na ordem da tela de Lojas. A coluna Tipo ML saiu na M-53: a
+                 conta do ML é uma linha só (Clássico e Premium). -->
             <tr>
-              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Nome</th>
-              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Plataforma</th>
+              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Plataforma</th>
+              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Conta</th>
               <th
                 class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
-                title="Tipo do anúncio no Mercado Livre. Preenchido, a coluna só manda preço para anúncios desse tipo; vazio = manda para clássico e premium. O Catálogo ML exige o tipo."
-              >Tipo ML</th>
-              <th
-                class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-28"
-                title="Liga a tabela ML Catálogo desta conta: colunas próprias na Tabela de Preços, calculadas pela coluna Catálogo dos produtos (com a comissão e os fretes desta conta; a margem é a desta conta ou a própria do catálogo, no botão “% margens”), que mandam preço só para o anúncio de catálogo."
+                title="Catálogo ML da conta (Clássico e Premium juntos): Ativo = colunas próprias no grupo ML Catálogo da Tabela de Preços, calculadas pela coluna Catálogo dos produtos com a comissão e os fretes desta conta, que mandam preço só para o anúncio de catálogo. Clique para mudar."
               >Catálogo ML</th>
               <th
                 class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[70px]"
@@ -5127,7 +5358,7 @@ watch(department, async () => {
               <!-- Kit, Comissão e os pares marg/frete: só ADM (M-10, 18/11/2026). -->
               <template v-if="isAdmin">
               <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12" data-coluna-so-admin="kit">Kit</th>
-              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20" data-coluna-so-admin="comissao">Comissão</th>
+              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20" title="Comissão da conta. No ML: Clássico · Premium — clique para mudar." data-coluna-so-admin="comissao">Comissão</th>
               <th
                 v-for="(label, i) in TYPE_HEADERS[department] ?? []"
                 :key="i"
@@ -5141,13 +5372,13 @@ watch(department, async () => {
                 </div>
               </th>
               </template>
-              <!-- Desconto até / Afiliado / Cupom até / Oferta limite: colunas de ~84px,
-                   centralizadas (M-11); Ads centralizado e só Obs à esquerda (M-9). -->
+              <!-- Afiliado / Desconto / Ads / Custo total (M-55/M-56): colunas de
+                   ~62px, centralizadas, com a caixinha de 34×24px; só Obs à esquerda. -->
               <th
                 v-for="f in STORE_NOTE_FIELDS"
                 :key="`h-${f.key}`"
                 class="px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
-                :class="f.key === 'observation' ? 'text-left min-w-[120px]' : f.tipo ? 'text-center w-[84px] min-w-[84px]' : 'text-center min-w-[120px]'"
+                :class="f.key === 'observation' ? 'text-left min-w-[120px]' : 'text-center w-[62px] min-w-[62px]'"
                 :title="f.titulo"
                 :data-coluna-anotacao="f.key"
               >{{ f.label }}</th>
@@ -5166,26 +5397,26 @@ watch(department, async () => {
               </td>
             </tr>
 
-            <!-- add row -->
+            <!-- add row: Plataforma e depois Conta (M-52). ML nasce com Clássico
+                 e Premium, sem escolher tipo (M-53). -->
             <tr v-if="showAddAcc" class="bg-blue-50/40 dark:bg-blue-900/10">
-              <td class="border border-border px-1 py-1">
-                <input
-                  id="new-acc-name"
-                  v-model="newAcc.name"
-                  type="text"
-                  placeholder="Nome"
-                  class="w-full text-xs border rounded px-1.5 py-1 bg-background"
-                  @keydown.enter="submitNewAcc"
-                  @keydown.escape="showAddAcc = false"
-                />
-              </td>
               <td class="border border-border px-1 py-1">
                 <select v-model="newAcc.platform" class="w-full text-xs border rounded px-1 py-1 bg-background">
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
               </td>
-              <!-- Tipo ML, Catálogo ML e Equipe: definidos depois, na linha criada. -->
-              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td class="border border-border px-1 py-1">
+                <input
+                  id="new-acc-name"
+                  v-model="newAcc.name"
+                  type="text"
+                  placeholder="Conta"
+                  class="w-full text-xs border rounded px-1.5 py-1 bg-background"
+                  @keydown.enter="submitNewAcc"
+                  @keydown.escape="showAddAcc = false"
+                />
+              </td>
+              <!-- Catálogo ML e Equipe: definidos depois, na linha criada. -->
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <template v-if="isAdmin">
@@ -5197,7 +5428,14 @@ watch(department, async () => {
                   data-campo="novo-kit"
                 />
               </td>
-              <td class="border border-border px-1 py-1">
+              <!-- ML: a comissão de cada tipo é a usual da categoria (Clássico · Premium). -->
+              <td
+                v-if="newAcc.platform === 'mercadolivre'"
+                class="border border-border px-1 py-1 text-center text-xs text-muted-foreground whitespace-nowrap"
+                title="Comissão com que a conta nasce (Clássico · Premium), a usual da categoria. Depois, clique na Comissão da conta para mudar."
+                data-campo="nova-comissao-ml"
+              >{{ comissaoPadraoMl(department) }}</td>
+              <td v-else class="border border-border px-1 py-1">
                 <input
                   v-model="newAcc.commission"
                   type="text" inputmode="decimal"
@@ -5232,7 +5470,37 @@ watch(department, async () => {
               </tr>
               <template v-for="acc in group.rows" :key="acc.id">
               <tr class="hover:bg-accent/30">
-                <!-- name -->
+              <!-- plataforma (M-52: primeira coluna, à esquerda). Conta ML com
+                   Clássico e Premium não troca de plataforma por aqui; conta ML
+                   sem par (só um tipo) mostra o tipo ao lado de "ML". -->
+              <td
+                class="border border-border px-2 py-1.5 text-xs text-left whitespace-nowrap"
+                :class="{
+                  'cursor-pointer': !parDe(acc),
+                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'platform'),
+                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'platform'),
+                }"
+                :title="parDe(acc) ? 'Conta do ML com Clássico e Premium (as duas colunas na Tabela de Preços)' : undefined"
+                data-coluna-plataforma
+                @click="!isEditing(acc.id, 'platform') && !parDe(acc) && startEditAccount(acc, 'platform')"
+              >
+                <select
+                  v-if="isEditing(acc.id, 'platform')"
+                  :ref="setEditInputRef"
+                  v-model="editValue"
+                  class="w-full text-xs bg-transparent outline-none"
+                  @blur="commitEditAccount"
+                  @change="commitEditAccount"
+                  @keydown.escape.prevent="cancelEdit"
+                >
+                  <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
+                </select>
+                <template v-else>
+                  <span>{{ platformLabel(acc.platform) }}</span>
+                  <span v-if="tipoDaContaSolta(acc)" class="ml-1 text-muted-foreground" data-tipo-conta-solta>{{ tipoDaContaSolta(acc) }}</span>
+                </template>
+              </td>
+              <!-- conta (o nome, como está cadastrado; M-52: segunda coluna) -->
               <td
                 class="border border-border px-2 py-1.5 text-xs text-left relative"
                 :class="{
@@ -5305,107 +5573,133 @@ watch(department, async () => {
                   </div>
                 </div>
               </td>
-              <!-- platform -->
+              <!-- Catálogo ML (M-54): só "Ativo" ou "Inativo". Quem edita Contas
+                   clica e abre a janela da conta ("ML forpaper"): [x] Catálogo ativo
+                   e, para o ADM, o botão Margens. Nada grava antes do Salvar. -->
               <td
-                class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
-                :class="{
-                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'platform'),
-                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'platform'),
-                }"
-                @click="!isEditing(acc.id, 'platform') && startEditAccount(acc, 'platform')"
-              >
-                <select
-                  v-if="isEditing(acc.id, 'platform')"
-                  :ref="setEditInputRef"
-                  v-model="editValue"
-                  class="w-full text-xs bg-transparent outline-none"
-                  @blur="commitEditAccount"
-                  @change="commitEditAccount"
-                  @keydown.escape.prevent="cancelEdit"
-                >
-                  <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
-                </select>
-                <span v-else>{{ platformLabel(acc.platform) }}</span>
-              </td>
-              <!-- tipo ML (listing_type): select direto, só em conta do ML -->
-              <td
-                class="border border-border px-1 py-1 text-center"
-                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'listing_type') }"
-              >
-                <select
-                  v-if="acc.platform === 'mercadolivre' && canEditContas"
-                  class="text-xs border rounded px-1 py-0.5 bg-background cursor-pointer"
-                  :class="acc.listing_type ? '' : 'text-muted-foreground'"
-                  :value="tipoMlDe(acc)"
-                  :title="catalogoAtivo(acc)
-                    ? 'Tipo do anúncio ML desta conta — a coluna de catálogo dela acompanha (sem tipo, ela fica bloqueada)'
-                    : 'Tipo do anúncio ML desta conta'"
-                  @change="definirTipoMl(acc, ($event.target as HTMLSelectElement).value)"
-                >
-                  <!-- :selected também (não só o :value do select): na página que vem
-                       pronta do servidor o :value do select não marca a opção. -->
-                  <option value="" :selected="!tipoMlDe(acc)">— sem tipo</option>
-                  <option
-                    v-for="o in opcoesTipoMl(acc)"
-                    :key="o.value"
-                    :value="o.value"
-                    :selected="o.value === tipoMlDe(acc)"
-                  >{{ o.label }}</option>
-                </select>
-                <span v-else-if="acc.platform === 'mercadolivre'" class="text-xs" :class="acc.listing_type ? '' : 'text-muted-foreground'">
-                  {{ rotuloTipoMl(acc) }}
-                </span>
-                <span v-else class="text-xs text-muted-foreground">—</span>
-              </td>
-              <!-- Catálogo ML: liga/desliga a coluna de catálogo desta conta -->
-              <td
-                class="border border-border px-1 py-1 text-center"
+                class="border border-border px-1 py-1 text-center text-xs"
                 :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'catalogo') }"
+                data-coluna-catalogo
               >
                 <template v-if="podeTerCatalogo(acc)">
-                  <button
-                    type="button"
-                    role="switch"
-                    :aria-checked="catalogoAtivo(acc)"
-                    class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed"
-                    :class="catalogoAtivo(acc)
-                      ? 'border-indigo-300 bg-indigo-50 text-indigo-800 dark:border-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-200'
-                      : 'border-border text-muted-foreground hover:bg-muted'"
-                    :disabled="!canEditContas || catalogoBusy.has(acc.id)"
-                    :title="catalogoAtivo(acc)
-                      ? 'Catálogo ML ligado — clique para desligar'
-                      : 'Catálogo ML desligado — clique para ligar (cria as colunas de catálogo desta conta na Tabela de Preços)'"
-                    @click="alternarCatalogo(acc)"
+                  <PopoverRoot
+                    v-if="canEditContas"
+                    :open="catalogoJanelaId === acc.id"
+                    @update:open="alternarJanelaCatalogo(acc, $event)"
                   >
-                    <Loader2 v-if="catalogoBusy.has(acc.id)" class="h-3 w-3 animate-spin" />
-                    <span
-                      v-else
-                      class="relative inline-block h-3 w-5 shrink-0 rounded-full transition-colors"
-                      :class="catalogoAtivo(acc) ? 'bg-indigo-500' : 'bg-muted-foreground/30'"
-                    >
-                      <span
-                        class="absolute top-0.5 h-2 w-2 rounded-full bg-white transition-all"
-                        :class="catalogoAtivo(acc) ? 'left-2.5' : 'left-0.5'"
-                      />
-                    </span>
-                    {{ catalogoAtivo(acc) ? 'Ligado' : 'Desligado' }}
-                  </button>
-                  <button
-                    v-if="catalogoAtivo(acc) && isAdmin"
-                    type="button"
-                    data-margens-catalogo
-                    class="mt-1 block mx-auto whitespace-nowrap text-[10px] hover:underline"
-                    :class="temMargemPropria(acc)
-                      ? 'font-semibold text-indigo-700 dark:text-indigo-300'
-                      : 'text-muted-foreground'"
-                    :title="temMargemPropria(acc)
-                      ? `Margens próprias do catálogo: ${resumoMargemPropria(catalogoPorBase.get(acc.id)!)}`
-                      : 'Margens do catálogo: hoje usa as margens desta conta — clique para dar margens próprias'"
-                    @click.stop="abrirMargensCatalogo(acc)"
-                  >% {{ temMargemPropria(acc) ? 'margens próprias' : 'margens' }}</button>
-                  <p v-if="catalogoErro[acc.id]" class="mt-1 max-w-[180px] mx-auto text-[10px] leading-tight text-destructive">
-                    {{ catalogoErro[acc.id] }}
-                  </p>
+                    <PopoverTrigger as-child>
+                      <button
+                        type="button"
+                        class="rounded px-1.5 py-0.5 text-xs hover:bg-muted"
+                        data-acao="catalogo"
+                        :title="tituloCatalogoDaConta(acc)"
+                      >{{ catalogoAtivo(acc) ? 'Ativo' : 'Inativo' }}</button>
+                    </PopoverTrigger>
+                    <PopoverPortal>
+                      <PopoverContent
+                        side="bottom"
+                        align="start"
+                        :side-offset="4"
+                        :collision-padding="8"
+                        data-janela-catalogo
+                        class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 text-xs shadow-lg"
+                      >
+                        <div class="px-1 pb-2 text-xs font-bold">{{ tituloConta(acc) }}</div>
+                        <label class="flex cursor-pointer items-center gap-2 px-1 py-1">
+                          <input
+                            v-model="catalogoJanelaAtivo"
+                            type="checkbox"
+                            class="size-3.5"
+                            :disabled="catalogoJanelaSalvando"
+                            data-campo="catalogo-ativo"
+                          />
+                          Catálogo ativo
+                        </label>
+                        <!-- Margens: só o ADM (quem via o link das margens antes), com o
+                             catálogo marcado como ativo. -->
+                        <template v-if="isAdmin">
+                          <div class="px-1 pt-1">
+                            <button
+                              type="button"
+                              class="btn btn-sm h-6 py-0 text-xs"
+                              :class="{ 'border-blue-400 font-medium': catalogoJanelaMargens && catalogoJanelaAtivo }"
+                              :disabled="!catalogoJanelaAtivo || catalogoJanelaSalvando"
+                              data-acao="margens-catalogo"
+                              @click="catalogoJanelaMargens = !catalogoJanelaMargens"
+                            >
+                              Margens
+                              <ChevronDown class="h-3 w-3 ml-1" />
+                            </button>
+                          </div>
+                          <div
+                            v-if="catalogoJanelaMargens && catalogoJanelaAtivo"
+                            class="mt-1 space-y-1 border-t px-1 pt-1.5"
+                            data-margens-catalogo
+                          >
+                            <label class="flex cursor-pointer items-center gap-2">
+                              <input
+                                v-model="catalogoJanelaUsarDaConta"
+                                type="checkbox"
+                                class="size-3.5"
+                                :disabled="catalogoJanelaSalvando"
+                                data-campo="catalogo-usar-margens-da-conta"
+                              />
+                              Usar as margens da conta
+                            </label>
+                            <div
+                              v-for="(nome, i) in TYPE_HEADERS[department] ?? []"
+                              :key="i"
+                              class="flex items-center justify-between gap-2"
+                            >
+                              <label :for="`margem-cat-${acc.id}-${i}`">{{ nome }}</label>
+                              <span class="inline-flex items-center gap-1">
+                                <!-- Marcada: travado, com a margem da conta em cinza. -->
+                                <input
+                                  v-if="catalogoJanelaUsarDaConta"
+                                  :id="`margem-cat-${acc.id}-${i}`"
+                                  :value="margemDaContaTexto(acc, i + 1)"
+                                  type="text"
+                                  disabled
+                                  class="h-6 w-14 rounded border bg-muted px-1 text-right text-xs text-muted-foreground"
+                                />
+                                <input
+                                  v-else
+                                  :id="`margem-cat-${acc.id}-${i}`"
+                                  v-model="catalogoJanelaValores[i]"
+                                  type="text"
+                                  inputmode="decimal"
+                                  class="h-6 w-14 rounded border bg-background px-1 text-right text-xs"
+                                  :placeholder="margemDaContaTexto(acc, i + 1)"
+                                  :disabled="catalogoJanelaSalvando"
+                                  @keydown.enter.prevent="salvarCatalogo()"
+                                />
+                                <span class="text-muted-foreground">%</span>
+                              </span>
+                            </div>
+                          </div>
+                        </template>
+                        <p v-if="catalogoJanelaErro" class="px-1 pt-1 text-[11px] leading-snug text-destructive" role="alert">
+                          {{ catalogoJanelaErro }}
+                        </p>
+                        <div class="mt-2 flex justify-end gap-2 border-t px-1 pt-2">
+                          <button
+                            type="button"
+                            class="btn btn-sm h-7 py-0"
+                            :disabled="catalogoJanelaSalvando"
+                            @click="fecharCatalogo()"
+                          >Cancelar</button>
+                          <button
+                            type="button"
+                            class="btn btn-sm btn-primary h-7 py-0"
+                            :disabled="catalogoJanelaSalvando"
+                            data-acao="salvar-catalogo"
+                            @click="salvarCatalogo()"
+                          >{{ catalogoJanelaSalvando ? 'Salvando…' : 'Salvar' }}</button>
+                        </div>
+                      </PopoverContent>
+                    </PopoverPortal>
+                  </PopoverRoot>
+                  <span v-else>{{ catalogoAtivo(acc) ? 'Ativo' : 'Inativo' }}</span>
                 </template>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
@@ -5435,8 +5729,78 @@ watch(department, async () => {
                 />
                 <span v-else>{{ acc.kit_number }}</span>
               </td>
-              <!-- commission -->
+              <!-- comissão. Conta ML com par (M-53): "14% · 19%" (Clássico · Premium);
+                   clicar abre a janelinha "ML forpaper" e só grava no Salvar. -->
               <td
+                v-if="parDe(acc)"
+                class="border border-border px-1 py-1 text-xs text-center whitespace-nowrap"
+                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'commission') }"
+                data-comissao-ml
+              >
+                <PopoverRoot :open="comissaoMlId === acc.id" @update:open="alternarJanelaComissao(acc, $event)">
+                  <PopoverTrigger as-child>
+                    <button
+                      type="button"
+                      class="rounded px-1 py-0.5 text-xs hover:bg-muted"
+                      data-acao="comissao-ml"
+                      title="Comissão do Clássico · do Premium — clique para mudar"
+                    >{{ textoComissaoPar(parDe(acc)!) }}</button>
+                  </PopoverTrigger>
+                  <PopoverPortal>
+                    <PopoverContent
+                      side="bottom"
+                      align="start"
+                      :side-offset="4"
+                      :collision-padding="8"
+                      data-janela-comissao-ml
+                      class="z-[70] w-52 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 text-xs shadow-lg"
+                    >
+                      <div class="px-1 pb-2 text-xs font-bold">{{ tituloConta(acc) }}</div>
+                      <div
+                        v-for="t in TIPOS_COMISSAO_ML"
+                        :key="t.chave"
+                        class="flex items-center justify-between gap-2 px-1 py-0.5"
+                      >
+                        <label :for="`comissao-ml-${t.chave}`">{{ t.rotulo }}</label>
+                        <span class="inline-flex items-center gap-1">
+                          <input
+                            :id="`comissao-ml-${t.chave}`"
+                            v-model="comissaoMlValores[t.chave]"
+                            type="text"
+                            inputmode="decimal"
+                            class="h-6 w-14 rounded border bg-background px-1 text-right text-xs"
+                            :disabled="comissaoMlSalvando"
+                            :data-campo="`comissao-ml-${t.chave}`"
+                            @keydown.enter.prevent="salvarComissaoMl()"
+                          />
+                          <span class="text-muted-foreground">%</span>
+                        </span>
+                      </div>
+                      <p v-if="comissaoMlErro" class="px-1 pt-1 text-[11px] leading-snug text-destructive" role="alert">
+                        {{ comissaoMlErro }}
+                      </p>
+                      <div class="mt-2 flex justify-end gap-2 border-t px-1 pt-2">
+                        <button
+                          type="button"
+                          class="btn btn-sm h-7 py-0"
+                          :disabled="comissaoMlSalvando"
+                          @click="fecharComissaoMl()"
+                        >Cancelar</button>
+                        <button
+                          type="button"
+                          class="btn btn-sm btn-primary h-7 py-0"
+                          :disabled="comissaoMlSalvando"
+                          data-acao="salvar-comissao-ml"
+                          @click="salvarComissaoMl()"
+                        >{{ comissaoMlSalvando ? 'Salvando…' : 'Salvar' }}</button>
+                      </div>
+                    </PopoverContent>
+                  </PopoverPortal>
+                </PopoverRoot>
+              </td>
+              <!-- as outras (e conta ML sem par): clique e digite, como antes -->
+              <td
+                v-else
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'commission'),
@@ -5500,13 +5864,15 @@ watch(department, async () => {
                 </td>
               </template>
               </template>
-              <!-- desconto até / afiliado / ads / cupom até / oferta limite / obs -->
+              <!-- afiliado / desconto / ads / custo total / obs (M-55/M-56) -->
               <template v-for="f in STORE_NOTE_FIELDS" :key="`c-${f.key}`">
-                <!-- Campos próprios (M-11): sempre à mostra, 24px, gravam ao sair ou com
-                     Enter; quem não edita Contas só vê. -->
+                <!-- Campos próprios (%): caixinha de 34×24px, 12px, número no meio e
+                     "%" ao lado, sempre à mostra; gravam ao sair ou com Enter. Custo
+                     total: só o ADM muda, os outros veem travado. Recusa do Custo
+                     total (M-56): borda vermelha e o aviso do servidor junto do campo. -->
                 <td
                   v-if="f.tipo"
-                  class="border border-border px-1 py-1 text-center w-[84px] min-w-[84px]"
+                  class="relative border border-border px-1 py-1 text-center w-[62px] min-w-[62px]"
                   :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, f.key) }"
                 >
                   <div class="flex items-center justify-center gap-0.5">
@@ -5514,41 +5880,58 @@ watch(department, async () => {
                       :value="textoAnotacao(acc, f)"
                       type="text"
                       inputmode="decimal"
-                      :maxlength="f.tipo === 'data' ? 5 : 6"
-                      :placeholder="f.tipo === 'data' ? 'dd/mm' : ''"
-                      :readonly="!canEditContas"
-                      class="h-6 w-full min-w-0 rounded border px-1 text-center text-xs"
-                      :class="canEditContas ? 'bg-background' : 'bg-transparent cursor-default'"
+                      maxlength="6"
+                      :readonly="!podeEditarAnotacao(f)"
+                      class="h-6 w-[34px] min-w-0 rounded border px-0.5 text-center text-xs"
+                      :class="[
+                        podeEditarAnotacao(f) ? 'bg-background' : 'bg-transparent cursor-default',
+                        { 'border-destructive ring-1 ring-destructive': estourouCustoTotal(acc, f.key) },
+                      ]"
+                      :title="f.soAdmin && !podeEditarAnotacao(f) ? 'Só o administrador muda o Custo total' : f.titulo"
                       :data-campo="`conta-${f.key}`"
                       @blur="gravarAnotacao(acc, f, $event)"
                       @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
                       @keydown.escape.prevent="desfazerAnotacao(acc, f, $event)"
                     />
-                    <span v-if="f.tipo === 'pct'" class="text-xs text-muted-foreground">%</span>
+                    <span class="text-xs text-muted-foreground">%</span>
+                  </div>
+                  <div
+                    v-if="estourouCustoTotal(acc, f.key)"
+                    class="absolute left-0 top-full z-20 mt-0.5 flex w-60 items-start gap-1 rounded border border-destructive/50 bg-background px-2 py-1 text-left text-[11px] leading-snug text-destructive shadow-md"
+                    role="alert"
+                    data-aviso-custo-total
+                  >
+                    <span class="flex-1">{{ estourouCustoTotal(acc, f.key) }}</span>
+                    <button
+                      type="button"
+                      class="shrink-0 text-muted-foreground hover:text-foreground"
+                      title="Fechar o aviso"
+                      @click="erroCustoTotal = null"
+                    ><X class="h-3 w-3" /></button>
                   </div>
                 </td>
-                <!-- Ads (M-12): botão "2%  ROAS 50 ▾" que abre o painel no estilo do
-                     da Margem. Quem não edita Contas abre e só vê. -->
+                <!-- Ads (M-12/M-55): a caixinha com o % Geral (vazia sem %) abre o
+                     painel da conta; não se digita na tabela. Quem não edita Contas
+                     abre e só vê. -->
                 <td
                   v-else-if="f.key === 'ads'"
-                  class="border border-border px-1 py-1 text-center"
+                  class="border border-border px-1 py-1 text-center w-[62px] min-w-[62px]"
                   :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'ads') }"
                 >
                   <PopoverRoot @update:open="abrirOuFecharAds">
                     <PopoverTrigger as-child>
                       <button
                         type="button"
-                        class="inline-flex items-center gap-2 whitespace-nowrap rounded px-1.5 py-0.5 text-xs hover:bg-muted"
+                        class="inline-flex items-center justify-center gap-0.5"
                         data-acao="ads"
                         :data-ads-botao="acc.id"
-                        :title="adsErro ? 'O Ads não carregou — recarregue a página.' : 'Ads da conta: % que pode gastar, ROAS mínimo e gasto por dia'"
+                        :title="adsErro ? 'O Ads não carregou — recarregue a página.' : 'Ads da conta: % Geral — clique para ver o gasto por dia e o % por produto'"
                       >
-                        <template v-if="ads && pctGeralAds(adsDa(acc.id)) != null">
-                          <span>{{ fmtPct(pctGeralAds(adsDa(acc.id))!) }}%</span>
-                          <span>ROAS {{ fmtRoas(roasMinimo(pctGeralAds(adsDa(acc.id)))) }}</span>
-                        </template>
-                        <span v-else class="text-muted-foreground">{{ ads || adsErro ? '—' : '…' }}</span>
-                        <ChevronDown class="h-3 w-3 text-muted-foreground" />
+                        <span
+                          class="inline-flex h-6 w-[34px] items-center justify-center rounded border bg-background text-xs hover:bg-muted"
+                          data-ads-caixa
+                        >{{ ads && pctGeralAds(adsDa(acc.id)) != null ? fmtPct(pctGeralAds(adsDa(acc.id))!) : '' }}</span>
+                        <span class="text-xs text-muted-foreground">%</span>
                       </button>
                     </PopoverTrigger>
                     <PopoverPortal>
@@ -5559,76 +5942,88 @@ watch(department, async () => {
                         :collision-padding="8"
                         data-menu-ads
                         :data-ads-painel="acc.id"
-                        class="z-[70] w-[30rem] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+                        class="z-[70] w-[30rem] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 text-xs shadow-lg"
                       >
-                        <div class="px-1 pb-2 text-sm font-semibold">Ads — {{ nomeComTipo(acc) }} · {{ platformLabel(acc.platform) }}</div>
-                        <div v-if="!ads" class="px-1 py-1 text-sm text-muted-foreground">
+                        <!-- M-57: título = plataforma + conta (12px, negrito); logo
+                             abaixo, o cabeçalho das colunas e a linha Geral na mesma
+                             grade dos produtos. Cabeçalho, Geral e lista reservam a
+                             mesma faixa da barra de rolagem (scrollbar-gutter), para as
+                             colunas baterem. -->
+                        <div class="px-1 pb-1 text-xs font-bold" data-ads-titulo>{{ tituloConta(acc) }}</div>
+                        <div v-if="!ads" class="px-1 py-1 text-muted-foreground">
                           {{ adsErro ? 'O Ads não carregou — recarregue a página.' : 'carregando o Ads…' }}
                         </div>
                         <!-- `c` = o Ads desta conta (alias para o template; nada até carregar). -->
                         <template v-for="c in ads ? [adsDa(acc.id)] : []" :key="acc.id">
-                          <div class="flex flex-wrap items-center gap-2 rounded px-1 py-1 text-sm">
-                            <label class="flex cursor-pointer items-center gap-2">
+                          <div class="overflow-hidden px-1 [scrollbar-gutter:stable]">
+                            <div
+                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
+                              data-ads-cabecalho
+                            >
+                              <span>Produto</span>
+                              <span class="text-right">Pode gastar (%)</span>
+                              <span class="text-right">ROAS mínimo</span>
+                              <span class="text-right">Gasto por dia (R$)</span>
+                            </div>
+                            <div
+                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
+                              data-ads-geral
+                            >
+                              <label class="flex cursor-pointer items-center gap-1.5">
+                                <input
+                                  type="checkbox"
+                                  class="size-3.5"
+                                  :class="{ 'ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:ads_geral_ligada') }"
+                                  data-campo="ads-geral-ligada"
+                                  :checked="c.ads_geral_ligada"
+                                  :disabled="!podeEditarAds"
+                                  @change="gravarAds(acc.id, { ads_geral_ligada: !c.ads_geral_ligada })"
+                                />
+                                Geral
+                              </label>
+                              <span class="inline-flex items-center justify-end gap-0.5">
+                                <input
+                                  type="text"
+                                  inputmode="decimal"
+                                  class="h-6 w-12 border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                                  :class="{ 'border-destructive ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:pode_gastar_pct') }"
+                                  data-campo="ads-pct"
+                                  :data-ads-conta="acc.id"
+                                  data-ads-campo="pode_gastar_pct"
+                                  :value="c.pode_gastar_pct == null ? '' : fmtPct(c.pode_gastar_pct)"
+                                  :disabled="!podeEditarAds"
+                                  @change="gravarCampoAds"
+                                />
+                                %
+                              </span>
+                              <span class="text-right text-muted-foreground" data-ads-roas-minimo>
+                                {{ fmtRoas(roasMinimo(c.pode_gastar_pct)) }}
+                              </span>
                               <input
-                                type="checkbox"
-                                class="size-4"
-                                data-campo="ads-geral-ligada"
-                                :checked="c.ads_geral_ligada"
+                                type="text"
+                                inputmode="decimal"
+                                class="h-6 w-full border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                                :class="{ 'border-destructive ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:gasto_dia') }"
+                                data-campo="ads-gasto-dia"
+                                :data-ads-conta="acc.id"
+                                data-ads-campo="gasto_dia"
+                                :value="fmtGasto(c.gasto_dia)"
                                 :disabled="!podeEditarAds"
-                                @change="gravarAds(acc.id, { ads_geral_ligada: !c.ads_geral_ligada })"
+                                @change="gravarCampoAds"
                               />
-                              Geral
-                            </label>
-                            <input
-                              type="text"
-                              inputmode="decimal"
-                              class="h-7 w-16 border rounded px-2 text-right text-sm bg-background disabled:opacity-60"
-                              data-campo="ads-pct"
-                              :data-ads-conta="acc.id"
-                              data-ads-campo="pode_gastar_pct"
-                              :value="c.pode_gastar_pct == null ? '' : fmtPct(c.pode_gastar_pct)"
-                              :disabled="!podeEditarAds"
-                              @change="gravarCampoAds"
-                            />
-                            %
-                            <span class="text-xs text-muted-foreground" data-ads-roas-minimo>
-                              ROAS mínimo {{ fmtRoas(roasMinimo(c.pode_gastar_pct)) }}
-                            </span>
-                          </div>
-                          <div class="flex items-center gap-2 px-1 py-1 text-sm">
-                            <span class="text-muted-foreground">Gasto por dia R$</span>
-                            <input
-                              type="text"
-                              inputmode="decimal"
-                              class="h-7 w-24 border rounded px-2 text-right text-sm bg-background disabled:opacity-60"
-                              data-campo="ads-gasto-dia"
-                              :data-ads-conta="acc.id"
-                              data-ads-campo="gasto_dia"
-                              :value="fmtGasto(c.gasto_dia)"
-                              :disabled="!podeEditarAds"
-                              @change="gravarCampoAds"
-                            />
-                          </div>
-                          <p class="px-1 pb-1 text-[11px] text-muted-foreground">
-                            Vale para todos os produtos sem % próprio. ROAS mínimo = 100 ÷ %. Desmarcada: fica sem % (—).
-                          </p>
-                          <div class="grid grid-cols-2 gap-2 px-1 pb-1">
-                            <div class="rounded border px-2 py-1" data-ads-real="pct_gasto">
-                              <div class="text-[11px] text-muted-foreground">% gasto real</div>
-                              <div class="text-sm font-semibold">{{ c.real.pct_gasto == null ? '—' : `${fmtPct(c.real.pct_gasto)}%` }}</div>
                             </div>
-                            <div class="rounded border px-2 py-1" data-ads-real="roas">
-                              <div class="text-[11px] text-muted-foreground">ROAS real</div>
-                              <div class="text-sm font-semibold">{{ fmtRoas(c.real.roas) }}</div>
-                            </div>
+                            <p
+                              v-if="erroAdsDaLinhaGeral(acc.id)"
+                              class="pb-1 text-[11px] leading-snug text-destructive"
+                              role="alert"
+                              data-aviso-custo-total
+                            >{{ erroAdsDaLinhaGeral(acc.id) }}</p>
                           </div>
-                          <p class="px-1 pb-1 text-[11px] text-muted-foreground">
-                            Últimos 7 dias, do Marketing (% gasto = ACOS; ROAS = receita ÷ gasto). Sem dado da conta: —.
-                          </p>
-                          <label class="flex cursor-pointer items-center gap-2 rounded border-t px-1 pb-1 pt-2 text-sm">
+                          <label class="mt-1 flex cursor-pointer items-center gap-1.5 border-t px-1 pb-1 pt-1.5">
                             <input
                               type="checkbox"
-                              class="size-4"
+                              class="size-3.5"
+                              :class="{ 'ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:ads_por_produto_ligada') }"
                               data-campo="ads-por-produto-ligada"
                               :checked="c.ads_por_produto_ligada"
                               :disabled="!podeEditarAds"
@@ -5636,71 +6031,78 @@ watch(department, async () => {
                             />
                             Por produto
                           </label>
-                          <p class="px-1 pb-1 text-[11px] text-muted-foreground">
-                            O produto com % próprio usa o dele; % vazio usa a Geral. Desmarcada: todos usam a Geral.
-                          </p>
-                          <div class="relative px-1 pb-1">
-                            <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                            <input
-                              v-model="buscaAdsProduto"
-                              placeholder="Buscar produto por SKU ou nome…"
-                              class="h-7 w-full border rounded pl-7 pr-2 text-sm bg-background"
-                              data-campo="ads-busca-produto"
-                            />
-                          </div>
-                          <div class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 px-1 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground">
-                            <span>Produto</span>
-                            <span class="text-right">Pode gastar (%)</span>
-                            <span class="text-right">ROAS mínimo</span>
-                            <span class="text-right">Gasto por dia (R$)</span>
+                          <p
+                            v-if="erroAdsEm(acc.id, 'geral:ads_por_produto_ligada')"
+                            class="px-1 pb-1 text-[11px] leading-snug text-destructive"
+                            role="alert"
+                            data-aviso-custo-total
+                          >{{ erroAdsEm(acc.id, 'geral:ads_por_produto_ligada') }}</p>
+                          <div class="px-1 pb-1">
+                            <div class="relative">
+                              <Search class="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+                              <input
+                                v-model="buscaAdsProduto"
+                                placeholder="Buscar produto por SKU ou nome…"
+                                class="h-6 w-full border rounded pl-6 pr-2 text-xs bg-background"
+                                data-campo="ads-busca-produto"
+                              />
+                            </div>
                           </div>
                           <div
-                            class="max-h-64 overflow-y-auto px-1"
+                            class="max-h-64 overflow-y-auto px-1 [scrollbar-gutter:stable]"
                             :class="{ 'opacity-60': !c.ads_por_produto_ligada }"
                             data-lista-ads-produto
                           >
-                            <div
-                              v-for="p in produtosDoAds(c)"
-                              :key="p.id"
-                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5 text-xs"
-                              :data-ads-produto-linha="p.id"
-                            >
-                              <span class="truncate" :title="`${p.sku} — ${p.name}`">{{ p.name }}</span>
-                              <span class="inline-flex items-center justify-end gap-0.5">
+                            <template v-for="p in produtosDoAds(c)" :key="p.id">
+                              <div
+                                class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
+                                :data-ads-produto-linha="p.id"
+                              >
+                                <span class="truncate" :title="`${p.sku} — ${p.name}`">{{ p.name }}</span>
+                                <span class="inline-flex items-center justify-end gap-0.5">
+                                  <input
+                                    type="text"
+                                    inputmode="decimal"
+                                    class="h-6 w-12 border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                                    :class="{ 'border-destructive ring-1 ring-destructive': erroAdsEm(acc.id, `produto:${p.id}:pode_gastar_pct`) }"
+                                    :placeholder="pctGeralAds(c) == null ? '—' : fmtPct(pctGeralAds(c)!)"
+                                    :value="c.produtos[p.id]?.pode_gastar_pct == null ? '' : fmtPct(c.produtos[p.id].pode_gastar_pct!)"
+                                    :data-ads-conta="acc.id"
+                                    data-ads-campo="pode_gastar_pct"
+                                    :data-ads-produto="p.id"
+                                    :disabled="!podeEditarAds"
+                                    @change="gravarCampoAds"
+                                  />
+                                  %
+                                </span>
+                                <span class="text-right text-muted-foreground" data-ads-roas-produto>
+                                  {{ fmtRoas(roasMinimo(pctDoProdutoAds(c, p.id))) }}
+                                </span>
                                 <input
                                   type="text"
                                   inputmode="decimal"
-                                  class="h-6 w-12 border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
-                                  :placeholder="pctGeralAds(c) == null ? '—' : fmtPct(pctGeralAds(c)!)"
-                                  :value="c.produtos[p.id]?.pode_gastar_pct == null ? '' : fmtPct(c.produtos[p.id].pode_gastar_pct!)"
+                                  class="h-6 w-full border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
+                                  :class="{ 'border-destructive ring-1 ring-destructive': erroAdsEm(acc.id, `produto:${p.id}:gasto_dia`) }"
+                                  :value="fmtGasto(c.produtos[p.id]?.gasto_dia)"
                                   :data-ads-conta="acc.id"
-                                  data-ads-campo="pode_gastar_pct"
+                                  data-ads-campo="gasto_dia"
                                   :data-ads-produto="p.id"
                                   :disabled="!podeEditarAds"
                                   @change="gravarCampoAds"
                                 />
-                                %
-                              </span>
-                              <span class="text-right text-muted-foreground" data-ads-roas-produto>
-                                {{ fmtRoas(roasMinimo(pctDoProdutoAds(c, p.id))) }}
-                              </span>
-                              <input
-                                type="text"
-                                inputmode="decimal"
-                                class="h-6 w-full border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
-                                :value="fmtGasto(c.produtos[p.id]?.gasto_dia)"
-                                :data-ads-conta="acc.id"
-                                data-ads-campo="gasto_dia"
-                                :data-ads-produto="p.id"
-                                :disabled="!podeEditarAds"
-                                @change="gravarCampoAds"
-                              />
-                            </div>
-                            <p v-if="!produtosDoAds(c).length" class="py-1 text-[11px] text-muted-foreground">
+                              </div>
+                              <p
+                                v-if="erroAdsEm(acc.id, `produto:${p.id}:`, true)"
+                                class="pb-1 text-[11px] leading-snug text-destructive"
+                                role="alert"
+                                data-aviso-custo-total
+                              >{{ erroAdsEm(acc.id, `produto:${p.id}:`, true) }}</p>
+                            </template>
+                            <p v-if="!produtosDoAds(c).length" class="py-1 text-muted-foreground">
                               {{ buscaAdsProduto.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.' }}
                             </p>
                           </div>
-                          <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
+                          <div class="mt-1 border-t px-1 pt-1 text-muted-foreground">
                             {{ podeEditarAds
                               ? 'Grava ao sair do campo, com Enter ou ao fechar. Fora do cálculo de preço.'
                               : 'Só quem edita Contas altera o Ads.' }}
@@ -7511,68 +7913,5 @@ watch(department, async () => {
     <!-- A tela de Faturamento de antes (/faturamento), com os mesmos filtros
          e a mesma tabela (13/11/2026). -->
     <FaturamentoPainel v-else-if="tab === 'faturamento'" embutido />
-
-      <!-- Margens do catálogo: janelinha aberta pelo "% margens" do Catálogo ML
-         (aba Contas). Uma margem por tipo da aba; vazio = a da conta. -->
-    <div
-      v-if="margensCatalogoConta"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      data-janela-margens-catalogo
-      @click.self="fecharMargensCatalogo()"
-      @keydown.escape="fecharMargensCatalogo()"
-    >
-      <div class="w-full max-w-sm rounded-lg border bg-background p-4 shadow-xl space-y-3">
-        <div>
-          <div class="text-sm font-semibold">Margem do catálogo</div>
-          <div class="text-xs text-muted-foreground">
-            {{ nomeComTipo(margensCatalogoConta) }} · Catálogo ML
-          </div>
-        </div>
-        <div class="space-y-1.5">
-          <div
-            v-for="(nome, i) in (TYPE_HEADERS[department] ?? [])"
-            :key="i"
-            class="flex items-center justify-between gap-3"
-          >
-            <label class="text-sm" :for="`margem-cat-${i}`">{{ nome }}</label>
-            <div class="flex items-center gap-1">
-              <input
-                :id="`margem-cat-${i}`"
-                v-model="margensCatalogoValores[i]"
-                type="text"
-                inputmode="decimal"
-                class="w-20 rounded border bg-background px-2 py-1 text-right text-sm"
-                :placeholder="fmtMargin((margensCatalogoConta as any)[`margin${i + 1}`]).replace('%', '').replace('.', ',')"
-                :disabled="!canEditContas || margensCatalogoSalvando"
-                @keydown.enter.prevent="salvarMargensCatalogo()"
-              />
-              <span class="text-sm text-muted-foreground">%</span>
-            </div>
-          </div>
-        </div>
-        <p class="text-[11px] text-muted-foreground leading-snug">
-          Em branco = usa a margem da conta (a que aparece em cinza). Comissão e frete
-          são sempre os da conta.
-        </p>
-        <p v-if="margensCatalogoErro" class="text-xs text-destructive">{{ margensCatalogoErro }}</p>
-        <div class="flex items-center justify-between gap-2">
-          <button
-            type="button"
-            class="text-xs text-muted-foreground hover:underline disabled:opacity-50"
-            :disabled="!canEditContas || margensCatalogoSalvando"
-            @click="margensCatalogoValores = margensCatalogoValores.map(() => '')"
-          >usar as da conta</button>
-          <div class="flex gap-2">
-            <button type="button" class="btn btn-sm" :disabled="margensCatalogoSalvando" @click="fecharMargensCatalogo()">Cancelar</button>
-            <button
-              type="button"
-              class="btn btn-sm btn-primary"
-              :disabled="!canEditContas || margensCatalogoSalvando"
-              @click="salvarMargensCatalogo()"
-            >{{ margensCatalogoSalvando ? 'Salvando…' : 'Salvar' }}</button>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 </template>

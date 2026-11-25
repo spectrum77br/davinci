@@ -86,24 +86,25 @@ const iKit = ths.indexOf('Kit')
 assert.ok(iKit > 0, 'Kit header exists')
 assert.equal(ths[iKit - 1], 'Equipe')
 assert.equal(ths[iKit - 2], 'Catálogo ML')
-const linha = contas.slice(contas.indexOf('<!-- Catálogo ML: liga/desliga'))
+const linha = contas.slice(contas.indexOf('<!-- Catálogo ML (M-54)'))
 assert.ok(linha.indexOf('data-coluna-equipe') < linha.indexOf('<!-- kit -->'),
   'equipe cell comes right before the kit cell')
 assert.match(linha, /data-coluna-equipe\s*>\{\{ rotuloEquipes\(acc\) \}\}<\/td>/)
-assert.match(contas, /Tipo ML, Catálogo ML e Equipe: definidos depois[\s\S]*?—<\/td>[\s\S]*?—<\/td>[\s\S]*?—<\/td>[\s\S]*?newAcc\.kit_number/,
+assert.match(contas, /Catálogo ML e Equipe: definidos depois[\s\S]*?—<\/td>[\s\S]*?—<\/td>[\s\S]*?newAcc\.kit_number/,
   'add-account row keeps the columns aligned')
 
 // 5) Cabeçalho no formato da Tabela de Preços: 11px, peso 600, linha 14px;
-// centralizado, menos Nome e Obs (à esquerda).
+// centralizado, menos Plataforma, Conta e Obs (à esquerda; M-52).
 const abreTh = [...cab.matchAll(/<th\b[^>]*>/g)].map((m) => m[0])
-assert.ok(abreTh.length >= 10, 'achou os cabeçalhos da aba Contas')
+assert.ok(abreTh.length >= 9, 'achou os cabeçalhos da aba Contas')
 for (const th of abreTh) {
   assert.match(th, /text-\[11px\] font-semibold leading-\[14px\]/, `formato do cabeçalho: ${th.slice(0, 80)}`)
   assert.doesNotMatch(th, /font-medium/)
 }
 const aEsquerda = abreTh.filter((th) => /\btext-left\b/.test(th))
-assert.equal(aEsquerda.length, 2, 'só Nome e Obs à esquerda')
-assert.match(cab, /text-left[^>]*>Nome<\/th>/)
+assert.equal(aEsquerda.length, 3, 'só Plataforma, Conta e Obs à esquerda')
+assert.match(cab, /text-left[^>]*>Plataforma<\/th>\s*<th[^>]*text-left[^>]*>Conta<\/th>/)
+assert.doesNotMatch(cab, />(Nome|Tipo ML)<\/th>/)
 assert.ok(aEsquerda.some((th) => th.includes('v-for="f in STORE_NOTE_FIELDS"')), 'Obs à esquerda')
 for (const th of abreTh.filter((t) => !/\btext-left\b/.test(t))) assert.match(th, /\btext-center\b/)
 // O `v-for` das anotações vale por 6 colunas: o alinhamento de cada uma sai
@@ -115,8 +116,7 @@ const thNotas = abreTh.find((th) => th.includes('v-for="f in STORE_NOTE_FIELDS"'
 const classeNota = new Function('f', `return ${/:class="([^"]*)"/.exec(thNotas)[1]}`)
 const alinhamento = Object.fromEntries(campos.map((f) => [f.key, /\btext-left\b/.test(classeNota(f)) ? 'esquerda' : 'centro']))
 assert.deepEqual(alinhamento, {
-  desconto_ate: 'centro', afiliado_pct: 'centro', ads: 'centro', cupom_ate: 'centro',
-  oferta_limite_pct: 'centro', observation: 'esquerda',
+  afiliado_pct: 'centro', desconto_pct: 'centro', ads: 'centro', custo_total_pct: 'centro', observation: 'esquerda',
 }, 'das anotações, só Obs à esquerda')
 for (const f of campos) assert.match(classeNota(f), /\btext-(left|center)\b/)
 assert.match(contas, /v-else-if="f\.key === 'ads'"\s+class="[^"]*\btext-center\b/, 'célula do Ads centralizada')

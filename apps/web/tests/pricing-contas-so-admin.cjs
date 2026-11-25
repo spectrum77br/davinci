@@ -61,18 +61,20 @@ console.log('pricing contas só ADM: grupos da grade ok')
 // ---------- 2) colspan da aba Contas
 const isAdmin = ref(true)
 const nTiposAba = ref(5)
-const STORE_NOTE_FIELDS = new Array(6).fill({})
+const STORE_NOTE_FIELDS = new Array(5).fill({})
 const colunas = new Function('isAdmin', 'nTiposAba', 'STORE_NOTE_FIELDS',
   js(`${computado('colunasContas')}\nreturn __f`))(isAdmin, nTiposAba, STORE_NOTE_FIELDS)
-assert.equal(colunas(), 5 + 2 + 10 + 6 + 1)
+// Plataforma, Conta, Catálogo ML, Equipe (Tipo ML saiu na M-53) + Kit, Comissão,
+// 5 pares + Afiliado, Desconto, Ads, Custo total, Obs + lixeira.
+assert.equal(colunas(), 4 + 2 + 10 + 5 + 1)
 isAdmin.value = false
-assert.equal(colunas(), 5 + 6 + 1)
+assert.equal(colunas(), 4 + 5 + 1)
 console.log('pricing contas só ADM: colspan ok')
 
 // ---------- 3) script: conta nova sem kit/comissão, recálculo e aviso só do ADM
 const novo = funcao('submitNewAcc')
 assert.doesNotMatch(novo.slice(0, novo.indexOf('if (isAdmin.value)')), /kit_number|commission/)
-assert.match(novo, /if \(isAdmin\.value\) \{\s*body\.kit_number = newAcc\.kit_number \|\| 1\s*if \(newAcc\.commission\) body\.commission/)
+assert.match(novo, /if \(isAdmin\.value\) \{\s*body\.kit_number = newAcc\.kit_number \|\| 1\s*if \(newAcc\.commission && !ehMl\) body\.commission/)
 assert.match(funcao('recomputeCellsForProduct'), /if \(!grid\.value \|\| !isAdmin\.value\) return/)
 assert.match(funcao('_patchProduct'), /if \(mudaPreco\) \{\s*if \(isAdmin\.value\) recomputeCellsForProduct\(id\)\s*else if \(grid\.value\) void loadGrid\(\)/)
 assert.match(setup, /kit_number: number \| null/)
@@ -90,13 +92,17 @@ assert.match(contas, /<template v-if="isAdmin">\s*<td[^>]*>\s*<input\s+v-model\.
 // Linha da conta: kit, comissão e pares dentro do mesmo v-if.
 const linha = contas.slice(contas.indexOf('<!-- kit, comissão e pares marg/frete: só ADM (M-10) -->'))
 assert.match(linha, /^<!-- kit, comissão e pares marg\/frete: só ADM \(M-10\) -->\s*<template v-if="isAdmin">/)
-const bloco = linha.slice(0, linha.indexOf('<!-- desconto até / afiliado / ads / cupom até / oferta limite / obs -->'))
+const fimBloco = linha.indexOf('<!-- afiliado / desconto / ads / custo total / obs (M-55/M-56) -->')
+assert.ok(fimBloco > 0)
+const bloco = linha.slice(0, fimBloco)
 for (const campo of ["'kit_number'", "'commission'", '`margin${t}`', '`shipping${t}`']) {
   assert.ok(bloco.includes(campo), `${campo} dentro do bloco só ADM`)
 }
-assert.ok(!contas.slice(contas.indexOf('<!-- desconto até / afiliado')).includes("'commission'"))
-// "% margens" do Catálogo ML: só ADM.
-assert.match(contas, /v-if="catalogoAtivo\(acc\) && isAdmin"\s*type="button"\s*data-margens-catalogo/)
+assert.ok(!contas.slice(contas.indexOf('<!-- afiliado / desconto / ads / custo total / obs')).includes("'commission'"))
+// A janela da comissão do ML (M-53) também fica dentro do bloco só ADM.
+assert.ok(bloco.includes('data-janela-comissao-ml'), 'comissão do ML só ADM')
+// Botão "Margens" da janela do Catálogo ML (M-54; antes o link "% margens"): só ADM.
+assert.match(contas, /<template v-if="isAdmin">\s*<div class="px-1 pt-1">\s*<button[^>]*?data-acao="margens-catalogo"/)
 // Subtítulo sem a contagem de pares para quem não é ADM.
 assert.match(contas, /conta\(s\)<template v-if="isAdmin"> com \{\{ nTiposAba \}\} pares margem\/frete por tipo<\/template>/)
 // Aviso de margem negativa (precisa de kit e frete): só ADM.
