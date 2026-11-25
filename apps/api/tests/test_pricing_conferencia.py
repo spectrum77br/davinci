@@ -1111,7 +1111,9 @@ async def _paridade_com_o_envio(
 @pytest.mark.asyncio
 async def test_mala_casa_pelo_sku_inteiro_como_o_envio(db: AsyncSession, admin: User, cenario):
     """Mala: o anúncio casa pelo SKU inteiro ou pelo lado esquerdo do kit
-    (`sku_casa_no_departamento`); o índice da conferência não perde nenhum."""
+    (`sku_casa_no_departamento`); o índice da conferência não perde nenhum.
+    Desde 25/11/2026 o kit que tem linha própria (b109.20+a075) é só dela — a
+    linha b109.20 fica com o produto sozinho e o kit sem linha (b109.20+a999)."""
     folha = cenario.seg["mala_filhos"][0]
     produtos = {}
     for sku in ("b109.20", "b109.20+a075", "b109.20+a999", "b109.24", "B109.30"):
@@ -1146,12 +1148,12 @@ async def test_mala_casa_pelo_sku_inteiro_como_o_envio(db: AsyncSession, admin: 
         (cel.conta.name, cel.produto.sku): sorted(lk.external_id for lk in cel.links)
         for cel in celulas
     }
-    assert links[("counhago mala", "b109.20")] == ["MLB50", "MLB51", "MLB52"]
+    assert links[("counhago mala", "b109.20")] == ["MLB50", "MLB52"]
     assert links[("counhago mala", "b109.20+a075")] == ["MLB51"]
     assert links[("counhago mala", "b109.24")] == ["MLB53"]
     assert links[("counhago mala", "b109.30")] == ["MLB54"]  # SKU em maiúsculas no Bling
     assert links[("counhago mala", "b109.99")] == []
-    assert links[("amazon mala", "b109.20")] == ["B0MALA0", "B0MALA1", "B0MALA2"]
+    assert links[("amazon mala", "b109.20")] == ["B0MALA0", "B0MALA2"]
     assert await _paridade_com_o_envio(db, "mala", celulas) == 8
 
 

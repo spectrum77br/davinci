@@ -164,7 +164,7 @@ def test_celular_sem_disputa_nao_muda():
     )
 
 
-def test_mala_e_catalogo_nao_usam_a_regra_nova():
+def test_mala_sku_inteiro_da_propria_linha_sempre_casa():
     assert sku_casa_no_departamento(
         "b109.20", dept="mala", sku_full_set={"b109.20"}, sku_base_set={"b109"},
         skus_outras_linhas={"b109.20"},
@@ -205,3 +205,77 @@ def test_linhas_do_departamento_exclui_a_propria_e_outros_departamentos():
     assert ld.outras("eletro", "b") == {"uaf001m1.2l"}
     assert ld.outras("celular", "c") == frozenset()
     assert ld.outras(None, "d") == frozenset()
+
+
+# ------------------------------------------------------------ Mala (25/11/2026)
+# O anúncio de kit recebia o preço da linha do kit E o da linha do produto
+# sozinho (lado esquerdo do kit) — valia o último enviado. Nos dados reais:
+# 'mochila' (bp001..3) × 'Mochila + Oculos + Tag' (bp001+a019+a020...),
+# 'PP 20' (b057.20...) × 'PP 20 + acessórios' (b057.20+a075+bp003+a076...).
+
+MALA = {
+    "mochila": "bp003,bp002,bp001",
+    "kit_mochila": "bp001+a019+a020,bp002+a019+a020,bp003+a019+a020",
+    "pp20": "b057.20,b058.20",
+    "kit_pp20": "b057.20+a075+bp003+a076",
+}
+LD_MALA = LinhasDoDepartamento.de((k, "mala", sku) for k, sku in MALA.items())
+
+
+def _mala(links_skus, linha: str, plataforma: str = "ml"):
+    links = [lk for lk, _pid, _sku in links_skus]
+    skus = {pid: sku for _lk, pid, sku in links_skus}
+    res = resolver_anuncios(
+        links, skus,
+        pricing_sku=MALA[linha], dept="mala", plataforma=plataforma, canal=CANAL_KIT,
+        listing_type_conta=None, pula_catalogo=False,
+        skus_outras_linhas=LD_MALA.outras("mala", linha),
+    )
+    por_id = {lk.id: sku for lk, _pid, sku in links_skus}
+    return sorted(por_id[lk.id] for lk in res.links)
+
+
+MALA_LINKS = [
+    _link("bp001", item="MLB1", variacao=None),
+    _link("bp001+a019+a020", item="MLB2", variacao=None),
+    _link("b057.20", item="MLB3", variacao=None),
+    _link("b057.20+a075+bp003+a076", item="MLB4", variacao=None),
+    # kit sem linha própria na tabela: continua com a linha do produto
+    _link("b058.20+a075+bp003+a076", item="MLB5", variacao=None),
+]
+
+
+def test_mala_kit_com_linha_propria_so_recebe_da_linha_do_kit():
+    assert _mala(MALA_LINKS, "mochila") == ["bp001"]
+    assert _mala(MALA_LINKS, "kit_mochila") == ["bp001+a019+a020"]
+    assert _mala(MALA_LINKS, "kit_pp20") == ["b057.20+a075+bp003+a076"]
+
+
+def test_mala_kit_sem_linha_propria_continua_com_a_linha_do_produto():
+    assert _mala(MALA_LINKS, "pp20") == ["b057.20", "b058.20+a075+bp003+a076"]
+
+
+def test_mala_regra_antiga_mandava_o_produto_para_o_kit():
+    """Sem as outras linhas, a mochila pegava o anúncio do kit também."""
+    links = [lk for lk, _pid, _sku in MALA_LINKS]
+    skus = {pid: sku for _lk, pid, sku in MALA_LINKS}
+    res = resolver_anuncios(
+        links, skus, pricing_sku=MALA["mochila"], dept="mala", plataforma="ml",
+        canal=CANAL_KIT, listing_type_conta=None, pula_catalogo=False,
+    )
+    assert {lk.external_id for lk in res.links} == {"MLB1", "MLB2"}
+
+
+def test_mala_regra_de_sku_direta():
+    assert not sku_casa_no_departamento(
+        "bp001+a019+a020", dept="mala", sku_full_set={"bp001"}, sku_base_set={"bp001"},
+        skus_outras_linhas={"bp001+a019+a020"},
+    )
+    assert sku_casa_no_departamento(
+        "bp001+a019+a020", dept="mala", sku_full_set={"bp001+a019+a020"},
+        sku_base_set={"bp001"}, skus_outras_linhas={"bp001"},
+    )
+    assert sku_casa_no_departamento(
+        "bp001+a999", dept="mala", sku_full_set={"bp001"}, sku_base_set={"bp001"},
+        skus_outras_linhas={"bp001+a019+a020"},
+    )

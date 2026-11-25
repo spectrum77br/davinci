@@ -235,7 +235,8 @@ def sku_casa_no_departamento(
 
     `sku_full_set` são os SKUs da célula inteiros; `sku_base_set`, a parte
     antes do primeiro ponto. Ambos já em minúsculas. `skus_outras_linhas`:
-    ver `casa_pelo_codigo` (só celular/eletro).
+    ver `casa_pelo_codigo` (celular/eletro); na mala, o SKU inteiro do anúncio
+    que outra linha tem é dela.
     """
     sku = (sku_do_anuncio or "").lower()
     if not sku:
@@ -259,7 +260,16 @@ def sku_casa_no_departamento(
         # Exato primeiro, de propósito: dois kits do mesmo produto
         # ("b109.20+a075" e "b109.20+a999") têm o mesmo lado esquerdo, então
         # casar só por ele empurraria preço pro anúncio errado.
-        return sku in sku_full_set or main_sku in sku_full_set
+        if sku in sku_full_set:
+            return True
+        # Exato vence também ENTRE linhas (25/11/2026): o anúncio de kit que
+        # outra linha da mala tem pelo SKU inteiro ("Mochila + Óculos + Tag",
+        # bp001+a019+a020) é dela — a linha do produto sozinho (mochila, bp001)
+        # não manda mais o preço dela para ele. Sem linha do kit, o lado
+        # esquerdo continua valendo como antes.
+        if sku in skus_outras_linhas:
+            return False
+        return main_sku in sku_full_set
 
     # celular/eletro: o mais específico vence; sem disputa, o código base
     return casa_pelo_codigo(
