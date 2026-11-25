@@ -2848,6 +2848,40 @@ async def estoque_transferencia_tick(ctx: dict) -> None:
         logger.exception("estoque_transferencia_tick_failed")
 
 
+async def estoque_entrada_tick(ctx: dict) -> None:
+    """A cada 2 min: termina as entradas do "Incluir" do Produtos 2 (M-43,
+    25/11/2026) que ficaram no meio. "conferindo" (o Bling respondeu erro
+    depois de receber) é procurada no extrato antes de qualquer coisa;
+    "pendente" esquecida (nada foi enviado) é lançada — ou encerrada, se já
+    houver uma igual mais nova. Sem pendência = 1 SELECT, zero Bling."""
+    from sqlalchemy import select
+
+    from app.models import EstoqueEntrada as E
+    from app.services import estoque_entrada as svc
+    from app.services.devolution_stock_return import _get_bling_client
+
+    try:
+        async with session_scope() as s:
+            tem = (
+                await s.execute(
+                    select(E.id)
+                    .where(E.status.in_((svc.PENDENTE, svc.ENVIANDO, svc.CONFERINDO)))
+                    .limit(1)
+                )
+            ).first()
+            if tem is None:
+                return
+            # Cliente e sessão juntos: a renovação do token grava nesta sessão.
+            client = await _get_bling_client(s)
+            if client is None:
+                return
+            out = await svc.processar_pendentes(client)
+        if any(out.values()):
+            logger.info("estoque_entrada_tick", **out)
+    except Exception:  # noqa: BLE001
+        logger.exception("estoque_entrada_tick_failed")
+
+
 async def devolucao_prazo_sync(ctx: dict) -> None:
     """A cada 30 min: pergunta à Shopee/TikTok até quando dá pra contestar cada
     devolução recente e avisa no Threema quando o motivo ainda está vazio a
@@ -5927,6 +5961,7 @@ class WorkerSettings:
         prioridade_estoque_tick,
         prioridade_estoque_estorno_tick,
         func(estoque_transferencia_tick, timeout=600),
+        func(estoque_entrada_tick, timeout=600),
         # Flex por anúncio (etapa 3): varredura, botão "Sincronizar" e o
         # gancho do pedido Flex. 15 min de teto: até 400 leituras do ML + as
         # escritas da rodada, uma de cada vez.
@@ -6637,6 +6672,15 @@ class WorkerSettings:
         # fora da conferência das devoluções; 1 SELECT quando não há nada.
         cron(
             estoque_transferencia_tick,
+            minute=set(range(1, 60, 2)),
+            run_at_startup=True,
+            timeout=600,
+        ),
+        # "Incluir" do Produtos 2 (M-43, 25/11): termina as entradas avulsas
+        # paradas (pendente esquecida, conferência no extrato). Minutos ímpares
+        # como a transferência; 1 SELECT quando não há nada.
+        cron(
+            estoque_entrada_tick,
             minute=set(range(1, 60, 2)),
             run_at_startup=True,
             timeout=600,

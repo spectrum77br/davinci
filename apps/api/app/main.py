@@ -53,6 +53,7 @@ from app.routers import erp_gate as erp_gate_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
+from app.routers import estoque_entradas as estoque_entradas_router
 from app.routers import estoque_transferencias as estoque_transferencias_router
 from app.routers import faturamento as faturamento_router
 from app.routers import conciliacao as conciliacao_router
@@ -89,6 +90,7 @@ from app.routers import oauth as oauth_router
 from app.routers import organizar as organizar_router
 from app.routers import produto_cadastros as produto_cadastros_router
 from app.routers import produtos_atualizar as produtos_atualizar_router
+from app.routers import produtos_trocar_tag as produtos_trocar_tag_router
 from app.routers import ouvidoria as ouvidoria_router
 from app.routers import denuncia as denuncia_router
 from app.routers import juridico as juridico_router
@@ -251,6 +253,8 @@ app.include_router(products_router.router)
 app.include_router(organizar_router.router)
 # Produtos › Atualizar (17/11/2026): só lê do Bling/marketplaces, grava no DaVinci.
 app.include_router(produtos_atualizar_router.router)
+# Produtos 2 › Configuração › "Tag" (M-46): troca o código no Bling (só admin).
+app.include_router(produtos_trocar_tag_router.router)
 # Estoque só leitura para os sites Charlots/Uranyx (30/09/2026). Fecha
 # sozinha se SITES_ESTOQUE_TOKENS estiver vazio; fora do openapi.
 app.include_router(sites_estoque_router.router)
@@ -397,6 +401,8 @@ app.include_router(atendimento_robo_router.router)
 app.include_router(app_uranyx_router.router)
 app.include_router(estoque_router.router)
 app.include_router(estoque_transferencias_router.router)
+# Produtos 2 › estoque do produto › "Incluir" (M-43): entrada avulsa no Bling (só admin).
+app.include_router(estoque_entradas_router.router)
 app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)
 app.include_router(importacao_router.router)

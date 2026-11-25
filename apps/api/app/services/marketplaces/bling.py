@@ -929,6 +929,65 @@ class BlingClient:
         except Exception:  # noqa: BLE001
             return False
 
+    async def produtos_com_codigo(self, codigo: str, *, max_paginas: int = 5) -> list[dict]:
+        """Os produtos do Bling com EXATAMENTE este código (sem diferenciar
+        maiúscula), em qualquer situação — ativos, inativos e excluídos
+        (`criterio=5`). Para o "Trocar a tag" (M-46): o código novo não pode
+        existir em lugar nenhum.
+
+        Diferente de `product_exists_by_sku`, aqui erro na consulta SOBE (na
+        dúvida não troca nada) e o filtro `codigo` é conferido: se o Bling
+        devolver item cujo código nem contém o procurado, o filtro não valeu e
+        a resposta não prova nada — sobe erro em vez de dizer "não existe".
+        Devolve [{"id", "codigo", "situacao"}]."""
+        alvo = (codigo or "").strip().casefold()
+        if not alvo:
+            return []
+        out: list[dict] = []
+        for pagina in range(1, max_paginas + 1):
+            r = await self._request(
+                "GET",
+                "/produtos",
+                params={"codigo": codigo.strip(), "criterio": 5, "pagina": pagina, "limite": 100},
+            )
+            r.raise_for_status()
+            items = r.json().get("data") or []
+            for item in items:
+                cod = str(item.get("codigo") or "").strip().casefold()
+                if alvo not in cod:
+                    raise RuntimeError(f"bling_filtro_codigo_ignorado: {codigo!r}")
+                if cod == alvo:
+                    out.append(
+                        {
+                            "id": item.get("id"),
+                            "codigo": item.get("codigo"),
+                            "situacao": item.get("situacao"),
+                        }
+                    )
+            if len(items) < 100:
+                return out
+        raise RuntimeError(f"bling_codigo_muitos_resultados: {codigo!r}")
+
+    async def update_product_codigo(self, bling_product_id: int, codigo: str) -> dict:
+        """Troca SÓ o código do produto: PATCH /produtos/{id} {"codigo": ...}
+        ("Altera parcialmente um produto … Somente os campos informados terão
+        o valor alterado" — spec oficial do Bling v3). Nunca PUT: o PUT troca
+        o cadastro inteiro. `repetir_503=False`: um 503 pode ter sido gravado —
+        quem chama confere com GET em vez de mandar de novo."""
+        r = await self._request(
+            "PATCH",
+            f"/produtos/{int(bling_product_id)}",
+            json={"codigo": codigo},
+            repetir_503=False,
+        )
+        r.raise_for_status()
+        if r.content and "json" in (r.headers.get("content-type") or ""):
+            try:
+                return r.json().get("data") or {}
+            except ValueError:
+                return {}
+        return {}
+
     async def find_next_z_sku(self) -> str:
         """Find the first available sequential z-SKU (z0001, z0002, …) not yet in Bling."""
         for n in range(1, 10000):
