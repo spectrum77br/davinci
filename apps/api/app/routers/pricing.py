@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+from decimal import Decimal
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -52,6 +53,8 @@ from app.schemas.pricing import (
     AccountSetDepartmentIn,
     AutoMatchResult,
     CertificacaoDoProdutoOut,
+    ComissaoMlIn,
+    ComissaoMlOut,
     CompetitorPriceRow,
     ContaCatalogoIn,
     ContaCatalogoOut,
@@ -107,6 +110,7 @@ from app.services.pricing.anuncios import (
 from app.services.pricing.audit import scan_missing_skus
 from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.competitor import search_competitors
+from app.services.pricing.custo_total import EstadoAds, estado_ads, estouro
 from app.services.pricing.push import (
     bases_com_catalogo_ligado,
     integracoes_com_marca_lida,
@@ -257,6 +261,7 @@ _CAMPOS_HERDADOS_DA_BASE = (
     "margin5", "shipping5",
     "discount", "affiliate", "ads", "coupon", "offer",
     "desconto_ate", "cupom_ate", "afiliado_pct", "oferta_limite_pct",
+    "desconto_pct", "custo_total_pct",
     "observation", "observation2", "observation3",
 )
 
@@ -285,7 +290,7 @@ _MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
 # conta saem com esses campos vazios (null) — inclusive os que a coluna de
 # catálogo herda da base e as margens próprias dela —, e o POST/PATCH recusa
 # mudá-los. O preço da grade continua calculado aqui com os números de verdade.
-_CAMPOS_SO_ADMIN = (
+_CAMPOS_OCULTOS_DE_QUEM_NAO_E_ADMIN = (
     "kit_number",
     "commission",
     "margin1", "shipping1",
@@ -293,6 +298,56 @@ _CAMPOS_SO_ADMIN = (
     "margin3", "shipping3",
     "margin4", "shipping4",
     "margin5", "shipping5",
+)
+# O que só o administrador GRAVA: os de cima e o Custo total (M-56, 25/11/2026),
+# que os outros perfis VEEM (fica fora da lista de ocultos).
+_CAMPOS_SO_ADMIN = (*_CAMPOS_OCULTOS_DE_QUEM_NAO_E_ADMIN, "custo_total_pct")
+
+# M-53 (25/11/2026): a conta ML de kit nasce com as duas linhas, Clássico e
+# Premium, ligadas pelo mesmo `par_id`. Comissão inicial = a usual da
+# categoria raiz (fração, como `commission`); o ADM troca depois pela janela
+# da comissão (PUT /accounts/{id}/comissao-ml).
+TIPO_ML_CLASSICO = "ml classico"
+TIPO_ML_PREMIUM = "ml premium"
+_COMISSAO_ML_PADRAO: dict[str, tuple[Decimal, Decimal]] = {
+    "celular": (Decimal("0.11"), Decimal("0.16")),
+    "eletro": (Decimal("0.11"), Decimal("0.16")),
+    "mala": (Decimal("0.14"), Decimal("0.19")),
+}
+_COMISSAO_ML_OUTRA_RAIZ = (Decimal("0.11"), Decimal("0.16"))
+
+# M-53: o que gravar numa linha do par grava também na irmã. Fora daqui:
+# `commission` (cada tipo tem a sua, pela janela), `sort_order`, `listing_type`
+# (fixo no par) e os campos antigos escondidos (senha, e-mail, endereços,
+# discount/affiliate/ads/coupon/offer, observation2/3), que não se mexem.
+_CAMPOS_DO_PAR = (
+    "name",
+    "segment_id",
+    "kit_number",
+    "margin1",
+    "shipping1",
+    "margin2",
+    "shipping2",
+    "margin3",
+    "shipping3",
+    "margin4",
+    "shipping4",
+    "margin5",
+    "shipping5",
+    "observation",
+    "store_info_id",
+    "integration_id",
+    "afiliado_pct",
+    "desconto_pct",
+    "custo_total_pct",
+    "desconto_ate",
+    "cupom_ate",
+    "oferta_limite_pct",
+    "slot1_segment_id",
+    "slot2_segment_id",
+    "slot3_segment_id",
+    "slot4_segment_id",
+    "slot5_segment_id",
 )
 
 
@@ -312,7 +367,9 @@ def _recusar_campos_so_admin(user: User, body: PricingAccountCreate | PricingAcc
             403,
             detail={
                 "code": "campos_so_admin",
-                "message": "Kit, comissão, margens e fretes só o administrador altera",
+                "message": (
+                    "Kit, comissão, margens, fretes e custo total só o administrador altera"
+                ),
                 "campos": campos,
             },
         )
@@ -359,7 +416,7 @@ def _account_out(
     if row.canal != CANAL_CATALOGO:
         out.conta_catalogo_id = conta_catalogo_id
     if not admin:
-        for campo in _CAMPOS_SO_ADMIN:
+        for campo in _CAMPOS_OCULTOS_DE_QUEM_NAO_E_ADMIN:
             setattr(out, campo, None)
         out.margens_catalogo = None
     return out
@@ -505,6 +562,147 @@ def _recusar_edicao_da_filha(row: PricingAccount) -> None:
         )
 
 
+async def _irma_de(session: AsyncSession, row: PricingAccount) -> PricingAccount | None:
+    """A outra linha do par (M-53): o Premium do Clássico e vice-versa. None =
+    linha sem par, ou a irmã não existe mais."""
+    if row.par_id is None:
+        return None
+    return (
+        (
+            await session.execute(
+                select(PricingAccount)
+                .where(PricingAccount.par_id == row.par_id, PricingAccount.id != row.id)
+                .order_by(PricingAccount.listing_type)
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
+async def _comissoes_ml_padrao(session: AsyncSession, segment_id: UUID) -> tuple[Decimal, Decimal]:
+    """(Clássico, Premium) da conta ML nova, pela categoria raiz (M-53)."""
+    raiz = await session.get(Segment, segment_id)
+    return _COMISSAO_ML_PADRAO.get(raiz.slug if raiz else "", _COMISSAO_ML_OUTRA_RAIZ)
+
+
+def _novo_par_ml(
+    dados: dict, comissoes: tuple[Decimal, Decimal]
+) -> tuple[PricingAccount, PricingAccount]:
+    """As duas linhas de uma conta ML de kit nova (M-53), com o mesmo par_id:
+    tudo igual, menos o tipo e a comissão."""
+    dados = {k: v for k, v in dados.items() if k not in ("listing_type", "commission", "par_id")}
+    par_id = uuid4()
+    classico = PricingAccount(
+        **dados, listing_type=TIPO_ML_CLASSICO, commission=comissoes[0], par_id=par_id
+    )
+    premium = PricingAccount(
+        **dados, listing_type=TIPO_ML_PREMIUM, commission=comissoes[1], par_id=par_id
+    )
+    return classico, premium
+
+
+def _recusar_troca_de_tipo_no_par(row: PricingAccount, data: dict) -> None:
+    """Linha do par (M-53) não troca de tipo nem sai do ML: o par é sempre um
+    Clássico e um Premium do Mercado Livre."""
+    if row.par_id is None:
+        return
+    muda_tipo = "listing_type" in data and data["listing_type"] != row.listing_type
+    muda_plataforma = data.get("platform") is not None and data["platform"] != row.platform
+    if muda_tipo or muda_plataforma:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "tipo_fixo",
+                "message": (
+                    "Conta do Mercado Livre com Clássico e Premium juntos: o tipo e a "
+                    "plataforma de cada linha não mudam"
+                ),
+            },
+        )
+
+
+async def _gravar_na_conta(session: AsyncSession, conta: PricingAccount, dados: dict) -> None:
+    """Grava os campos numa linha de kit e acompanha a coluna de catálogo.
+
+    Conta que muda de aba sem slots explícitos re-deriva os slots default da
+    aba nova: slots da aba velha nunca casam com os leaves da nova na view de
+    margens e o frete projetado sumiria (ver _default_slot_segments)."""
+    dados = dict(dados)
+    if (
+        dados.get("segment_id") is not None
+        and dados["segment_id"] != conta.segment_id
+        and not any(dados.get(f"slot{n}_segment_id") for n in (1, 2, 3, 4, 5))
+    ):
+        slots = await _default_slot_segments(session, dados["segment_id"])
+        for n in (1, 2, 3, 4, 5):
+            dados[f"slot{n}_segment_id"] = slots[n - 1]
+    for k, v in dados.items():
+        setattr(conta, k, v)
+    await _sincronizar_filha(session, conta)
+
+
+def _erro_custo_total(mensagem: str) -> HTTPException:
+    return HTTPException(422, detail={"code": "custo_total_estourado", "mensagem": mensagem})
+
+
+def _recusar_custo_total_estourado(
+    conta: PricingAccount, ads: EstadoAds, novos: dict | None = None
+) -> None:
+    """M-56: 422 `custo_total_estourado` se Afiliado + Desconto + Ads da conta
+    passa do Custo total, com os valores que FICARIAM gravados (`novos` vence
+    o da conta; `ads` já é o estado novo do Ads). Nada foi gravado ainda."""
+    novos = novos or {}
+
+    def valor(campo: str):
+        return novos[campo] if campo in novos else getattr(conta, campo)
+
+    mensagem = estouro(
+        valor("afiliado_pct"), valor("desconto_pct"), ads.maximo(), valor("custo_total_pct")
+    )
+    if mensagem:
+        logger.info("pricing.custo_total_estourado", account_id=str(conta.id), mensagem=mensagem)
+        raise _erro_custo_total(mensagem)
+
+
+# O que entra na soma do Custo total (M-56) na própria conta.
+_CAMPOS_DO_CUSTO_TOTAL = frozenset({"afiliado_pct", "desconto_pct", "custo_total_pct"})
+
+
+async def _ligar_ou_desligar_catalogo(
+    session: AsyncSession, user: User, base: PricingAccount, ativo: bool
+) -> PricingAccount | None:
+    """Cria ou apaga a coluna de catálogo de UMA conta ML de kit (sem commit).
+    Devolve a filha que fica (None = desligado)."""
+    filha = await _filha_de(session, base.id)
+    if ativo and filha is None:
+        if ml_listing_type_for_account(base.listing_type) is None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "tipo_obrigatorio",
+                    "message": (
+                        "Preencha o tipo (clássico/premium) desta conta antes de ativar o catálogo"
+                    ),
+                },
+            )
+        filha = PricingAccount(
+            canal=CANAL_CATALOGO,
+            conta_base_id=base.id,
+            integration_id=None,
+            **{campo: getattr(base, campo) for campo in _CAMPOS_ESPELHADOS_NA_FILHA},
+        )
+        session.add(filha)
+        await session.flush()
+        logger.info("pricing.catalogo_ligado", conta_base_id=str(base.id), user_id=str(user.id))
+    elif not ativo and filha is not None:
+        await session.delete(filha)
+        await session.flush()
+        filha = None
+        logger.info("pricing.catalogo_desligado", conta_base_id=str(base.id), user_id=str(user.id))
+    return filha
+
+
 async def _patch_margens_da_filha(
     session: AsyncSession,
     user: User,
@@ -523,16 +721,36 @@ async def _patch_margens_da_filha(
     base = (await session.execute(stmt)).scalar_one_or_none()
     if base is None:
         raise HTTPException(404, detail={"code": "account_not_found"})
-    for campo in campos:
-        setattr(filha, campo, getattr(body, campo))
+    # M-54: a margem do catálogo vale para a CONTA — base do par grava a mesma
+    # margem na coluna de catálogo da irmã.
+    filhas = [filha]
+    irma = await _irma_de(session, base)
+    if irma is not None:
+        filha_irma = await _filha_de(session, irma.id)
+        if filha_irma is None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "catalogo_desencontrado",
+                    "message": (
+                        "O catálogo está ligado só num dos tipos (Clássico/Premium) desta "
+                        "conta: desligue e ligue de novo"
+                    ),
+                },
+            )
+        filhas.append(filha_irma)
+    for linha in filhas:
+        for campo in campos:
+            setattr(linha, campo, getattr(body, campo))
     await session.commit()
     await session.refresh(filha)
-    logger.info(
-        "pricing.catalogo_margem",
-        conta_catalogo_id=str(filha.id),
-        campos=sorted(campos),
-        user_id=str(user.id),
-    )
+    for linha in filhas:
+        logger.info(
+            "pricing.catalogo_margem",
+            conta_catalogo_id=str(linha.id),
+            campos=sorted(campos),
+            user_id=str(user.id),
+        )
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
     equipes = (await _equipes_das_contas(session, [filha, base])).get(filha.id)
@@ -746,12 +964,35 @@ async def create_account(
         slots = await _default_slot_segments(session, data["segment_id"])
         for n in (1, 2, 3, 4, 5):
             data[f"slot{n}_segment_id"] = slots[n - 1]
-    row = PricingAccount(user_id=user.id, **data)
-    if body.password:
-        row.password_enc = encrypt(body.password)
-    session.add(row)
+    # M-56: conta nova não tem Ads; a soma é Afiliado + Desconto.
+    mensagem = estouro(
+        data.get("afiliado_pct"), data.get("desconto_pct"), Decimal(0), data.get("custo_total_pct")
+    )
+    if mensagem:
+        raise _erro_custo_total(mensagem)
+    if data["platform"] == PricingPlatform.ML:
+        # M-53: a conta ML nasce com o Clássico e o Premium (mesmo par_id), com
+        # a comissão usual da categoria; `listing_type` e `commission` do corpo
+        # ficam de fora. A resposta é a linha do Clássico.
+        comissoes = await _comissoes_ml_padrao(session, data["segment_id"])
+        row, premium = _novo_par_ml({"user_id": user.id, **data}, comissoes)
+        linhas = [row, premium]
+    else:
+        row = PricingAccount(user_id=user.id, **data)
+        linhas = [row]
+    for linha in linhas:
+        if body.password:
+            linha.password_enc = encrypt(body.password)
+        session.add(linha)
     await session.commit()
     await session.refresh(row)
+    if row.par_id is not None:
+        logger.info(
+            "pricing.conta_ml_criada",
+            par_id=str(row.par_id),
+            ids=[str(linha.id) for linha in linhas],
+            user_id=str(user.id),
+        )
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
     return await _uma_conta_out(
@@ -774,11 +1015,9 @@ async def patch_account(
         return await _patch_margens_da_filha(session, user, row, body)
 
     data = body.model_dump(exclude_unset=True)
-    if "password" in data:
-        pwd = data.pop("password")
-        row.password_enc = encrypt(pwd) if pwd else None
     if "platform" in data and data["platform"] is not None:
         data["platform"] = _coerce_platform(data["platform"])
+    _recusar_troca_de_tipo_no_par(row, data)
     # Translate legacy department-string into segment_id; explicit segment_id
     # wins if both are present.
     dept_str = data.pop("department", None)
@@ -787,21 +1026,23 @@ async def patch_account(
         if sid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
         data["segment_id"] = sid
-    # Conta mudou de aba sem slots explícitos no body → re-deriva os slots
-    # default da aba nova. Slots da aba velha nunca casam com os leaves da
-    # nova na view de margens e o frete projetado sumiria (ver
-    # _default_slot_segments).
-    if (
-        data.get("segment_id") is not None
-        and data["segment_id"] != row.segment_id
-        and not any(data.get(f"slot{n}_segment_id") for n in (1, 2, 3, 4, 5))
-    ):
-        slots = await _default_slot_segments(session, data["segment_id"])
-        for n in (1, 2, 3, 4, 5):
-            data[f"slot{n}_segment_id"] = slots[n - 1]
-    for k, v in data.items():
-        setattr(row, k, v)
-    await _sincronizar_filha(session, row)
+    # M-53: na linha do par, o que foi gravado vale para a irmã (menos
+    # comissão, ordem e os campos escondidos — `_CAMPOS_DO_PAR`); cada linha
+    # re-deriva os próprios slots se mudou de aba.
+    irma = await _irma_de(session, row)
+    dados_irma = {k: v for k, v in data.items() if k in _CAMPOS_DO_PAR}
+    # M-56: Afiliado + Desconto + Ads não passa do Custo total (valores novos;
+    # nas duas linhas do par). Recusa antes de gravar qualquer coisa.
+    if data.keys() & _CAMPOS_DO_CUSTO_TOTAL:
+        _recusar_custo_total_estourado(row, await estado_ads(session, row.id), data)
+        if irma is not None:
+            _recusar_custo_total_estourado(irma, await estado_ads(session, irma.id), dados_irma)
+    if "password" in data:
+        pwd = data.pop("password")
+        row.password_enc = encrypt(pwd) if pwd else None
+    await _gravar_na_conta(session, row, data)
+    if irma is not None and dados_irma:
+        await _gravar_na_conta(session, irma, dados_irma)
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
@@ -822,7 +1063,13 @@ async def delete_account(
     ],
 ) -> None:
     row = await _conta_da_cerca(session, user, account_id)
-    await session.execute(delete(PricingAccount).where(PricingAccount.id == row.id))
+    # M-53: excluir uma linha do par exclui as duas (as colunas de catálogo
+    # saem junto, pelo ON DELETE CASCADE, como sempre).
+    ids = [row.id]
+    irma = await _irma_de(session, row)
+    if irma is not None:
+        ids.append(irma.id)
+    await session.execute(delete(PricingAccount).where(PricingAccount.id.in_(ids)))
     await session.commit()
     return None
 
@@ -2545,14 +2792,70 @@ async def set_account_department(
         raise HTTPException(400, detail={"code": "invalid_department"})
     row = await _conta_da_cerca(session, user, account_id)
     _recusar_edicao_da_filha(row)
-    row.segment_id = sid
-    await _sincronizar_filha(session, row)
+    # M-53: o par muda de aba junto.
+    irma = await _irma_de(session, row)
+    for conta in (row, irma) if irma is not None else (row,):
+        conta.segment_id = sid
+        await _sincronizar_filha(session, conta)
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
     return await _uma_conta_out(
         session, row, roots_by_id, names_by_id, admin=_e_admin(user)
+    )
+
+
+@router.put("/accounts/{account_id}/comissao-ml", response_model=ComissaoMlOut)
+async def gravar_comissao_ml(
+    account_id: UUID,
+    body: ComissaoMlIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos_contas", "edit"))],
+) -> ComissaoMlOut:
+    """Comissão da conta ML (M-53, 25/11/2026): a do Clássico e a do Premium,
+    em fração (0.14 = 14%, como `commission`; null apaga), gravadas nas duas
+    linhas do par na mesma transação. O id pode ser de qualquer uma das duas.
+    Só o administrador (a comissão é campo só dele, M-10). Conta sem o par →
+    400 `sem_par`."""
+    if not _e_admin(user):
+        raise HTTPException(
+            403,
+            detail={
+                "code": "campos_so_admin",
+                "message": "Comissão só o administrador altera",
+                "campos": ["commission"],
+            },
+        )
+    row = await _conta_da_cerca(session, user, account_id)
+    irma = await _irma_de(session, row)
+    por_tipo = {c.listing_type: c for c in (row, irma) if c is not None}
+    classico, premium = por_tipo.get(TIPO_ML_CLASSICO), por_tipo.get(TIPO_ML_PREMIUM)
+    if classico is None or premium is None:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "sem_par",
+                "message": "Esta conta não tem o Clássico e o Premium juntos",
+            },
+        )
+    classico.commission = body.classico
+    premium.commission = body.premium
+    await session.commit()
+    await session.refresh(classico)
+    await session.refresh(premium)
+    logger.info(
+        "pricing.comissao_ml",
+        par_id=str(classico.par_id),
+        classico=str(body.classico),
+        premium=str(body.premium),
+        user_id=str(user.id),
+    )
+    roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
+    return ComissaoMlOut(
+        classico=await _uma_conta_out(session, classico, roots_by_id, names_by_id, admin=True),
+        premium=await _uma_conta_out(session, premium, roots_by_id, names_by_id, admin=True),
     )
 
 
@@ -2575,7 +2878,11 @@ async def definir_catalogo_da_conta(
     filha nova, sem margem própria (usa as da base). Idempotente nos dois
     sentidos.
 
-    Mesma cerca de equipe do `/accounts`: conta de outra equipe → 404."""
+    Mesma cerca de equipe do `/accounts`: conta de outra equipe → 404.
+
+    M-54 (25/11/2026): na conta do par (Clássico + Premium, M-53) liga ou
+    desliga nas DUAS linhas, na mesma transação; a resposta é a da linha
+    pedida."""
     stmt = select(PricingAccount).where(
         and_(
             PricingAccount.id == account_id,
@@ -2596,40 +2903,23 @@ async def definir_catalogo_da_conta(
             },
         )
 
-    filha = await _filha_de(session, base.id)
-    if body.ativo and filha is None:
-        if ml_listing_type_for_account(base.listing_type) is None:
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "tipo_obrigatorio",
-                    "message": (
-                        "Preencha o tipo (clássico/premium) desta conta antes de "
-                        "ativar o catálogo"
-                    ),
-                },
-            )
-        filha = PricingAccount(
-            canal=CANAL_CATALOGO,
-            conta_base_id=base.id,
-            integration_id=None,
-            **{campo: getattr(base, campo) for campo in _CAMPOS_ESPELHADOS_NA_FILHA},
+    bases = [base]
+    irma = await _irma_de(session, base)
+    if irma is not None:
+        bases.append(
+            (
+                await session.execute(
+                    select(PricingAccount).where(PricingAccount.id == irma.id).with_for_update()
+                )
+            ).scalar_one()
         )
-        session.add(filha)
-        await session.commit()
+    filhas: dict[UUID, PricingAccount | None] = {}
+    for conta in bases:
+        filhas[conta.id] = await _ligar_ou_desligar_catalogo(session, user, conta, body.ativo)
+    await session.commit()
+    filha = filhas[base.id]
+    if filha is not None:
         await session.refresh(filha)
-        logger.info(
-            "pricing.catalogo_ligado", conta_base_id=str(base.id), user_id=str(user.id)
-        )
-    elif not body.ativo and filha is not None:
-        await session.delete(filha)
-        await session.commit()
-        filha = None
-        logger.info(
-            "pricing.catalogo_desligado", conta_base_id=str(base.id), user_id=str(user.id)
-        )
-    else:
-        await session.commit()
 
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
@@ -3154,15 +3444,22 @@ async def _ensure_store_pricing_account(
         )
     ).scalar() or 0
 
-    row = PricingAccount(
-        user_id=info.user_id,
-        name=name,
-        platform=platform,
-        segment_id=sid,
-        store_info_id=info.id,
-        sort_order=int(max_sort) + 1,
-    )
-    session.add(row)
+    dados = {
+        "user_id": info.user_id,
+        "name": name,
+        "platform": platform,
+        "segment_id": sid,
+        "store_info_id": info.id,
+        "sort_order": int(max_sort) + 1,
+    }
+    if platform == PricingPlatform.ML:
+        # M-53 (25/11/2026): conta ML nunca mais nasce sem tipo — nasce o par
+        # Clássico + Premium, com a comissão usual da categoria.
+        row, premium = _novo_par_ml(dados, await _comissoes_ml_padrao(session, sid))
+        session.add_all([row, premium])
+    else:
+        row = PricingAccount(**dados)
+        session.add(row)
     await session.flush()
     return row
 

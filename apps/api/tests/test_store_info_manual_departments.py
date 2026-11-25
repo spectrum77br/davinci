@@ -272,7 +272,11 @@ async def test_existing_pricing_platforms_keep_the_account_contract(
     row = await _listed(client, store_id)
     assert row["departments"] == ["mala"]
     assert row["has_pricing"] is True
-    assert await db.scalar(select(func.count()).select_from(PricingAccount)) == 1
+    # M-53 (25/11/2026): loja ML ganha o par Clássico + Premium (nunca mais uma
+    # linha ML sem tipo); a resposta é o Clássico.
+    ml = platform in ("ml", "mercadolivre")
+    assert account["listing_type"] == ("ml classico" if ml else None)
+    assert await db.scalar(select(func.count()).select_from(PricingAccount)) == (2 if ml else 1)
 
 
 async def test_manual_departments_migration_preserves_existing_stores(db, monkeypatch):

@@ -28,6 +28,12 @@ não tem Ads próprio); grava quem edita Contas.
 
 Campo ausente não muda; % e gasto null apagam (o produto sem % nem gasto volta
 para a Geral).
+
+M-53 (25/11/2026): conta ML do par (Clássico + Premium, mesmo `par_id`) grava o
+mesmo na irmã, nas duas rotas. M-56: Afiliado % + Desconto % + Ads % da conta
+não passa do Custo total (`app/services/pricing/custo_total.py`); o PUT que
+estoura (inclusive religar uma caixa) é recusado com 422 `custo_total_estourado`
+e nada é gravado.
 """
 
 from __future__ import annotations
@@ -59,9 +65,15 @@ from app.models import (
     UserRole,
 )
 from app.models.marketing import MarketingAccount, MarketingMetric
-from app.routers.pricing import _contas_da_grade, _resolve_root_segment_id
+from app.routers.pricing import (
+    _contas_da_grade,
+    _irma_de,
+    _recusar_custo_total_estourado,
+    _resolve_root_segment_id,
+)
 from app.services.marketing.horarios_contas import chave_nome
 from app.services.pricing.anuncios import CANAL_CATALOGO
+from app.services.pricing.custo_total import estado_ads
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
@@ -276,22 +288,61 @@ async def gravar_ads_da_conta(
         if valor is not None or campo in ("pode_gastar_pct", "gasto_dia")
     }
     if mudancas:
-        stmt = pg_insert(PricingAdsConta).values(
-            pricing_account_id=acc.id, atualizado_por=user.id, **mudancas
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[PricingAdsConta.pricing_account_id],
-            set_={**mudancas, "atualizado_por": user.id, "atualizado_em": func.now()},
-        )
-        await session.execute(stmt)
+        irma = await _irma_de(session, acc)
+        contas = [acc] if irma is None else [acc, irma]
+        # M-56: o % e as caixas mexem na soma; o gasto por dia, não.
+        if mudancas.keys() - {"gasto_dia"}:
+            for conta in contas:
+                novo = (await estado_ads(session, conta.id)).com_geral(mudancas)
+                _recusar_custo_total_estourado(conta, novo)
+        for conta in contas:
+            stmt = pg_insert(PricingAdsConta).values(
+                pricing_account_id=conta.id, atualizado_por=user.id, **mudancas
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[PricingAdsConta.pricing_account_id],
+                set_={**mudancas, "atualizado_por": user.id, "atualizado_em": func.now()},
+            )
+            await session.execute(stmt)
         await session.commit()
-        logger.info(
-            "pricing_ads_conta",
-            account_id=str(acc.id),
-            campos=sorted(mudancas),
-            user_id=str(user.id),
-        )
+        for conta in contas:
+            logger.info(
+                "pricing_ads_conta",
+                account_id=str(conta.id),
+                campos=sorted(mudancas),
+                user_id=str(user.id),
+            )
     return (await _contas_out(session, [acc], department))[str(acc.id)]
+
+
+async def _gravar_produto_na_conta(
+    session: AsyncSession, user: User, account_id: UUID, product_id: UUID, mudancas: dict
+) -> None:
+    """Aplica as mudanças no % / gasto próprios do produto numa conta (sem
+    commit). Sem % e sem gasto, a linha sai e o produto volta para a Geral."""
+    linha = await session.get(PricingAdsProduto, (account_id, product_id))
+    valores = {
+        "pode_gastar_pct": linha.pode_gastar_pct if linha else None,
+        "gasto_dia": linha.gasto_dia if linha else None,
+        **mudancas,
+    }
+    if valores["pode_gastar_pct"] is None and valores["gasto_dia"] is None:
+        if linha is not None:
+            await session.delete(linha)
+    elif linha is None:
+        session.add(
+            PricingAdsProduto(
+                pricing_account_id=account_id,
+                pricing_product_id=product_id,
+                atualizado_por=user.id,
+                **valores,
+            )
+        )
+    else:
+        for campo, valor in mudancas.items():
+            setattr(linha, campo, valor)
+        linha.atualizado_por = user.id
+        linha.atualizado_em = func.now()
 
 
 @router.put("/ads/{account_id}/produto/{product_id}", response_model=AdsContaOut)
@@ -311,35 +362,24 @@ async def gravar_ads_do_produto(
     if folha is None or folha.parent_id != acc.segment_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "product_not_found"})
     mudancas = body.model_dump(exclude_unset=True)
-    linha = await session.get(PricingAdsProduto, (acc.id, product_id))
-    valores = {
-        "pode_gastar_pct": linha.pode_gastar_pct if linha else None,
-        "gasto_dia": linha.gasto_dia if linha else None,
-        **mudancas,
-    }
-    if valores["pode_gastar_pct"] is None and valores["gasto_dia"] is None:
-        if linha is not None:
-            await session.delete(linha)
-    elif linha is None:
-        session.add(
-            PricingAdsProduto(
-                pricing_account_id=acc.id,
-                pricing_product_id=product_id,
-                atualizado_por=user.id,
-                **valores,
+    irma = await _irma_de(session, acc)
+    contas = [acc] if irma is None else [acc, irma]
+    # M-56: o % do produto mexe na soma; o gasto por dia, não.
+    if "pode_gastar_pct" in mudancas:
+        for conta in contas:
+            novo = (await estado_ads(session, conta.id)).com_produto(
+                product_id, mudancas["pode_gastar_pct"]
             )
-        )
-    else:
-        for campo, valor in mudancas.items():
-            setattr(linha, campo, valor)
-        linha.atualizado_por = user.id
-        linha.atualizado_em = func.now()
+            _recusar_custo_total_estourado(conta, novo)
+    for conta in contas:
+        await _gravar_produto_na_conta(session, user, conta.id, product_id, mudancas)
     await session.commit()
-    logger.info(
-        "pricing_ads_produto",
-        account_id=str(acc.id),
-        product_id=str(product_id),
-        campos=sorted(mudancas),
-        user_id=str(user.id),
-    )
+    for conta in contas:
+        logger.info(
+            "pricing_ads_produto",
+            account_id=str(conta.id),
+            product_id=str(product_id),
+            campos=sorted(mudancas),
+            user_id=str(user.id),
+        )
     return (await _contas_out(session, [acc], department))[str(acc.id)]

@@ -535,6 +535,10 @@ CAMPOS: dict[str, str] = {
     "cupom_ate": "Cupom até",
     "afiliado_pct": "Afiliado (%)",
     "oferta_limite_pct": "Oferta limite (%)",
+    # M-53/M-55/M-56 (25/11/2026, migration 0511).
+    "desconto_pct": "Desconto (%)",
+    "custo_total_pct": "Custo total (%)",
+    "par_id": "Par Clássico + Premium (ML)",
     # Ads da aba Contas (M-12, 18/11/2026, migration 0503).
     "ads_geral_ligada": "Ads geral ligado",
     "ads_por_produto_ligada": "Ads por produto ligado",

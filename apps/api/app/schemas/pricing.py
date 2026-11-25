@@ -66,6 +66,9 @@ class PricingAccountBase(BaseModel):
     cupom_ate: DiaMes | None = None
     afiliado_pct: PctConta | None = None
     oferta_limite_pct: PctConta | None = None
+    # M-55/M-56 (25/11/2026): Desconto % e Custo total % (este só o ADM grava).
+    desconto_pct: PctConta | None = None
+    custo_total_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
@@ -121,6 +124,8 @@ class PricingAccountPatch(BaseModel):
     cupom_ate: DiaMes | None = None
     afiliado_pct: PctConta | None = None
     oferta_limite_pct: PctConta | None = None
+    desconto_pct: PctConta | None = None
+    custo_total_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None
@@ -169,6 +174,11 @@ class PricingAccountOut(PricingAccountBase):
     # margens; null volta à da base). Desligar o catálogo apaga a filha e as
     # margens próprias: ao religar, a filha nova nasce sem nenhuma.
     margens_catalogo: dict[str, Decimal | None] | None = None
+    # M-53 (25/11/2026): o Clássico e o Premium da mesma conta ML de kit têm o
+    # mesmo `par_id` (a aba Contas junta os dois numa linha; gravar numa linha
+    # grava nas duas). Null = linha sem par (as outras plataformas, a coluna de
+    # catálogo e conta ML com um tipo só).
+    par_id: UUID | None = None
     # Coluna "Equipe" da aba Contas (03/11/2026): as equipes de vendas cuja
     # cerca deixa ver esta conta (a loja dela, pela régua de
     # `escopo_das_equipes`). Vazia = sem equipe. A filha sai com as da base.
@@ -179,6 +189,23 @@ class PricingAccountOut(PricingAccountBase):
 
 class ContaCatalogoIn(BaseModel):
     ativo: bool
+
+
+# Comissão é fração (0.14 = 14%), como `commission`.
+ComissaoMl = Annotated[Decimal | None, Field(ge=0, lt=1)]
+
+
+class ComissaoMlIn(BaseModel):
+    """M-53: a comissão do Clássico e a do Premium da conta ML, gravadas
+    juntas (PUT /accounts/{id}/comissao-ml). Null apaga."""
+
+    classico: ComissaoMl
+    premium: ComissaoMl
+
+
+class ComissaoMlOut(BaseModel):
+    classico: PricingAccountOut
+    premium: PricingAccountOut
 
 
 class ContaCatalogoOut(BaseModel):

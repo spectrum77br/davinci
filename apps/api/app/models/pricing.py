@@ -69,6 +69,17 @@ class PricingAccount(Base, TimestampMixin):
         CheckConstraint(f"cupom_ate ~ '{DIA_MES_REGEX}'", name="cupom_ate"),
         CheckConstraint("afiliado_pct BETWEEN 0 AND 100", name="afiliado_pct"),
         CheckConstraint("oferta_limite_pct BETWEEN 0 AND 100", name="oferta_limite_pct"),
+        # M-55/M-56 (25/11/2026, migration 0511): Desconto % e Custo total %.
+        CheckConstraint("desconto_pct BETWEEN 0 AND 100", name="desconto_pct"),
+        CheckConstraint("custo_total_pct BETWEEN 0 AND 100", name="custo_total_pct"),
+        # M-53 (migration 0511): no par só um Clássico e um Premium.
+        Index(
+            "uq_pricing_accounts_par_tipo",
+            "par_id",
+            "listing_type",
+            unique=True,
+            postgresql_where=text("par_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -128,6 +139,18 @@ class PricingAccount(Base, TimestampMixin):
     cupom_ate: Mapped[str | None] = mapped_column(Text, nullable=True)
     afiliado_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     oferta_limite_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    # M-55 (25/11/2026, migration 0511): Desconto (%) da conta, só anotação
+    # como o Afiliado (não entra no preço). Campo novo: não é o `discount`
+    # antigo nem o "Desconto: 0" da Obs.
+    desconto_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    # M-56 (migration 0511): teto de Afiliado % + Desconto % + Ads % da conta
+    # (vazio = sem teto). Só o administrador grava; todos veem. Fora do preço.
+    custo_total_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    # M-53 (migration 0511): o Clássico e o Premium da mesma conta ML de kit
+    # têm o mesmo `par_id` (nas outras linhas NULL). A aba Contas mostra o par
+    # numa linha e a API grava as duas juntas; a grade, o cálculo, o envio e a
+    # Margem continuam com as duas linhas separadas.
+    par_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True, index=True)
     store_info_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("store_info.id", ondelete="SET NULL"),
