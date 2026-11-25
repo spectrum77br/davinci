@@ -62,13 +62,23 @@ console.log('pricing contas só ADM: grupos da grade ok')
 const isAdmin = ref(true)
 const nTiposAba = ref(5)
 const STORE_NOTE_FIELDS = new Array(5).fill({})
-const colunas = new Function('isAdmin', 'nTiposAba', 'STORE_NOTE_FIELDS',
-  js(`${computado('colunasContas')}\nreturn __f`))(isAdmin, nTiposAba, STORE_NOTE_FIELDS)
+// M-51: as colunas escondidas pelo Layout ▾ saem do colspan.
+let ocultas = []
+const mostraColunaConta = (chave) => !ocultas.includes(chave)
+const colunas = new Function('isAdmin', 'nTiposAba', 'STORE_NOTE_FIELDS', 'mostraColunaConta',
+  js(`${computado('colunasContas')}\nreturn __f`))(isAdmin, nTiposAba, STORE_NOTE_FIELDS, mostraColunaConta)
 // Plataforma, Conta, Catálogo ML, Equipe (Tipo ML saiu na M-53) + Kit, Comissão,
 // 5 pares + Afiliado, Desconto, Ads, Custo total, Obs + lixeira.
 assert.equal(colunas(), 4 + 2 + 10 + 5 + 1)
 isAdmin.value = false
 assert.equal(colunas(), 4 + 5 + 1)
+ocultas = ['catalogo', 'equipe', 'obs']
+assert.equal(colunas(), 2 + 4 + 1, 'sem Catálogo ML, Equipe e Obs (Desconto e Custo total ficam)')
+ocultas = ['kit', 'comissao']
+assert.equal(colunas(), 4 + 5 + 1, 'Kit e Comissão escondidos não mudam nada para quem não é ADM')
+isAdmin.value = true
+assert.equal(colunas(), 4 + 10 + 5 + 1, 'ADM sem Kit e Comissão')
+ocultas = []
 console.log('pricing contas só ADM: colspan ok')
 
 // ---------- 3) script: conta nova sem kit/comissão, recálculo e aviso só do ADM
@@ -103,8 +113,10 @@ assert.ok(!contas.slice(contas.indexOf('<!-- afiliado / desconto / ads / custo t
 assert.ok(bloco.includes('data-janela-comissao-ml'), 'comissão do ML só ADM')
 // Botão "Margens" da janela do Catálogo ML (M-54; antes o link "% margens"): só ADM.
 assert.match(contas, /<template v-if="isAdmin">\s*<div class="px-1 pt-1">\s*<button[^>]*?data-acao="margens-catalogo"/)
-// Subtítulo sem a contagem de pares para quem não é ADM.
-assert.match(contas, /conta\(s\)<template v-if="isAdmin"> com \{\{ nTiposAba \}\} pares margem\/frete por tipo<\/template>/)
+// M-51 (25/11/2026): o título e a frase de baixo (com a contagem de pares)
+// saíram da aba Contas.
+assert.doesNotMatch(contas, /pares margem\/frete por tipo/)
+assert.doesNotMatch(contas, /Contas de Venda/)
 // Aviso de margem negativa (precisa de kit e frete): só ADM.
 assert.match(tpl, /v-if="isAdmin && negativeMarginCount > 0"\s*data-aviso-margem-negativa/)
 console.log('pricing contas só ADM: template ok')

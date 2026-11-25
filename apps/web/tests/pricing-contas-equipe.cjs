@@ -132,7 +132,9 @@ assert.match(menuPlat, /@click="contasPlataformasDesmarcadas = \[\]">Marcar toda
 assert.match(menuPlat, /@click="contasPlataformasDesmarcadas = \[\.\.\.platformsPresentInDept\]">Limpar</)
 const iEquipe = filtros.indexOf('<PopoverRoot v-if="mostrarFiltroEquipe">')
 assert.ok(iEquipe > 0, 'Equipe ▾ só com mais de uma opção')
-const menuEq = filtros.slice(iEquipe)
+const menuEq = filtros.slice(iEquipe, filtros.indexOf('</PopoverRoot>', iEquipe))
+// M-51: o botão passou a se chamar "Equipes", igual ao da Tabela de Preços.
+assert.match(menuEq, /data-filtro-equipe\s*>\s*Equipes\s*<ChevronDown/)
 assert.match(menuEq, /data-filtro-equipe[\s\S]*?v-for="o in equipesPresentesNoDept"[\s\S]*?type="checkbox"[\s\S]*?:checked="!contasEquipesDesmarcadas\.includes\(o\.valor\)"[\s\S]*?\{\{ o\.rotulo \}\}/)
 assert.match(menuEq, /@click="contasEquipesDesmarcadas = \[\]">Marcar todas</)
 assert.match(menuEq, /@click="contasEquipesDesmarcadas = equipesPresentesNoDept\.map\(\(o\) => o\.valor\)">Limpar</)

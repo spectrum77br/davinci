@@ -8,6 +8,7 @@ import {
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { isoToday } from '~/lib/date'
 import { ordenarCategorias } from '~/lib/categorias'
+import { gerarXlsx, TIPO_XLSX, type CelulaPlanilha } from '~/lib/planilhaXlsx'
 import {
   MOTIVO_ANUNCIO, cartoesDaGrade, celulaComparavel, divergenciasDaConferencia, margemDaResposta,
   tipoSemAnuncio,
@@ -793,11 +794,45 @@ const accountsCurrent = computed(() => accountsByDept.value[department.value] ??
 // tipo é desativado (Mala sem "Queima de estoque", 07/10/2026).
 const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).length)
 
+// Layout ▾ da aba Contas (M-51, 25/11/2026): caixas para mostrar ou esconder
+// colunas, como o Layout da Tabela de Preços (marcada = aparece; lembrado
+// neste navegador). Kit e Comissão só entram na lista de quem já vê essas
+// colunas (ADM, M-10). Desconto e Custo total (M-55/M-56) ficam sempre à mostra.
+const COLUNAS_LAYOUT_CONTAS = [
+  { chave: 'catalogo', rotulo: 'Catálogo ML', dica: 'coluna Catálogo ML (Ativo/Inativo)', soAdmin: false },
+  { chave: 'equipe', rotulo: 'Equipe', dica: 'número da equipe que vê a conta', soAdmin: false },
+  { chave: 'kit', rotulo: 'Kit', dica: 'kit da conta', soAdmin: true },
+  { chave: 'comissao', rotulo: 'Comissão', dica: 'comissão da plataforma (ML: Clássico · Premium)', soAdmin: true },
+  { chave: 'obs', rotulo: 'Obs', dica: 'observação da conta', soAdmin: false },
+]
+const CHAVE_COLUNAS_OCULTAS_CONTAS = 'precos.contas.colunasOcultas'
+// Guarda as DESMARCADAS: vazio = tudo à mostra (o começo).
+const colunasOcultasContas = ref<string[]>([])
+const opcoesLayoutContas = computed(() => COLUNAS_LAYOUT_CONTAS.filter((c) => !c.soAdmin || isAdmin.value))
+
+function mostraColunaConta(chave: string): boolean {
+  return !colunasOcultasContas.value.includes(chave)
+}
+
+// O que veio do navegador ("kit,obs"): só as chaves que existem.
+function lerColunasOcultasContas(texto: string | null): string[] {
+  const validas = new Set(COLUNAS_LAYOUT_CONTAS.map((c) => c.chave))
+  return (texto || '').split(',').map((s) => s.trim()).filter((s) => validas.has(s))
+}
+
 // Colunas da tabela da aba Contas (o colspan das linhas de grupo e de aviso):
 // Plataforma, Conta, Catálogo ML, Equipe, [Kit, Comissão e os pares
 // marg/frete — só ADM, M-10], as anotações e a lixeira. (Tipo ML saiu na M-53.)
+// Menos as que o Layout esconde (M-51).
 const colunasContas = computed(() =>
-  4 + (isAdmin.value ? 2 + nTiposAba.value * 2 : 0) + STORE_NOTE_FIELDS.length + 1,
+  2
+  + (mostraColunaConta('catalogo') ? 1 : 0)
+  + (mostraColunaConta('equipe') ? 1 : 0)
+  + (isAdmin.value
+    ? (mostraColunaConta('kit') ? 1 : 0) + (mostraColunaConta('comissao') ? 1 : 0) + nTiposAba.value * 2
+    : 0)
+  + STORE_NOTE_FIELDS.length - (mostraColunaConta('obs') ? 0 : 1)
+  + 1,
 )
 
 // SSH-style contas filters
@@ -811,6 +846,15 @@ const contasPlataformasDesmarcadas = ref<string[]>([])
 // conta vista por duas equipes aparece se qualquer uma delas estiver marcada.
 const SEM_EQUIPE = 'sem'
 const contasEquipesDesmarcadas = ref<string[]>([])
+// Contas ▾ (M-51, 25/11/2026): pelo nome da conta, como o Contas ▾ da Tabela
+// de Preços ("atlas" vale para a atlas de todas as plataformas). Guarda o nome
+// (minúsculo) DESMARCADO: vazio = tudo marcado = sem filtro.
+const contasNomesDesmarcados = ref<string[]>([])
+const buscaNomesContas = ref('')
+
+function chaveNomeConta(a: Account): string {
+  return (a.name || '').trim().toLocaleLowerCase('pt-BR')
+}
 
 // Marca/desmarca uma opção do filtro (devolve a lista nova).
 function alternarNaLista(lista: string[], valor: string): string[] {
@@ -869,13 +913,48 @@ const mostrarFiltroEquipe = computed(() => {
   return opcoes.length > 1 || opcoes.some((o) => contasEquipesDesmarcadas.value.includes(o.valor))
 })
 
+// Opções do Contas ▾: os nomes das contas desta aba, sem repetir, em ordem.
+const opcoesNomesContas = computed<{ valor: string; rotulo: string }[]>(() => {
+  const porChave = new Map<string, string>()
+  for (const a of accountsCurrent.value) {
+    const chave = chaveNomeConta(a)
+    if (!porChave.has(chave)) porChave.set(chave, (a.name || '').trim())
+  }
+  return Array.from(porChave, ([valor, rotulo]) => ({ valor, rotulo })).sort((x, y) =>
+    x.rotulo.localeCompare(y.rotulo, 'pt-BR', { sensitivity: 'base' }),
+  )
+})
+
+// Lista do Contas ▾ depois da busca do próprio menu.
+const opcoesNomesContasBuscadas = computed(() => {
+  const q = buscaNomesContas.value.trim().toLocaleLowerCase('pt-BR')
+  return q ? opcoesNomesContas.value.filter((o) => o.valor.includes(q)) : opcoesNomesContas.value
+})
+
+// "Contas (2)": com filtro parcial, o botão mostra quantas estão marcadas.
+const rotuloNomesContas = computed(() => {
+  const total = opcoesNomesContas.value.length
+  const marcadas = opcoesNomesContas.value.filter((o) => !contasNomesDesmarcados.value.includes(o.valor)).length
+  return marcadas < total ? `Contas (${marcadas})` : 'Contas'
+})
+
+// "Marcar todas" / "Limpar" valem para a lista à vista (com busca, só as encontradas).
+function marcarNomesContas(marcar: boolean) {
+  const visiveis = opcoesNomesContasBuscadas.value.map((o) => o.valor)
+  contasNomesDesmarcados.value = marcar
+    ? contasNomesDesmarcados.value.filter((v) => !visiveis.includes(v))
+    : Array.from(new Set([...contasNomesDesmarcados.value, ...visiveis]))
+}
+
 const accountsFiltered = computed(() => {
   const q = contasSearch.value.trim().toLowerCase()
   const pd = contasPlataformasDesmarcadas.value
   const ed = contasEquipesDesmarcadas.value
+  const nd = contasNomesDesmarcados.value
   return accountsCurrent.value.filter((a) => {
     if (pd.includes(a.platform)) return false
     if (!passaFiltroEquipe(a, ed)) return false
+    if (nd.length && nd.includes(chaveNomeConta(a))) return false
     if (!q) return true
     return (
       a.name.toLowerCase().includes(q) ||
@@ -2050,6 +2129,10 @@ async function submitNewAcc() {
     }
     if (contasPlataformasDesmarcadas.value.includes(created.platform)) {
       contasPlataformasDesmarcadas.value = alternarNaLista(contasPlataformasDesmarcadas.value, created.platform)
+    }
+    // Mesmo nome de uma conta desmarcada no Contas ▾ (M-51): volta a marcar.
+    if (contasNomesDesmarcados.value.includes(chaveNomeConta(created))) {
+      contasNomesDesmarcados.value = alternarNaLista(contasNomesDesmarcados.value, chaveNomeConta(created))
     }
     showAddAcc.value = false
   } catch (e: any) {
@@ -4801,6 +4884,73 @@ function handleExportExcel() {
   URL.revokeObjectURL(url)
 }
 
+// Excel da aba Contas (M-51, 25/11/2026): as contas que estão na tela (busca e
+// filtros, na ordem da tabela) com as colunas à vista (Layout), na ordem da
+// tabela: Plataforma | Conta | Catálogo ML | Equipe | Kit | Comissão |
+// marg/frete | Afiliado | Desconto | Ads | Custo total | Obs. Quem não é ADM não
+// recebe Kit, Comissão, margens e fretes (nem vêm do /accounts). A conta do ML
+// com Clássico e Premium é uma linha só, como na tela (M-53), com a Comissão
+// "14% · 19%"; Catálogo ML "Ativo"/"Inativo" (M-54). Afiliado, Desconto, Ads (o
+// % Geral) e Custo total vão como número; vazio fica em branco, não "—".
+function linhasExcelContas(): CelulaPlanilha[][] {
+  const semTraco = (s: string) => (s === '—' ? '' : s)
+  const numero = (v: unknown): number | '' => {
+    if (v == null || v === '') return ''
+    const n = Number(v)
+    return Number.isFinite(n) ? n : ''
+  }
+  const tipos = TYPE_HEADERS.value[department.value] ?? []
+  const notas = STORE_NOTE_FIELDS.filter((f) => f.key !== 'observation' || mostraColunaConta('obs'))
+  const cab: CelulaPlanilha[] = ['Plataforma', 'Conta']
+  if (mostraColunaConta('catalogo')) cab.push('Catálogo ML')
+  if (mostraColunaConta('equipe')) cab.push('Equipe')
+  if (isAdmin.value) {
+    if (mostraColunaConta('kit')) cab.push('Kit')
+    if (mostraColunaConta('comissao')) cab.push('Comissão')
+    for (const t of tipos) cab.push(`${t} marg`, `${t} frete`)
+  }
+  for (const f of notas) cab.push(f.tipo === 'pct' || f.key === 'ads' ? `${f.label} (%)` : f.label)
+  const linhas: CelulaPlanilha[][] = [cab]
+  for (const acc of accountsGrouped.value.flatMap((g) => g.rows)) {
+    const plataforma = [platformLabel(acc.platform), tipoDaContaSolta(acc)].filter(Boolean).join(' ')
+    const l: CelulaPlanilha[] = [plataforma, acc.name]
+    if (mostraColunaConta('catalogo')) l.push(podeTerCatalogo(acc) ? (catalogoAtivo(acc) ? 'Ativo' : 'Inativo') : '')
+    if (mostraColunaConta('equipe')) l.push(rotuloEquipes(acc))
+    if (isAdmin.value) {
+      if (mostraColunaConta('kit')) l.push(acc.kit_number ?? '')
+      if (mostraColunaConta('comissao')) {
+        const par = parDe(acc)
+        l.push(par ? textoComissaoPar(par) : semTraco(fmtCommission(acc.commission)))
+      }
+      for (let t = 1; t <= tipos.length; t++) {
+        l.push(
+          semTraco(fmtMargin((acc as any)[`margin${t}`])),
+          semTraco(fmtShipping((acc as any)[`shipping${t}`])),
+        )
+      }
+    }
+    for (const f of notas) {
+      if (f.key === 'ads') l.push(ads.value ? numero(pctGeralAds(adsDa(acc.id))) : '')
+      else if (f.tipo === 'pct') l.push(numero((acc as any)[f.key]))
+      else l.push(String((acc as any)[f.key] ?? ''))
+    }
+    linhas.push(l)
+  }
+  return linhas
+}
+
+function exportarExcelContas() {
+  if (!accountsFiltered.value.length) return
+  const bytes = gerarXlsx(linhasExcelContas(), 'Contas')
+  const blob = new Blob([bytes as BlobPart], { type: TIPO_XLSX })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `contas-${department.value}-${isoToday()}.xlsx`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // Feature 8: o painel do Atualizar ▾ (M-14, 18/11/2026).
 // Toda vez que abre: só "Atualizar planilha" marcado e Contas em Geral.
 function abrirPainelAtualizar(aberto: boolean) {
@@ -5073,6 +5223,9 @@ onMounted(() => {
   ocultarEstoque.value = lerPreferencia(CHAVE_OCULTAR_ESTOQUE) === '1'
   watch(ocultarKits, (v) => gravarPreferencia(CHAVE_OCULTAR_KITS, v ? '1' : '0'))
   watch(ocultarEstoque, (v) => gravarPreferencia(CHAVE_OCULTAR_ESTOQUE, v ? '1' : '0'))
+  // Layout ▾ da aba Contas (M-51): as colunas escondidas, "kit,obs".
+  colunasOcultasContas.value = lerColunasOcultasContas(lerPreferencia(CHAVE_COLUNAS_OCULTAS_CONTAS))
+  watch(colunasOcultasContas, (v) => gravarPreferencia(CHAVE_COLUNAS_OCULTAS_CONTAS, v.join(',')))
 })
 
 // Prazo e conferência (com a margem): uma vez por visita à aba e por troca de
@@ -5208,40 +5361,27 @@ watch(department, async () => {
 
     <!-- ============================================ CONTAS -->
     <section v-if="tab === 'contas'" class="space-y-3">
-      <div class="flex items-center justify-between">
-        <div>
-          <h3 class="text-base font-semibold">
-            Contas de Venda — {{ DEPARTMENTS.find(d => d.value === department)?.label }}
-          </h3>
-          <p class="text-xs text-muted-foreground">
-            {{ accountsCurrent.length }} conta(s)<template v-if="isAdmin"> com {{ nTiposAba }} pares margem/frete por tipo</template> — clique para editar
-          </p>
+      <!-- Barra (M-51, 25/11/2026; saíram o título da categoria e a frase de
+           baixo): no estilo da barra da Tabela de Preços, tudo com
+           28px (h-7). Buscar | Plataforma ▾ | Contas ▾ | Layout ▾ | Equipes ▾ |
+           Excel … e à direita N conta(s), Vincular Integrações e + Adicionar Conta. -->
+      <div class="flex flex-wrap items-center gap-2" data-barra-contas>
+        <div class="relative flex-1 min-w-[200px] max-w-sm">
+          <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <input
+            v-model="contasSearch"
+            placeholder="Buscar conta..."
+            class="h-7 border rounded pl-7 pr-2 py-0 text-sm bg-background w-full"
+          />
         </div>
-        <div class="flex gap-2">
-          <button v-if="canEditContas" class="btn btn-sm" @click="autoMatchAccounts">
-            <Link2 class="h-4 w-4 mr-1" /> Vincular Integrações
-          </button>
-          <button v-if="canEditContas" class="btn btn-sm btn-primary" :disabled="showAddAcc" @click="openAddAcc">
-            <Plus class="h-4 w-4 mr-1" /> Adicionar Conta
-          </button>
-        </div>
-      </div>
-
-      <!-- Filters: busca + plataforma + contador (SSH-style) -->
-      <div class="flex flex-wrap gap-2 items-center">
-        <input
-          v-model="contasSearch"
-          placeholder="Buscar conta..."
-          class="border rounded px-2 py-1 text-sm bg-background w-56"
-        />
-        <!-- Plataforma ▾ e Equipe ▾ (M-9): caixas de marcar, no visual dos
+        <!-- Plataforma ▾ e Equipes ▾ (M-9): caixas de marcar, no visual dos
              menus da Tabela de Preços ("Marcar todas · Limpar" no topo, lista
              com rolagem). Recarregar a página marca tudo de novo. -->
         <PopoverRoot>
           <PopoverTrigger as-child>
             <button
               type="button"
-              class="btn btn-sm"
+              class="btn btn-sm h-7 py-0"
               :class="{ 'border-blue-400 font-medium': contasPlataformasDesmarcadas.length }"
               title="Filtrar contas pela plataforma"
               data-filtro-plataforma
@@ -5282,16 +5422,116 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
+        <!-- Contas ▾ (M-51): pelo nome da conta, igual ao Contas ▾ da Tabela de
+             Preços. Tudo marcado = sem filtro; filtro parcial: "Contas (2)". -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="btn btn-sm h-7 py-0"
+              :class="{ 'border-blue-400 font-medium': contasNomesDesmarcados.length }"
+              title="Filtrar pelo nome da conta"
+              data-filtro-contas
+            >
+              {{ rotuloNomesContas }}
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-contas
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div class="relative px-1 pb-1">
+                <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <input
+                  v-model="buscaNomesContas"
+                  placeholder="Buscar conta…"
+                  class="h-7 w-full border rounded pl-7 pr-2 text-sm bg-background"
+                  data-campo="contas-nomes-busca"
+                />
+              </div>
+              <div class="flex items-center gap-2 px-1 pb-1 text-xs">
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" @click="marcarNomesContas(true)">Marcar todas</button>
+                <span class="text-muted-foreground">·</span>
+                <button type="button" class="text-blue-700 hover:underline dark:text-blue-300" @click="marcarNomesContas(false)">Limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto border-t pt-1">
+                <label
+                  v-for="o in opcoesNomesContasBuscadas"
+                  :key="o.valor"
+                  class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="!contasNomesDesmarcados.includes(o.valor)"
+                    @change="contasNomesDesmarcados = alternarNaLista(contasNomesDesmarcados, o.valor)"
+                  />
+                  <span class="truncate">{{ o.rotulo }}</span>
+                </label>
+                <p v-if="!opcoesNomesContasBuscadas.length" class="px-1 py-1 text-[11px] text-muted-foreground">
+                  {{ buscaNomesContas.trim() ? 'Nenhuma conta encontrada.' : 'Nenhuma conta neste departamento.' }}
+                </p>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <!-- Layout ▾ (M-51): mostra/esconde colunas da tabela de contas, como o
+             Layout da Tabela de Preços. Lembrado neste navegador. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-contas" title="Escolher as colunas que a tabela de contas mostra">
+              Layout
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-layout-contas
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <label
+                v-for="c in opcoesLayoutContas"
+                :key="c.chave"
+                class="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  class="size-4 mt-0.5"
+                  :checked="mostraColunaConta(c.chave)"
+                  :data-campo="`layout-contas-${c.chave}`"
+                  @change="colunasOcultasContas = alternarNaLista(colunasOcultasContas, c.chave)"
+                />
+                <span>
+                  {{ c.rotulo }}
+                  <span class="block text-[11px] text-muted-foreground">{{ c.dica }}</span>
+                </span>
+              </label>
+              <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
+                Fica lembrado neste navegador. O Excel leva só as colunas à mostra. Esc ou clicar fora fecha.
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
         <PopoverRoot v-if="mostrarFiltroEquipe">
           <PopoverTrigger as-child>
             <button
               type="button"
-              class="btn btn-sm"
+              class="btn btn-sm h-7 py-0"
               :class="{ 'border-blue-400 font-medium': equipesPresentesNoDept.some((o) => contasEquipesDesmarcadas.includes(o.valor)) }"
               title="Filtrar contas pela equipe"
               data-filtro-equipe
             >
-              Equipe
+              Equipes
               <ChevronDown class="h-3 w-3 ml-1" />
             </button>
           </PopoverTrigger>
@@ -5327,9 +5567,18 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
+        <button class="btn btn-sm h-7 py-0" :disabled="!accountsFiltered.length" data-acao="excel-contas" @click="exportarExcelContas">
+          <Download class="h-4 w-4 mr-1" /> Excel
+        </button>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ accountsFiltered.length }} conta(s)
         </span>
+        <button v-if="canEditContas" class="btn btn-sm h-7 py-0" @click="autoMatchAccounts">
+          <Link2 class="h-4 w-4 mr-1" /> Vincular Integrações
+        </button>
+        <button v-if="canEditContas" class="btn btn-sm h-7 py-0 btn-primary" :disabled="showAddAcc" @click="openAddAcc">
+          <Plus class="h-4 w-4 mr-1" /> Adicionar Conta
+        </button>
       </div>
 
       <div v-if="accountsErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
@@ -5347,18 +5596,22 @@ watch(department, async () => {
             <tr>
               <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Plataforma</th>
               <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Conta</th>
+              <!-- Catálogo ML, Equipe, Kit, Comissão e Obs: escondidos pelo
+                   Layout ▾ (M-51). Desconto e Custo total ficam sempre. -->
               <th
+                v-if="mostraColunaConta('catalogo')"
                 class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
                 title="Catálogo ML da conta (Clássico e Premium juntos): Ativo = colunas próprias no grupo ML Catálogo da Tabela de Preços, calculadas pela coluna Catálogo dos produtos com a comissão e os fretes desta conta, que mandam preço só para o anúncio de catálogo. Clique para mudar."
               >Catálogo ML</th>
               <th
+                v-if="mostraColunaConta('equipe')"
                 class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[70px]"
                 title="Número da equipe que vê esta conta (1, 2 ou 3, a mesma da tela de Lojas), pela loja ligada a ela — a que separa o que cada vendedor enxerga."
               >Equipe</th>
               <!-- Kit, Comissão e os pares marg/frete: só ADM (M-10, 18/11/2026). -->
               <template v-if="isAdmin">
-              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12" data-coluna-so-admin="kit">Kit</th>
-              <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20" title="Comissão da conta. No ML: Clássico · Premium — clique para mudar." data-coluna-so-admin="comissao">Comissão</th>
+              <th v-if="mostraColunaConta('kit')" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12" data-coluna-so-admin="kit">Kit</th>
+              <th v-if="mostraColunaConta('comissao')" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20" title="Comissão da conta. No ML: Clássico · Premium — clique para mudar." data-coluna-so-admin="comissao">Comissão</th>
               <th
                 v-for="(label, i) in TYPE_HEADERS[department] ?? []"
                 :key="i"
@@ -5376,6 +5629,7 @@ watch(department, async () => {
                    ~62px, centralizadas, com a caixinha de 34×24px; só Obs à esquerda. -->
               <th
                 v-for="f in STORE_NOTE_FIELDS"
+                v-show="f.key !== 'observation' || mostraColunaConta('obs')"
                 :key="`h-${f.key}`"
                 class="px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
                 :class="f.key === 'observation' ? 'text-left min-w-[120px]' : 'text-center w-[62px] min-w-[62px]'"
@@ -5417,10 +5671,10 @@ watch(department, async () => {
                 />
               </td>
               <!-- Catálogo ML e Equipe: definidos depois, na linha criada. -->
-              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
-              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-if="mostraColunaConta('catalogo')" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-if="mostraColunaConta('equipe')" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <template v-if="isAdmin">
-              <td class="border border-border px-1 py-1">
+              <td v-if="mostraColunaConta('kit')" class="border border-border px-1 py-1">
                 <input
                   v-model.number="newAcc.kit_number"
                   type="text" inputmode="numeric"
@@ -5429,6 +5683,7 @@ watch(department, async () => {
                 />
               </td>
               <!-- ML: a comissão de cada tipo é a usual da categoria (Clássico · Premium). -->
+              <template v-if="mostraColunaConta('comissao')">
               <td
                 v-if="newAcc.platform === 'mercadolivre'"
                 class="border border-border px-1 py-1 text-center text-xs text-muted-foreground whitespace-nowrap"
@@ -5445,9 +5700,10 @@ watch(department, async () => {
                   @keydown.enter="submitNewAcc"
                 />
               </td>
+              </template>
               <td v-for="i in nTiposAba * 2" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
               </template>
-              <td v-for="i in STORE_NOTE_FIELDS.length" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-for="i in STORE_NOTE_FIELDS.length - (mostraColunaConta('obs') ? 0 : 1)" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
                   <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="addingAcc" @click="submitNewAcc">
@@ -5577,6 +5833,7 @@ watch(department, async () => {
                    clica e abre a janela da conta ("ML forpaper"): [x] Catálogo ativo
                    e, para o ADM, o botão Margens. Nada grava antes do Salvar. -->
               <td
+                v-if="mostraColunaConta('catalogo')"
                 class="border border-border px-1 py-1 text-center text-xs"
                 :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'catalogo') }"
                 data-coluna-catalogo
@@ -5705,6 +5962,7 @@ watch(department, async () => {
               </td>
               <!-- equipe: só leitura (vem da equipe de vendas da loja) -->
               <td
+                v-if="mostraColunaConta('equipe')"
                 class="border border-border px-2 py-1.5 text-xs text-center whitespace-nowrap"
                 :class="{ 'text-muted-foreground': !equipesDaConta(acc).length }"
                 data-coluna-equipe
@@ -5713,6 +5971,7 @@ watch(department, async () => {
               <template v-if="isAdmin">
               <!-- kit -->
               <td
+                v-if="mostraColunaConta('kit')"
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'kit_number') }"
                 @click="!isEditing(acc.id, 'kit_number') && startEditAccount(acc, 'kit_number')"
@@ -5732,7 +5991,7 @@ watch(department, async () => {
               <!-- comissão. Conta ML com par (M-53): "14% · 19%" (Clássico · Premium);
                    clicar abre a janelinha "ML forpaper" e só grava no Salvar. -->
               <td
-                v-if="parDe(acc)"
+                v-if="mostraColunaConta('comissao') && parDe(acc)"
                 class="border border-border px-1 py-1 text-xs text-center whitespace-nowrap"
                 :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'commission') }"
                 data-comissao-ml
@@ -5800,7 +6059,7 @@ watch(department, async () => {
               </td>
               <!-- as outras (e conta ML sem par): clique e digite, como antes -->
               <td
-                v-else
+                v-else-if="mostraColunaConta('comissao')"
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'commission'),
@@ -6115,6 +6374,7 @@ watch(department, async () => {
                 <td
                   v-else
                   class="border border-border px-2 py-1.5 text-xs cursor-pointer text-left max-w-[260px]"
+                  v-show="f.key !== 'observation' || mostraColunaConta('obs')"
                   :class="{
                     'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, f.key),
                     'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, f.key),

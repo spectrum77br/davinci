@@ -414,7 +414,7 @@ function template() {
   assert.ok(add.indexOf('v-model="newAcc.platform"') < add.indexOf('id="new-acc-name"'))
   assert.match(add, /v-if="newAcc\.platform === 'mercadolivre'"[\s\S]*?\{\{ comissaoPadraoMl\(department\) \}\}<\/td>\s*<td v-else[\s\S]*?v-model="newAcc\.commission"/)
   // Comissão do par: "14% · 19%" e a janela "ML forpaper" com Clássico e Premium.
-  const com = linha.slice(linha.indexOf('<td\n                v-if="parDe(acc)"'), linha.indexOf('<!-- as outras (e conta ML sem par)'))
+  const com = linha.slice(linha.indexOf('<td\n                v-if="mostraColunaConta(\'comissao\') && parDe(acc)"'), linha.indexOf('<!-- as outras (e conta ML sem par)'))
   assert.ok(com.length > 100, 'célula da comissão do par')
   for (const t of [
     '{{ textoComissaoPar(parDe(acc)!) }}',
