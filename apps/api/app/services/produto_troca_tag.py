@@ -68,7 +68,8 @@ from app.models.enums import AlertSeverity, AlertType
 from app.services.alerts import emit_alert
 from app.services.devolution_stock_return import _falha_sem_envio
 from app.services.pricing.audit import _load_segment_roots
-from app.services.pricing.sku_match import variants_of
+from app.services.pricing.push import linhas_do_departamento
+from app.services.pricing.sku_match import casa_pelo_codigo, variants_of
 from app.services.produto_renomeio import aplicar_codigo_do_bling, resolver_produto
 from app.services.sku_tag_envio import codigo_com_tag, tag_do_sku, tags_de_envio
 from app.services.sku_tags import classify_sku_tag
@@ -91,6 +92,10 @@ MOTIVO_EXISTE = "já existe: use Transferir no estoque"
 MOTIVO_KIT = "kit não muda de tag: troque nas peças"
 MOTIVO_MALA = "mala: a Tabela de Preços casa pelo código inteiro"
 MOTIVO_CATALOGO = "catálogo: a Tabela de Preços casa pelo código inteiro"
+MOTIVO_TABELA_LINHA = (
+    "a Tabela de Preços passaria a ligar este código a outra linha (o código mais específico "
+    "decide): troque à mão"
+)
 MOTIVO_AMAZON = "tem anúncio da Amazon vinculado"
 MOTIVO_CARREFOUR = "tem anúncio da Carrefour vinculado"
 MOTIVO_NAO_ENCONTRADO = "não encontrado"
@@ -202,6 +207,40 @@ async def _skus_casados_pelo_codigo_inteiro(session: AsyncSession) -> tuple[set[
     return mala, catalogo
 
 
+async def _linhas_celular_eletro(
+    session: AsyncSession,
+) -> list[tuple[object, frozenset[str], frozenset[str], frozenset[str]]]:
+    """Linhas de celular/eletro da Tabela de Preços: (linha, SKUs inteiros,
+    códigos base, SKUs das OUTRAS linhas do departamento). Para conferir que a
+    troca não muda a linha que casa o código (`sku_match.casa_pelo_codigo`:
+    o mais específico vence; 25/11/2026, Eletro com o mesmo código base)."""
+    linhas = await linhas_do_departamento(session)
+    out = []
+    for dept, por_linha in linhas.por_dept.items():
+        if dept not in ("celular", "eletro"):
+            continue
+        for chave, full in por_linha.items():
+            base = frozenset(v.split(".", 1)[0] for v in full)
+            outras = frozenset(linhas.outras(dept, chave) - full)
+            out.append((chave, full, base, outras))
+    return out
+
+
+def _linhas_que_casam(
+    sku: str, linhas: list[tuple[object, frozenset[str], frozenset[str], frozenset[str]]]
+) -> set[object]:
+    principal = (sku or "").strip().lower().split("+", 1)[0]
+    if not principal:
+        return set()
+    return {
+        chave
+        for chave, full, base, outras in linhas
+        if casa_pelo_codigo(
+            principal, sku_full_set=full, sku_base_set=base, skus_outras_linhas=outras
+        )
+    }
+
+
 async def previa(
     session: AsyncSession,
     client: Any,
@@ -288,6 +327,7 @@ async def previa(
                 kits_por_peca_sku[k].add(ksku.strip())
 
     mala_tabela, catalogo_tabela = await _skus_casados_pelo_codigo_inteiro(session)
+    linhas_tabela = await _linhas_celular_eletro(session)
     raizes = await _load_segment_roots(session)
 
     ids_produtos = [p.id for p in produtos]
@@ -405,6 +445,11 @@ async def previa(
             continue
         if k in catalogo_tabela:
             item.pular(MOTIVO_CATALOGO)
+            continue
+        if _linhas_que_casam(item.sku_atual, linhas_tabela) != _linhas_que_casam(
+            item.novo, linhas_tabela
+        ):
+            item.pular(MOTIVO_TABELA_LINHA)
             continue
         canais = set(canais_do_sku.get(k, ()))
         for x in linhas:

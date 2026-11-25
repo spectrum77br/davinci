@@ -474,6 +474,54 @@ async def test_codigo_criado_no_bling_depois_da_previa_e_pulado(
     assert await _sku_de(db, 880501) == "z2819"
 
 
+async def test_eletro_nao_troca_se_a_linha_da_tabela_mudaria(
+    client: AsyncClient, db: AsyncSession, cenario, bling, admin, make_user
+):
+    """Eletro com o mesmo código base em várias linhas: o código mais
+    específico decide a linha (sku_match.casa_pelo_codigo, 25/11/2026). A troca
+    que faria a Tabela ligar o produto a outra linha (ou a nenhuma) é pulada;
+    a que mantém a mesma linha passa (celular pelo código base, eletro com o
+    pedaço reivindicado antes da tag)."""
+    dono = await make_user()
+    eletro = Segment(name="Eletro", slug="eletro")
+    celular = Segment(name="Celular", slug="celular")
+    db.add_all([eletro, celular])
+    await db.flush()
+    linhas = [
+        ("uaf001m1.2l.ra", eletro),  # pote 2,5 L: casado pelo SKU inteiro com a tag
+        ("uaf001m1.110", eletro),  # airfryer: mesmo código base
+        ("uaf002.2l", eletro),  # casado pelo pedaço antes da tag
+        ("dg050", celular),  # celular: código base
+    ]
+    db.add_all(
+        PricingProduct(
+            user_id=dono.id, sku=sku, name=sku, segment_id=seg.id, cost_kit1=Decimal("0")
+        )
+        for sku, seg in linhas
+    )
+    for sku, bid in (("uaf001m1.2l.ra", 881001), ("uaf002.2l", 881002)):
+        db.add(
+            Product(
+                user_id=dono.id,
+                sku=sku,
+                bling_product_id=bid,
+                situacao="A",
+                formato="S",
+                name=f"Produto {sku}",
+            )
+        )
+        bling.codigos[bid] = sku
+    await db.commit()
+    r = await client.post(
+        f"{URL}/previa", json={"skus": ["uaf001m1.2l.ra", "uaf002.2l", "dg050.ra"], "tag": ".sp"}
+    )
+    assert r.status_code == 200, r.text
+    por_sku = {i["sku"]: (i["acao"], i["motivo"]) for i in r.json()["itens"]}
+    assert por_sku["uaf001m1.2l.ra"] == ("pular", svc.MOTIVO_TABELA_LINHA)
+    assert por_sku["uaf002.2l"] == ("alterar", None)
+    assert por_sku["dg050.ra"] == ("alterar", None)
+
+
 async def test_validacoes_e_so_admin(
     client: AsyncClient, make_user, auth_as: Callable, cenario, bling, admin
 ):
