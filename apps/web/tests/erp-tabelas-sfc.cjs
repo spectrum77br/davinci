@@ -31,6 +31,10 @@ for (const [file, src] of [
   assert.ok(source.includes("'/erp-pedidos': { src: '/erp?embed=1#orders/store'"), file)
   assert.match(source, /v-show="atual === caminho"/, file)
   assert.match(source, /v-if="auth\.user\?\.erp === true"/, file)
+  // "V 310306" num lançamento de estoque abre o pedido em Pedidos 2: só mensagens do próprio site.
+  assert.match(source, /evento\.origin !== window\.location\.origin \|\| evento\.data\?\.tipo !== 'erp-abrir-pedido'/, file)
+  assert.ok(source.includes('`/erp?embed=1#orders/store/${pedidoInicial.value}`'), file)
+  assert.match(source, /navigateTo\(PEDIDOS\)/, file)
 }
 const layout = fs.readFileSync(path.join(root, 'layouts/default.vue'), 'utf8')
 assert.match(layout, /<slot \/>\n\s*<ClientOnly><ErpTelas \/><\/ClientOnly>/)

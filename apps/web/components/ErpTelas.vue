@@ -3,7 +3,7 @@
 // Cada tela carrega na primeira visita e fica carregada (só some da vista) enquanto a pessoa anda
 // pelo DaVinci: voltar a ela é instantâneo, sem recarregar o ERP a cada clique no menu. Só monta
 // para quem entra no ERP; o portão do /erp (Caddy) vale do mesmo jeito.
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const TELAS: Record<string, { src: string; titulo: string }> = {
   '/erp-produtos': { src: '/erp?embed=1#products', titulo: 'Produtos do DaVinci ERP' },
@@ -21,6 +21,28 @@ watch(
   },
   { immediate: true },
 )
+
+// "V 310306" clicado num lançamento de estoque (Produtos 2): abre o pedido em Pedidos 2. Se a tela
+// de pedidos já está carregada, ela recebe o número; senão nasce com ele no endereço.
+const PEDIDOS = '/erp-pedidos'
+const quadros: Record<string, HTMLIFrameElement | null> = {}
+const pedidoInicial = ref('')
+function origem(caminho: string) {
+  return caminho === PEDIDOS && pedidoInicial.value
+    ? `/erp?embed=1#orders/store/${pedidoInicial.value}`
+    : TELAS[caminho].src
+}
+function aoMensagem(evento: MessageEvent) {
+  if (evento.origin !== window.location.origin || evento.data?.tipo !== 'erp-abrir-pedido') return
+  const numero = String(evento.data.numero || '')
+  if (!/^\d{1,20}$/.test(numero)) return
+  const pedidos = abertas.value.includes(PEDIDOS) ? quadros[PEDIDOS] : null
+  if (pedidos?.contentWindow) pedidos.contentWindow.postMessage({ tipo: 'erp-abrir-pedido', numero }, window.location.origin)
+  else pedidoInicial.value = numero
+  navigateTo(PEDIDOS)
+}
+onMounted(() => window.addEventListener('message', aoMensagem))
+onBeforeUnmount(() => window.removeEventListener('message', aoMensagem))
 </script>
 
 <template>
@@ -29,7 +51,8 @@ watch(
       v-for="caminho in abertas"
       v-show="atual === caminho"
       :key="caminho"
-      :src="TELAS[caminho].src"
+      :ref="(quadro) => (quadros[caminho] = quadro as HTMLIFrameElement | null)"
+      :src="origem(caminho)"
       :title="TELAS[caminho].titulo"
       class="erp-tela"
     />

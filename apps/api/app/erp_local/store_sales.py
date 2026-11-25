@@ -166,6 +166,7 @@ def listing(db, query="", offset=0, limit=50, situation=None):
             in " ".join(
                 [
                     s["number"],
+                    s.get("bling_number") or "",
                     s["store"],
                     s["status"],
                     s["buyer"],

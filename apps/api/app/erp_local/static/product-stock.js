@@ -32,6 +32,41 @@ function sideTotals(product){
   available:copy?copy.available:productAvailable(product)};
 }
 const sideReason=reason=>/bling/i.test(String(reason||''))?'Ajuste automático':String(reason||'');
+// Lançamentos como o Bling lista (25/11/2026): só o que mexe no físico (a reserva fica no quadro
+// Reservado), uma linha por pedido, com o número da venda ("V 310306") que abre o pedido. O que não
+// achou pedido segue numa linha só, como "Ajuste automático".
+function stockLines(items){
+ const out=[];
+ for(const m of items||[]){
+  const delta=Number(m.physical_delta);if(!delta)continue;
+  let left=Math.abs(delta);
+  for(const o of m.orders||[]){const q=Math.min(left,Number(o.quantity)||0);if(q<=0)continue;out.push({...m,physical_delta:String(Math.sign(delta)*q),order:String(o.number)});left-=q;}
+  if(left>0)out.push({...m,physical_delta:String(Math.sign(delta)*left),order:''});
+ }
+ return out;
+}
+function orderLink(n){return `<button type="button" class="p2-link" data-open-order="${esc(n)}" title="Abrir o pedido ${esc(n)}">V ${esc(n)}</button>`;}
+// Abre o pedido: dentro do DaVinci, em Pedidos 2 (o DaVinci troca de tela, components/ErpTelas.vue);
+// no ERP aberto sozinho, na tela Pedidos › Lidos das lojas.
+async function openSaleByNumber(number){
+ for(let i=0;i<100&&!state;i++)await new Promise(r=>setTimeout(r,100));
+ page='orders';salesView='store';storeSalesQuery=String(number);storeSalesOffset=0;storeSituation=null;storeSaleDetail=null;storeSales=null;render();
+ try{
+  const r=await fetch(`/api/erp-local/store-sales?q=${encodeURIComponent(number)}&offset=0&limit=50`),reply=await r.json();
+  const sale=(reply.items||[]).find(s=>String(s.bling_number)===String(number));
+  if(sale){const d=await fetch(`/api/erp-local/store-sales/detail?channel=${encodeURIComponent(sale.channel)}&store=${encodeURIComponent(sale.store_id)}&number=${encodeURIComponent(sale.number)}`),detail=await d.json();if(d.ok)storeSaleDetail=detail;else storeSales=reply;}
+  else storeSales=reply;
+  render();window.scrollTo(0,0);
+ }catch{message('Pedido indisponível.',true);}
+}
+document.addEventListener('click',e=>{
+ const link=e.target.closest('[data-open-order]');if(!link)return;e.preventDefault();
+ const number=link.dataset.openOrder;
+ if(document.body.classList.contains('embedded')&&window.parent!==window){window.parent.postMessage({tipo:'erp-abrir-pedido',numero:number},location.origin);return;}
+ openSaleByNumber(number);
+});
+// Pedidos 2 (DaVinci) pede para abrir um pedido nesta tela.
+window.addEventListener('message',e=>{if(e.origin!==location.origin||e.data?.tipo!=='erp-abrir-pedido')return;openSaleByNumber(String(e.data.numero||''));});
 // Destinos do Transferir: simples (sem componentes), ativos, mesma base e tag diferente. O servidor
 // confere de novo (mesma_numeracao).
 function transferTargets(origin){
@@ -57,7 +92,7 @@ function sideStockPanel(){
  const t=sideTotals(product),h=sideStockHistory?.sku===product.sku?sideStockHistory:null;
  // O número nunca é cortado: se o quadro ficar estreito, quem encurta (com reticências) é o rótulo.
  const facts=[['Entradas',t.entries],['Saídas',t.exits],['Saldo atual',t.physical],['Reservado',t.reserved],['Disponível',t.available]].map(([k,v])=>`<td class="p2-fact"><div class="p2-fact-box"><span title="${k}">${k}</span><strong>${h||!['Entradas','Saídas'].includes(k)?qty(v):'…'}</strong></div></td>`).join('');
- const moves=h?(h.items||[]).map(m=>{const delta=Number(m.physical_delta),reserve=Number(m.reserved_delta);return `<tr><td>${esc(when(m.created_at).replace(',',''))}</td><td class="p2-num">${delta>0?qty(delta):'—'}</td><td class="p2-num">${delta<0?qty(-delta):'—'}</td><td class="p2-obs">${esc([sideReason(m.reason),reserve?`Reserva: ${qty(reserve)}`:''].filter(Boolean).join(' · '))}</td></tr>`;}).join('')||empty(4,'Nenhum lançamento para este produto.'):empty(4,'Carregando os lançamentos…');
+ const moves=h?stockLines(h.items).map(m=>{const delta=Number(m.physical_delta);return `<tr><td>${esc(when(m.created_at).replace(',',''))}</td><td class="p2-num">${delta>0?qty(delta):'—'}</td><td class="p2-num">${delta<0?qty(-delta):'—'}</td><td class="p2-obs">${m.order?orderLink(m.order):esc(sideReason(m.reason))}</td></tr>`;}).join('')||empty(4,'Nenhum lançamento para este produto.'):empty(4,'Carregando os lançamentos…');
  return `<aside class="p2-side" aria-label="Estoque do produto"><div class="p2-frame"><table class="p2-grid p2-facts"><tbody>${title}<tr class="p2-row">${facts}</tr></tbody></table><table class="p2-grid p2-moves"><colgroup><col class="p2-col-date"><col class="p2-col-qty"><col class="p2-col-qty"><col></colgroup><thead><tr><th>Data</th><th class="p2-num">Entrada</th><th class="p2-num">Saída</th><th>Observação</th></tr></thead><tbody>${moves}</tbody></table></div></aside>`;
 }
 

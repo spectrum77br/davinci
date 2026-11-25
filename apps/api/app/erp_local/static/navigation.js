@@ -40,8 +40,9 @@ window.addEventListener('popstate',e=>{
 });
 document.addEventListener('click',e=>{if(e.target.closest('#back')&&navigationIndex>0)history.back();});
 // F5 on a page reopens it: the first draw reads the page from the address.
-// "#orders/store" opens a page on one of its views (DaVinci's "Pedidos 2" opens the sales read from the stores).
-(function(){const [asked,view]=decodeURIComponent(location.hash.slice(1)).split('/');if(asked&&titles[asked])page=asked;if(page==='orders'&&view==='store')salesView='store';})();
+// "#orders/store" opens a page on one of its views (DaVinci's "Pedidos 2" opens the sales read from the stores);
+// "#orders/store/310306" also opens that order (a "V 310306" clicked in a stock entry).
+(function(){const [asked,view,number]=decodeURIComponent(location.hash.slice(1)).split('/');if(asked&&titles[asked])page=asked;if(page==='orders'&&view==='store'){salesView='store';if(/^\d{1,20}$/.test(number||''))setTimeout(()=>openSaleByNumber(number));}})();
 // Inside DaVinci (?embed=1, or framed): only the screen itself, without the ERP's own menus and
 // without the opening animation, which would replay on every click in DaVinci's menu.
 (function(){if(new URLSearchParams(location.search).get('embed')==='1'||window.self!==window.top){document.body.classList.add('embedded');document.body.dataset.screen=page;document.getElementById('abertura')?.remove();const [title,sub]=titles[page]||[];if(title){document.getElementById('title').textContent=title;document.getElementById('subtitle').textContent=sub||'';}}})();

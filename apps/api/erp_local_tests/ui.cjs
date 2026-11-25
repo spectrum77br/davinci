@@ -1426,8 +1426,8 @@ test('M-42: the stock number opens the product stock on the right, without leavi
  const table=side().querySelector('table.p2-moves');
  assert.deepEqual(cellsOf(table.querySelector('thead tr')),['Data','Entrada','Saída','Observação']);
  assert.deepEqual([...table.querySelectorAll('tbody tr')].map(cellsOf),[
-  ['24/11/2026 21:09','—','—','Ajuste automático · Reserva: 1'],
-  ['24/11/2026 11:44','—','5','Ajuste automático · Reserva: -5'],
+  // 25/11: como o Bling lista — só o que mexe no físico (a reserva fica no quadro Reservado).
+  ['24/11/2026 11:44','—','5','Ajuste automático'],
   ['05/11/2026 09:00','10','—','saldo e reserva de abertura'],
  ]);
  const text=side().textContent+[...side().querySelectorAll('[title]')].map(e=>e.title).join(' ');
@@ -2424,6 +2424,24 @@ test('M-28: Produtos 2 (embed) marks the screen from the first paint; Pedidos 2 
   const only=[...css.matchAll(/^body\.embedded\[data-screen=products\][^{]*\{/gm)].map(m=>m[0]);
   assert.equal(only.length,7,'as regras do M-28 valem só para Produtos embutido');
   assert.doesNotMatch(css,/body\.embedded #environment|body\.embedded #header-context/);
+});
+
+test('stock entries: one row per order with "V <número>", reservations out, and the number opens the order',async()=>{
+  const lines=dom=>dom.window.eval('stockLines')([
+    {created_at:'2026-11-24T17:26:00Z',physical_delta:'0',reserved_delta:'1',reason:'Espelho do Bling',orders:[]},
+    {created_at:'2026-11-24T14:38:00Z',physical_delta:'-2.000',reserved_delta:'-2.000',reason:'Espelho do Bling',orders:[{number:'310306',quantity:'1'},{number:'310181',quantity:'1'}]},
+    {created_at:'2026-11-24T14:32:00Z',physical_delta:'-1.000',reserved_delta:'-1.000',reason:'Espelho do Bling',orders:[]},
+  ]);
+  const {dom,document:d}=await setup({});
+  assert.deepEqual(JSON.parse(JSON.stringify(lines(dom).map(l=>[l.physical_delta,l.order]))),[['-1','310306'],['-1','310181'],['-1','']]);
+  const link=d.createElement('div');link.innerHTML=dom.window.eval('orderLink')('310306');d.body.append(link);
+  const asked=[];const plain=dom.window.fetch;
+  dom.window.fetch=async (url,options)=>{asked.push(String(url));if(String(url).includes('/store-sales/detail'))return {ok:true,status:200,json:async()=>({number:'2611244DTPPCJT',bling_number:'310306'})};if(String(url).includes('/store-sales?'))return {ok:true,status:200,json:async()=>({items:[{number:'2611244DTPPCJT',channel:'shopee',store_id:'s1',bling_number:'310306'}],total:1,offset:0})};return plain(url,options);};
+  link.querySelector('[data-open-order]').click();
+  await new Promise(r=>setTimeout(r,20));
+  assert.ok(asked.some(u=>u.includes('/store-sales?q=310306')),asked.join(' '));
+  assert.ok(asked.some(u=>u.includes('/store-sales/detail?channel=shopee&store=s1&number=2611244DTPPCJT')));
+  assert.equal(d.querySelector('nav [data-page].active')?.dataset.page,'orders');
 });
 
 test('outside consulta a change is sent as before',async()=>{

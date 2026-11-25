@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -1473,10 +1474,23 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "WHERE m.sku=? AND (?='' OR m.depot=?) ORDER BY m.id",
                 (sku, depot, depot),
             ).fetchall()
+            # Orders behind each exit, as Bling shows "V <número>" (bling_mirror.attribute).
+            try:
+                linked = {}
+                for link in db.execute(
+                    "SELECT o.movement_id,o.number,o.quantity FROM movement_orders o "
+                    "JOIN movements m ON m.id=o.movement_id WHERE m.sku=? ORDER BY o.rowid",
+                    (sku,),
+                ):
+                    linked.setdefault(link["movement_id"], []).append(
+                        {"number": link["number"], "quantity": link["quantity"]}
+                    )
+            except sqlite3.OperationalError:
+                linked = {}
             running, items = Decimal(0), []
             for row in rows:
                 running += Decimal(row["physical_delta"])
-                item = {**dict(row), "balance": str(running)}
+                item = {**dict(row), "balance": str(running), "orders": linked.get(row["id"], [])}
                 payload = json.loads(item.pop("payload") or "{}")
                 item["purchase_price"] = payload.get("purchase_price") or None
                 try:

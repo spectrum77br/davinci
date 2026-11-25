@@ -8,6 +8,7 @@ never overwrites stock the ERP owns.
 """
 
 import json
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from app.erp_local.core import ERPError, number, text
@@ -18,6 +19,12 @@ CREATE TABLE IF NOT EXISTS bling_mirror_stock (
 CREATE TABLE IF NOT EXISTS bling_mirror_orders (
  store_number TEXT PRIMARY KEY, number TEXT NOT NULL, situation TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bling_mirror_items (store_number TEXT PRIMARY KEY, items TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bling_mirror_ships (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT NOT NULL, store_number TEXT NOT NULL,
+ sku TEXT NOT NULL, quantity TEXT NOT NULL, left_quantity TEXT NOT NULL, seen_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS movement_orders (
+ movement_id INTEGER NOT NULL, number TEXT NOT NULL, quantity TEXT NOT NULL, source TEXT NOT NULL,
+ PRIMARY KEY (movement_id, number));
 """
 STOCK_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM (SELECT bling_product_id::text AS id,"
@@ -141,10 +148,56 @@ def apply_command(erp, db, key, p):
     return {"sku": sku, "physical": str(physical), "reserved": str(reserved)}
 
 
+# Bling books a sale's exit when it leaves these situations for one past them (15 and on): the
+# same rule as the compatible API (bling_compat). Cancelled and held ones are no exit.
+RESERVING = {"6", "21", "83965"}
+NOT_SHIPPED = RESERVING | {"12", "83955", "83962"}
+
+
+def _parts(db, sku, quantity, depth=0):
+    """A sold code as the physical products that leave: a kit as its parts, times the quantity."""
+    row = db.execute("SELECT kind,components FROM products WHERE sku=?", (sku,)).fetchone()
+    if row and row["kind"] == "kit" and depth < 4:
+        out = {}
+        for part in json.loads(row["components"] or "[]"):
+            for code, amount in _parts(
+                db, part["sku"], quantity * Decimal(str(part["quantity"])), depth + 1
+            ).items():
+                out[code] = out.get(code, Decimal(0)) + amount
+        return out
+    return {sku: quantity} if row and row["kind"] == "simple" else {}
+
+
+def _record_ships(erp, db, rows):
+    """Orders that left a reserving situation for a shipped one since the last round: each part
+    that leaves, to be matched with the exit Bling books for it (attribute)."""
+    before = {
+        r["store_number"]: r["situation"]
+        for r in db.execute("SELECT store_number,situation FROM bling_mirror_orders")
+    }
+    now = erp.now()
+    for row in rows:
+        store_number = str(row.get("store_number") or "")
+        old, new = before.get(store_number), str(row.get("situation") or "")
+        if old not in RESERVING or not new or new in NOT_SHIPPED:
+            continue
+        parts = {}
+        for line in _lines(row.get("items")):
+            for code, amount in _parts(db, line["sku"], Decimal(line["quantity"])).items():
+                parts[code] = parts.get(code, Decimal(0)) + amount
+        for code, amount in parts.items():
+            db.execute(
+                "INSERT INTO bling_mirror_ships(number,store_number,sku,quantity,left_quantity,"
+                "seen_at) VALUES (?,?,?,?,?,?)",
+                (str(row.get("number") or ""), store_number, code, str(amount), str(amount), now),
+            )
+
+
 def apply_orders(erp, rows):
     with erp.connection() as db:
         db.executescript(SCHEMA)
         db.execute("BEGIN IMMEDIATE")
+        _record_ships(erp, db, rows)
         db.execute("DELETE FROM bling_mirror_orders")
         db.executemany(
             "INSERT OR REPLACE INTO bling_mirror_orders VALUES (?,?,?)",
@@ -266,8 +319,79 @@ def orders(db):
         return {}
 
 
+# An exit and the order that caused it reach the ERP within a round or two of each other (Bling's
+# balance and the order's situation come by different notices): they are paired within this window,
+# oldest first, as Bling booked them.
+PAIR_WINDOW = timedelta(minutes=30)
+
+
+def attribute(erp, now=None):
+    """Each exit the mirror recorded gets the orders that left in the same minutes, one unit each,
+    as Bling shows a "V <número>" beside each exit. What finds no order stays without one."""
+    moment = now or datetime.fromisoformat(erp.now())
+    since = (moment - PAIR_WINDOW).isoformat()
+    paired = 0
+    with erp.connection() as db:
+        db.executescript(SCHEMA)
+        db.execute("BEGIN IMMEDIATE")
+        ships = db.execute(
+            "SELECT * FROM bling_mirror_ships WHERE CAST(left_quantity AS REAL)>0 AND seen_at>=? "
+            "ORDER BY seen_at,id",
+            (since,),
+        ).fetchall()
+        by_sku = {}
+        for ship in ships:
+            by_sku.setdefault(ship["sku"], []).append(
+                [ship["id"], ship["number"], Decimal(ship["left_quantity"]), ship["seen_at"]]
+            )
+        for sku, pending in by_sku.items():
+            exits = [
+                [
+                    row["id"],
+                    row["created_at"],
+                    -Decimal(row["physical_delta"]) - Decimal(str(row["done"])),
+                ]
+                for row in db.execute(
+                    "SELECT m.id,m.created_at,m.physical_delta,(SELECT coalesce(sum(CAST("
+                    "o.quantity AS REAL)),0) FROM movement_orders o WHERE o.movement_id=m.id) AS "
+                    "done FROM movements m WHERE m.sku=? AND m.reason=? AND CAST(m.physical_delta "
+                    "AS REAL)<0 AND m.created_at>=? ORDER BY m.created_at,m.id",
+                    (sku, REASON, since),
+                )
+            ]
+            # Each order goes to the exit nearest in time: both come within a round or two.
+            for ship in pending:
+                seen = datetime.fromisoformat(ship[3])
+                while ship[2] > 0:
+                    open_exits = [e for e in exits if e[2] > 0]
+                    if not open_exits:
+                        break
+                    near = min(open_exits, key=lambda e: abs(datetime.fromisoformat(e[1]) - seen))
+                    take = min(near[2], ship[2])
+                    db.execute(
+                        "INSERT INTO movement_orders VALUES (?,?,?,'espelho') ON CONFLICT"
+                        "(movement_id,number) DO UPDATE SET quantity=CAST(CAST(quantity AS REAL)+"
+                        "CAST(excluded.quantity AS REAL) AS TEXT)",
+                        (near[0], ship[1], str(take)),
+                    )
+                    near[2] -= take
+                    ship[2] -= take
+                    paired += 1
+                    db.execute(
+                        "UPDATE bling_mirror_ships SET left_quantity=? WHERE id=?",
+                        (str(ship[2]), ship[0]),
+                    )
+        db.execute(
+            "DELETE FROM bling_mirror_ships WHERE seen_at<?",
+            ((moment - timedelta(days=2)).isoformat(),),
+        )
+        db.commit()
+    return {"pairs": paired}
+
+
 def run(erp, reader=read_local):
-    """One pass: stock and situations, each on its own so one failing keeps the other."""
+    """One pass: stock and situations, each on its own so one failing keeps the other; then each
+    new exit gets the order that caused it."""
     report = {}
     for name, sql, apply in (
         ("estoque", STOCK_SQL, apply_stock),
@@ -277,4 +401,8 @@ def run(erp, reader=read_local):
             report[name] = apply(erp, reader(sql))
         except ERPError as error:
             report[name] = {"state": error.code}
+    try:
+        report["pedidos"] = attribute(erp)
+    except ERPError as error:
+        report["pedidos"] = {"state": error.code}
     return report
