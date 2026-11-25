@@ -298,6 +298,16 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .p2-desc .stock-low{flex:none;margin:0;font-size:11px;line-height:14px;font-weight:500}
 .p2-grid .p2-stock,.p2-grid .p2-link{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);cursor:pointer;box-shadow:none}
 .p2-grid .p2-stock:hover,.p2-grid .p2-link:hover{text-decoration:underline;filter:none}
+/* O número da venda como no Bling: o "V" branco num quadradinho vermelho e o número ao lado. */
+.order-link{display:inline-flex;align-items:center;gap:6px;padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:inherit;cursor:pointer;box-shadow:none;white-space:nowrap}
+.order-link:hover{text-decoration:underline;filter:none}
+.v-badge{display:inline-grid;place-items:center;flex:none;width:16px;height:16px;border-radius:3px;background:rgb(229,57,53);color:#fff;font-size:11px;font-weight:700;line-height:1}
+.order-link:hover .v-badge{text-decoration:none}
+.p2-grid>tbody>tr>td.p2-held{padding:4px 6px;font-size:12px;line-height:20px;border-top:1px solid rgb(229,231,235)}
+.p2-held-label{font-size:11px;font-weight:600}
+.held-list{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:2px}
+.held-item{display:inline-flex;align-items:center;gap:4px}
+.held-item small{font-size:11px;color:rgb(107,114,128)}
 .p2-grid>tbody>tr>td.p2-stock-cell.is-open{outline:2px solid rgb(37,99,235);outline-offset:-2px}
 /* O estoque à direita: 24px com "código - nome" e Incluir/Transferir; 34px com os 5 quadros; 34px de
    cabeçalho Data | Entrada | Saída | Observação; 34px por lançamento. */

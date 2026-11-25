@@ -1409,7 +1409,7 @@ test('M-41: Excel crosses Categoria + Tag + Estoque, and "Só os itens seleciona
 });
 
 test('M-42: the stock number opens the product stock on the right, without leaving the list, and says nothing of Bling',async()=>{
- const {dom,document:d,calls}=await p2Page({routes:{'/api/erp-local/stock-movements':(_,c)=>({body:{...p2Moves,sku:new URL(c.url,'http://x').searchParams.get('sku')}})}});
+ const {dom,document:d,calls}=await p2Page({routes:{'/api/erp-local/stock-movements':(_,c)=>({body:{...p2Moves,sku:new URL(c.url,'http://x').searchParams.get('sku'),reserving:[{number:'310420',quantity:'2'},{number:'310401',quantity:'1'}]}})}});
  const side=()=>d.querySelector('.p2-split > .p2-side');
  assert.equal(side().textContent.trim(),'Clique no estoque de um produto para ver os lançamentos');assert.equal(side().querySelector('table'),null);
  d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
@@ -1423,6 +1423,11 @@ test('M-42: the stock number opens the product stock on the right, without leavi
  assert.ok(side().querySelector('tr.p2-row-head th .p2-side-name'),'código e nome na linha de 24px');
  assert.deepEqual([...side().querySelectorAll('.p2-side-actions button')].map(b=>[b.textContent,b.disabled,b.classList.contains('is-primary')]),[['Incluir',false,true],['Transferir',false,false]]);
  assert.deepEqual([...side().querySelectorAll('.p2-fact')].map(td=>[td.querySelector('span').textContent,td.querySelector('strong').textContent]),[['Entradas','220'],['Saídas','122'],['Saldo atual','98'],['Reservado','3'],['Disponível','95']]);
+ // As vendas que seguram o Reservado, ao lado dele, cada uma com o V e o número que abre o pedido.
+ const held=side().querySelector('.p2-held');
+ assert.equal(held.querySelector('.p2-held-label').textContent,'Reservado em');
+ assert.deepEqual([...held.querySelectorAll('[data-open-order]')].map(b=>b.dataset.openOrder),['310420','310401']);
+ assert.deepEqual([...held.querySelectorAll('.held-item small')].map(e=>e.textContent),['×2']);
  const table=side().querySelector('table.p2-moves');
  assert.deepEqual(cellsOf(table.querySelector('thead tr')),['Data','Entrada','Saída','Observação']);
  assert.deepEqual([...table.querySelectorAll('tbody tr')].map(cellsOf),[
@@ -2426,15 +2431,28 @@ test('M-28: Produtos 2 (embed) marks the screen from the first paint; Pedidos 2 
   assert.doesNotMatch(css,/body\.embedded #environment|body\.embedded #header-context/);
 });
 
-test('stock entries: one row per order with "V <número>", reservations out, and the number opens the order',async()=>{
+test('stock entries: one row per order with the red V and the number, at the moment it left, reservations out, and the number opens the order',async()=>{
   const lines=dom=>dom.window.eval('stockLines')([
+    {created_at:'2026-11-24T18:34:00Z',physical_delta:'-1.000',reserved_delta:'-1.000',reason:'Espelho do Bling',orders:[{number:'310288',quantity:'1',shipped_at:'2026-11-24T18:32:22+00:00'}]},
+    {created_at:'2026-11-24T18:33:00Z',physical_delta:'-1.000',reserved_delta:'0',reason:'Espelho do Bling',orders:[]},
     {created_at:'2026-11-24T17:26:00Z',physical_delta:'0',reserved_delta:'1',reason:'Espelho do Bling',orders:[]},
-    {created_at:'2026-11-24T14:38:00Z',physical_delta:'-2.000',reserved_delta:'-2.000',reason:'Espelho do Bling',orders:[{number:'310306',quantity:'1'},{number:'310181',quantity:'1'}]},
+    {created_at:'2026-11-24T14:38:00Z',physical_delta:'-2.000',reserved_delta:'-2.000',reason:'Espelho do Bling',orders:[{number:'310306',quantity:'1',shipped_at:'2026-11-24T14:32:00+00:00'},{number:'310181',quantity:'1',shipped_at:'2026-11-24T14:32:00+00:00'}]},
     {created_at:'2026-11-24T14:32:00Z',physical_delta:'-1.000',reserved_delta:'-1.000',reason:'Espelho do Bling',orders:[]},
   ]);
   const {dom,document:d}=await setup({});
-  assert.deepEqual(JSON.parse(JSON.stringify(lines(dom).map(l=>[l.physical_delta,l.order]))),[['-1','310306'],['-1','310181'],['-1','']]);
+  // 310288 shows when it left (15:32, as Bling), not when the copy saw the balance (15:34).
+  assert.deepEqual(JSON.parse(JSON.stringify(lines(dom).map(l=>[l.physical_delta,l.order,l.created_at]))),[
+    ['-1','','2026-11-24T18:33:00Z'],
+    ['-1','310288','2026-11-24T18:32:22+00:00'],
+    ['-1','310306','2026-11-24T14:32:00+00:00'],
+    ['-1','310181','2026-11-24T14:32:00+00:00'],
+    ['-1','','2026-11-24T14:32:00Z'],
+  ]);
   const link=d.createElement('div');link.innerHTML=dom.window.eval('orderLink')('310306');d.body.append(link);
+  const button=link.querySelector('[data-open-order]');
+  assert.equal(button.querySelector('.v-badge').textContent,'V','o V vermelho do Bling');
+  assert.equal(button.lastChild.textContent,'310306');
+  assert.equal(button.getAttribute('aria-label'),'Pedido de venda 310306');
   const asked=[];const plain=dom.window.fetch;
   dom.window.fetch=async (url,options)=>{asked.push(String(url));if(String(url).includes('/store-sales/detail'))return {ok:true,status:200,json:async()=>({number:'2611244DTPPCJT',bling_number:'310306'})};if(String(url).includes('/store-sales?'))return {ok:true,status:200,json:async()=>({items:[{number:'2611244DTPPCJT',channel:'shopee',store_id:'s1',bling_number:'310306'}],total:1,offset:0})};return plain(url,options);};
   link.querySelector('[data-open-order]').click();

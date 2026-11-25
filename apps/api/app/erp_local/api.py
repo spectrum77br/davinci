@@ -1474,16 +1474,22 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "WHERE m.sku=? AND (?='' OR m.depot=?) ORDER BY m.id",
                 (sku, depot, depot),
             ).fetchall()
-            # Orders behind each exit, as Bling shows "V <número>" (bling_mirror.attribute).
+            # Sales behind each exit, as Bling shows "V <número>", with the moment each one left
+            # (bling_mirror.attribute).
             try:
                 linked = {}
                 for link in db.execute(
-                    "SELECT o.movement_id,o.number,o.quantity FROM movement_orders o "
+                    "SELECT o.* FROM movement_orders o "
                     "JOIN movements m ON m.id=o.movement_id WHERE m.sku=? ORDER BY o.rowid",
                     (sku,),
                 ):
+                    link = dict(link)
                     linked.setdefault(link["movement_id"], []).append(
-                        {"number": link["number"], "quantity": link["quantity"]}
+                        {
+                            "number": link["number"],
+                            "quantity": link["quantity"],
+                            "shipped_at": link.get("shipped_at"),
+                        }
                     )
             except sqlite3.OperationalError:
                 linked = {}
@@ -1506,10 +1512,13 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
 
         with erp.connection() as db:
             bling = bling_mirror.stock_of(db, sku)
+            # The sales Bling's Reservado is made of, to show beside it.
+            held = bling_mirror.reserving(db, sku) if bling else []
         return {
             "items": list(reversed(items[-100:])),
             "total": len(rows),
             "bling": bling,
+            "reserving": held,
             "entries": str(entries),
             "exits": str(exits),
             "sku": sku,
