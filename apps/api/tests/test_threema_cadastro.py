@@ -39,7 +39,7 @@ from app.services.threema_catalogo import ENVIOS, K
 from tests.threema_cadastro_apoio import limpar_ouvidoria  # noqa: F401 — fixture
 
 _API = Path(__file__).resolve().parent.parent
-_MIGRATION = _API / "alembic" / "versions" / "0506_threema_cadastro.py"
+_MIGRATION = _API / "alembic" / "versions" / "0512_threema_cadastro.py"
 TABELAS = (
     "threema_envio",
     "threema_contato",
@@ -105,8 +105,8 @@ async def _catalogo(db, schema: str, tabela: str) -> dict:
 @pytest.mark.asyncio
 async def test_0506_cria_igual_aos_modelos_desce_e_sobe(db):
     mod = _carregar()
-    assert mod.revision == "0506_threema_cadastro"
-    assert mod.down_revision == "0505_threema_envio_registro"
+    assert mod.revision == "0512_threema_cadastro"
+    assert mod.down_revision == "0511_threema_envio_registro"
     assert mod.FREQUENCIAS == modelos.FREQUENCIAS_ENVIO
     assert mod.ONDE_RODA == modelos.ONDE_RODA_ENVIO
     assert mod.ORIGENS_CONTATO == modelos.ORIGENS_CONTATO

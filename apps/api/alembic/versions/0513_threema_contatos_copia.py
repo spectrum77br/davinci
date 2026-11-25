@@ -18,8 +18,8 @@ DOWNGRADE: apaga os contatos com origem `migracao` (a linha antiga continua
 com eles). Os cadastrados na tela depois disto ficam em threema_contato (e no
 espelho).
 
-Revision ID: 0507_threema_contatos_copia
-Revises: 0506_threema_cadastro
+Revision ID: 0513_threema_contatos_copia
+Revises: 0512_threema_cadastro
 """
 
 # ruff: noqa: S608
@@ -29,8 +29,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0507_threema_contatos_copia"
-down_revision: str | None = "0506_threema_cadastro"
+revision: str = "0513_threema_contatos_copia"
+down_revision: str | None = "0512_threema_cadastro"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

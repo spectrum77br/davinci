@@ -648,7 +648,7 @@ def test_cada_marca_usa_a_chave_certa():
 
 # ─────────────────────────────────────────────────────────── migration 0504
 
-_MIGRATION = _API / "alembic" / "versions" / "0505_threema_envio_registro.py"
+_MIGRATION = _API / "alembic" / "versions" / "0511_threema_envio_registro.py"
 _TABELA = "threema_envio_registro"
 
 
@@ -706,8 +706,8 @@ async def test_0505_cria_igual_ao_model_desce_e_sobe(db):
     from app.models import threema_envio as modelo_registro
 
     mod = _carregar()
-    assert mod.revision == "0505_threema_envio_registro"
-    assert mod.down_revision == "0504_conciliacao_conferido_esperando"
+    assert mod.revision == "0511_threema_envio_registro"
+    assert mod.down_revision == "0510_estoque_entradas_troca_tag"
     assert mod.ORIGENS == modelo_registro.ORIGENS_REGISTRO == threema_registro.ORIGENS
     assert mod.VIAS == modelo_registro.VIAS_REGISTRO == threema_registro.VIAS
     assert mod.ONDE_RODA == modelo_registro.ONDE_RODA_REGISTRO
