@@ -221,6 +221,9 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   for (const trecho of [
     '<PopoverRoot @update:open="abrirOuFecharAds">',
     'data-acao="ads"',
+    // M-60: o botão é "flex" com a largura da célula, para a caixinha vazia
+    // ficar na mesma altura das vizinhas (e a linha não crescer).
+    'class="flex w-full items-center justify-center gap-0.5"',
     // M-55: a caixinha de 34×24px com o % Geral e o "%" ao lado; vazia sem %.
     'class="inline-flex h-6 w-[34px] items-center justify-center rounded border bg-background text-xs hover:bg-muted"',
     "{{ ads && pctGeralAds(adsDa(acc.id)) != null ? fmtPct(pctGeralAds(adsDa(acc.id))!) : '' }}",

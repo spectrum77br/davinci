@@ -6321,7 +6321,9 @@ watch(department, async () => {
                 </td>
                 <!-- Ads (M-12/M-55): a caixinha com o % Geral (vazia sem %) abre o
                      painel da conta; não se digita na tabela. Quem não edita Contas
-                     abre e só vê. -->
+                     abre e só vê. O botão é "flex" com a largura da célula (M-60),
+                     igual ao invólucro dos outros campos: assim a caixinha vazia não
+                     sobe nem deixa a linha mais alta. -->
                 <td
                   v-else-if="f.key === 'ads'"
                   class="border border-border px-1 py-1 text-center w-[62px] min-w-[62px]"
@@ -6331,7 +6333,7 @@ watch(department, async () => {
                     <PopoverTrigger as-child>
                       <button
                         type="button"
-                        class="inline-flex items-center justify-center gap-0.5"
+                        class="flex w-full items-center justify-center gap-0.5"
                         data-acao="ads"
                         :data-ads-botao="acc.id"
                         :title="adsErro ? 'O Ads não carregou — recarregue a página.' : 'Ads da conta: % Geral — clique para ver o gasto por dia e o % por produto'"
