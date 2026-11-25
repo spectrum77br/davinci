@@ -4,11 +4,18 @@ Removal is reversible: documents, movements and images keep every reference. A p
 becomes a service when no stock or composition depends on it.
 """
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from app.erp_local import product_details, product_structures
 from app.erp_local.core import ERPError, number, text
 
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS product_price_history (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT NOT NULL REFERENCES products(sku),
+ price_from TEXT, price_to TEXT NOT NULL, operation_key TEXT NOT NULL, actor TEXT NOT NULL,
+ created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS product_price_history_sku ON product_price_history(sku,id);
+"""
 COMMANDS = {
     "product.batch",
     "product.clone",
@@ -19,6 +26,8 @@ COMMANDS = {
     "product.rename",
 }
 BATCH_LIMIT = 1000
+PRICE_ACTIONS = {"set", "increase", "decrease"}
+CENTS = Decimal("0.01")
 
 
 def _selected(erp, db, raw, limit=BATCH_LIMIT):
@@ -114,27 +123,129 @@ def _batch(erp, db, key, p):
     return {"updated": len(results), "external_writes": False}
 
 
-def _price_adjust(erp, db, p):
+def _decimal(value):
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def record_price_change(erp, db, key, sku, before, after, *, always=False):
+    """Who changed the ERP's own sale price, when, and from what to what (M-47). The editor's
+    save only counts when the price really changed; a mass change keeps every product it set."""
+    if after is None:
+        return
+    if not always and before is not None and _decimal(before) == _decimal(after):
+        return
+    actor = db.execute("SELECT actor FROM events WHERE operation_key=?", (key,)).fetchone()
+    db.execute(
+        "INSERT INTO product_price_history(sku,price_from,price_to,operation_key,actor,"
+        "created_at) VALUES (?,?,?,?,?,?)",
+        (sku, before, str(after), key or "ERP", actor[0] if actor else "ERP", erp.now()),
+    )
+
+
+def price_history(db, sku):
+    return [
+        dict(r)
+        for r in db.execute(
+            "SELECT price_from,price_to,actor,operation_key,created_at "
+            "FROM product_price_history WHERE sku=? ORDER BY id DESC",
+            (sku,),
+        )
+    ]
+
+
+def _price_adjust(erp, db, key, p):
+    """Novo preço (set, always in R$), Acrescer or Descontar (in R$ or %) on the ERP's own sale
+    price. All or nothing, at most 1,000 products, the result in cents. Never published."""
     if set(p) != {"items", "action", "mode", "amount"}:
         raise ERPError("product_price_adjust", "Informe ação, tipo, valor e produtos.")
-    if p["action"] not in {"increase", "decrease"} or p["mode"] not in {"value", "percent"}:
-        raise ERPError("product_price_adjust", "Escolha acrescer ou descontar, em R$ ou %.")
+    if p["action"] not in PRICE_ACTIONS or p["mode"] not in {"value", "percent"}:
+        raise ERPError(
+            "product_price_adjust", "Escolha novo preço, acrescer ou descontar, em R$ ou %."
+        )
+    if p["action"] == "set" and p["mode"] != "value":
+        raise ERPError("product_price_adjust", "O novo preço é sempre em R$.")
     amount = number(p["amount"], unit=True)
     changes = []
     for sku, version in _selected(erp, db, p["items"]):
         _check_version(product_details.details(db, sku), version)
         row = db.execute("SELECT price FROM product_pricing WHERE sku=?", (sku,)).fetchone()
-        if not row or row["price"] is None:
-            raise ERPError("product_price_missing", "Produto sem preço para reajustar: " + sku)
-        old = Decimal(row["price"])
-        delta = amount if p["mode"] == "value" else old * amount / 100
-        new = old + delta if p["action"] == "increase" else old - delta
-        if new < 0:
-            raise ERPError("product_price_negative", "O reajuste deixa negativo o preço de " + sku)
-        new = new.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-        db.execute("UPDATE product_pricing SET price=? WHERE sku=?", (str(new), sku))
-        changes.append({"sku": sku, "from": row["price"], "to": str(new)})
+        before = row["price"] if row else None
+        if p["action"] == "set":
+            new = amount
+        else:
+            if before is None or _decimal(before) is None:
+                raise ERPError("product_price_missing", "Produto sem preço para reajustar: " + sku)
+            old = _decimal(before)
+            delta = amount if p["mode"] == "value" else old * amount / 100
+            new = old + delta if p["action"] == "increase" else old - delta
+            if new < 0:
+                raise ERPError(
+                    "product_price_negative", "O reajuste deixa negativo o preço de " + sku
+                )
+        new = new.quantize(CENTS, rounding=ROUND_HALF_UP)
+        db.execute(
+            "INSERT INTO product_pricing(sku,price,cost_price) VALUES (?,?,NULL) "
+            "ON CONFLICT(sku) DO UPDATE SET price=excluded.price",
+            (sku, str(new)),
+        )
+        record_price_change(erp, db, key, sku, before, new, always=True)
+        changes.append({"sku": sku, "from": before, "to": str(new)})
     return {"changes": changes, "published": False, "external_writes": False}
+
+
+def bulk_price(erp, body, actor=None):
+    """Produtos 2 › Configuração (M-47): Novo preço, Acrescer or Descontar for every selected
+    product, through product.price_adjust (same rules, one event with who did it). Accepted
+    while Bling owns the base (consulta.CONSULTA_WRITES); the price goes nowhere else."""
+    from uuid import uuid4
+
+    if (
+        not isinstance(body, dict)
+        or not {"skus", "action", "amount"} <= set(body)
+        or set(body) - {"skus", "action", "mode", "amount", "operation_key"}
+    ):
+        raise ERPError("bulk_price_fields", "Informe os produtos, a ação e o valor.")
+    raw = body["skus"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= BATCH_LIMIT:
+        raise ERPError("bulk_price_batch", f"Selecione de 1 a {BATCH_LIMIT} produtos.")
+    skus = list(dict.fromkeys(text(sku, "SKU") for sku in raw))
+    action = body["action"]
+    if action not in PRICE_ACTIONS:
+        raise ERPError("bulk_price_action", "Escolha novo preço, acrescer ou descontar.")
+    mode = "value" if action == "set" else body.get("mode", "value")
+    if mode not in {"value", "percent"}:
+        raise ERPError("bulk_price_mode", "Escolha R$ ou %.")
+    amount = body["amount"]
+    if isinstance(amount, bool) or not isinstance(amount, str | int | float):
+        raise ERPError("invalid_number", "Informe um número válido.")
+    key = body.get("operation_key") or "bulk-price:" + uuid4().hex
+    key = text(key, "identificador da operação")
+    with erp.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            items = []
+            for sku in skus:
+                if not db.execute("SELECT 1 FROM products WHERE sku=?", (sku,)).fetchone():
+                    raise ERPError("product_not_found", "Produto não encontrado: " + sku, 404)
+                items.append({"sku": sku, "version": product_details.details(db, sku)["version"]})
+            payload = {"items": items, "action": action, "mode": mode, "amount": str(amount)}
+            result = erp.execute_in(
+                db, key, "product.price_adjust", payload, *([actor] if actor else [])
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    count = len(result["changes"])
+    return {
+        "changed": count,
+        "changes": result["changes"],
+        "message": f"Preço alterado em {count} produto" + ("" if count == 1 else "s"),
+        "replayed": result.get("replayed", False),
+    }
 
 
 def _remove(erp, db, key, p, *, restore):
@@ -254,6 +365,7 @@ def _clone(erp, db, key, p):
             db,
             "category.assign",
             {"items": [{"sku": new_sku, "version": 0, "category_id": category["id"]}]},
+            key,
         )
     return {"sku": new_sku, "source": sku, "external_writes": False}
 
@@ -294,7 +406,7 @@ def apply(erp, db, key, kind, p):
     if kind == "product.batch":
         return _batch(erp, db, key, p)
     if kind == "product.price_adjust":
-        return _price_adjust(erp, db, p)
+        return _price_adjust(erp, db, key, p)
     if kind == "product.clone":
         return _clone(erp, db, key, p)
     if kind == "product.structure.replace":

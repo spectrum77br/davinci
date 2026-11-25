@@ -2,6 +2,7 @@
 
 Runs only on command and never touches stock, prices or anything already edited here. A value
 the origin leaves at zero stays unknown, since the origin cannot tell zero from not informed.
+Nor a category chosen in the ERP (Produtos 2 › Configuração, M-45): that one stays.
 """
 
 import argparse
@@ -38,6 +39,7 @@ def apply_mirror(erp, rows):
         "already_edited": 0,
         "updated": 0,
         "services": 0,
+        "category_kept": 0,
         "refused": [],
     }
     for row in rows:
@@ -50,6 +52,7 @@ def apply_mirror(erp, rows):
                 continue
             current = product_details.details(db, sku)
             category = categories.document_snapshot(db, sku)
+            kept = category_set_here(db, sku)
         if current["version"]:
             report["already_edited"] += 1
             continue
@@ -62,6 +65,9 @@ def apply_mirror(erp, rows):
         if row.get("tipo") == "S" and exists["kind"] == "simple":
             payload["type"] = "service"
         name = (row.get("categoria_nome") or "").strip()
+        if name and kept:
+            report["category_kept"] += 1
+            name = ""
         try:
             if name:
                 category_id = _category_id(erp, name, STOP + "category:" + name)
@@ -87,6 +93,17 @@ def edited_here(db, sku):
         not row[0].startswith(IMPORT_PREFIXES)
         for row in db.execute(
             "SELECT operation_key FROM product_details_history WHERE sku=?", (sku,)
+        )
+    )
+
+
+def category_set_here(db, sku):
+    """A category changed in the ERP (Produtos 2 › Configuração, the categories panel, the
+    editor) and not by a load from Bling: a load never puts Bling's back (M-45, 25/11/2026)."""
+    return any(
+        not row[0].startswith(IMPORT_PREFIXES)
+        for row in db.execute(
+            "SELECT operation_key FROM own_product_category_history WHERE sku=?", (sku,)
         )
     )
 
@@ -283,6 +300,7 @@ def apply_bling_read(erp, rows):
         "already_imported": 0,
         "services": 0,
         "with_images_at_origin": 0,
+        "category_kept": 0,
         "refused": [],
         "skipped_fields": {},
         "structure_differences": [],
@@ -323,6 +341,7 @@ def apply_bling_read(erp, rows):
                 report["edited_here"] += 1
                 continue
             category = categories.document_snapshot(db, sku)
+            kept = category_set_here(db, sku)
             tax_version = product_tax.details(db, sku)["version"]
             suppliers = product_suppliers.details(db, sku)
             _, recipes = product_structures.graph(db)
@@ -340,7 +359,10 @@ def apply_bling_read(erp, rows):
             payload["tax"] = {"version": 0, "data": tax, "reason": "Cadastro lido do Bling"}
         target = mapping.get(str((raw.get("categoria") or {}).get("id")))
         if target and category["id"] != target:
-            payload["category"] = {"version": category["version"], "category_id": target}
+            if kept:
+                report["category_kept"] += 1
+            else:
+                payload["category"] = {"version": category["version"], "category_id": target}
         supplier = _supplier_row(erp, raw, contacts_cache)
         if supplier and not suppliers["version"]:
             payload["suppliers"] = {

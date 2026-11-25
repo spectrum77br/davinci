@@ -441,7 +441,8 @@ def test_price_adjust_is_exact_atomic_and_never_publishes(erp):
         {"items": items, "action": "increase", "mode": "percent", "amount": "12.5"},
     )
     assert result["published"] is False and result["external_writes"] is False
-    assert price(erp, "demo.aparelho") == "112.5000" and price(erp, "demo.fone") == "11.2500"
+    # In cents since M-47 (25/11/2026): a sale price in R$.
+    assert price(erp, "demo.aparelho") == "112.50" and price(erp, "demo.fone") == "11.25"
     before = erp.snapshot()
     with pytest.raises(ERPError, match="negativo"):
         run(

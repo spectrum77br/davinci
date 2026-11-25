@@ -132,6 +132,7 @@ class LocalERP:
             pos,
             price_lists,
             procurement,
+            product_actions,
             product_details,
             product_images,
             product_structures,
@@ -165,6 +166,7 @@ class LocalERP:
                 + finance_categories.SCHEMA
                 + sellers.SCHEMA
                 + product_details.SCHEMA
+                + product_actions.SCHEMA
                 + bling_compat.SCHEMA
                 + product_images.SCHEMA
                 + product_structures.SCHEMA
@@ -569,7 +571,7 @@ class LocalERP:
             return proposals.apply(self, db, kind, p)
 
         if kind in categories.COMMANDS:
-            return categories.apply(self, db, kind, p)
+            return categories.apply(self, db, kind, p, key)
 
         if kind in price_lists.COMMANDS:
             return price_lists.apply(self, db, p)

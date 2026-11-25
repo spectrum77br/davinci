@@ -413,7 +413,7 @@ def apply(erp, db, key, p):
         if not isinstance(raw_category, dict) or set(raw_category) != {"version", "category_id"}:
             raise ERPError("category_fields", "Informe categoria e versão do vínculo.")
         categories.apply(
-            erp, db, "category.assign", {"items": [{"sku": product["sku"], **raw_category}]}
+            erp, db, "category.assign", {"items": [{"sku": product["sku"], **raw_category}]}, key
         )
     db.execute("UPDATE products SET name=? WHERE sku=?", (name, product["sku"]))
     db.execute(
@@ -421,9 +421,12 @@ def apply(erp, db, key, p):
         "price=excluded.price,cost_price=excluded.cost_price",
         (product["sku"], *prices),
     )
-    from app.erp_local import price_table
+    from app.erp_local import price_table, product_actions
 
     actor = db.execute("SELECT actor FROM events WHERE operation_key=?", (key,)).fetchone()
+    product_actions.record_price_change(
+        erp, db, key, product["sku"], price[0] if price else None, prices[0]
+    )
     price_table.record_cost_change(
         erp,
         db,
