@@ -716,7 +716,19 @@ async def test_apagar_a_base_apaga_a_filha_e_base_fora_do_ml_perde_o_catalogo(
         await db.execute(select(PricingAccount).where(PricingAccount.canal == "catalogo"))
     ).first() is None
 
-    await client.patch(f"/api/pricing/accounts/{base.id}", json={"platform": "mercadolivre"})
+    # M-53: voltar para o ML pelo PATCH é recusado (conta do ML só nasce pelo
+    # "+ Adicionar Conta", já com Clássico e Premium).
+    r = await client.patch(
+        f"/api/pricing/accounts/{base.id}",
+        json={"platform": "mercadolivre", "listing_type": "ml classico"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "tipo_obrigatorio"
+
+    # Apagar a base apaga a filha: a base volta ao ML direto no banco e religa.
+    await db.refresh(base)
+    base.platform = PricingPlatform.ML
+    await db.commit()
     assert (await _ligar(client, base.id)).status_code == 200
     assert (await client.delete(f"/api/pricing/accounts/{base.id}")).status_code == 204
     assert (

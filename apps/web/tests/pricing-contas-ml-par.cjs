@@ -562,7 +562,7 @@ function template() {
   assert.ok(celPlat.includes("'ring-1 ring-destructive ring-inset': erroPlataforma?.id === acc.id"))
   // T1: aviso do campo de slot com Clássico e Premium diferentes.
   const slotsTpl = linha.slice(linha.indexOf('v-if="slotPopoverAccountId === acc.id"'), linha.indexOf('saveSlotPopover(acc.id)'))
-  assert.match(slotsTpl, /v-if="slotPopoverDiferentes\[i - 1\]"[\s\S]*?>Clássico e Premium estão diferentes neste campo; salvar grava o mesmo nos dois\.<\/p>/)
+  assert.match(slotsTpl, /v-if="slotPopoverDiferentes\[i - 1\]"[\s\S]*?>Clássico e Premium estão diferentes neste campo; se você mudar, o novo valor vale para os dois\.<\/p>/)
   // Linha de adicionar: Plataforma, Conta; ML mostra a comissão da categoria.
   const add = contas.slice(contas.indexOf('<!-- add row'), contas.indexOf('<!-- data rows grouped'))
   assert.ok(add.indexOf('v-model="newAcc.platform"') < add.indexOf('id="new-acc-name"'))

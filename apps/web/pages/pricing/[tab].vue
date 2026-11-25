@@ -5903,7 +5903,7 @@ watch(department, async () => {
                         v-if="slotPopoverDiferentes[i - 1]"
                         class="pl-14 pt-0.5 text-[10px] leading-snug text-amber-700 dark:text-amber-400"
                         data-aviso-slot-diferente
-                      >Clássico e Premium estão diferentes neste campo; salvar grava o mesmo nos dois.</p>
+                      >Clássico e Premium estão diferentes neste campo; se você mudar, o novo valor vale para os dois.</p>
                     </div>
                   </div>
                   <p v-if="slotPopoverError" class="text-[10px] text-red-600 mt-1.5">{{ slotPopoverError }}</p>
