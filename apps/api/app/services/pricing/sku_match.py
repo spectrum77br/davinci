@@ -12,7 +12,7 @@ the push service to walk that relation efficiently.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Collection, Iterable
 from uuid import UUID
 
 
@@ -170,12 +170,62 @@ def filter_products_by_department(
 # =============================================================================
 
 
+def prefixos_de_ponto(sku: str) -> list[str]:
+    """O SKU e cada pedaço dele cortado num ponto, do mais longo ao mais curto:
+    'uaf001m1.2l' → ['uaf001m1.2l', 'uaf001m1']."""
+    out = [sku]
+    fim = len(sku)
+    while True:
+        fim = sku.rfind(".", 0, fim)
+        if fim <= 0:
+            return out
+        out.append(sku[:fim])
+
+
+def casa_pelo_codigo(
+    sku_principal: str,
+    *,
+    sku_full_set: Collection[str],
+    sku_base_set: Collection[str],
+    skus_outras_linhas: Collection[str] = (),
+) -> bool:
+    """Regra de celular/eletro: o anúncio (lado esquerdo do kit, minúsculo) é
+    desta linha?
+
+    O MAIS ESPECÍFICO VENCE (25/11/2026). Antes casava só pelo código base
+    (parte antes do primeiro ponto), e as 4 linhas do Eletro com o mesmo base
+    — airfryer vidro (uaf001m1.110/.220) e os potes 2,5L/4L/6L (uaf001m1.2l/
+    .4l/.6l) — mandavam preço umas para as variações das outras (Eduardo: "o
+    pote de vidro 2,5 L joga para todos os outros da variação").
+
+    Agora, do SKU inteiro para o código base (cortando nos pontos), o primeiro
+    pedaço que alguma linha do departamento tem POR INTEIRO decide o dono: se
+    é desta linha, casa; se é de outra, não. Nenhum pedaço reivindicado: vale
+    o código base, como sempre — MENOS quando outra linha do departamento tem
+    o mesmo código base (o anúncio é de qual delas? nenhuma manda preço).
+
+    `skus_outras_linhas` = SKUs (minúsculos, inteiros) das OUTRAS linhas do
+    mesmo departamento. Vazio = a regra antiga (só o código base). No celular
+    nenhuma linha divide código base com outra, então nada muda lá.
+    """
+    for pedaco in prefixos_de_ponto(sku_principal):
+        if pedaco in sku_full_set:
+            return True
+        if pedaco in skus_outras_linhas:
+            return False
+    base = sku_principal.split(".", 1)[0]
+    if base not in sku_base_set:
+        return False
+    return not any(o.split(".", 1)[0] == base for o in skus_outras_linhas)
+
+
 def sku_casa_no_departamento(
     sku_do_anuncio: str,
     *,
     dept: str,
     sku_full_set: set[str],
     sku_base_set: set[str],
+    skus_outras_linhas: Collection[str] = (),
 ) -> bool:
     """O SKU vinculado ao anúncio pertence a esta célula da Tabela de Preços?
 
@@ -184,7 +234,8 @@ def sku_casa_no_departamento(
     mesmo com o anúncio vinculado (Eduardo, 16/09/2026, Amazon kfa).
 
     `sku_full_set` são os SKUs da célula inteiros; `sku_base_set`, a parte
-    antes do primeiro ponto. Ambos já em minúsculas.
+    antes do primeiro ponto. Ambos já em minúsculas. `skus_outras_linhas`:
+    ver `casa_pelo_codigo` (só celular/eletro).
     """
     sku = (sku_do_anuncio or "").lower()
     if not sku:
@@ -210,8 +261,13 @@ def sku_casa_no_departamento(
         # casar só por ele empurraria preço pro anúncio errado.
         return sku in sku_full_set or main_sku in sku_full_set
 
-    # celular/eletro: casa pelo SKU base (parte antes do ".")
-    return main_sku.split(".", 1)[0] in sku_base_set
+    # celular/eletro: o mais específico vence; sem disputa, o código base
+    return casa_pelo_codigo(
+        main_sku,
+        sku_full_set=sku_full_set,
+        sku_base_set=sku_base_set,
+        skus_outras_linhas=skus_outras_linhas,
+    )
 
 
 # =============================================================================
