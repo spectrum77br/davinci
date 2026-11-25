@@ -110,7 +110,7 @@ async function setup(overrides={},address='http://127.0.0.1:8765') {
     if(options?.method==='POST')requests.push(JSON.parse(options.body));
     return {ok:true,status:200,json:async()=>options?.method==='POST'?(url.endsWith('/price-preview')?snapshot.price_preview:{replayed:false}):url.includes('/reference/')?{items:[],total:0,offset:0,limit:50}:snapshot};
   };
-  dom.window.eval(fs.readFileSync(path.join(assets,'consulta.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'chrome.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'operations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'fulfillment.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'catalog.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'integrations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'contacts.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'returns.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'deposits.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sellers.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inventory.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-characteristics.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-details.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-list.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'price-lists.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'categories.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'production.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'payment-methods.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'cash-register.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'pos.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'proposals.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sales-form.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'access.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inbound.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'tax-guides.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'companies.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'store-sales.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'app.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'navigation.js'),'utf8'));
+  dom.window.eval(fs.readFileSync(path.join(assets,'consulta.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'chrome.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'operations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'fulfillment.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'catalog.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'integrations.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'contacts.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'returns.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'deposits.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sellers.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inventory.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-characteristics.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-details.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-list.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'xlsx.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'product-stock.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'price-lists.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'categories.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'production.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'payment-methods.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'cash-register.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'pos.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'proposals.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'sales-form.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'access.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'inbound.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'tax-guides.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'companies.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'store-sales.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'app.js'),'utf8')+'\n'+fs.readFileSync(path.join(assets,'navigation.js'),'utf8'));
   await new Promise(r=>setImmediate(r));
   return {dom,requests,document:dom.window.document};
 }
@@ -532,19 +532,6 @@ test('financial list displays the frozen payment method name from a sales order'
   assert.doesNotMatch(d.querySelector('.finance-ledger').textContent,/\[object Object\]/);
 });
 
-test('product category assignment includes only selected SKUs and their link versions',async()=>{
-  const p={sku:'part',name:'Insumo',kind:'simple',components:[],balances:[],category:{version:3}};
-  const {dom,document:d,requests}=await setup({products:[p,{...p,sku:'other'}],categories:[{id:'C1',name:'Linha',path:'Linha',effective_active:true,status:'active',data:{links:[]}}]});
-  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
-  d.querySelector('nav [data-page=products]').click();
-  const selected=d.querySelector('[data-product-select=part]');selected.checked=true;selected.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
-  d.querySelector('[data-open-form=category-assign]').click();
-  const f=d.querySelector('#category-assign');f.querySelector('[name=category_id]').value='C1';
-  f.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
-  assert.deepEqual(requests.map(r=>r.kind),['category.assign']);
-  assert.deepEqual(requests[0].payload.items,[{sku:'part',category_id:'C1',version:3}]);
-});
-
 test('explicit price preview updates unsaved item prices and carries its token when saved',async()=>{
   const l={id:'L1',name:'Dez por cento',status:'active',data:{mode:'percent',scope:'all',action:'discount',value:'10',prices:{}}};
   const {dom,document:d,requests}=await setup({price_lists:[l],price_preview:{token:'frozen-quote-token',prices:{'demo.aparelho':'90.0000'}}});
@@ -573,7 +560,7 @@ test('seller identity and commission policy save together without creating acces
 test('product totals exclude quarantine without hiding its physical balance from stock history',async()=>{
   const p={sku:'part',name:'Produto local',kind:'simple',components:[],price:'10',cost_price:'2',balances:[{depot:'geral',physical:'8',reserved:'0',available:'8',in_total:true},{depot:'quarantine',physical:'5',reserved:'0',available:'5',in_total:false}]};
   const {document:d}=await setup({products:[p]});d.querySelector('nav [data-page=products]').click();
-  const cells=d.querySelector('.product-list tbody tr').querySelectorAll('td');assert.equal(cells[6].textContent,'8');
+  const cells=d.querySelector('.product-list tbody tr').querySelectorAll('td');assert.equal(cells.length,5);assert.equal(cells[4].textContent,'8');
 });
 
 test('quarantine is not offered for new sales while the depot form keeps its physical purpose explicit',async()=>{
@@ -1078,7 +1065,9 @@ async function barPage(lists,products=barRows){
  context.document.querySelector('nav [data-page=products]').click();await new Promise(r=>setTimeout(r,0));
  return context;
 }
-const railCount=d=>d.querySelector('#action-rail .rail-info strong').textContent;
+// M-40: "N produtos · N selecionados" fica no fim da barra (era o painel da direita, que saiu).
+const barCount=d=>d.querySelector('#catalog-search [data-product-count]').textContent.replace('×','').trim();
+const railCount=d=>barCount(d).match(/^([\d.]+) produtos?/)[1].replace(/\./g,'');
 
 test('M-30: one bar — search, Estoque, Tags, Categoria, Situação — and nothing of the old funnel',async()=>{
  const {document:d,asked}=await barPage();
@@ -1150,9 +1139,9 @@ test('M-30: lists from Cadastros › Produtos, live search, selection and closin
  onlyThese(dom,d,'tag',['Sem tag']);assert.deepEqual(listed(d),['v.cat','x.semtag'],'.pi não está mais na lista');
  // Seleção: filtrar limpa a seleção; "todos" marca só os filtrados.
  const all=d.getElementById('products-all');all.checked=true;all.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
- assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^2 selecionados/);
+ assert.match(barCount(d),/· 2 selecionados$/);
  allOf(d,'tag');
- assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^0 selecionados/);
+ assert.match(barCount(d),/· 0 selecionados$/);
  allOf(d,'category');
  // Busca enquanto digita, sem perder o campo.
  const input=d.querySelector('#catalog-search [name=query]');input.focus();input.value='dg105';input.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
@@ -1199,8 +1188,8 @@ test('M-30 revisão: a tag ou categoria nova de Cadastros › Produtos chega sem
 });
 
 test('M-30 revisão: a seleção de várias páginas sai de uma vez pelo × da barra, como antes',async()=>{
- // O "Selecionados: N cadastros ×" morava na linha que o pedido tirou; a seleção continua
- // "funcionando como hoje" (item 9): o × vai para o fim da barra, só quando há seleção.
+ // O × (M-30) ficou junto da contagem "N produtos · N selecionados" do fim da barra (M-40), só
+ // quando há seleção; "Selecionar todos" marca os da página.
  const rows=Array.from({length:150},(_,i)=>({sku:`s${i}.sp`,name:'Produto '+i,kind:'simple',position:i,components:[],price:'1',balances:[{depot:'geral',physical:'1',reserved:'0',available:'1'}],details:{version:0,status:'active'}}));
  const {dom,document:d}=await barPage(null,rows);
  const chip=()=>d.querySelector('#catalog-search [data-product-selection-clear]');
@@ -1209,16 +1198,16 @@ test('M-30 revisão: a seleção de várias páginas sai de uma vez pelo × da b
  all();
  d.querySelector('[data-catalog-offset="100"]').click();
  const one=d.querySelector('[data-product-select]');one.checked=true;one.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
- assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^101 selecionados/);
- assert.equal(chip().closest('.catalog-bar-selection').textContent.replace('×','').trim(),'Selecionados: 101 cadastros');
+ assert.match(barCount(d),/· 101 selecionados$/);
+ assert.equal(barCount(d),'150 produtos · 101 selecionados');
  assert.equal(chip().getAttribute('aria-label'),'Limpar seleção');
  chip().click();
- assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^0 selecionados/);
+ assert.match(barCount(d),/· 0 selecionados$/);
  assert.equal(chip(),null);assert.ok([...d.querySelectorAll('[data-product-select]')].every(i=>!i.checked));
  assert.equal(d.querySelector('[data-product-delete]').disabled,true);
  // Um só: singular.
  const first=d.querySelector('[data-product-select]');first.checked=true;first.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
- assert.equal(chip().closest('.catalog-bar-selection').textContent.replace('×','').trim(),'Selecionados: 1 cadastro');
+ assert.equal(barCount(d),'150 produtos · 1 selecionado');
 });
 
 test('M-30: the example of the request (2.753 products, base of 23/11) counts the same on the bar',async()=>{
@@ -1243,36 +1232,439 @@ test('M-30: the example of the request (2.753 products, base of 23/11) counts th
  assert.deepEqual([counted('tag','.sp'),counted('tag','.pi'),counted('tag','Sem tag')],['639','705','1110']);
 });
 
+// M-40…M-47 (Produtos 2, 25/11/2026): a lista limpa, Excel/Atualizar/Configuração na barra e o
+// estoque do produto à direita, com Incluir e Transferir. Rotas do DaVinci e do ERP respondidas aqui.
+const p2Name='Uranyx F105 12.64 - Preto + cartão 64GB';
+const p2Rows=[
+ {sku:'dg019.ra',name:p2Name,kind:'simple',position:9,components:[],price:'800',balances:[{depot:'geral',physical:'98',reserved:'3',available:'95'}],details:{version:4,status:'active'},category:{id:'c1'}},
+ {sku:'dg019.sp',name:'Uranyx F105 SP',kind:'simple',position:8,components:[],price:'560',balances:[{depot:'geral',physical:'57',reserved:'0',available:'57'}],details:{version:1,status:'active'},category:{id:'c1'}},
+ {sku:'dg019.ci',name:'Uranyx F105 CI',kind:'simple',position:7,components:[],price:'1',balances:[{depot:'geral',physical:'2',reserved:'0',available:'2'}],details:{version:0,status:'inactive'},category:{id:'c1'}},
+ {sku:'dg019.ra+a001.ra',name:'Kit F105',kind:'kit',position:6,components:[{sku:'dg019.ra',quantity:'1'},{sku:'a001.sp',quantity:'1'}],price:'900',balances:[{depot:'geral',physical:'4',reserved:null,available:'4'}],details:{version:0,status:'active'},category:{id:'c2'}},
+ {sku:'dg108.ra',name:'Outro aparelho',kind:'simple',position:5,components:[],price:'10',balances:[{depot:'geral',physical:'1',reserved:'0',available:'1'}],details:{version:0,status:'active'},category:{id:'c1'}},
+ {sku:'dg020.sp',name:'Celular zerado',kind:'simple',position:4,components:[],price:'20',balances:[{depot:'geral',physical:'0',reserved:'0',available:'0'}],details:{version:0,status:'active'},category:{id:'c1'}},
+ {sku:'a001.sp',name:'Mala SP',kind:'simple',position:3,components:[],price:'30',balances:[{depot:'geral',physical:'4',reserved:'0',available:'4'}],details:{version:0,status:'active'},category:{id:'c3'}},
+ {sku:'z2819',name:'Sem tag',kind:'simple',position:2,components:[],price:null,balances:[{depot:'geral',physical:'0',reserved:'0',available:'0'}],details:{version:0,status:'active'}},
+ {sku:'x.serv',name:'Conserto',kind:'service',position:1,components:[],price:'40',balances:[],details:{version:0,status:'active'}},
+ {sku:'e.del.sp',name:'Excluído',kind:'simple',position:10,components:[],price:'1',balances:[],details:{version:3,status:'deleted'},category:{id:'c1'}},
+];
+const p2Categories=[{id:'c1',name:'Celular',path:'Celular',status:'active'},{id:'c2',name:'Celular Kit',path:'Celular Kit',status:'active'},{id:'c3',name:'Mala',path:'Mala',status:'active'}];
+const p2Moves={items:[
+ {created_at:'2026-11-25T00:09:00Z',physical_delta:'0',reserved_delta:'1',reason:'Espelho do Bling',kind:'bling.mirror',depot:'geral',unit_cost:null},
+ {created_at:'2026-11-24T14:44:00Z',physical_delta:'-5',reserved_delta:'-5',reason:'Espelho do Bling',kind:'bling.mirror',depot:'geral',unit_cost:null},
+ {created_at:'2026-11-05T12:00:00Z',physical_delta:'10',reserved_delta:'0',reason:'saldo e reserva de abertura',kind:'catalog.bootstrap',depot:'geral',unit_cost:'5'},
+],total:3,entries:'220',exits:'122',bling:{reserved:'3',available:'95'},sku:'dg019.ra',depot:''};
+const tick=async(n=4)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
+// routes: {caminho: resposta | (corpo, chamada) => resposta}; resposta {status, body} ou Error (sem resposta).
+async function p2Page({products=p2Rows,consulta,routes={}}={}){
+ const context=await setup({products,categories:p2Categories,...(consulta?{consulta}:{})});
+ const {dom}=context,before=dom.window.fetch;context.calls=[];
+ dom.window.fetch=async(url,options={})=>{
+  const u=String(url),call={url:u,path:u.split('?')[0],method:options.method||'GET',headers:options.headers||{},credentials:options.credentials,body:options.body?JSON.parse(options.body):undefined};
+  context.calls.push(call);
+  const route=routes[call.path];
+  if(route){const reply=typeof route==='function'?await route(call.body,call):route;if(reply instanceof Error)throw reply;return {ok:(reply.status||200)<400,status:reply.status||200,json:async()=>reply.body};}
+  if(u==='/api/produto-cadastros/listas')return {ok:false,status:404,json:async()=>({})};
+  return before(url,options);
+ };
+ dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+ context.document.querySelector('nav [data-page=products]').click();await tick();
+ context.pick=sku=>{const box=context.document.querySelector(`[data-product-select="${sku}"]`);box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
+ context.submit=form=>form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+ context.change=(el,value)=>{if(typeof value==='boolean')el.checked=value;else el.value=value;el.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
+ context.called=path=>context.calls.filter(c=>c.path===path);
+ return context;
+}
+const field=(form,name)=>form.querySelector(`[name=${name}]`);
+const cellsOf=row=>[...row.querySelectorAll('th,td')].map(c=>c.textContent.trim());
+
+test('M-40: Produtos list like the Tabela de Preços grid — five columns, nothing of the old rail and tools',async()=>{
+ const {dom,document:d}=await p2Page();
+ assert.equal(d.body.dataset.screen,'products');assert.equal(d.body.dataset.productsTab,'products');
+ assert.equal(d.getElementById('action-rail').innerHTML,'','sem painel da direita');
+ for(const gone of ['.sales-list-tools','[aria-label="Recarregar produtos"]','[data-product-print]','[data-product-density]','.row-logistics','.row-menu','.product-image','.product-price','[data-stock-product]'])assert.equal(d.querySelector(`.product-list ${gone}`),null,gone);
+ const table=d.querySelector('.product-list .p2-split-list table.p2-grid');
+ assert.deepEqual(cellsOf(table.querySelector('thead tr')),['','Descrição','Código','Preço','Estoque']);
+ assert.deepEqual([...table.querySelectorAll('thead th')].map(th=>th.className),['p2-check','','p2-num','p2-num','p2-num']);
+ assert.deepEqual([...table.querySelectorAll('col')].map(c=>c.className),['p2-col-check','','p2-col-code','p2-col-price','p2-col-stock']);
+ const row=d.querySelector('[data-product-select="dg019.ra"]').closest('tr');
+ assert.deepEqual(cellsOf(row),['',p2Name,'dg019.ra','800,00','95']);
+ assert.equal(row.querySelector('.p2-name').dataset.editProduct,'dg019.ra','o nome abre o cadastro');
+ assert.equal(row.querySelector('td:last-child button.p2-stock').dataset.stockSide,'dg019.ra','o número do Estoque é o botão do estoque');
+ // Inativo sem o "Inativo" embaixo do nome; serviço sem botão; sem a frase do rodapé; o paginador fica.
+ assert.deepEqual(cellsOf(d.querySelector('[data-product-select="dg019.ci"]').closest('tr')),['','Uranyx F105 CI','dg019.ci','1,00','2']);
+ assert.equal(d.querySelector('[data-product-select="x.serv"]').closest('tr').querySelector('td:last-child').textContent,'—');
+ assert.equal(d.querySelector('[data-product-select="x.serv"]').closest('tr').querySelector('td:last-child button'),null);
+ assert.doesNotMatch(d.querySelector('.product-list').textContent,/Inativo|Estoque = disponível próprio|Kit virtual · capacidade/);
+ assert.match(d.querySelector('.product-list .reference-pager').textContent,/1–9 de 9/);
+ // A barra: os filtros, Excel, Atualizar, Configuração e, no fim, Selecionar todos, lixeira e contagem.
+ const bar=d.querySelector('#catalog-search');
+ const labels=[...bar.querySelectorAll(':scope > .catalog-bar-filter > button, :scope > button, :scope > .catalog-bar-end > *')].map(b=>b.getAttribute('aria-label')||b.textContent.trim());
+ assert.deepEqual(labels,['Estoque','Tags','Categoria','Situação','Excel','Atualizar','Configuração','Selecionar todos','Excluir selecionados','9 produtos · 0 selecionados']);
+ assert.deepEqual([...bar.querySelectorAll('[data-catalog-menu]')].map(b=>b.dataset.catalogMenu),['stock','tag','category','situation']);
+ assert.ok(bar.querySelector('[data-products-refresh]').classList.contains('catalog-bar-primary'),'Atualizar azul');
+ assert.equal(bar.querySelectorAll('[data-products-refresh] svg').length,1,'Atualizar sem setinha');
+ assert.equal(bar.querySelectorAll('[data-bar-menu=excel] svg').length,2,'Excel: download e setinha');
+ assert.equal(bar.querySelectorAll('[data-bar-menu=config] svg').length,2,'Configuração: engrenagem e setinha');
+ // Selecionar todos marca a página; a contagem acompanha.
+ const all=d.getElementById('products-all');all.checked=true;all.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+ assert.equal(barCount(d),'9 produtos · 9 selecionados');assert.ok(d.getElementById('products-all').checked);
+ // A aba Anúncios: sem o painel; o Atualizar do canto continua lá.
+ d.querySelector('[data-products-view=listings]').click();
+ assert.equal(d.body.dataset.productsTab,'listings');assert.equal(d.getElementById('action-rail').innerHTML,'');
+ d.querySelector('[data-products-view=products]').click();
+ d.querySelector('[data-edit-product="dg019.ra"]').click();
+ assert.equal(d.body.dataset.productEditor,'true');assert.equal(d.body.dataset.productsTab,'');assert.match(d.getElementById('action-rail').textContent,/Cadastro do produto/,'o editor continua com o painel dele');
+});
+
+test('M-41: Atualizar on the bar reads the state again, like the old one in the corner',async()=>{
+ const {document:d,calls}=await p2Page();
+ const states=()=>calls.filter(c=>c.path==='/api/erp-local/state').length,before=states();
+ d.querySelector('#catalog-search [data-products-refresh]').click();await tick();
+ assert.equal(states(),before+1);
+ assert.ok(d.querySelector('#catalog-search'),'a tela continua a mesma');
+});
+
+// O .xlsx é um zip "stored": lê cada parte, confere o CRC32 e devolve as linhas da planilha.
+function readXlsx(bytes){
+ const zlib=require('node:zlib'),view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),files={};
+ let at=0;
+ while(view.getUint32(at,true)===0x04034b50){
+  assert.equal(view.getUint16(at+8,true),0,'stored');
+  const crc=view.getUint32(at+14,true),size=view.getUint32(at+18,true),nameLen=view.getUint16(at+26,true),extra=view.getUint16(at+28,true);
+  const name=Buffer.from(bytes.subarray(at+30,at+30+nameLen)).toString('utf8'),data=Buffer.from(bytes.subarray(at+30+nameLen+extra,at+30+nameLen+extra+size));
+  assert.equal(zlib.crc32(data),crc,`CRC de ${name}`);files[name]=data.toString('utf8');at+=30+nameLen+extra+size;
+ }
+ const end=bytes.length-22;assert.equal(view.getUint32(end,true),0x06054b50,'fim do zip');assert.equal(view.getUint16(end+10,true),Object.keys(files).length);
+ assert.equal(view.getUint32(end+16,true),at,'diretório central logo depois das partes');
+ for(const part of ['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/worksheets/sheet1.xml','xl/styles.xml'])assert.ok(files[part],part);
+ const unxml=t=>t.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&amp;/g,'&');
+ const rows=[...files['xl/worksheets/sheet1.xml'].matchAll(/<row r="(\d+)">(.*?)<\/row>/g)].map(([,,cells])=>{
+  const row=Array(7).fill(null);
+  for(const [,col,attrs,text,num] of cells.matchAll(/<c r="([A-Z]+)\d+"([^>]*)>(?:<is><t[^>]*>(.*?)<\/t><\/is>|<v>(.*?)<\/v>)<\/c>/g)){row[col.charCodeAt(0)-65]=text!==undefined?unxml(text):Number(num);if(num!==undefined)assert.doesNotMatch(attrs,/t="/,'número sem tipo de texto');}
+  return row;
+ });
+ return {files,rows};
+}
+async function excelPage(){
+ const context=await p2Page();const {dom}=context;context.downloads=[];
+ dom.window.URL.createObjectURL=blob=>{context.downloads.push({blob});return 'blob:planilha';};dom.window.URL.revokeObjectURL=()=>{};
+ dom.window.HTMLAnchorElement.prototype.click=function(){context.downloads.at(-1).name=this.download;context.downloads.at(-1).href=this.href;};
+ context.openExcel=()=>{const d=context.document;if(!d.querySelector('[data-bar-menu-box=excel]'))d.querySelector('[data-bar-menu=excel]').click();return d.querySelector('[data-bar-menu-box=excel]');};
+ context.download=async()=>{context.openExcel().querySelector('[data-excel-download]').click();const last=context.downloads.at(-1);return {...last,...readXlsx(new Uint8Array(await last.blob.arrayBuffer()))};};
+ context.only=(key,labels)=>{const box=context.openExcel();box.querySelector(`[data-excel-none="${key}"]`).click();for(const label of labels)context.change([...box.querySelectorAll(`[data-excel-option="${key}"]`)].find(i=>i.closest('label').textContent.trim()===label),true);};
+ return context;
+}
+
+test('M-41: Excel menu opens all checked, and the whole list comes as a real .xlsx with the seven columns',async()=>{
+ const {dom,document:d,openExcel,download,only,change}=await excelPage();
+ const box=openExcel();
+ assert.equal(box.querySelector('.catalog-bar-menu-title').textContent,'Baixar em Excel');
+ assert.equal(box.querySelector('[data-excel-selected]').checked,false);assert.match(box.querySelector('[data-excel-selected]').closest('label').textContent,/Só os itens selecionados \(0\)/);
+ assert.match(box.textContent,/Ou escolha o que baixar:/);assert.match(box.textContent,/Tudo marcado = lista inteira/);
+ assert.deepEqual([...box.querySelectorAll('.catalog-bar-column > strong')].map(s=>s.textContent),['Categoria','Tag','Estoque']);
+ assert.deepEqual([...box.querySelectorAll('[data-excel-column=tag] label')].map(l=>l.textContent.trim()),['.cd','.ci','.pi','.ra','.sa','.sp','Sem tag']);
+ assert.deepEqual([...box.querySelectorAll('[data-excel-column=category] label')].map(l=>l.textContent.trim()),['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit','Sem categoria']);
+ assert.deepEqual([...box.querySelectorAll('[data-excel-column=stock] label')].map(l=>l.textContent.trim()),['Menor que zero','Maior que zero','Igual a zero']);
+ assert.ok([...box.querySelectorAll('[data-excel-option]')].every(i=>i.checked),'tudo marcado ao abrir');
+ assert.equal(box.querySelector('[data-excel-download]').classList.contains('catalog-bar-primary'),true,'Baixar azul');
+ // A escolha não depende dos filtros da tela: com Situação = Ativo na tela, o inativo vem igual.
+ onlyThese(dom,d,'situation',['Ativo']);
+ assert.ok(!listed(d).includes('dg019.ci'));
+ const file=await download();
+ assert.match(file.name,/^produtos-\d{4}-\d{2}-\d{2}\.xlsx$/);
+ assert.equal(file.blob.type,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+ assert.match(file.files['xl/workbook.xml'],/<sheet name="Produtos"/);
+ assert.deepEqual(file.rows[0],['Código','Descrição','Categoria','Tag','Situação','Preço','Estoque']);
+ assert.deepEqual(file.rows.slice(1).map(r=>r[0]),['dg019.ra','dg019.sp','dg019.ci','dg019.ra+a001.ra','dg108.ra','dg020.sp','a001.sp','z2819','x.serv'],'lista inteira, sem o excluído');
+ assert.deepEqual(file.rows[1],['dg019.ra',p2Name,'Celular','.ra','Ativo',800,95]);
+ assert.deepEqual(file.rows[3],['dg019.ci','Uranyx F105 CI','Celular','.ci','Inativo',1,2]);
+ assert.deepEqual(file.rows[8],['z2819','Sem tag',null,null,'Ativo',null,0],'sem categoria, sem tag, sem preço');
+ assert.deepEqual(file.rows[9],['x.serv','Conserto',null,null,'Ativo',40,null],'serviço: Estoque vazio, como o — da lista');
+ assert.equal(d.querySelector('[data-bar-menu-box=excel]'),null,'Baixar fecha o menu');
+ // Reabre sempre com tudo marcado e a caixa dos selecionados desmarcada.
+ only('tag',['.sp']);change(openExcel().querySelector('[data-excel-selected]'),true);
+ assert.ok(openExcel().querySelector('.catalog-bar-columns').classList.contains('is-off'),'com "Só os selecionados", as colunas ficam apagadas');
+ d.body.click();assert.equal(d.querySelector('[data-bar-menu-box=excel]'),null,'clique fora fecha');
+ const box2=openExcel();
+ assert.ok([...box2.querySelectorAll('[data-excel-option]')].every(i=>i.checked)&&!box2.querySelector('[data-excel-selected]').checked,'reabre com tudo marcado');
+});
+
+test('M-41: Excel crosses Categoria + Tag + Estoque, and "Só os itens selecionados" ignores the columns',async()=>{
+ const {document:d,download,only,pick,change,openExcel,downloads}=await excelPage();
+ only('category',['Celular']);only('tag',['.sp']);only('stock',['Maior que zero']);
+ let file=await download();
+ assert.deepEqual(file.rows.slice(1),[['dg019.sp','Uranyx F105 SP','Celular','.sp','Ativo',560,57]],'só celulares .sp com estoque positivo');
+ // Dentro da coluna, qualquer opção marcada.
+ only('category',['Celular','Mala']);only('tag',['.sp']);only('stock',['Maior que zero']);
+ file=await download();assert.deepEqual(file.rows.slice(1).map(r=>r[0]),['dg019.sp','a001.sp']);
+ only('category',['Sem categoria']);file=await download();assert.deepEqual(file.rows.slice(1).map(r=>r[0]),['z2819','x.serv']);
+ // Selecionados: dois marcados na lista, mesmo que as colunas não os pegassem.
+ pick('dg108.ra');pick('z2819');
+ only('tag',['.cd']);change(openExcel().querySelector('[data-excel-selected]'),true);only('tag',['.cd']);
+ assert.match(openExcel().querySelector('[data-excel-selected]').closest('label').textContent,/\(2\)/);
+ file=await download();assert.deepEqual(file.rows.slice(1).map(r=>r[0]),['dg108.ra','z2819']);
+ // Nada atende: avisa e não baixa.
+ const files=downloads.length;only('tag',[]);openExcel().querySelector('[data-excel-download]').click();
+ assert.match(d.getElementById('notice').textContent,/Nenhum produto atende/);assert.equal(downloads.length,files);
+});
+
+test('M-42: the stock number opens the product stock on the right, without leaving the list, and says nothing of Bling',async()=>{
+ const {dom,document:d,calls}=await p2Page({routes:{'/api/erp-local/stock-movements':(_,c)=>({body:{...p2Moves,sku:new URL(c.url,'http://x').searchParams.get('sku')}})}});
+ const side=()=>d.querySelector('.p2-split > .p2-side');
+ assert.equal(side().textContent.trim(),'Clique no estoque de um produto para ver os lançamentos');assert.equal(side().querySelector('table'),null);
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ const moves=calls.filter(c=>c.path==='/api/erp-local/stock-movements');
+ assert.deepEqual(moves.map(c=>c.url),['/api/erp-local/stock-movements?sku=dg019.ra&depot='],'depósito vazio = todos');
+ assert.ok(d.querySelector('.product-list .p2-split-list table'),'a lista continua à esquerda');assert.equal(d.getElementById('stock-query'),null,'não foi para a tela Estoque');
+ assert.equal(d.querySelector('nav [data-page].active').dataset.page,'products');
+ assert.ok(d.querySelector('[data-stock-side="dg019.ra"]').closest('td').classList.contains('is-open'),'contorno azul na célula aberta');
+ assert.equal(d.querySelectorAll('.p2-stock-cell.is-open').length,1);
+ assert.equal(side().querySelector('.p2-side-name').textContent,`dg019.ra - ${p2Name}`);
+ assert.ok(side().querySelector('tr.p2-row-head th .p2-side-name'),'código e nome na linha de 24px');
+ assert.deepEqual([...side().querySelectorAll('.p2-side-actions button')].map(b=>[b.textContent,b.disabled,b.classList.contains('is-primary')]),[['Incluir',false,true],['Transferir',false,false]]);
+ assert.deepEqual([...side().querySelectorAll('.p2-fact')].map(td=>[td.querySelector('span').textContent,td.querySelector('strong').textContent]),[['Entradas','220'],['Saídas','122'],['Saldo atual','98'],['Reservado','3'],['Disponível','95']]);
+ const table=side().querySelector('table.p2-moves');
+ assert.deepEqual(cellsOf(table.querySelector('thead tr')),['Data','Entrada','Saída','Observação']);
+ assert.deepEqual([...table.querySelectorAll('tbody tr')].map(cellsOf),[
+  ['24/11/2026 21:09','—','—','Ajuste automático · Reserva: 1'],
+  ['24/11/2026 11:44','—','5','Ajuste automático · Reserva: -5'],
+  ['05/11/2026 09:00','10','—','saldo e reserva de abertura'],
+ ]);
+ const text=side().textContent+[...side().querySelectorAll('[title]')].map(e=>e.title).join(' ');
+ assert.doesNotMatch(text,/Bling/);
+ for(const gone of [/Preço de Venda|Preço de Compra|Preço de Custo|Origem|Depósito/,/Lançamentos/,/Valores históricos/,/Gerenciar produtos|Saldos por depósito/])assert.doesNotMatch(side().textContent,gone);
+ assert.equal(side().querySelector('select,#stock-depot'),null);
+ // O state de cada minuto (e o Atualizar) não fecha o painel nem perde o produto: relê os lançamentos.
+ await dom.window.eval('refresh()');await tick();
+ assert.equal(side().querySelector('.p2-side-name').textContent,`dg019.ra - ${p2Name}`);
+ assert.equal(calls.filter(c=>c.path==='/api/erp-local/stock-movements').length,2);
+ assert.ok(d.querySelector('[data-stock-side="dg019.ra"]').closest('td').classList.contains('is-open'));
+ // Outro produto troca o da direita; a tela Estoque do menu continua a de antes.
+ d.querySelector('[data-stock-side="dg019.sp"]').click();await tick();
+ assert.equal(side().querySelector('.p2-side-name').textContent,'dg019.sp - Uranyx F105 SP');
+ d.querySelector('nav [data-page=stock]').click();assert.ok(d.getElementById('stock-query'));assert.equal(d.querySelector('.p2-side'),null);
+});
+
+test('M-42/M-43/M-44: kit shows its parts with both buttons off, and a product without another lot cannot transfer',async()=>{
+ const {document:d,calls}=await p2Page({routes:{'/api/erp-local/stock-movements':{body:{...p2Moves,sku:'z2819',items:[]}}}});
+ d.querySelector('[data-stock-side="dg019.ra+a001.ra"]').click();await tick();
+ const side=d.querySelector('.p2-split > .p2-side');
+ assert.equal(calls.filter(c=>c.path==='/api/erp-local/stock-movements').length,0,'kit não tem lançamento próprio');
+ assert.match(side.textContent,/A movimentação ocorre nas peças da composição/);
+ assert.deepEqual([...side.querySelectorAll('table.p2-parts tbody tr')].map(cellsOf),[['dg019.ra','1','Abrir componente'],['a001.sp','1','Abrir componente']]);
+ const [include,transfer]=side.querySelectorAll('.p2-side-actions button');
+ assert.ok(include.disabled&&transfer.disabled);
+ assert.equal(include.closest('.p2-side-tip').title,'Kit não tem estoque próprio: inclua nas peças');
+ assert.equal(transfer.closest('.p2-side-tip').title,'Kit não tem estoque próprio: transfira as peças');
+ include.click();transfer.click();assert.equal(d.querySelector('dialog'),null);
+ side.querySelector('[data-stock-side="a001.sp"]').click();await tick();
+ assert.equal(d.querySelector('.p2-side .p2-side-name').textContent,'a001.sp - Mala SP','o componente abre do lado');
+ d.querySelector('[data-stock-side="z2819"]').click();await tick();
+ const [inc,tra]=d.querySelectorAll('.p2-side .p2-side-actions button');
+ assert.equal(inc.disabled,false);assert.equal(tra.disabled,true);
+ assert.equal(tra.closest('.p2-side-tip').title,'Não há outro lote deste produto');
+ assert.match(d.querySelector('.p2-side table.p2-moves tbody').textContent,/Nenhum lançamento para este produto/);
+});
+
+test('M-43: Incluir posts the entry to DaVinci with an Idempotency-Key, kept only when the same send is repeated',async()=>{
+ let fail=true;const replies=[];
+ const {dom,document:d,calls,submit}=await p2Page({routes:{
+  '/api/erp-local/stock-movements':{body:p2Moves},
+  '/api/estoque/entradas':body=>{if(fail){fail=false;return new Error('rede');}replies.push(body);return replies.length===3?{status:422,body:{detail:{code:'kit',message:'Kit não tem estoque próprio: inclua nas peças'}}}:{body:{id:'e1',sku:body.sku,quantidade:body.quantidade,estado:replies.length===1?'ok':'pendente',texto:'Lançando no Bling…'}};},
+ }});
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ d.querySelector('.p2-side [data-stock-include]').click();
+ const dialog=d.getElementById('p2-include-dialog');assert.ok(dialog);assert.equal(dialog.getAttribute('role'),'dialog');
+ assert.equal(dialog.querySelector('h2').textContent,'Incluir estoque');
+ assert.equal(dialog.querySelector('.p2-dialog-info').textContent,`dg019.ra - ${p2Name} · saldo atual 98`);
+ assert.deepEqual([...dialog.querySelectorAll('label')].map(l=>l.firstChild.textContent),['Quantidade','Observação']);
+ assert.deepEqual([...dialog.querySelectorAll('.form-footer button')].map(b=>b.textContent),['Cancelar','Incluir']);
+ const form=dialog.querySelector('form'),posts=()=>calls.filter(c=>c.path==='/api/estoque/entradas');
+ for(const bad of ['0','-2','1.5',''])
+ {field(form,'quantidade').value=bad;submit(form);await tick();assert.equal(posts().length,0,bad);assert.match(form.querySelector('.p2-dialog-error').textContent,/inteira maior que zero/);}
+ field(form,'quantidade').value='10';field(form,'observacao').value='entrada de mercadoria';
+ submit(form);await tick();
+ assert.equal(posts().length,1);assert.match(form.querySelector('.p2-dialog-error').textContent,/Sem resposta do DaVinci/);assert.ok(d.getElementById('p2-include-dialog'),'a janela fica para repetir');
+ const states=calls.filter(c=>c.path==='/api/erp-local/state').length,history=calls.filter(c=>c.path==='/api/erp-local/stock-movements').length;
+ submit(form);await tick(8);
+ const [first,second]=posts();
+ for(const c of [first,second]){assert.equal(c.method,'POST');assert.equal(c.credentials,'same-origin');assert.equal(c.headers['Content-Type'],'application/json');assert.deepEqual(c.body,{sku:'dg019.ra',quantidade:10,observacao:'entrada de mercadoria'});}
+ assert.match(first.headers['Idempotency-Key'],/^[0-9a-f-]{36}$/);
+ assert.equal(second.headers['Idempotency-Key'],first.headers['Idempotency-Key'],'o mesmo envio repetido leva a mesma chave');
+ assert.equal(d.getElementById('p2-include-dialog'),null);
+ assert.equal(d.getElementById('notice').textContent,'Entrada lançada. O saldo atualiza em alguns minutos.');
+ assert.equal(calls.filter(c=>c.path==='/api/erp-local/state').length,states+1,'relê o state');
+ assert.equal(calls.filter(c=>c.path==='/api/erp-local/stock-movements').length,history+1,'e os lançamentos do painel');
+ // Um novo envio igual, de propósito, é outro lançamento: outra chave. Estado pendente mostra o texto.
+ d.querySelector('.p2-side [data-stock-include]').click();let again=d.querySelector('#p2-include-form');field(again,'quantidade').value='10';field(again,'observacao').value='entrada de mercadoria';submit(again);await tick(8);
+ assert.notEqual(posts()[2].headers['Idempotency-Key'],first.headers['Idempotency-Key']);
+ assert.equal(d.getElementById('notice').textContent,'Lançando no Bling…');
+ // Recusa do servidor: a mensagem dele, na janela.
+ d.querySelector('.p2-side [data-stock-include]').click();again=d.querySelector('#p2-include-form');field(again,'quantidade').value='3';field(again,'observacao').value='';submit(again);await tick(8);
+ assert.equal(posts()[3].body.observacao,null);
+ assert.equal(again.querySelector('.p2-dialog-error').textContent,'Kit não tem estoque próprio: inclua nas peças');
+ assert.ok(dom.window.document.getElementById('p2-include-dialog'));
+});
+
+test('M-44: Transferir lists only lots of the same number, checks first and posts with mesma_numeracao',async()=>{
+ let refuse=false;
+ const {document:d,calls,submit}=await p2Page({routes:{
+  '/api/erp-local/stock-movements':{body:p2Moves},
+  '/api/estoque/transferencias/conferir':body=>({body:{linhas:body.linhas.map(l=>({...l,erros:refuse?['dg019.ra → dg019.sp: as tags precisam ser diferentes']:[]}))}}),
+  '/api/estoque/transferencias':body=>({body:{id:'t1',numero:7,estado:'andamento',observacao:body.observacao,linhas:[{texto:'Saiu 10 de dg019.ra; entrando em dg019.sp…'}]}}),
+ }});
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ d.querySelector('.p2-side [data-stock-transfer]').click();
+ const dialog=d.getElementById('p2-transfer-dialog');assert.equal(dialog.querySelector('h2').textContent,'Transferir estoque');
+ assert.match(dialog.textContent,/Só entre produtos simples com a mesma numeração e tag diferente\./);
+ assert.equal(dialog.querySelector('.p2-dialog-fixed').textContent,'Dedg019.ra · disponível 95');
+ // Nem o inativo (dg019.ci), nem o kit, nem outra numeração (dg108.ra), nem o próprio.
+ assert.deepEqual([...dialog.querySelectorAll('[name=destino] option')].map(o=>[o.value,o.textContent]),[['dg019.sp','dg019.sp · saldo 57']]);
+ assert.deepEqual([...dialog.querySelectorAll('.form-footer button')].map(b=>b.textContent),['Cancelar','Transferir']);
+ const form=dialog.querySelector('form'),checks=()=>calls.filter(c=>c.path==='/api/estoque/transferencias/conferir'),posts=()=>calls.filter(c=>c.path==='/api/estoque/transferencias');
+ field(form,'quantidade').value='96';submit(form);await tick();
+ assert.equal(checks().length,0);assert.match(form.querySelector('.p2-dialog-error').textContent,/passa do disponível \(95\)/);
+ refuse=true;field(form,'quantidade').value='10';submit(form);await tick(8);
+ assert.equal(checks().length,1);assert.equal(posts().length,0,'conferência recusou: nada lançado');
+ assert.equal(form.querySelector('.p2-dialog-error').textContent,'dg019.ra → dg019.sp: as tags precisam ser diferentes');
+ refuse=false;field(form,'observacao').value='troca de lote';submit(form);await tick(10);
+ const linhas=[{origem:'dg019.ra',destino:'dg019.sp',quantidade:10}];
+ assert.deepEqual(checks()[1].body,{linhas,mesma_numeracao:true});assert.equal(checks()[1].headers['Idempotency-Key'],undefined);
+ assert.equal(posts().length,1);
+ const sent=posts()[0];
+ assert.deepEqual(sent.body,{linhas,observacao:'troca de lote',mesma_numeracao:true});
+ assert.match(sent.headers['Idempotency-Key'],/^[0-9a-f-]{36}$/);assert.equal(sent.credentials,'same-origin');
+ assert.ok(calls.indexOf(checks()[1])<calls.indexOf(sent),'confere antes de lançar');
+ assert.equal(d.getElementById('p2-transfer-dialog'),null);
+ assert.equal(d.getElementById('notice').textContent,'Transferência lançada. Os saldos atualizam em alguns minutos.');
+ assert.ok(calls.slice(calls.indexOf(sent)).some(c=>c.path==='/api/erp-local/state'),'relê o state depois');
+});
+
+test('M-45/M-46/M-47: Configuração applies category, then price, then the tag after the preview, on the right routes',async()=>{
+ const confirms=[];
+ const {dom,document:d,calls,pick,change}=await p2Page({routes:{
+  '/api/erp-local/catalog/bulk-category':body=>({body:{changed:body.skus.length,skipped:[],message:`Categoria alterada em ${body.skus.length} produtos`}}),
+  '/api/erp-local/catalog/bulk-price':body=>({body:{changed:body.skus.length,changes:[],replayed:false}}),
+  '/api/produtos/trocar-tag/previa':()=>({body:{itens:[{sku:'dg019.ra',novo:'dg019.sa',acao:'alterar',motivo:null},{sku:'z2819',novo:'z2819.sa',acao:'alterar',motivo:null},{sku:'dg019.sp',novo:'dg019.sa',acao:'pular',motivo:'já existe: use Transferir no estoque'}],alterar:2,pular:1}}),
+  '/api/produtos/trocar-tag':()=>({body:{itens:[{sku:'dg019.ra',novo:'dg019.sa',estado:'ok',motivo:null},{sku:'z2819',novo:'z2819.sa',estado:'falhou',motivo:'Bling recusou'},{sku:'dg019.sp',novo:'dg019.sa',estado:'pulado',motivo:'já existe: use Transferir no estoque'}],ok:1,pulado:1,falhou:1}}),
+ }});
+ dom.window.confirm=text=>{confirms.push(text);return true;};
+ const open=()=>{if(!d.querySelector('[data-bar-menu-box=config]'))d.querySelector('[data-bar-menu=config]').click();return d.querySelector('[data-bar-menu-box=config]');};
+ // Sem seleção: subtítulo pede seleção e o Aplicar fica desligado.
+ let box=open();
+ assert.equal(box.querySelector('.catalog-bar-menu-title').textContent,'Alterar em massa');
+ assert.equal(box.querySelector('[data-bulk-count]').textContent,'Selecione itens na lista');
+ assert.equal(box.querySelector('[data-bulk-apply]').disabled,true);
+ assert.deepEqual([...box.querySelectorAll('.catalog-bar-bulk > label')].map(l=>l.textContent.trim()),['Categoria','Tag','Preço']);
+ assert.ok([...box.querySelectorAll('[data-bulk-on]')].every(i=>!i.checked),'abre sem nada marcado');
+ assert.deepEqual([...box.querySelectorAll('[data-bulk-field="category.value"] option')].map(o=>o.textContent),['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit']);
+ assert.deepEqual([...box.querySelectorAll('[data-bulk-field="tag.value"] option')].map(o=>o.textContent),['.cd','.ci','.pi','.ra','.sa','.sp']);
+ assert.deepEqual([...box.querySelectorAll('[data-bulk-field="price.action"] option')].map(o=>o.textContent),['Novo preço','Acrescer','Descontar']);
+ assert.equal(box.querySelector('[data-bulk-field="price.mode"]').disabled,true,'Novo preço é sempre R$');
+ assert.match(box.textContent,/Só muda o que estiver marcado\. Vale para todos os itens selecionados\./);
+ d.body.click();assert.equal(d.querySelector('[data-bar-menu-box=config]'),null);
+ pick('dg019.ra');pick('z2819');pick('dg019.sp');
+ box=open();
+ assert.equal(box.querySelector('[data-bulk-count]').textContent,'3 itens selecionados');
+ assert.equal(box.querySelector('[data-bulk-apply]').textContent,'Aplicar aos 3 itens');assert.equal(box.querySelector('[data-bulk-apply]').disabled,false);
+ change(box.querySelector('[data-bulk-on=category]'),true);change(box.querySelector('[data-bulk-field="category.value"]'),'Celular');
+ change(box.querySelector('[data-bulk-on=tag]'),true);change(box.querySelector('[data-bulk-field="tag.value"]'),'.sa');
+ change(box.querySelector('[data-bulk-on=price]'),true);change(box.querySelector('[data-bulk-field="price.action"]'),'decrease');
+ assert.equal(box.querySelector('[data-bulk-field="price.mode"]').disabled,false);
+ change(box.querySelector('[data-bulk-field="price.mode"]'),'percent');
+ const amount=box.querySelector('[data-bulk-field="price.amount"]');amount.value='10';amount.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+ // Um redesenho (o state de cada minuto) não perde o que foi escolhido.
+ dom.window.eval('render()');box=open();
+ assert.ok(box.querySelector('[data-bulk-on=price]').checked);assert.equal(box.querySelector('[data-bulk-field="price.amount"]').value,'10');assert.equal(box.querySelector('[data-bulk-field="price.mode"]').value,'percent');
+ const start=calls.length;
+ box.querySelector('[data-bulk-apply]').click();await tick(12);
+ assert.deepEqual(confirms,['Alterar o preço de 3 produtos?']);
+ const mine=calls.slice(start).filter(c=>c.method==='POST'||c.path==='/api/erp-local/state').map(c=>c.path);
+ assert.deepEqual(mine,['/api/erp-local/catalog/bulk-category','/api/erp-local/catalog/bulk-price','/api/erp-local/state','/api/produtos/trocar-tag/previa'],'categoria, preço, lista de novo, e a prévia da tag antes de trocar');
+ const [category,price,,preview]=calls.slice(start).filter(c=>c.method==='POST'||c.path==='/api/erp-local/state');
+ assert.equal(category.headers['X-ERP-Local'],'1');assert.deepEqual(category.body,{skus:['dg019.ra','z2819','dg019.sp'],category:'Celular'});
+ assert.equal(price.headers['X-ERP-Local'],'1');assert.match(price.body.operation_key,/^[0-9a-f-]{36}$/);
+ assert.deepEqual({...price.body,operation_key:'k'},{skus:['dg019.ra','z2819','dg019.sp'],action:'decrease',mode:'percent',amount:'10',operation_key:'k'});
+ assert.equal(preview.credentials,'same-origin');assert.deepEqual(preview.body,{skus:['dg019.ra','z2819','dg019.sp'],tag:'.sa'});
+ assert.equal(calls.filter(c=>c.path==='/api/produtos/trocar-tag').length,0,'nada trocado antes da confirmação');
+ const dialog=d.getElementById('p2-tag-dialog');
+ assert.equal(dialog.querySelector('.p2-tag-summary').textContent,'2 serão alterados, 1 será pulado');
+ assert.deepEqual([...dialog.querySelectorAll('.p2-tag-list li')].map(li=>li.textContent),['dg019.ra → dg019.sa','z2819 → z2819.sa','dg019.sp → dg019.sa pulado: já existe: use Transferir no estoque']);
+ assert.equal(d.getElementById('notice').textContent,'Categoria alterada em 3 produtos · Preço alterado em 3 produtos');
+ dialog.querySelector('[data-tag-confirm]').click();await tick(8);
+ const swap=calls.filter(c=>c.path==='/api/produtos/trocar-tag');
+ assert.equal(swap.length,1);assert.deepEqual(swap[0].body,{skus:['dg019.ra','z2819','dg019.sp'],tag:'.sa'});assert.match(swap[0].headers['Idempotency-Key'],/^[0-9a-f-]{36}$/);
+ assert.equal(dialog.querySelector('h2').textContent,'Resultado da troca de tag');
+ assert.deepEqual([...dialog.querySelectorAll('.p2-tag-list li')].map(li=>li.textContent),['dg019.ra → dg019.sa — trocado','z2819 → z2819.sa — falhou: Bling recusou','dg019.sp → dg019.sa — pulado: já existe: use Transferir no estoque']);
+ assert.equal(dialog.querySelector('.p2-tag-warning').textContent,'A lista de Produtos 2 leva até ~1 hora para mostrar o código novo.');
+ const states=calls.filter(c=>c.path==='/api/erp-local/state').length;
+ dialog.querySelector('[data-tag-close]').click();await tick(6);
+ assert.equal(d.getElementById('p2-tag-dialog'),null);
+ assert.equal(calls.filter(c=>c.path==='/api/erp-local/state').length,states+1,'lista e filtros de novo no fim');
+ assert.equal(d.getElementById('notice').textContent,'Categoria alterada em 3 produtos · Preço alterado em 3 produtos');
+});
+
+test('M-45/M-47: price asks first (cancel sends nothing), Novo preço goes in R$, and a refusal says what already changed',async()=>{
+ let answer=false;
+ const {dom,document:d,calls,pick,change}=await p2Page({routes:{
+  '/api/erp-local/catalog/bulk-category':{status:422,body:{code:'category_unknown',message:'Categoria não existe: Nova'}},
+  '/api/erp-local/catalog/bulk-price':{body:{changed:2,changes:[{sku:'dg019.ra',from:'800.00',to:'1234.56'}],replayed:false}},
+ }});
+ dom.window.confirm=()=>answer;
+ pick('dg019.ra');pick('dg019.sp');
+ d.querySelector('[data-bar-menu=config]').click();let box=d.querySelector('[data-bar-menu-box=config]');
+ change(box.querySelector('[data-bulk-on=price]'),true);
+ const amount=box.querySelector('[data-bulk-field="price.amount"]');amount.value='1.234,56';amount.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+ box.querySelector('[data-bulk-apply]').click();await tick();
+ assert.equal(calls.filter(c=>c.method==='POST').length,0,'cancelou: nada enviado');
+ answer=true;box=d.querySelector('[data-bar-menu-box=config]');box.querySelector('[data-bulk-apply]').click();await tick(8);
+ const price=calls.find(c=>c.path==='/api/erp-local/catalog/bulk-price');
+ assert.deepEqual({...price.body,operation_key:'k'},{skus:['dg019.ra','dg019.sp'],action:'set',mode:'value',amount:'1234.56',operation_key:'k'});
+ assert.equal(d.getElementById('notice').textContent,'Preço alterado em 2 produtos');
+ // Sem nada marcado ou sem valor: avisa e não envia.
+ const before=calls.length;
+ d.querySelector('[data-bar-menu=config]').click();box=d.querySelector('[data-bar-menu-box=config]');
+ box.querySelector('[data-bulk-apply]').click();assert.equal(d.getElementById('notice').textContent,'Marque Categoria, Tag ou Preço.');
+ change(box.querySelector('[data-bulk-on=price]'),true);change(box.querySelector('[data-bulk-field="price.action"]'),'increase');box.querySelector('[data-bulk-apply]').click();
+ assert.match(d.getElementById('notice').textContent,/Informe o valor do preço/);
+ assert.equal(calls.slice(before).filter(c=>c.method==='POST').length,0);
+ // O servidor recusa a categoria: a mensagem dele, e o preço não segue.
+ change(box.querySelector('[data-bulk-on=price]'),false);change(box.querySelector('[data-bulk-on=category]'),true);
+ box.querySelector('[data-bulk-apply]').click();await tick(6);
+ assert.equal(d.getElementById('notice').textContent,'Categoria não existe: Nova');assert.ok(d.getElementById('notice').classList.contains('error'));
+});
+
+test('M-45/M-47: in consulta only the two bulk routes leave the screen; every other ERP write stays refused',async()=>{
+ const consulta={active:true,reason:'automático',message:'Modo consulta.',read_posts:['/api/erp-local/price-preview'],writes:['/api/erp-local/catalog/bulk-category','/api/erp-local/catalog/bulk-price']};
+ const {dom}=await setup({consulta});
+ assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/catalog/bulk-category'),false);
+ assert.equal(dom.window.erpConsultaRefuses('POST','/erp/api/erp-local/catalog/bulk-price'),false);
+ assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/commands'),true);
+ assert.equal(dom.window.erpConsultaRefuses('POST','/api/erp-local/catalog/bulk-price-x'),true);
+ assert.equal(dom.window.erpConsultaRefuses('POST','/api/estoque/entradas'),false,'rotas do DaVinci não passam pela trava do ERP');
+ const old=await setup({consulta:{...consulta,writes:undefined}});
+ assert.equal(old.dom.window.erpConsultaRefuses('POST','/api/erp-local/catalog/bulk-price'),true,'sem a liberação do servidor, continua recusado');
+});
+
 test('product list keeps the low-stock hint and leaves deleted products out',async()=>{
  const {document:d}=await catalogPage();
  assert.deepEqual(listed(d),['d.serv','c.kit','b.zero','a.ativo']);
  assert.match(d.querySelector('tr td small.stock-low')?.textContent||d.querySelector('.stock-low').textContent,/Abaixo do mínimo/);
 });
 
-test('batch dialogs send only selected products and removal waits for confirmation',async()=>{
+test('M-40: the bar trash sends only the selected products, after confirmation',async()=>{
+ // Mudar situação e Incluir tags (do Mais ações) saíram com o painel da direita; a lixeira
+ // "Excluir selecionados" passou da linha de ferramentas para o fim da barra.
  const {dom,document:d,requests}=await catalogPage();
  const pick=sku=>{const box=d.querySelector(`[data-product-select="${sku}"]`);box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
- pick('a.ativo');pick('b.zero');
- assert.match(d.querySelector('#action-rail .rail-info small').textContent,/^2 selecionados/);
- d.querySelector('[data-product-status-batch]').click();
- const status=d.querySelector('#product-status-form');status.querySelector('[name=status]').value='inactive';status.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
- assert.equal(requests[0].kind,'product.batch');assert.deepEqual(requests[0].payload,{items:[{sku:'a.ativo',version:1},{sku:'b.zero',version:0}],status:'inactive'});
- pick('b.zero');d.querySelector('[data-product-tags-batch]').click();
- const tags=d.querySelector('#product-tags-form');tags.querySelector('[name=tags]').value='Azul, Mala ,';tags.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
- assert.deepEqual(requests[1].payload.add_tags,['Azul','Mala']);
- pick('b.zero');d.querySelector('[data-product-delete]').click();assert.equal(requests.length,2);
- d.querySelector('#product-delete-form [data-dialog-close]').click();assert.equal(requests.length,2);assert.equal(d.querySelector('#product-delete-form'),null);
- d.querySelector('[data-product-delete]').click();d.querySelector('#product-delete-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
- assert.equal(requests[2].kind,'product.delete');assert.deepEqual(requests[2].payload.items,[{sku:'b.zero',version:0}]);
-});
-
-test('price adjustment applies to filtered or selected rows and never offers publication',async()=>{
- const {dom,document:d,requests}=await catalogPage();
- searchFor(dom,d,'mala azul');
- d.querySelector('[data-price-adjust-open]').click();
- const form=d.querySelector('#price-adjust');assert.equal(form.querySelector('[name=scope][value=selected]').disabled,true);assert.equal(form.querySelector('.price-adjust-actions [disabled]').textContent,'Sincronizar com loja virtual');
- form.querySelector('[name=amount]').value='12.5';form.querySelector('[name=mode]').value='percent';form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
- assert.deepEqual(requests[0],{...requests[0],kind:'product.price_adjust'});assert.deepEqual(requests[0].payload,{items:[{sku:'a.ativo',version:1}],action:'increase',mode:'percent',amount:'12.5'});
+ const trash=()=>d.querySelector('#catalog-search [data-product-delete]');
+ assert.equal(trash().disabled,true);assert.equal(trash().getAttribute('aria-label'),'Excluir selecionados');
+ for(const gone of ['[data-product-status-batch]','[data-product-tags-batch]','[data-price-adjust-open]','[data-product-clone]','#price-adjust','[data-product-density]','[data-product-print]'])assert.equal(d.querySelector(gone),null,gone);
+ pick('b.zero');assert.match(barCount(d),/· 1 selecionado$/);
+ trash().click();assert.equal(requests.length,0);
+ d.querySelector('#product-delete-form [data-dialog-close]').click();assert.equal(requests.length,0);assert.equal(d.querySelector('#product-delete-form'),null);
+ trash().click();d.querySelector('#product-delete-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+ assert.equal(requests[0].kind,'product.delete');assert.deepEqual(requests[0].payload.items,[{sku:'b.zero',version:0}]);
 });
 
 test('service forms hide stock and physical blocks but keep values, and deleted products stay out',async()=>{
@@ -1288,13 +1680,6 @@ test('service forms hide stock and physical blocks but keep values, and deleted 
  d.querySelector('#product-edit-cancel')?.click();
  // M-30: "Excluídos" saiu da Situação; o excluído nunca aparece na lista.
  assert.equal(d.querySelector('[data-product-select="e.del"]'),null);assert.equal(d.querySelector('[data-product-restore]'),null);
-});
-
-test('clone keeps the typed code and opens the new register after confirmation',async()=>{
- const {dom,document:d,requests}=await catalogPage();
- d.querySelector('[data-product-clone="a.ativo"]').click();
- const form=d.querySelector('#product-clone-form');assert.equal(form.querySelector('[name=name]').value,'Mala azul');form.querySelector('[name=new_sku]').value='a.copia';form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
- assert.equal(requests[0].kind,'product.clone');assert.deepEqual(requests[0].payload,{sku:'a.ativo',new_sku:'a.copia',name:'Mala azul'});
 });
 
 test('invoice screen lists blockers from the API and never offers production',async()=>{
@@ -1636,8 +2021,11 @@ test('homologation turns on stock and price sync and links the full list',async(
   const would=[{at:'2026-11-11T13:00:00+00:00',action:'stock',name:'Estoque nos anúncios',target:'Todos os anúncios',detail:{would:'Mandaria o estoque do ERP a 2 anúncios.'}}];
   const {document:d}=await setup({homolog:{started_at:'2026-11-10T18:13:20+00:00'},would});
   d.querySelector('nav [data-page=products]').click();
-  const stock=d.querySelector('[data-homolog-sync="stock"]'),price=d.querySelector('[data-homolog-sync="price"]');
-  assert.ok(stock&&price);assert.equal(stock.disabled,false);
+  // M-40: o painel da direita (com os dois Sincronizar) saiu; o do estoque segue na aba Anúncios.
+  assert.equal(d.querySelector('[data-homolog-sync="price"]'),null);
+  d.querySelector('[data-products-view=listings]').click();await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  const stock=d.querySelector('[data-homolog-sync="stock"]');
+  assert.ok(stock);assert.equal(stock.disabled,false);
   d.querySelector('nav [data-page=overview]').click();
   assert.ok(d.querySelector('a[href="/api/erp-local/homolog/plans/stock.csv"]'));
 });
@@ -1762,7 +2150,7 @@ test('M-28: Produtos 2 (embed) marks the screen from the first paint; Pedidos 2 
   // Antes do primeiro desenho (sem o state ainda), para a faixa não piscar.
   const dom=new JSDOM(fs.readFileSync(path.join(assets,'index.html'),'utf8'),{url:'http://127.0.0.1:8765/erp?embed=1#products',runScripts:'outside-only'});activeDOMs.add(dom);
   dom.window.fetch=()=>new Promise(()=>{});
-  dom.window.eval(['consulta.js','chrome.js','operations.js','fulfillment.js','catalog.js','integrations.js','contacts.js','returns.js','deposits.js','sellers.js','inventory.js','product-characteristics.js','product-details.js','product-list.js','price-lists.js','categories.js','production.js','payment-methods.js','cash-register.js','pos.js','proposals.js','sales-form.js','access.js','inbound.js','tax-guides.js','companies.js','store-sales.js','app.js','navigation.js'].filter(f=>fs.existsSync(path.join(assets,f))).map(f=>fs.readFileSync(path.join(assets,f),'utf8')).join('\n'));
+  dom.window.eval(['consulta.js','chrome.js','operations.js','fulfillment.js','catalog.js','integrations.js','contacts.js','returns.js','deposits.js','sellers.js','inventory.js','product-characteristics.js','product-details.js','product-list.js','xlsx.js','product-stock.js','price-lists.js','categories.js','production.js','payment-methods.js','cash-register.js','pos.js','proposals.js','sales-form.js','access.js','inbound.js','tax-guides.js','companies.js','store-sales.js','app.js','navigation.js'].filter(f=>fs.existsSync(path.join(assets,f))).map(f=>fs.readFileSync(path.join(assets,f),'utf8')).join('\n'));
   assert.equal(dom.window.document.body.dataset.screen,'products');
   const {document:d}=await setup({consulta},'http://127.0.0.1:8765/erp?embed=1#products');
   assert.equal(d.body.dataset.screen,'products');assert.ok(d.body.classList.contains('embedded'));

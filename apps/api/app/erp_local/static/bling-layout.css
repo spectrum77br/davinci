@@ -6,8 +6,8 @@ body{background:#f7f9fb}.ui-icon{display:inline-block;flex:none;vertical-align:m
 @media(min-width:1650px){.sales-list th:nth-child(3){width:25%}.sales-search{max-width:430px}}@media(max-width:1250px){.sidebar{width:180px}.workspace{margin-left:180px;width:calc(100% - 180px)}#action-rail{width:180px;padding:12px}.workspace header{padding-right:205px}#content{padding-right:204px}.sales-toolbar{flex-wrap:wrap}.date-picker summary{font-size:9px}.top-context{display:none}.sales-list{overflow-x:auto}.sales-list .table-wrap{overflow-x:auto}.own-ledger-caption{display:none}#notice{margin-right:204px}}@media(max-width:900px){.sidebar{width:165px}.workspace{margin-left:165px;width:calc(100% - 165px)}#action-rail{position:static;width:auto;display:block;margin:0 12px 16px}.workspace header{padding-right:14px}#content{padding:0 12px 20px}.erp-topbar{padding:0 10px;gap:10px}.top-menus{gap:12px}.top-menus button{font-size:11px}.top-tools{margin-left:auto;gap:8px}.rail-actions{flex-direction:row;flex-wrap:wrap;gap:10px}.rail-action{width:auto;max-width:180px;border:0;padding:8px;font-size:10px}.rail-primary{width:auto;min-width:160px}.rail-info{display:none}footer{padding-right:12px}#notice{margin-right:12px}.forms{grid-template-columns:repeat(2,minmax(0,1fr))}.sales-toolbar .toolbar-spacer{display:none}}
 @media print{.sidebar,.erp-topbar,.environment,header,#action-rail,footer,.creation-panel,.icon-button,.row-menu,.sales-list-tools,.reference-pager,.form-footer{display:none!important}.workspace{margin:0;width:100%}#content{padding:0}.panel{page-break-inside:avoid}.sales-list table{min-width:0}.sales-filter-options,.filter-caption,.sales-toolbar{display:none!important}body{background:white}}
 #quick-search{display:flex;align-items:center;margin:auto;background:#f7f9fb;border-radius:7px;width:400px;height:30px;max-width:30%}#quick-search input{border:0;background:none;min-height:28px;width:100%;font-size:12px;color:#7d91b0}#quick-search input::placeholder{color:#8a9ab1}#quick-search button{background:none;color:#8a9ab1;font-size:20px;padding:1px 8px}#header-store{color:#2b60dc;border:0;border-left:1px solid #cdd8e8;border-radius:0;font-size:14px;font-weight:600;background:none;margin-left:12px;padding:0 10px;min-height:25px;max-width:300px;vertical-align:middle;letter-spacing:0}header h1{display:flex;align-items:center}header h1:before{white-space:nowrap}@media(max-width:1250px){#header-store{font-size:12px;max-width:200px}#quick-search{width:260px;max-width:27%}}@media(max-width:900px){#quick-search{display:none}#header-store{font-size:11px;max-width:160px}}
-.product-list .table-wrap{overflow:visible}.product-list th:nth-child(2){width:70px}.product-list td{height:68px}.product-list th:nth-child(3){width:45%}.product-list th:nth-child(4){width:17%}.product-image{width:47px;height:47px;display:grid;place-items:center;border:1px solid #ccd5e2;border-radius:4px;color:#9ca3af}.product-image .ui-icon{width:21px;height:21px}.product-price{font-weight:600;color:#285be7}.product-list td:nth-child(4){overflow-wrap:anywhere;max-width:220px}.rail-action{text-decoration:none}.native-empty{text-align:center;padding:110px 20px 160px}.native-empty>.ui-icon{width:58px;height:58px;color:#8f9cac;stroke-width:1.4}.native-empty h3{font-size:16px;margin:20px 0 12px;color:#4c5b70}.native-empty p{font-size:12px;color:#5b6c84}.stock-product-heading{padding:16px 0 10px;font-size:14px;color:#4e5f77}.stock-product-heading small{display:block;margin-top:5px;font-size:11px;color:#8391a8}.stock-totals{display:flex;gap:40px;padding:12px 0;color:#8a9ab1;font-size:11px}.stock-totals strong{display:block;font-size:18px;color:#40536c;margin-top:7px}#stock-depot,#header-context{color:#285be7;border:0;border-left:1px solid #cdd8e8;border-radius:0;font-size:14px;font-weight:600;background:none;margin-left:12px;padding:0 10px;min-height:25px;letter-spacing:0}.native-list>.table-wrap{margin-top:16px}.native-list .table-wrap table{min-width:800px}.native-list{min-width:0}#content>section.native-list{padding:0}.native-list .bling-table td{white-space:normal}
-.badge.good,.badge.settled{background:#e4f3e8;color:#3f754d}.sales-status .badge.good{background:#fff0ca;color:#825c18}.badge.late{background:#fde5ed;color:#b44d73}.rail-section-label{color:#93a2b7;font-size:10px;padding:12px 0 0}.native-list .product-price{font-weight:600}.native-list small{line-height:1.5}
+.rail-action{text-decoration:none}.native-empty{text-align:center;padding:110px 20px 160px}.native-empty>.ui-icon{width:58px;height:58px;color:#8f9cac;stroke-width:1.4}.native-empty h3{font-size:16px;margin:20px 0 12px;color:#4c5b70}.native-empty p{font-size:12px;color:#5b6c84}.stock-product-heading{padding:16px 0 10px;font-size:14px;color:#4e5f77}.stock-product-heading small{display:block;margin-top:5px;font-size:11px;color:#8391a8}.stock-totals{display:flex;gap:40px;padding:12px 0;color:#8a9ab1;font-size:11px}.stock-totals strong{display:block;font-size:18px;color:#40536c;margin-top:7px}#stock-depot,#header-context{color:#285be7;border:0;border-left:1px solid #cdd8e8;border-radius:0;font-size:14px;font-weight:600;background:none;margin-left:12px;padding:0 10px;min-height:25px;letter-spacing:0}.native-list>.table-wrap{margin-top:16px}.native-list .table-wrap table{min-width:800px}.native-list{min-width:0}#content>section.native-list{padding:0}.native-list .bling-table td{white-space:normal}
+.badge.good,.badge.settled{background:#e4f3e8;color:#3f754d}.sales-status .badge.good{background:#fff0ca;color:#825c18}.badge.late{background:#fde5ed;color:#b44d73}.rail-section-label{color:#93a2b7;font-size:10px;padding:12px 0 0}.native-list small{line-height:1.5}
 .integration-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:18px;margin:25px 0}.integration-card{background:#fff;border:1px solid #e0e6ef;border-radius:8px;min-height:235px;text-align:center;display:flex;align-items:center;flex-direction:column;padding:22px 14px;gap:10px}.provider-avatar{width:64px;height:55px;border-radius:8px;background:#edf2ff;color:#285be7;display:grid;place-items:center;font-size:22px;font-weight:700}.provider-ml{background:#fff3a6;color:#344674}.provider-amazon{background:#f5ece2;color:#252f3e}.provider-shopee{background:#fff0e8;color:#e45a33}.provider-tiktok{background:#171d2b;color:#fff}.integration-card h3{margin:2px 0;font-size:14px;color:#4b5c74}.integration-card p{margin:0;font-size:11px;color:#8a9ab1}.integration-card small{font-size:10px;color:#8a9ab1;line-height:1.6}.integration-card button{margin-top:auto}details>summary{cursor:pointer;color:#4f6ba1;font-size:12px}
 body[data-screen=accounts] #subtitle,body[data-screen=accounts] #content>.panel:not(.creation-panel)>.panel-head{display:none}
 body[data-screen=accounts] #content>.panel:not(.creation-panel){padding:0}
@@ -51,7 +51,6 @@ body[data-screen=purchases] button[data-edit-purchase]{border:0;background:none;
 #product-edit-form [role=tab][aria-selected=true]{border-bottom-color:var(--blue,#2453d4);color:#26384c;font-weight:700}
 .product-supplier-dialog h2{font-size:19px;margin:0 0 20px}
 .product-supplier-dialog>label{display:block;margin:12px 0}
-.product-image img{width:48px;height:48px;object-fit:contain}
 .product-image-drop{border:1px dashed #c7d3e2;border-radius:7px;padding:22px;text-align:center;background:#fff}
 .product-image-drop small{display:block;margin-top:10px;color:#657c92}
 .product-image-drop label{display:inline-block;max-width:340px;margin-right:14px}
@@ -126,24 +125,14 @@ body[data-product-editor=true] header h1{font-size:20px;line-height:1.4;white-sp
 .catalog-filter label{display:block;font-size:12px}
 .catalog-filter-head{display:flex;align-items:center;justify-content:space-between}
 .catalog-filter-head strong{display:flex;align-items:center;gap:6px;font-size:15px}
-.filter-close{background:none;border:0;padding:0 4px;color:var(--blue,#2453d4);font-size:18px;line-height:1;box-shadow:none}
 .catalog-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin:2px 0 10px;font-size:12px;color:#3b4a5c}
 .catalog-chips button{background:none;border:0;padding:0 0 0 4px;color:var(--blue,#2453d4);box-shadow:none}
 .link-action.inline{display:inline;margin:0;padding:0;font-weight:700}
-.icon-button.active{color:var(--blue,#2453d4);border-color:var(--blue,#2453d4)}
 .stock-low{color:#b5541c;font-weight:600}
-.price-adjust{position:relative;margin-top:16px;padding:14px 16px;border:1px solid #bcd0f2;border-top:2px solid var(--blue,#2453d4);border-radius:6px;background:#eef3fc}
-.price-adjust h3{margin:0 0 10px;font-size:15px}
-.price-adjust>.filter-close{position:absolute;top:8px;right:10px}
-.price-adjust-grid{display:grid;grid-template-columns:minmax(120px,1fr) minmax(150px,1fr) minmax(170px,1fr) auto;gap:16px;align-items:start}
-.price-adjust fieldset{border:0;margin:0;padding:0;display:grid;gap:4px}
-.price-adjust fieldset legend{padding:0;font-size:12px;font-weight:700}
-.value-mode{display:grid;grid-template-columns:minmax(0,1fr) 62px;gap:4px}
-.price-adjust-actions{display:grid;gap:6px}
 .rail-more>summary{display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;color:var(--blue,#2453d4);font-weight:700;list-style:none}
 .rail-more>p{margin:10px 0 4px;font-size:12px;font-weight:700;color:#3b4a5c}
-@media(max-width:900px){.product-list.with-filter{grid-template-columns:1fr}.catalog-filter{position:static;border-right:0}.price-adjust-grid{grid-template-columns:1fr 1fr}}
-@media print{.catalog-filter,.sales-toolbar,.catalog-chips,.sales-list-tools,.price-adjust,.reference-pager{display:none!important}}
+@media(max-width:900px){.product-list.with-filter{grid-template-columns:1fr}.catalog-filter{position:static;border-right:0}}
+@media print{.catalog-filter,.sales-toolbar,.catalog-chips,.sales-list-tools,.reference-pager{display:none!important}}
 .product-list .filter-caption{display:none}
 body[data-screen=products] #subtitle{display:none}
 .product-grid[hidden],.product-category[hidden],#product-edit-form [role=tab][hidden]{display:none}
@@ -240,3 +229,107 @@ body.embedded[data-screen=products] header #refresh{font-family:ui-sans-serif,sy
 .catalog-bar .catalog-bar-selection button{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;min-height:20px;padding:0;border:0;border-radius:4px;background:none;color:inherit;font:inherit;font-size:14px;line-height:1;box-shadow:none}
 .catalog-bar .catalog-bar-selection button:hover{background:rgb(219,234,254);filter:none}
 @media print{.catalog-bar{display:none!important}}
+
+/* M-40…M-47 (Produtos 2, 25/11/2026): a tela Produtos no padrão da grade da Tabela de Preços.
+   Título só "Produtos" (sem o "… ›"), sem o painel da direita (a área ocupa a largura toda) e, na
+   aba Produtos, sem o Atualizar do canto (o novo fica na barra). O editor de produto fica como era. */
+body[data-screen=products]:not([data-product-editor=true]) header h1:before{content:none}
+body[data-screen=products]:not([data-product-editor=true]) #action-rail{display:none!important}
+body[data-screen=products]:not([data-product-editor=true]) .workspace header{padding-right:14px}
+body[data-screen=products]:not([data-product-editor=true]) #content{padding-right:14px}
+body[data-screen=products]:not([data-product-editor=true]) #notice{margin-right:14px}
+body[data-screen=products]:not([data-product-editor=true]) footer{padding-right:14px}
+body[data-screen=products]:not([data-product-editor=true]):not([data-products-tab=listings]) header #refresh{display:none!important}
+/* Barra: Excel ▾ (branco), Atualizar (azul, como o da Tabela de Preços) e Configuração ▾ (branco), no
+   tamanho dos filtros; no fim, Selecionar todos, a lixeira e "N produtos · N selecionados". */
+.catalog-bar .catalog-bar-button svg{flex:none}
+.catalog-bar .catalog-bar-primary{background:rgb(37,99,235);border-color:rgb(37,99,235);color:#fff}
+.catalog-bar .catalog-bar-primary:hover{background:rgb(29,78,216);border-color:rgb(29,78,216);color:#fff}
+.catalog-bar .catalog-bar-button:disabled{opacity:.5;cursor:default}
+.catalog-bar .catalog-bar-icon{width:28px;padding:0}
+.catalog-bar-end{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
+.catalog-bar .catalog-bar-check{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:12px;line-height:16px;font-weight:500;color:rgb(15,23,42);white-space:nowrap;cursor:pointer}
+.catalog-bar .catalog-bar-check input{width:16px;height:16px;min-height:16px;margin:0;flex:none}
+.catalog-bar-count{display:inline-flex;align-items:center;gap:4px;font-size:12px;line-height:16px;color:rgb(107,114,128);white-space:nowrap}
+.catalog-bar .catalog-bar-count button{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;min-height:20px;padding:0;border:0;border-radius:4px;background:none;color:inherit;font:inherit;font-size:14px;line-height:1;box-shadow:none}
+.catalog-bar .catalog-bar-count button:hover{background:rgb(243,244,246);filter:none}
+.catalog-bar .catalog-bar-menu-wide{width:520px}
+.catalog-bar .catalog-bar-config{width:430px}
+.catalog-bar-menu-title{padding:0 4px 2px;font-size:11px;font-weight:600;line-height:16px;color:rgb(107,114,128)}
+.catalog-bar .catalog-bar-note{margin:0;padding:2px 4px 6px;font-size:12px;line-height:16px;color:rgb(107,114,128)}
+.catalog-bar .catalog-bar-line{display:flex;align-items:center;gap:8px;margin:0;padding:4px;border-radius:4px;font-size:14px;line-height:20px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
+.catalog-bar .catalog-bar-line input[type=checkbox]{width:16px;height:16px;min-height:16px;margin:0;flex:none}
+.catalog-bar-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;border-top:1px solid rgb(229,231,235);padding-top:6px}
+.catalog-bar-columns.is-off{opacity:.45;pointer-events:none}
+.catalog-bar-column strong{display:block;padding:0 4px 2px;font-size:12px;font-weight:600;line-height:16px;color:rgb(15,23,42)}
+.catalog-bar .catalog-bar-column .catalog-bar-options{max-height:240px;border-top:0;padding-top:0}
+.catalog-bar-menu-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding:8px 4px 0;border-top:1px solid rgb(229,231,235);font-size:12px;line-height:16px;color:rgb(107,114,128)}
+.catalog-bar-config .catalog-bar-menu-foot{justify-content:flex-end}
+.catalog-bar-bulk{display:flex;align-items:center;gap:6px;padding:2px 0}
+.catalog-bar .catalog-bar-bulk .catalog-bar-line{width:104px;flex:none}
+.catalog-bar .catalog-bar-bulk select,.catalog-bar .catalog-bar-bulk input:not([type=checkbox]){flex:1 1 0;width:auto;min-width:0;height:28px;min-height:28px;padding:0 6px;border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,42);font:inherit;font-size:12px;line-height:16px;box-shadow:none}
+.catalog-bar .catalog-bar-bulk input:not([type=checkbox]){max-width:96px}
+.catalog-bar .catalog-bar-bulk [data-bulk-field="price.mode"]{flex:none;width:56px}
+/* Grade: fonte do DaVinci, células 12px/400 rgb(15,23,41) com 4px 8px, linhas de 34px com borda
+   superior clara, cabeçalho 11px/600 com 24px e fundo branco, Código/Preço/Estoque com 130/110/110px,
+   centralizados e separados por linhas verticais claras. Bordas "separadas": cada linha mede
+   exatamente o que diz, dos dois lados da tela (a lista e o estoque à direita alinham linha a linha). */
+.p2-split{display:grid;grid-template-columns:minmax(0,55fr) minmax(0,45fr);column-gap:16px;align-items:start}
+.p2-split-list,.p2-side{min-width:0}
+.p2-frame{border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;overflow:hidden}
+.p2-grid{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:12px;font-weight:400;line-height:16px;color:rgb(15,23,41);white-space:nowrap}
+.p2-grid>thead>tr,.p2-grid>tbody>tr.p2-row-head{height:24px}
+.p2-grid>tbody>tr{height:34px}
+.p2-grid>thead>tr>th,.p2-grid>tbody>tr>th{padding:0 8px;border:0;background:#fff;font-size:11px;font-weight:600;line-height:14px;color:rgb(15,23,41);text-transform:none;letter-spacing:0;text-align:left;vertical-align:middle;white-space:nowrap}
+.p2-grid>tbody>tr>td{padding:4px 8px;border:0;border-top:1px solid rgb(229,231,235);background:#fff;font-size:12px;font-weight:400;line-height:16px;color:rgb(15,23,41);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.p2-grid>thead>tr>.p2-num,.p2-grid>tbody>tr>.p2-num{text-align:center;border-left:1px solid rgb(229,231,235)}
+.p2-grid>thead>tr>.p2-check,.p2-grid>tbody>tr>.p2-check{padding:0;text-align:center}
+.p2-grid .p2-check input{width:15px;height:15px;min-height:15px;margin:0;vertical-align:middle}
+.p2-grid .p2-col-check{width:32px}
+.p2-grid .p2-col-code{width:130px}
+.p2-grid .p2-col-price,.p2-grid .p2-col-stock{width:110px}
+.p2-desc{display:flex;align-items:center;gap:8px;min-width:0}
+.p2-grid .p2-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0;border:0;border-radius:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer;box-shadow:none}
+.p2-grid .p2-name:hover{color:rgb(37,99,235);text-decoration:underline;filter:none}
+.p2-desc .stock-low{flex:none;margin:0;font-size:11px;line-height:14px;font-weight:500}
+.p2-grid .p2-stock,.p2-grid .p2-link{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);cursor:pointer;box-shadow:none}
+.p2-grid .p2-stock:hover,.p2-grid .p2-link:hover{text-decoration:underline;filter:none}
+.p2-grid>tbody>tr>td.p2-stock-cell.is-open{outline:2px solid rgb(37,99,235);outline-offset:-2px}
+/* O estoque à direita: 24px com "código - nome" e Incluir/Transferir; 34px com os 5 quadros; 34px de
+   cabeçalho Data | Entrada | Saída | Observação; 34px por lançamento. */
+.p2-side-empty{display:flex;align-items:center;min-height:58px;padding:0 12px;font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:12px;line-height:16px;color:rgb(107,114,128)}
+.p2-side-title{display:flex;align-items:center;gap:8px;min-width:0}
+.p2-side-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:400;line-height:16px}
+.p2-side-actions{display:inline-flex;align-items:center;gap:4px;flex:none}
+.p2-side-tip{display:inline-flex}
+.p2-grid .p2-side-button{height:20px;min-height:20px;padding:0 8px;border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,41);font:inherit;font-size:11px;font-weight:500;line-height:14px;cursor:pointer;box-shadow:none}
+.p2-grid .p2-side-button:hover{background:rgb(243,244,246);filter:none}
+.p2-grid .p2-side-button.is-primary{background:rgb(37,99,235);border-color:rgb(37,99,235);color:#fff}
+.p2-grid .p2-side-button.is-primary:hover{background:rgb(29,78,216)}
+.p2-grid .p2-side-button:disabled{opacity:.5;cursor:not-allowed}
+.p2-fact span{margin-right:6px;font-size:11px;font-weight:600;line-height:14px}
+.p2-fact strong{font-size:12px;font-weight:400;color:rgb(15,23,41)}
+.p2-grid>tbody>tr>td.p2-fact+td.p2-fact{border-left:1px solid rgb(229,231,235)}
+.p2-grid>tbody>tr>td.p2-note{color:rgb(107,114,128)}
+.p2-moves>thead>tr{height:34px}
+.p2-moves>thead>tr>th{border-top:1px solid rgb(229,231,235)}
+.p2-grid .p2-col-date{width:120px}
+.p2-grid .p2-col-qty{width:72px}
+.p2-grid .p2-col-open{width:130px}
+/* Janelas Incluir / Transferir / troca de tag. */
+.p2-dialog-form{display:grid;gap:12px}
+.p2-dialog-info{margin:0;font-size:12px;color:rgb(75,85,99)}
+.p2-dialog-fixed{display:grid;gap:7px;font-size:11px;color:#5a6d87}
+.p2-dialog-fixed strong{font-size:13px;font-weight:500;color:rgb(15,23,41)}
+.p2-dialog-error{margin:0;padding:8px 10px;border:1px solid rgb(254,202,202);border-radius:4px;background:rgb(254,242,242);color:rgb(185,28,28);font-size:12px}
+.p2-dialog-error[hidden]{display:none}
+.p2-tag-list{max-height:320px;overflow:auto;margin:8px 0;padding:0;list-style:none;border:1px solid rgb(229,231,235);border-radius:4px}
+.p2-tag-list li{padding:6px 10px;border-top:1px solid rgb(229,231,235);font-size:12px;line-height:16px}
+.p2-tag-list li:first-child{border-top:0}
+.p2-tag-list li.is-skip,.p2-tag-list li.is-pulado{color:rgb(107,114,128)}
+.p2-tag-list li.is-falhou{color:rgb(185,28,28)}
+.p2-tag-list em{font-style:normal}
+.p2-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.p2-tag-warning{margin:8px 0 0;padding:8px 10px;border:1px solid rgb(253,230,138);border-radius:4px;background:rgb(255,251,235);color:rgb(146,64,14);font-size:12px}
+@media(max-width:900px){.p2-split{grid-template-columns:minmax(0,1fr);row-gap:16px}.catalog-bar-end{margin-left:0}}
+@media print{.p2-side{display:none!important}}

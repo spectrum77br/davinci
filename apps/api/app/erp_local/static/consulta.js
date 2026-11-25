@@ -1,6 +1,7 @@
 // Consulta: while Bling owns stock, orders and the register, the page only reads. The server refuses
 // every change; here a change is not even sent, and the answer says why (the page shows it like
-// any other refusal). Reads that post (price quote, papers, tracking) still go.
+// any other refusal). Reads that post (price quote, papers, tracking) still go, and so do the only
+// writes the server releases in consulta (state.consulta.writes: category and price in bulk, M-45/M-47).
 // Behind DaVinci's gate the page lives at /erp and its files at /erp/assets; /assets there is
 // DaVinci's own site. Images and video made by the scripts use this.
 window.erpAsset=name=>(location.pathname.startsWith('/erp')?'/erp/assets/':'/assets/')+name;
@@ -12,7 +13,7 @@ window.erpAsset=name=>(location.pathname.startsWith('/erp')?'/erp/assets/':'/ass
     if(!consulta||!consulta.active||safe.includes(String(method||'GET').toUpperCase()))return false;
     const path=new URL(url,location.href).pathname.replace(/^\/erp(?=\/api\/)/,'');
     if(!path.startsWith('/api/erp-local/'))return false;
-    return !(consulta.read_posts||[]).some(read=>read.endsWith('/')?path.startsWith(read):path===read);
+    return ![...(consulta.read_posts||[]),...(consulta.writes||[])].some(read=>read.endsWith('/')?path.startsWith(read):path===read);
   };
   window.fetch=function(input,init){
     const url=typeof input==='string'?input:input.url;

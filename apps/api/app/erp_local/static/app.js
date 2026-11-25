@@ -119,7 +119,7 @@ function inicioPage(){
 function products() {
   if(editingProduct&&state.products.some(p=>p.sku===editingProduct))return productDetailsForm();
   if(productsView==='listings')return productViewTabs()+listingsPage();
-  return productViewTabs()+categoryAssignPanel()+ownProductsPage()+panel('Novo produto','Os cadastros e alterações pertencem ao nosso banco; nenhuma gravação é enviada ao Bling.',`<form id="product-form"><div class="forms"><label>SKU<input name="product_sku" required maxlength="100" placeholder="ex.: teste.aparelho"></label><label>Nome<input name="name" required maxlength="120" placeholder="Nome do produto"></label><label>Unidade<input name="unit" maxlength="6" placeholder="UN"></label><label>GTIN / EAN<input name="gtin" maxlength="40"></label><label>GTIN tributário<input name="gtin_tax" maxlength="40"></label><label>Tipo<select name="kind" id="product-kind"><option value="simple">Produto físico</option><option value="service">Serviço · sem estoque</option><option value="kit">Kit virtual</option></select></label><label>Preço de cadastro (R$)<input name="price" type="number" min="0" step="0.0001" value="0"></label><label>Custo inicial (R$)<input name="cost_price" type="number" min="0" step="0.0001" value="0"></label></div><div id="components-block" hidden>${itemsForm(true)}</div><div class="form-footer"><span>O saldo inicial é lançado em Estoque.</span><button>Cadastrar localmente</button></div></form>`)+productDetailsForm();
+  return productViewTabs()+ownProductsPage()+panel('Novo produto','Os cadastros e alterações pertencem ao nosso banco; nenhuma gravação é enviada ao Bling.',`<form id="product-form"><div class="forms"><label>SKU<input name="product_sku" required maxlength="100" placeholder="ex.: teste.aparelho"></label><label>Nome<input name="name" required maxlength="120" placeholder="Nome do produto"></label><label>Unidade<input name="unit" maxlength="6" placeholder="UN"></label><label>GTIN / EAN<input name="gtin" maxlength="40"></label><label>GTIN tributário<input name="gtin_tax" maxlength="40"></label><label>Tipo<select name="kind" id="product-kind"><option value="simple">Produto físico</option><option value="service">Serviço · sem estoque</option><option value="kit">Kit virtual</option></select></label><label>Preço de cadastro (R$)<input name="price" type="number" min="0" step="0.0001" value="0"></label><label>Custo inicial (R$)<input name="cost_price" type="number" min="0" step="0.0001" value="0"></label></div><div id="components-block" hidden>${itemsForm(true)}</div><div class="form-footer"><span>O saldo inicial é lançado em Estoque.</span><button>Cadastrar localmente</button></div></form>`)+productDetailsForm();
 }
 
 function stock() {
@@ -208,6 +208,8 @@ async function refresh() {
   if(!response.ok) throw new Error('Não foi possível ler o banco local.');
   state=await response.json();stateAt=new Date();window.erpConsulta=state.consulta||null;applyAccessMenus();if(page==='stock'&&selectedStockSku)stockHistory=null;render();updateReferenceAge();
   if(page==='stock'&&selectedStockSku)await loadStockHistory();
+  // Produtos 2 (M-42): o produto aberto à direita continua aberto e relê os lançamentos.
+  if(page==='products'&&sideStockSku&&!editingProduct)await loadSideStock().catch(()=>{});
   // The store sales list is fetched apart: refreshed too, the old one stays until the new arrives.
   if(page==='orders'&&salesView==='store'&&!storeSaleDetail)loadStoreSales();
 }
