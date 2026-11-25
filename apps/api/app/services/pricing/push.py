@@ -53,6 +53,7 @@ from app.services.pricing.anuncios import (
     CANAL_CATALOGO,
     CANAL_KIT,
     TEXTO_BLOQUEIO,
+    LinhasDoDepartamento,
     Resolucao,
     celula_manda_preco,
     kit_pula_catalogo,
@@ -321,6 +322,7 @@ async def resolver_para_envio(
     platform_str: str,
     conta_base: PricingAccount | None = None,
     pula_catalogo: bool | None = None,
+    linhas: LinhasDoDepartamento | None = None,
 ) -> Resolucao:
     """Resolução SSH-style: busca TODOS os product_links da integração
     primeiro e só depois filtra pelos SKUs do pricing_product.
@@ -335,7 +337,9 @@ async def resolver_para_envio(
     (`services/pricing/anuncios.py`), o mesmo do /grid e do /actual-prices.
     No canal catálogo os vínculos são os da integração da conta BASE.
     `pula_catalogo` (canal kit): a D3 vale? None = descobre aqui (a conta tem
-    a coluna Catálogo ligada?).
+    a coluna Catálogo ligada?). `linhas`: as linhas da Tabela por departamento
+    (None = carrega aqui) — no celular/eletro o anúncio que outra linha tem
+    pelo SKU inteiro é dela (`sku_match.casa_pelo_codigo`).
     """
     if not pricing_product.sku or not variants_of(pricing_product.sku):
         return Resolucao()
@@ -367,6 +371,8 @@ async def resolver_para_envio(
         pula_catalogo = kit_pula_catalogo(
             account.id in await bases_com_catalogo_ligado(session, [account.id])
         )
+    if linhas is None:
+        linhas = await linhas_do_departamento(session)
     resolucao = resolver_anuncios(
         all_links,
         product_map,
@@ -376,6 +382,7 @@ async def resolver_para_envio(
         canal=canal,
         listing_type_conta=account.listing_type,
         pula_catalogo=bool(pula_catalogo),
+        skus_outras_linhas=linhas.outras(department, pricing_product.id),
     )
     if canal == CANAL_CATALOGO and resolucao.links:
         await _separar_disputados(
@@ -387,8 +394,34 @@ async def resolver_para_envio(
             resolucao=resolucao,
             all_links=all_links,
             product_map=product_map,
+            linhas_dept=linhas,
         )
     return resolucao
+
+
+async def linhas_do_departamento(session: AsyncSession) -> LinhasDoDepartamento:
+    """Todas as linhas da Tabela de Preços (id, departamento, SKU), para o
+    resolvedor saber o que é de OUTRA linha. Uma consulta de segmentos e uma
+    de linhas (são poucas dezenas)."""
+    segs = {
+        s.id: s for s in (await session.execute(select(Segment))).scalars().all()
+    }
+
+    def _raiz(seg_id: UUID | None) -> str | None:
+        seg = segs.get(seg_id) if seg_id else None
+        if seg is None:
+            return None
+        if seg.parent_id is None:
+            return seg.slug
+        pai = segs.get(seg.parent_id)
+        return pai.slug if pai is not None and pai.parent_id is None else None
+
+    rows = (
+        await session.execute(
+            select(PricingProduct.id, PricingProduct.segment_id, PricingProduct.sku)
+        )
+    ).all()
+    return LinhasDoDepartamento.de((pid, _raiz(seg), sku) for pid, seg, sku in rows)
 
 
 async def _separar_disputados(
@@ -401,6 +434,7 @@ async def _separar_disputados(
     resolucao: Resolucao,
     all_links: list[ProductLink],
     product_map: dict[UUID, str],
+    linhas_dept: LinhasDoDepartamento | None = None,
 ) -> None:
     """Mesma trava do /grid ('mesmo_anuncio'), aqui no servidor para não
     depender da tela: as outras linhas do departamento que mandam preço nesta
@@ -454,6 +488,9 @@ async def _separar_disputados(
             plataforma="ml",
             canal=CANAL_CATALOGO,
             listing_type_conta=account.listing_type,
+            skus_outras_linhas=(
+                linhas_dept.outras(department, outra.id) if linhas_dept else ()
+            ),
         )
         if not meus & {lk.external_id for lk in res.links}:
             continue

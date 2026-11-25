@@ -1501,10 +1501,14 @@ async def _celulas_eletro(client: AsyncClient, filha_id: str) -> dict[str, dict]
 
 
 @pytest.mark.asyncio
-async def test_grid_e_envio_travam_o_anuncio_disputado_por_duas_linhas(
+async def test_grid_e_envio_cada_linha_fica_so_com_o_proprio_anuncio(
     db: AsyncSession, client: AsyncClient, dono: User, cenario, eletro, auth_as: Callable,
     ml_falso: MLFalso,
 ):
+    """Regra nova (25/11/2026, o mais específico vence): MLB400/MLB401 têm o
+    SKU inteiro da linha 110/220 — são só dela. A 2L (uaf001m1.2l) dividia o
+    código base e antes travava os dois como 'mesmo_anuncio'; agora fica sem
+    anúncio de catálogo, e a 110/220 manda normalmente."""
     auth_as(dono)
     filha_id = (await _ligar(client, eletro["conta"].id)).json()["conta_catalogo"]["id"]
     ml_falso.item("MLB400", catalog_listing=True)
@@ -1512,39 +1516,58 @@ async def test_grid_e_envio_travam_o_anuncio_disputado_por_duas_linhas(
 
     cel = await _celulas_eletro(client, filha_id)
     c110, c2l = cel["uaf001m1.110,uaf001m1.220"], cel["uaf001m1.2l"]
-    # As duas linhas mandam preço e casam com os mesmos anúncios → as duas
-    # células travadas, cada uma citando a outra linha.
-    for cel_, outra in ((c2l, "uaf001m1.110,uaf001m1.220"), (c110, "uaf001m1.2l")):
-        assert cel_["price"] is not None
-        assert cel_["catalogo"]["bloqueio"] == "mesmo_anuncio", cel_
-        assert f"MLB400 também casa com a linha {outra}" in cel_["catalogo"]["texto"]
-        assert {a["external_id"]: a["bloqueio"] for a in cel_["catalogo"]["anuncios"]} == {
-            "MLB400": "mesmo_anuncio", "MLB401": "mesmo_anuncio",
-        }
-
-    # O servidor trava sozinho (sem depender da tela): nenhuma das duas chama o ML.
-    for linha, outra in ((eletro["l2l"], "uaf001m1.110,uaf001m1.220"),
-                         (eletro["l110"], "uaf001m1.2l")):
-        out = await _push(client, filha_id, linha.id)
-        assert (out["ok"], out["code"]) == (False, "bloqueado"), out
-        assert outra in out["detail"]
-    assert ml_falso.chamadas == []
-
-    # A 2L sem preço de catálogo não disputa mais: a 110/220 volta a mandar
-    # para o MLB400.
-    eletro["l2l"].preco_catalogo = None
-    db.add(eletro["l2l"])
-    await db.commit()
-    cel = await _celulas_eletro(client, filha_id)
-    assert cel["uaf001m1.2l"]["catalogo"]["bloqueio"] == "sem_preco_catalogo"
-    assert {a["external_id"]: a["bloqueio"]
-            for a in cel["uaf001m1.110,uaf001m1.220"]["catalogo"]["anuncios"]} == {
+    assert {a["external_id"]: a["bloqueio"] for a in c110["catalogo"]["anuncios"]} == {
         "MLB400": None, "MLB401": None,
     }
-    ml_falso.chamadas.clear()
+    assert c2l["catalogo"]["bloqueio"] == "sem_anuncio", c2l
+    assert c2l["catalogo"]["anuncios"] == []
+
+    # A 2L não chama o ML (não tem anúncio); a 110/220 manda para os dois.
+    out = await _push(client, filha_id, eletro["l2l"].id)
+    assert (out["ok"], out["code"]) == (False, "bloqueado"), out
+    assert ml_falso.chamadas == []
     out = await _push(client, filha_id, eletro["l110"].id)
     assert out["ok"] is True, out
     assert sorted(m for m, _ in ml_falso.puts_de_preco()) == ["MLB400", "MLB401"]
+
+
+@pytest.mark.asyncio
+async def test_grid_e_envio_travam_o_anuncio_disputado_por_duas_linhas(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, eletro, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    """A trava 'mesmo_anuncio' continua valendo quando duas linhas têm o MESMO
+    SKU inteiro (cadastro duplicado): o anúncio do SKU repetido fica de fora
+    das duas; o outro segue com a linha dele."""
+    dup = PricingProduct(
+        user_id=dono.id, sku="uaf001m1.220", name="Air fryer 220 (repetida)",
+        segment_id=cenario["seg"]["eletro_filhos"][0].id, cost_kit1=Decimal("240"),
+        preco_catalogo=Decimal("265"),
+    )
+    db.add(dup)
+    await db.commit()
+    await db.refresh(dup)
+    auth_as(dono)
+    filha_id = (await _ligar(client, eletro["conta"].id)).json()["conta_catalogo"]["id"]
+    ml_falso.item("MLB400", catalog_listing=True)
+    ml_falso.item("MLB401", catalog_listing=True)
+
+    cel = await _celulas_eletro(client, filha_id)
+    c110, cdup = cel["uaf001m1.110,uaf001m1.220"], cel["uaf001m1.220"]
+    assert {a["external_id"]: a["bloqueio"] for a in c110["catalogo"]["anuncios"]} == {
+        "MLB400": None, "MLB401": "mesmo_anuncio",
+    }
+    assert cdup["catalogo"]["bloqueio"] == "mesmo_anuncio", cdup
+    assert "MLB401 também casa com a linha uaf001m1.110,uaf001m1.220" in cdup["catalogo"]["texto"]
+
+    # O servidor trava sozinho: a repetida não chama o ML; a 110/220 só o MLB400.
+    out = await _push(client, filha_id, dup.id)
+    assert (out["ok"], out["code"]) == (False, "bloqueado"), out
+    assert "uaf001m1.110,uaf001m1.220" in out["detail"]
+    assert ml_falso.chamadas == []
+    out = await _push(client, filha_id, eletro["l110"].id)
+    assert out["ok"] is True, out
+    assert sorted(m for m, _ in ml_falso.puts_de_preco()) == ["MLB400"]
 
 
 @pytest.mark.asyncio

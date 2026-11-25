@@ -41,6 +41,14 @@ no "só propor" é a que sai quando ele desliga (a IA não é perguntada de novo
 não mexe em quem uma pessoa já mexeu (lançamento, chamado, "Abrir chamado: Não",
 tirar da Fraude). ML e Amazon ficam de fora nesta etapa.
 
+Saiu da Fraude com o vídeo ainda pedido (Vinicius, 25/11/2026 — 308495: a entrega
+falhou, o pacote voltou pela ida e o pedido foi pro Acompanhamento, mas o pedido de
+vídeo do robô ficou travando a aba Pedidos da equipe por dias): o robô cancela o
+pedido de vídeo que ELE fez e anota na Observação. Só quando ninguém está mexendo —
+com lançamento ou chamado de devolução o vídeo pode ainda servir, e o pedido fixado na
+Fraude à mão é da pessoa: esses ficam. Se o pedido voltar pra Fraude, o robô pede o
+vídeo de novo (não trata como "alguém cancelou"), mas só 6 h depois do cancelamento.
+
 Interruptor: `DEVOLUCAO_FRAUDE_AUTO` = ligado | so_video | desligado. Com `SO_PROPOR`
 ligado, "ligado" só ESCREVE a defesa proposta na Observação do pedido (nada é lançado
 nem vai pra plataforma) — fica desligado: o Vinicius preferiu rodar direto (16/11).
@@ -94,6 +102,13 @@ VIDEO_PEDIDO_DE_NOVO = "vídeo da embalagem pedido de novo à equipe"
 # tô em casa"): passadas estas horas da resposta, o robô pede o vídeo de novo, UMA
 # vez. Se a resposta vier sem vídeo outra vez, fica pra pessoa como antes.
 PEDIR_DE_NOVO_DEPOIS = timedelta(hours=12)
+# O pedido saiu da Fraude com o vídeo do robô ainda pendente: o robô cancela (25/11).
+VIDEO_CANCELADO_SAIU = "pedido de vídeo cancelado pelo robô"
+# Voltou pra Fraude depois desse cancelamento: só pede de novo passado este tempo. A
+# leitura do rastreio da ida da Shopee às vezes falha e o tipo volta a "só reembolso"
+# até o próximo sync (meia hora) — sem a espera, a equipe travava e destravava a cada
+# falha enquanto o pacote volta.
+VOLTOU_ESPERA = timedelta(hours=6)
 ACHADO_EXPEDICAO = "vídeo da embalagem achado na expedição"
 PROPOSTA = "defesa proposta pela IA"
 # A tela (cartão "Fraude: responder à mão", pages/devolucoes.vue) procura este pedaço.
@@ -172,6 +187,35 @@ _AINDA_LIVRE = text(
                          AND (r.abrir_chamado = false
                               OR lower(COALESCE(r.fila_manual, '')) = 'acompanhamento'))"""
 )
+# Pedido de vídeo do ROBÔ ainda sem resposta (o botão grava quem pediu; o robô não),
+# em pedido sem lançamento e sem chamado de devolução. Quem destes não é candidato na
+# rodada saiu da Fraude e tem o pedido de vídeo cancelado (25/11/2026, 308495).
+_VIDEO_DO_ROBO = text(
+    f"""
+SELECT r.pedido_bling,
+       upper(COALESCE(r.devolucao_tipo_auto, '')) AS tipo,
+       lower(COALESCE(r.fila_manual, '')) AS fila_manual,
+       r.abrir_chamado,
+       r.resolvido_at,
+       EXISTS (SELECT 1 FROM "{SCHEMA}".bling_orders bo
+               WHERE bo.numero = r.pedido_bling AND bo.situacao = '83957') AS aguardando
+FROM "{SCHEMA}".devolucao_rastreio r
+WHERE r.video_solicitado_em IS NOT NULL
+  AND r.video_enviado_em IS NULL
+  AND r.video_solicitado_por IS NULL
+  AND strpos(COALESCE(r.observacao, ''), :marca) > 0
+  AND strpos(COALESCE(r.observacao, ''), :pedido_video) > 0
+  -- Fixado na Fraude à mão: continua no painel e é da pessoa.
+  AND lower(COALESCE(r.fila_manual, '')) <> 'fraude'
+  AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".devolutions d WHERE btrim(d.pedido_bling) = r.pedido_bling)
+  AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".chamados c
+                  WHERE c.pedido_bling = r.pedido_bling AND c.origem = 'devolucao')
+ORDER BY r.pedido_bling
+"""
+)
+# O pedaço comum de VIDEO_PEDIDO e VIDEO_PEDIDO_DE_NOVO (o achado na expedição não
+# conta: ele já responde o pedido).
+_PEDIDO_VIDEO = "vídeo da embalagem pedido"
 
 
 @dataclass
@@ -180,6 +224,7 @@ class Resumo:
     video_da_expedicao: int = 0
     video_pedido: int = 0
     esperando_video: int = 0
+    video_cancelado: int = 0
     lancados: int = 0
     propostos: int = 0
     pra_pessoa: int = 0
@@ -540,13 +585,22 @@ async def _analisar(
 
 
 async def _pedir_video(
-    session: AsyncSession, pedido: str, rast: DevolucaoRastreio, agora: datetime, resumo: Resumo
+    session: AsyncSession,
+    pedido: str,
+    rast: DevolucaoRastreio,
+    agora: datetime,
+    resumo: Resumo,
+    *,
+    voltou: bool = False,
 ) -> None:
-    # O mesmo pedido de vídeo do botão (aparece pra equipe do estoque).
+    # O mesmo pedido de vídeo do botão (aparece pra equipe do estoque). `voltou` = o
+    # robô tinha cancelado porque o pedido saiu da Fraude: recado próprio, pra ficar
+    # DEPOIS do cancelamento na Observação (`_cancelado_pelo_robo`).
     rast.video_solicitado_em = agora
     rast.video_solicitado_por = None
     rast.video_refazer_motivo = None
-    _anotar(rast, f"{MARCA} ({_hoje_txt(agora)}): {VIDEO_PEDIDO}.")
+    volta = "o pedido voltou pra Fraude — " if voltou else ""
+    _anotar(rast, f"{MARCA} ({_hoje_txt(agora)}): {volta}{VIDEO_PEDIDO}.")
     await session.commit()
     resumo.video_pedido += 1
     resumo.pedidos[pedido] = "vídeo pedido"
@@ -574,6 +628,118 @@ async def _pedir_video_de_novo(
     await session.commit()
     resumo.video_pedido += 1
     resumo.pedidos[pedido] = "vídeo pedido de novo"
+
+
+def _cancelado_pelo_robo(obs: str) -> bool:
+    """O último recado de vídeo na Observação é o cancelamento do PRÓPRIO robô (o
+    pedido saiu da Fraude e voltou): pede o vídeo de novo em vez de tratar como
+    "alguém cancelou" (que fica pra pessoa). PURA."""
+    cancelou = obs.rfind(VIDEO_CANCELADO_SAIU)
+    return cancelou >= 0 and cancelou > obs.rfind(_PEDIDO_VIDEO)
+
+
+_RE_CANCELOU = re.compile(
+    rf"{re.escape(MARCA)} \((\d{{2}})/(\d{{2}}) (\d{{2}}):(\d{{2}})\): [^\n]*"
+    rf"{re.escape(VIDEO_CANCELADO_SAIU)}"
+)
+
+
+def _cancelou_ha_pouco(obs: str, agora: datetime) -> bool:
+    """O cancelamento do robô (o último) foi há menos de VOLTOU_ESPERA? A data vem do
+    próprio recado ("dd/mm HH:MM", hora de São Paulo, sem ano). PURA."""
+    from zoneinfo import ZoneInfo
+
+    achados = list(_RE_CANCELOU.finditer(obs or ""))
+    if not achados:
+        return False
+    dia, mes, hora, minuto = (int(x) for x in achados[-1].groups())
+    sp = ZoneInfo("America/Sao_Paulo")
+    hoje = agora.astimezone(sp)
+    try:
+        quando = datetime(hoje.year, mes, dia, hora, minuto, tzinfo=sp)
+    except ValueError:
+        return False
+    if quando > hoje + timedelta(days=1):  # recado de dezembro lido em janeiro
+        quando = quando.replace(year=hoje.year - 1)
+    return hoje - quando < VOLTOU_ESPERA
+
+
+def _porque_saiu(
+    *, tipo: str, fila_manual: str, abrir_chamado: bool | None, aguardando: bool, resolvido: bool
+) -> str:
+    """Por que o pedido não é mais da Fraude automática (vai no recado). PURA."""
+    if fila_manual == "acompanhamento":
+        return "o pedido foi movido pro Acompanhamento"
+    if tipo != "REFUND":
+        return "o caso deixou de ser só reembolso — o pacote volta pra loja"
+    if abrir_chamado is False:
+        return 'marcaram "Abrir chamado: Não"'
+    if not aguardando:
+        return "o Bling saiu de Aguardando Devolução"
+    if resolvido:
+        return "o pedido foi resolvido no painel"
+    return "o pedido não está mais na fila da Fraude automática"
+
+
+async def _cancelar_video_de_quem_saiu(
+    session: AsyncSession, agora: datetime, resumo: Resumo
+) -> None:
+    """Pedido de vídeo do robô ainda pendente em pedido que não é mais candidato: a
+    equipe não precisa mais mandar (e a aba Pedidos dela destrava). Mesma limpeza do
+    botão ✕ da coluna Vídeo. Pedido com lançamento ou chamado de devolução fica de fora
+    na consulta — alguém está trabalhando nele e o vídeo pode servir. A lista de
+    candidatos é lida de novo AGORA: a rodada leva minutos (IA, plataforma) e um pedido
+    pode ter voltado pra Fraude no meio dela."""
+    linhas = (
+        await session.execute(_VIDEO_DO_ROBO, {"marca": MARCA, "pedido_video": _PEDIDO_VIDEO})
+    ).all()
+    if not linhas:
+        return
+    ainda = set(await candidatos(session, agora=agora))
+    for linha in linhas:
+        pedido = linha.pedido_bling
+        if pedido in ainda:
+            continue
+        try:
+            rast = await session.get(DevolucaoRastreio, pedido)
+            if rast is None:
+                continue
+            # A equipe pode ter respondido (ou uma pessoa pedido de novo) desde a consulta.
+            await session.refresh(rast)
+            if (
+                rast.video_solicitado_em is None
+                or rast.video_enviado_em is not None
+                or rast.video_solicitado_por is not None
+            ):
+                continue
+            porque = _porque_saiu(
+                tipo=linha.tipo,
+                fila_manual=linha.fila_manual,
+                abrir_chamado=linha.abrir_chamado,
+                aguardando=bool(linha.aguardando),
+                resolvido=linha.resolvido_at is not None,
+            )
+            rast.video_solicitado_em = None
+            rast.video_solicitado_por = None
+            rast.video_enviado_em = None
+            rast.video_enviado_por = None
+            rast.video_link = None
+            rast.video_sem_motivo = None
+            rast.video_refazer_motivo = None
+            _anotar(
+                rast,
+                f"{MARCA} ({_hoje_txt(agora)}): {porque} — {VIDEO_CANCELADO_SAIU}, "
+                "a equipe não precisa mais mandar.",
+            )
+            await session.commit()
+            resumo.video_cancelado += 1
+            resumo.pedidos[pedido] = "fora da Fraude automática: pedido de vídeo cancelado"
+            logger.info("devolucao_fraude_auto_video_cancelado", pedido_bling=pedido, porque=porque)
+        except Exception as e:  # noqa: BLE001 — um pedido ruim não para a rodada
+            await session.rollback()
+            resumo.falhas += 1
+            resumo.pedidos[pedido] = f"falhou ao cancelar o vídeo: {type(e).__name__}"
+            logger.error("devolucao_fraude_auto_falhou", pedido_bling=pedido, err=str(e)[:200])
 
 
 async def _lancar(
@@ -724,9 +890,11 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                 elif rast.video_solicitado_em is not None:
                     resumo.esperando_video += 1
                     resumo.pedidos[pedido] = "esperando o vídeo"
-                elif VIDEO_PEDIDO in obs and not com_instrucao:
+                elif VIDEO_PEDIDO in obs and not com_instrucao and not _cancelado_pelo_robo(obs):
                     # O robô pediu e alguém cancelou o pedido: não pede de novo; fica
-                    # pra pessoa (aparece no cartão "Fraude: responder à mão").
+                    # pra pessoa (aparece no cartão "Fraude: responder à mão"). Se quem
+                    # cancelou foi o próprio robô (o pedido saiu da Fraude e voltou), o
+                    # `else` pede de novo.
                     _anotar(
                         rast,
                         f"{MARCA} ({_hoje_txt(agora)}): o pedido de vídeo foi cancelado — "
@@ -735,8 +903,14 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     await session.commit()
                     resumo.pra_pessoa += 1
                     resumo.pedidos[pedido] = "pedido de vídeo cancelado"
+                elif _cancelado_pelo_robo(obs) and _cancelou_ha_pouco(obs, agora):
+                    # Voltou pra Fraude logo depois do cancelamento do robô: pode ser só
+                    # a leitura do rastreio da ida que falhou nesta meia hora.
+                    resumo.pedidos[pedido] = "voltou pra Fraude há pouco (espera pra pedir)"
                 else:
-                    await _pedir_video(session, pedido, rast, agora, resumo)
+                    await _pedir_video(
+                        session, pedido, rast, agora, resumo, voltou=_cancelado_pelo_robo(obs)
+                    )
                 continue
             if m not in (LIGADO, PROPOR):
                 continue
@@ -766,6 +940,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
             resumo.falhas += 1
             resumo.pedidos[pedido] = f"falhou: {type(e).__name__}"
             logger.error("devolucao_fraude_auto_falhou", pedido_bling=pedido, err=str(e)[:200])
+    await _cancelar_video_de_quem_saiu(session, agora, resumo)
     return resumo.como_dict() | {"modo": m}
 
 

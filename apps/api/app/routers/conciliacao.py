@@ -811,6 +811,27 @@ def _num(v: Any) -> float | None:
     return None if v is None else float(v)
 
 
+ROTULO_DEVOLVIDO_ANTES = "Devolvido, aguarda a liquidação"
+
+
+def devolvido_antes_de_liquidar(p: ConciliacaoPedido) -> bool:
+    """Aguardando com o previsto NEGATIVO e nada liberado (25/11, Poofy (tiktok) 307730):
+    a plataforma devolveu o dinheiro ao comprador antes de liquidar e a liquidação vai
+    descontar. O cálculo deixa "aguardando" (`conciliacao_calculo`); aqui só o rótulo."""
+    return (
+        p.situacao == "aguardando"
+        and p.venda_liquido is not None
+        and p.venda_liquido < 0
+        and p.liberado_em is None
+    )
+
+
+def rotulo_situacao(p: ConciliacaoPedido) -> str:
+    if devolvido_antes_de_liquidar(p):
+        return ROTULO_DEVOLVIDO_ANTES
+    return SITUACAO_LABELS.get(p.situacao, p.situacao)
+
+
 def _pedido_out(p: ConciliacaoPedido) -> dict[str, Any]:
     out: dict[str, Any] = {"id": str(p.id), "integration_id": str(p.integration_id)}
     for c in _CAMPOS_PEDIDO:
@@ -819,7 +840,8 @@ def _pedido_out(p: ConciliacaoPedido) -> dict[str, Any]:
     for c in _DATAS_PEDIDO:
         v = getattr(p, c)
         out[c] = v.isoformat() if v else None
-    out["situacao_label"] = SITUACAO_LABELS.get(p.situacao, p.situacao)
+    out["situacao_label"] = rotulo_situacao(p)
+    out["devolvido_antes_de_liquidar"] = devolvido_antes_de_liquidar(p)
     out["etapa_label"] = ETAPA_LABELS.get(p.etapa, p.etapa)
     out["conferido"] = bool(p.conferido_em)
     out["esperando"] = _esperando(p, datetime.now(_BRT).date())
@@ -3317,9 +3339,7 @@ async def extrato_do_dia(
                     m.classificacao or "", m.classificacao
                 ),
                 "pedido_situacao": ped.situacao if ped else None,
-                "pedido_situacao_label": SITUACAO_LABELS.get(ped.situacao, ped.situacao)
-                if ped
-                else None,
+                "pedido_situacao_label": rotulo_situacao(ped) if ped else None,
                 "pedido_etapa": ped.etapa if ped else None,
                 # reserva: True = retida (aparece sempre); False = par fechado (pode esconder)
                 "reserva_aberta": reserva_aberta.get(m.id),
@@ -4821,7 +4841,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                 {
                     "loja": loja.conta,
                     "pedido": p.pedido_bling,
-                    "situacao_label": SITUACAO_LABELS.get(p.situacao, p.situacao),
+                    "situacao_label": rotulo_situacao(p),
                     "etapa": p.etapa,
                     "dif": _num(p.dif_previsto_recebido),
                     "motivo": p.conferido_motivo or p.observacao,

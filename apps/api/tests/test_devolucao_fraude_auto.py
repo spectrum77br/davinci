@@ -1446,3 +1446,191 @@ async def test_equipe_sem_video_e_o_video_chega_no_2o_pedido_o_robo_lanca(
     await db.commit()
     r = await auto.rodada(db)
     assert r["lancados"] == 1 and agendados == ["799702"], r
+
+
+# ── Saiu da Fraude com o vídeo do robô pendente (25/11/2026, 308495) ──────
+
+
+def _status_video(rast: DevolucaoRastreio) -> str:
+    return antigo._video_status(
+        link=rast.video_link,
+        solicitado_em=rast.video_solicitado_em,
+        enviado_em=rast.video_enviado_em,
+        sem_motivo=rast.video_sem_motivo,
+    )
+
+
+async def _bling(db: AsyncSession, pedido: str, situacao: str) -> None:
+    await db.execute(
+        text(f'UPDATE "{_SCHEMA}".bling_orders SET situacao = :s WHERE numero = :p'),  # noqa: S608
+        {"s": situacao, "p": pedido},
+    )
+    await db.commit()
+
+
+async def test_porque_saiu_e_cancelado_pelo_robo() -> None:
+    def porque(**kw):
+        base = {
+            "tipo": "REFUND",
+            "fila_manual": "",
+            "abrir_chamado": None,
+            "aguardando": True,
+            "resolvido": False,
+        }
+        return auto._porque_saiu(**(base | kw))
+
+    assert "Acompanhamento" in porque(fila_manual="acompanhamento")
+    assert "pacote volta" in porque(tipo="")
+    assert "Abrir chamado" in porque(abrir_chamado=False)
+    assert "Bling" in porque(aguardando=False)
+    assert "resolvido" in porque(resolvido=True)
+    pediu = f"{auto.MARCA} (19/11 21:47): {auto.VIDEO_PEDIDO}."
+    cancelou = (
+        f"{auto.MARCA} (25/11 08:00): o pedido saiu da Fraude (x) — "
+        f"{auto.VIDEO_CANCELADO_SAIU}, a equipe não precisa mais mandar."
+    )
+    de_novo = f"{auto.MARCA} (26/11 08:00): {auto.VIDEO_PEDIDO_DE_NOVO}."
+    assert not auto._cancelado_pelo_robo("")
+    assert not auto._cancelado_pelo_robo(pediu)
+    assert auto._cancelado_pelo_robo(f"{pediu}\n{cancelou}")
+    # Pediu de novo depois do cancelamento do robô: o último é o pedido.
+    assert not auto._cancelado_pelo_robo(f"{pediu}\n{cancelou}\n{pediu}")
+    assert not auto._cancelado_pelo_robo(f"{pediu}\n{cancelou}\n{de_novo}")
+    # A espera de 6 h conta do último cancelamento (hora de São Paulo no recado).
+    sp = datetime(2026, 11, 25, 8, 0, tzinfo=UTC) + timedelta(hours=3)  # 08:00 em SP
+    assert auto._cancelou_ha_pouco(cancelou, sp + timedelta(hours=5))
+    assert not auto._cancelou_ha_pouco(cancelou, sp + timedelta(hours=7))
+    assert not auto._cancelou_ha_pouco(pediu, sp)
+    # Recado de dezembro lido em janeiro: é do ano passado.
+    dez = cancelou.replace("25/11 08:00", "31/12 23:00")
+    assert auto._cancelou_ha_pouco(dez, datetime(2027, 1, 1, 4, 0, tzinfo=UTC))
+
+
+async def test_pacote_volta_pela_ida_o_robo_cancela_o_proprio_pedido_de_video(
+    db: AsyncSession, make_user, ligado, monkeypatch
+):
+    """308495: o robô pediu o vídeo na Fraude; a entrega falhou, a Shopee aceitou e o
+    pacote voltou pela ida — o sync troca o tipo (deixa de ser só reembolso) e o
+    pedido vai pro Acompanhamento. O pedido de vídeo ficava travando a aba Pedidos da
+    equipe por dias, sem servir pra nada."""
+    await _caso(db, make_user, "799801")
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+    assert (await auto.rodada(db))["video_pedido"] == 1
+    rast = await _rast(db, "799801")
+    rast.devolucao_tipo_auto = None
+    await db.commit()
+
+    r = await auto.rodada(db)
+    assert r["candidatos"] == 0 and r["video_cancelado"] == 1, r
+    assert r["pedidos"]["799801"] == "fora da Fraude automática: pedido de vídeo cancelado"
+    rast = await _rast(db, "799801")
+    assert rast.video_solicitado_em is None and rast.video_refazer_motivo is None
+    assert _status_video(rast) == "nao_solicitado"
+    assert auto.VIDEO_CANCELADO_SAIU in rast.observacao and "pacote volta" in rast.observacao
+    assert auto.NAO_RESPONDE not in rast.observacao
+    # Nada mais nas próximas rodadas.
+    assert (await auto.rodada(db))["video_cancelado"] == 0
+
+
+async def test_movido_pro_acompanhamento_ou_bling_fora_tambem_cancela(
+    db: AsyncSession, make_user, ligado, monkeypatch
+):
+    for pedido in ("799802", "799803", "799804"):
+        await _caso(db, make_user, pedido)
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+    assert (await auto.rodada(db))["video_pedido"] == 3
+    rast = await _rast(db, "799802")
+    rast.fila_manual = "acompanhamento"  # alguém tirou da Fraude na mão
+    await db.commit()
+    await _bling(db, "799803", "83953")  # o caso foi cancelado e o Bling voltou pra Entregue
+
+    r = await auto.rodada(db)
+    assert r["video_cancelado"] == 2 and r["pedidos"]["799804"] == "esperando o vídeo", r
+    assert "Acompanhamento" in (await _rast(db, "799802")).observacao
+    assert "Bling" in (await _rast(db, "799803")).observacao
+    # O que segue na Fraude continua pedido pra equipe.
+    assert _status_video(await _rast(db, "799804")) == "pendente"
+
+
+async def test_video_fica_com_lancamento_ou_pedido_feito_por_pessoa(
+    db: AsyncSession, make_user, ligado, monkeypatch
+):
+    """Quem já mexeu decide: com lançamento (ou chamado) o vídeo ainda pode servir, o
+    pedido feito pelo botão é da pessoa, não do robô, e o fixado na Fraude à mão
+    continua no painel (é da pessoa)."""
+    pessoa = await make_user()
+    pediu = f"{auto.MARCA} (19/11 21:47): {auto.VIDEO_PEDIDO}."
+    await _caso(db, make_user, "799805", observacao=pediu, video_solicitado_em=AGORA)
+    db.add(Devolution(pedido_bling="799805", conta="mini", sku="a17.sp", condicao_produto="Novo"))
+    await _caso(
+        db,
+        make_user,
+        "799806",
+        fila="acompanhamento",
+        observacao=pediu,
+        video_solicitado_em=AGORA,
+        video_solicitado_por=pessoa.id,
+    )
+    await _caso(
+        db,
+        make_user,
+        "799808",
+        fila="fraude",
+        tipo="",
+        observacao=pediu,
+        video_solicitado_em=AGORA,
+    )
+    await db.commit()
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+
+    r = await auto.rodada(db)
+    assert r["video_cancelado"] == 0, r
+    for pedido in ("799805", "799806", "799808"):
+        rast = await _rast(db, pedido)
+        assert _status_video(rast) == "pendente"
+        assert auto.VIDEO_CANCELADO_SAIU not in rast.observacao
+
+
+async def test_voltou_pra_fraude_depois_do_cancelamento_do_robo_pede_de_novo(
+    db: AsyncSession, make_user, ligado, monkeypatch
+):
+    """O cancelamento do robô não é "alguém cancelou": se o pedido volta pra Fraude, o
+    robô pede o vídeo de novo — mas só 6 h depois (a leitura do rastreio da ida que
+    falha devolve "só reembolso" por meia hora; a equipe não pode travar e destravar a
+    cada falha). Se depois uma PESSOA cancela, aí fica pra pessoa."""
+    await _caso(db, make_user, "799807")
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+    assert (await auto.rodada(db))["video_pedido"] == 1
+    rast = await _rast(db, "799807")
+    rast.devolucao_tipo_auto = None
+    await db.commit()
+    assert (await auto.rodada(db))["video_cancelado"] == 1
+    rast = await _rast(db, "799807")
+    rast.devolucao_tipo_auto = "REFUND"  # a leitura da ida falhou nesta meia hora
+    await db.commit()
+
+    r = await auto.rodada(db)
+    assert r["video_pedido"] == 0, r
+    assert r["pedidos"]["799807"] == "voltou pra Fraude há pouco (espera pra pedir)"
+    assert _status_video(await _rast(db, "799807")) == "nao_solicitado"
+    # Sync bom de novo: sai, e não há o que cancelar.
+    rast = await _rast(db, "799807")
+    rast.devolucao_tipo_auto = None
+    await db.commit()
+    assert (await auto.rodada(db))["video_cancelado"] == 0
+    # Voltou de verdade e ficou: passadas as 6 h, pede de novo.
+    rast = await _rast(db, "799807")
+    rast.devolucao_tipo_auto = "REFUND"
+    await db.commit()
+    depois = datetime.now(UTC) + auto.VOLTOU_ESPERA + timedelta(minutes=5)
+    r = await auto.rodada(db, agora=depois)
+    assert r["video_pedido"] == 1 and r["pedidos"]["799807"] == "vídeo pedido", r
+    rast = await _rast(db, "799807")
+    assert _status_video(rast) == "pendente" and "voltou pra Fraude" in rast.observacao
+    assert not auto._cancelado_pelo_robo(rast.observacao)
+    # Agora uma pessoa cancela pelo ✕ da coluna Vídeo: não pede mais.
+    rast = await _rast(db, "799807")
+    rast.video_solicitado_em = None
+    await db.commit()
+    r = await auto.rodada(db, agora=depois + timedelta(minutes=10))
+    assert r["video_pedido"] == 0 and r["pedidos"]["799807"] == "pedido de vídeo cancelado", r

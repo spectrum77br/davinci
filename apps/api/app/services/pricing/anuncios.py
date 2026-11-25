@@ -27,12 +27,13 @@ de status para conferir o item vivo antes do PUT.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Collection, Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from app.services.pricing.sku_match import (
+    casa_pelo_codigo,
     dedup_links_for_push,
     ml_listing_type_for_account,
     sku_casa_no_departamento,
@@ -145,13 +146,59 @@ class Resolucao:
         return [*self.links, *(b.link for b in self.bloqueados)]
 
 
-def _casa_catalogo(sku: str, *, dept: str, full: set[str], base: set[str]) -> bool:
+def _casa_catalogo(
+    sku: str,
+    *,
+    dept: str,
+    full: set[str],
+    base: set[str],
+    outras: Collection[str] = (),
+) -> bool:
     if not sku or "+" in sku:
         return False
     if dept == "mala":
         return sku in full
-    # celular/eletro: código base (parte antes do primeiro ponto)
-    return sku.split(".", 1)[0] in base
+    # celular/eletro: o mais específico vence; sem disputa, o código base
+    return casa_pelo_codigo(
+        sku, sku_full_set=full, sku_base_set=base, skus_outras_linhas=outras
+    )
+
+
+@dataclass(slots=True)
+class LinhasDoDepartamento:
+    """Os SKUs (minúsculos, inteiros) de cada linha da Tabela de Preços, por
+    departamento — para o resolvedor saber quais anúncios são de OUTRA linha
+    (`casa_pelo_codigo`). Quem chama carrega do banco uma vez
+    (`push.linhas_do_departamento`)."""
+
+    por_dept: dict[str, dict[Hashable, frozenset[str]]] = field(default_factory=dict)
+    _cache: dict[tuple[str, Hashable], frozenset[str]] = field(default_factory=dict)
+
+    @classmethod
+    def de(
+        cls, linhas: Iterable[tuple[Hashable, str | None, str | None]]
+    ) -> LinhasDoDepartamento:
+        """`linhas` = (id da linha, departamento, SKU da linha)."""
+        out = cls()
+        for chave, dept, sku in linhas:
+            if not dept:
+                continue
+            out.por_dept.setdefault(dept.lower(), {})[chave] = frozenset(
+                v.lower() for v in variants_of(sku)
+            )
+        return out
+
+    def outras(self, dept: str | None, linha: Hashable) -> frozenset[str]:
+        """SKUs das linhas do departamento `dept`, menos a `linha`."""
+        d = (dept or "").lower()
+        chave = (d, linha)
+        pronto = self._cache.get(chave)
+        if pronto is None:
+            pronto = frozenset().union(
+                *(skus for k, skus in self.por_dept.get(d, {}).items() if k != linha)
+            )
+            self._cache[chave] = pronto
+        return pronto
 
 
 def resolver_anuncios(
@@ -164,6 +211,7 @@ def resolver_anuncios(
     canal: str,
     listing_type_conta: str | None,
     pula_catalogo: bool = True,
+    skus_outras_linhas: Collection[str] = (),
 ) -> Resolucao:
     """Quais anúncios recebem o preço desta célula.
 
@@ -173,12 +221,17 @@ def resolver_anuncios(
     integração no /grid).
 
     `pula_catalogo` (só canal kit, ML): aplica a D3 — quem chama decide com
-    `kit_pula_catalogo(conta tem a coluna Catálogo ligada?)`."""
+    `kit_pula_catalogo(conta tem a coluna Catálogo ligada?)`.
+
+    `skus_outras_linhas`: SKUs das OUTRAS linhas do departamento
+    (`LinhasDoDepartamento.outras`) — no celular/eletro o anúncio que outra
+    linha tem pelo SKU inteiro é dela, não desta (`casa_pelo_codigo`)."""
     variantes = variants_of(pricing_sku)
     if not variantes:
         return Resolucao()
     full = {s.lower() for s in variantes}
     base = {s.split(".", 1)[0].lower() for s in variantes}
+    outras = {s.lower() for s in skus_outras_linhas} - full
     dept_lc = (dept or "celular").lower()
 
     if canal == CANAL_CATALOGO:
@@ -194,7 +247,7 @@ def resolver_anuncios(
             and (lk.listing_type or "") == tipo
             and _casa_catalogo(
                 (sku_por_produto.get(lk.product_id) or "").lower(),
-                dept=dept_lc, full=full, base=base,
+                dept=dept_lc, full=full, base=base, outras=outras,
             )
         ]
         out = Resolucao()
@@ -223,6 +276,7 @@ def resolver_anuncios(
         return sku_casa_no_departamento(
             (sku_por_produto.get(lk.product_id) or "").lower(),
             dept=dept_lc, sku_full_set=full, sku_base_set=base,
+            skus_outras_linhas=outras,
         )
 
     casados = [lk for lk in candidatos if _casa(lk)]

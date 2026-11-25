@@ -1159,8 +1159,46 @@ async def test_mala_casa_pelo_sku_inteiro_como_o_envio(db: AsyncSession, admin: 
 async def test_anuncio_de_catalogo_disputado_fica_fora_das_duas_linhas(
     db: AsyncSession, admin: User, cenario, marketplaces
 ):
-    """Duas linhas (q100.a e q100.b) mandam preço no mesmo anúncio de catálogo:
-    o envio não manda para ele em nenhuma — a conferência também não lê."""
+    """Duas linhas com o MESMO SKU inteiro (q100.a) mandam preço no mesmo
+    anúncio de catálogo: o envio não manda para ele em nenhuma — a
+    conferência também não lê."""
+    acess = cenario.seg["celular_filhos"][0]
+    p_q = Product(user_id=admin.id, sku="q100.a", name="Q100")
+    db.add(p_q)
+    await db.flush()
+    db.add(
+        _link(
+            admin,
+            cenario.ml,
+            p_q,
+            "MLB700",
+            listing_type="gold_special",
+            catalog_listing=True,
+            anuncio_status="active",
+        )
+    )
+    qa = _linha(admin, acess, "q100.a", cost_kit1=Decimal("10"), preco_catalogo=Decimal("20"))
+    qb = _linha(
+        admin, acess, "q100.a,q100.b", cost_kit1=Decimal("10"), preco_catalogo=Decimal("25")
+    )
+    db.add_all([qa, qb])
+    await db.commit()
+    await _rodar(db, admin)
+    gravadas = await _gravadas(db)
+    for linha, outra in ((qa, "q100.a,q100.b"), (qb, "q100.a")):
+        cel = gravadas[(cenario.filha.id, linha.id)]
+        assert (cel.situacao, cel.anuncios) == ("sem_anuncio", [])
+        assert f"MLB700 também casa com a linha {outra}" in cel.motivo
+    assert "MLB700" not in {lk.external_id for _, lks in marketplaces.ml.chamadas for lk in lks}
+
+
+@pytest.mark.asyncio
+async def test_anuncio_de_catalogo_e_da_linha_que_tem_o_sku_inteiro(
+    db: AsyncSession, admin: User, cenario, marketplaces
+):
+    """Regra de 25/11/2026 (o mais específico vence): q100.a e q100.b dividem o
+    código base, mas o anúncio é do SKU q100.a — só a linha q100.a o lê; a
+    q100.b fica sem anúncio, sem disputa."""
     acess = cenario.seg["celular_filhos"][0]
     p_q = Product(user_id=admin.id, sku="q100.a", name="Q100")
     db.add(p_q)
@@ -1182,11 +1220,11 @@ async def test_anuncio_de_catalogo_disputado_fica_fora_das_duas_linhas(
     await db.commit()
     await _rodar(db, admin)
     gravadas = await _gravadas(db)
-    for linha, outra in ((qa, "q100.b"), (qb, "q100.a")):
-        cel = gravadas[(cenario.filha.id, linha.id)]
-        assert (cel.situacao, cel.anuncios) == ("sem_anuncio", [])
-        assert f"MLB700 também casa com a linha {outra}" in cel.motivo
-    assert "MLB700" not in {lk.external_id for _, lks in marketplaces.ml.chamadas for lk in lks}
+    cel_b = gravadas[(cenario.filha.id, qb.id)]
+    assert (cel_b.situacao, cel_b.anuncios) == ("sem_anuncio", [])
+    assert "também casa" not in (cel_b.motivo or "")
+    assert gravadas[(cenario.filha.id, qa.id)].situacao != "sem_anuncio"
+    assert "MLB700" in {lk.external_id for _, lks in marketplaces.ml.chamadas for lk in lks}
 
 
 # =========================================================== rotas

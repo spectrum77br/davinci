@@ -75,6 +75,9 @@ TAXA_SOBRE_AFILIADOS = Decimal("0.14")
 DIAS_FINALIZAR = 7
 DIAS_VENCIDO_SEM_PREVISAO = 45
 FOLGA_PREVISAO = timedelta(days=2)
+# TikTok que devolveu o dinheiro ao comprador antes de liquidar (estimativa negativa):
+# espera a liquidação descontar até N dias depois da previsão; depois volta a vencido
+DIAS_DEVOLVIDO_SEM_LIQUIDAR = 30
 # Shopee e TikTok não dizem quando liberam (16/10, revisão): 2.230 pedidos "aguardando"
 # sem data e o "vencido" nunca disparava. Previsão = entrega confirmada (Logística) +
 # N dias; sem entrega lida, data do pedido + M dias. (plataforma: (N, M) — ajustar aqui.)
@@ -597,6 +600,25 @@ def situacao_do_pedido(
         if (bling_total is not None and venda_valor is not None)
         else None
     )
+    # 25/11 (Vinicius, Poofy (tiktok) 307730: "esse pedido tá estranho"): a TikTok fez o
+    # reembolso rápido ao comprador antes de liquidar e a estimativa dela ficou NEGATIVA
+    # (−12,58 = o frete que fica com a loja). Não há repasse a cobrar: a liquidação vai
+    # DESCONTAR esse valor. Fica aguardando com o motivo dito, e não "vencido · abrir
+    # chamado de repasse"; se não liquidar em DIAS_DEVOLVIDO_SEM_LIQUIDAR dias depois da
+    # previsão, volta a vencido (nada fica escondido).
+    devolvido_antes_de_liquidar = (
+        plataforma == "tiktok"
+        and not liberacoes
+        and not dinheiro
+        and not presas
+        and venda_liquido is not None
+        and venda_liquido < ZERO
+    )
+    base_devolvido = previsao or data_pedido
+    devolvido_esperando = devolvido_antes_de_liquidar and (
+        base_devolvido is None
+        or agora <= base_devolvido + timedelta(days=DIAS_DEVOLVIDO_SEM_LIQUIDAR)
+    )
     motivo: str | None = None
     dif: Decimal | None = None
 
@@ -650,6 +672,13 @@ def situacao_do_pedido(
         elif cancelada:
             situacao = "cancelado"
             motivo = "venda desfeita no ML"
+        elif devolvido_esperando:
+            assert venda_liquido is not None
+            situacao = "aguardando"
+            motivo = (
+                "a TikTok devolveu o dinheiro ao comprador antes de liquidar: "
+                f"a liquidação vai descontar {-venda_liquido:.2f}"
+            )
         elif previsao and agora > previsao + FOLGA_PREVISAO:
             situacao = "vencido"
             estimada = " (estimada)" if previsao_estimada else ""
@@ -670,6 +699,13 @@ def situacao_do_pedido(
                         motivo = "a Temu paga 7 dias depois da entrega"
                 else:
                     motivo = "sem lançamento no arquivo da Amazon ainda"
+        if devolvido_antes_de_liquidar and situacao == "vencido":
+            assert venda_liquido is not None
+            extra = (
+                "a TikTok devolveu o dinheiro ao comprador e não liquidou "
+                f"(deve descontar {-venda_liquido:.2f})"
+            )
+            motivo = f"{motivo} · {extra}" if motivo else extra
         if tarifa_devolvida:
             extra = f"o ML já devolveu {mexeu_sem_liberar:.2f} de tarifa (reembolso ao comprador)"
             motivo = f"{motivo} · {extra}" if motivo else extra

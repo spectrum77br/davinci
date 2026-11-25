@@ -95,6 +95,7 @@ from app.services.mega_midias import RAIZ_POR_DEPARTAMENTO
 from app.services.pricing.anuncios import (
     CANAL_CATALOGO,
     CANAL_KIT,
+    LinhasDoDepartamento,
     Resolucao,
     celula_manda_preco,
     info_celula_catalogo,
@@ -109,6 +110,7 @@ from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import (
     bases_com_catalogo_ligado,
     integracoes_com_marca_lida,
+    linhas_do_departamento,
     payload_para,
     push_one,
 )
@@ -1588,6 +1590,9 @@ async def get_grid(
     # anúncios de catálogo dessas integrações, carregados UMA vez para a grade
     # inteira (o resolvedor roda em memória por célula).
     contas_por_id = {a.id: a for a in accounts}
+    # Todas as linhas por departamento (não só as da aba): no celular/eletro o
+    # anúncio que outra linha tem pelo SKU inteiro é dela (25/11/2026).
+    linhas = await linhas_do_departamento(session)
     filhas = [a for a in accounts if a.canal == CANAL_CATALOGO]
     links_catalogo: dict[UUID, list[ProductLink]] = defaultdict(list)
     sku_dos_links: dict[UUID, str] = {}
@@ -1672,6 +1677,7 @@ async def get_grid(
                 plataforma="ml",
                 canal=CANAL_CATALOGO,
                 listing_type_conta=acc.listing_type,
+                skus_outras_linhas=linhas.outras(dept_conta, prod.id),
             )
             resolucoes[(prod.id, acc.id)] = resolucao
             if celula_manda_preco(outcome, ovr) and (pair[0] if pair else None) == dept_conta:
@@ -1681,7 +1687,7 @@ async def get_grid(
         separar_anuncios_disputados(por_linha, skus_das_linhas)
 
     so_catalogo = await _celulas_kit_so_catalogo(
-        session, products, kits_d3, links_catalogo, sku_dos_links, _dept_da_conta
+        session, products, kits_d3, links_catalogo, sku_dos_links, _dept_da_conta, linhas
     )
 
     cells: list[PricingGridCell] = []
@@ -1732,6 +1738,7 @@ async def _celulas_kit_so_catalogo(
     links_catalogo: dict[UUID, list[ProductLink]],
     sku_dos_links: dict[UUID, str],
     dept_da_conta,
+    linhas_dept: LinhasDoDepartamento | None = None,
 ) -> dict[tuple[UUID, UUID], dict]:
     """{(linha, conta de Kit): campo `catalogo`} das células de Kit (D3
     valendo) cujo único anúncio que casa é de catálogo — o mesmo resolvedor
@@ -1755,6 +1762,9 @@ async def _celulas_kit_so_catalogo(
                 canal=CANAL_KIT,
                 listing_type_conta=acc.listing_type,
                 pula_catalogo=True,
+                skus_outras_linhas=(
+                    linhas_dept.outras(dept_da_conta(acc), prod.id) if linhas_dept else ()
+                ),
             )
             if pre.so_catalogo:
                 candidatas.append((prod, acc))
@@ -1798,6 +1808,9 @@ async def _celulas_kit_so_catalogo(
             canal=CANAL_KIT,
             listing_type_conta=acc.listing_type,
             pula_catalogo=True,
+            skus_outras_linhas=(
+                linhas_dept.outras(dept_da_conta(acc), prod.id) if linhas_dept else ()
+            ),
         )
         info = info_celula_kit_so_catalogo(res)
         if info is not None:
@@ -2124,6 +2137,7 @@ async def get_actual_prices(
     # base): conta de outra equipe não tem o preço vivo lido nem devolvido.
     accounts = await _contas_da_grade(session, user, rid)
     contas_por_id = {a.id: a for a in accounts}
+    linhas = await linhas_do_departamento(session)
 
     result: dict[str, float | None] = {str(acc.id): None for acc in accounts}
 
@@ -2209,6 +2223,7 @@ async def get_actual_prices(
             canal=acc.canal or CANAL_KIT,
             listing_type_conta=acc.listing_type,
             pula_catalogo=kit_pula_catalogo(acc.id in com_catalogo),
+            skus_outras_linhas=linhas.outras(_dept(dona), product.id),
         )
         links = resolucao.todos
         if not links:

@@ -73,6 +73,8 @@ type Pedido = {
   dif_previsto_recebido: number | null
   situacao: string
   situacao_label: string
+  // 25/11: aguardando com previsto negativo — devolvido ao comprador antes de liquidar
+  devolvido_antes_de_liquidar?: boolean
   motivo: string | null
   etapa: string
   etapa_label: string
@@ -1005,6 +1007,7 @@ await carregar()
                   <template v-if="p.liberado_em">{{ fmtDia(p.liberado_em) }}</template>
                   <template v-else-if="p.situacao === 'vencido'"><span class="text-red-600">venceu {{ fmtDia(p.previsao_liberacao) }}</span></template>
                   <template v-else-if="p.situacao === 'cancelado'">—</template>
+                  <template v-else-if="p.devolvido_antes_de_liquidar"><span class="cursor-help text-amber-700" :title="p.motivo || ''">devolvido</span></template>
                   <template v-else-if="p.previsao_liberacao">prev. {{ fmtDia(p.previsao_liberacao) }}</template>
                   <template v-else>—</template>
                 </td>

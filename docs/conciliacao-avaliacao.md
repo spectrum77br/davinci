@@ -897,3 +897,14 @@ Vinicius, sobre a venda devolvida que ainda contava o custo: "daí no próximo p
 - **"Trocado"** (voltou outro produto, o `troca_sku`) conta quando entrou **Novo** — decisão de 19/11 (kfa 306795). Trocado que entrou Usado, Usado e danificado ficam com a pessoa (o produto ainda vale, mas não o custo cheio).
 - Se a entrada no estoque for estornada depois, o custo volta e o finalizado reabre pra uma pessoa olhar (como já era).
 - **Voltar atrás:** reverter o commit; o recálculo seguinte devolve o custo cheio onde a regra nova tinha zerado (o que foi zerado à mão continua).
+
+## 52. TikTok devolvido antes de liquidar não é "vencido" (25/11)
+
+Vinicius, sobre o Poofy (tiktok) 307730: "esse pedido tá estranho, não está?" → "Sim, corrige". A TikTok fez o reembolso rápido de R$ 158,60 ao comprador em 18/11, um dia depois da previsão de liquidação (17/11). A estimativa dela ficou **−12,58**: o frete que fica com a loja. Como nada liberou e a data passou, o painel mostrava "Não liberado (vencido) · abrir chamado de repasse". Não existe repasse a cobrar: a liquidação vai **descontar** os 12,58.
+
+- **Agora:** pedido TikTok sem nenhuma liberação nem dinheiro mexido e com a estimativa **negativa** fica "aguardando". O motivo diz "a TikTok devolveu o dinheiro ao comprador antes de liquidar: a liquidação vai descontar 12.58". A tela mostra "Devolvido, aguarda a liquidação" na Situação e "devolvido" na coluna Liberado em, no lugar de "prev. 17/11".
+- **Quando a TikTok liquida** o ORDER negativo (já vira liberação desde 22/10, `liquidacao_negativa_tiktok`), o pedido "bate" com recebido ≤ 0 e entra no cartão "venda devolvida: decida o custo ao finalizar", como os outros.
+- **Não some:** 30 dias depois da previsão sem liquidar (`DIAS_DEVOLVIDO_SEM_LIQUIDAR`), volta a "vencido" e o motivo diz "a TikTok devolveu o dinheiro ao comprador e não liquidou (deve descontar X)". O "A liberar" já somava aguardando e vencido: não muda.
+- **Só TikTok:** na Shopee a Margem guarda o escrow antigo (positivo) até liberar, então a regra não se aplica.
+- **Afetados em 25/11:** Poofy (tiktok) 307730 (−12,58), Mini (tiktok) 308718 (−27,73) e Mini (tiktok) 306085 (−6,02). Os outros 2 vencidos da TikTok (Mini 306890 e 306823, previsto positivo) continuam vencidos.
+- **Voltar atrás:** reverter o commit; o recálculo seguinte devolve "vencido".

@@ -108,6 +108,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, case, exists, func, literal, literal_column, not_, or_, select, update
 from sqlalchemy import text as sql_text
@@ -154,7 +155,7 @@ from app.routers.atendimento import (
 )
 from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services import mail_central
-from app.services.atendimento import abas, acesso, gravar, separa_email
+from app.services.atendimento import abas, acesso, gravar, midia_site, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_SISTEMA,
@@ -545,9 +546,30 @@ async def _cartao(
         return saida
     email = ponte.decifrar(message)
     protegido = codigos.proteger(email.assunto, texto.legivel(email.texto))
+    # Sem o conteúdo (o cartão só lista; os bytes saem pelas rotas do anexo).
     anexos = (
-        await session.scalars(select(MailAttachment).where(MailAttachment.message_id == message.id))
+        await session.execute(
+            select(MailAttachment.id, MailAttachment.size, MailAttachment.metadata_enc).where(
+                MailAttachment.message_id == message.id
+            )
+        )
     ).all()
+    # O chamado do SITE (25/11/2026, `midia_site`): a foto e o vídeo do cliente viram
+    # miniatura na conversa; o que o aviso diz que veio só pelo link, a tela avisa.
+    do_site = meta.plataforma == PLATAFORMA_SITE
+    lista = []
+    for a in anexos:
+        dados_anexo = {
+            k: v
+            for k, v in decrypt_json(a.metadata_enc).items()
+            if k in ("filename", "content_type")
+        }
+        item: dict[str, Any] = {"id": str(a.id), "tamanho": a.size, **dados_anexo}
+        if do_site:
+            item["midia"] = midia_site.especie_declarada(
+                dados_anexo.get("filename"), dados_anexo.get("content_type")
+            )
+        lista.append(item)
     saida.update(
         {
             "de": email.de,
@@ -558,20 +580,11 @@ async def _cartao(
             "texto": protegido.texto,
             "links_removidos": protegido.links_removidos,
             "codigo_mascarado": meta.codigo_mascarado or protegido.codigo_mascarado,
-            "anexos": [
-                {
-                    "id": str(a.id),
-                    "tamanho": a.size,
-                    **{
-                        k: v
-                        for k, v in decrypt_json(a.metadata_enc).items()
-                        if k in ("filename", "content_type")
-                    },
-                }
-                for a in anexos
-            ],
+            "anexos": lista,
         }
     )
+    if do_site:
+        saida["arquivos_so_pelo_link"] = midia_site.arquivos_so_pelo_link(protegido.texto)
     return saida
 
 
@@ -2464,6 +2477,95 @@ async def anexo(attachment_id: UUID, session: Session, user: Leitor) -> Response
             "Cache-Control": "no-store",
             "Content-Security-Policy": "sandbox; default-src 'none'",
         },
+    )
+
+
+@router.get("/conversas/{conversa_id}/midias/{attachment_id}")
+async def midia_do_site(
+    conversa_id: str,
+    attachment_id: UUID,
+    session: Session,
+    user: Leitor,
+    capa: Annotated[bool, Query()] = False,
+) -> Response:
+    """A foto e o vídeo do cliente no CHAMADO DO SITE (25/11/2026, `midia_site`).
+
+    A miniatura e o visor grande da conversa. Só na conversa do chamado do site; o
+    anexo num e-mail DESTA conversa, com as mesmas travas dos cartões (o escopo da
+    equipe, a lixeira, quem só vê a aba nas lojas dele). O tipo vale pelos bytes: a
+    foto sai como veio (`inline`); o vídeo sai convertido para MP4 H.264 + AAC (a
+    primeira vez converte; com Range) e `?capa=1` dá a miniatura dele (JPEG). O
+    resto (PDF, HEIC…) é 404 aqui — continua no "baixar" do e-mail inteiro.
+    """
+    nao_encontrada = HTTPException(404, detail={"code": "midia_nao_encontrada"})
+    scope = await escopo_do_atendimento(session, user)
+    conversa = await _conversa_ou_404(session, conversa_id, scope)
+    if not midia_site.conversa_aceita(conversa):
+        raise nao_encontrada
+    linha = (
+        await session.execute(
+            select(MailAttachment.message_id, MailAttachment.metadata_enc).where(
+                MailAttachment.id == attachment_id
+            )
+        )
+    ).first()
+    meta = await session.get(MailMessageMeta, linha.message_id) if linha else None
+    if (
+        linha is None
+        or meta is None
+        or meta.conversa_id != conversa.id
+        or meta.estado not in ESTADOS_COM_TEXTO
+    ):
+        raise nao_encontrada
+    # As travas dos cartões (GET …/conversas/{id}/emails) para ESTE e-mail.
+    visivel = await session.scalar(
+        select(MailMessage.id).where(
+            MailMessage.id == linha.message_id,
+            administracao.filtro_mensagem(user, MailMessage.id),
+            *(_recorte_email(scope, MailMessage.id) if acesso.so_le_filas_email(user) else ()),
+        )
+    )
+    if visivel is None:
+        raise nao_encontrada
+    nome = decrypt_json(linha.metadata_enc).get("filename")
+    mp4 = midia_site.video_pronto(attachment_id)
+    if mp4 is None:
+        cifrado = await session.scalar(
+            select(MailAttachment.content_enc).where(MailAttachment.id == attachment_id)
+        )
+        # A conversão leva segundos: nada de transação aberta enquanto o ffmpeg roda.
+        await session.commit()
+        dados = decrypt_bytes(cifrado) if cifrado is not None else None
+        verdade = midia_site.especie_de_verdade(dados)
+        if dados is None or verdade is None:
+            raise nao_encontrada
+        especie, mime = verdade
+        if especie == midia_site.FOTO:
+            return Response(
+                content=dados,
+                media_type=mime,
+                headers=midia_site.cabecalhos(midia_site.nome_para_mostrar(nome, especie)),
+            )
+        mp4 = await midia_site.preparar_video(attachment_id, dados)
+        if mp4 is None:
+            raise HTTPException(404, detail={"code": "video_nao_preparado"})
+    else:
+        await session.commit()
+    if capa:
+        figura = await midia_site.preparar_capa(attachment_id)
+        if figura is None:
+            raise nao_encontrada
+        return FileResponse(
+            figura,
+            media_type="image/jpeg",
+            headers=midia_site.cabecalhos(
+                midia_site.nome_para_mostrar(nome, midia_site.VIDEO, capa=True)
+            ),
+        )
+    return FileResponse(
+        mp4,
+        media_type="video/mp4",
+        headers=midia_site.cabecalhos(midia_site.nome_para_mostrar(nome, midia_site.VIDEO)),
     )
 
 

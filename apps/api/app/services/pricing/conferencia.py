@@ -125,7 +125,11 @@ from app.services.pricing.anuncios import (
 )
 from app.services.pricing.calc import calculate
 from app.services.pricing.conferencia_leitores import Leitor, LeituraAnuncio
-from app.services.pricing.push import bases_com_catalogo_ligado, integracoes_com_marca_lida
+from app.services.pricing.push import (
+    bases_com_catalogo_ligado,
+    integracoes_com_marca_lida,
+    linhas_do_departamento,
+)
 from app.services.pricing.sku_match import variants_of
 
 logger = structlog.get_logger()
@@ -646,6 +650,9 @@ async def montar_celulas(
     # Vínculos de TODAS as integrações: a plataforma sem leitor (Magalu)
     # também passa pelo resolvedor, para "sem anúncio" não virar "não conferido".
     vinculos = await _carregar_vinculos(session, set(integracoes))
+    # No celular/eletro o anúncio que outra linha tem pelo SKU inteiro é dela
+    # (25/11/2026) — a mesma régua do envio.
+    linhas = await linhas_do_departamento(session)
     com_catalogo = await bases_com_catalogo_ligado(
         session, [a.id for a in contas if a.canal != CANAL_CATALOGO]
     )
@@ -692,6 +699,7 @@ async def montar_celulas(
                 canal=canal,
                 listing_type_conta=conta.listing_type,
                 pula_catalogo=pula_catalogo,
+                skus_outras_linhas=linhas.outras(department, prod.id),
             )
             resolucoes[(prod.id, conta.id)] = resolucao
             if canal == CANAL_CATALOGO:
