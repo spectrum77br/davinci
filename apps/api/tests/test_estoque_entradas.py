@@ -45,7 +45,10 @@ class FakeBling:
         self.lancamentos: list[dict] = []
         self.tentativas = 0
         self.falhas: list[Exception | None] = []
-        self.custos: dict[str, float] = {}
+        # Custo no Bling por id do produto (None = o produto não tem custo lá).
+        self.custos: dict[int, float | None] = {}
+        self.custo_falha: Exception | None = None
+        self.leituras_custo: list[int] = []
 
     async def update_stock_by_id(self, pid, qty, *, operation, observacao=None, custo=None, **kw):
         self.tentativas += 1
@@ -64,8 +67,14 @@ class FakeBling:
         )
         return {"id": 9_990_000 + len(self.lancamentos)}
 
-    async def cost_by_skus(self, skus):
-        return {s: self.custos[s] for s in skus if s in self.custos}
+    async def preco_custo_do_produto(self, pid):
+        self.leituras_custo.append(int(pid))
+        if self.custo_falha is not None:
+            raise self.custo_falha
+        return self.custos.get(int(pid))
+
+    async def cost_by_skus(self, skus):  # pragma: no cover — engole erro: não pode ser usado
+        raise AssertionError("cost_by_skus engole o erro do Bling: não serve para o custo")
 
     async def _request(self, *a, **kw):  # pragma: no cover — nada mais pode ser chamado
         raise AssertionError(f"chamada inesperada ao Bling: {a}")
@@ -259,11 +268,117 @@ async def test_nao_admin_403(client: AsyncClient, make_user, auth_as: Callable, 
 
 
 async def test_custo_do_bling_quando_o_davinci_nao_tem(client: AsyncClient, produtos, bling, admin):
-    bling.custos = {"z2819": 37.9}
+    bling.custos = {880103: 37.9}
     r = await _post(client, "z2819", 3, "chave-custo-001")
     assert r.json()["estado"] == "ok"
+    assert bling.leituras_custo == [880103]  # pelo id do produto no Bling
     assert bling.lancamentos[0]["custo"] == 37.9
     assert bling.lancamentos[0]["obs"].startswith("Entrada DaVinci #")
+
+
+async def test_custo_do_davinci_primeiro_sem_ler_o_bling(
+    client: AsyncClient, produtos, bling, admin
+):
+    r = await _post(client, "dg019.ra", 1, "chave-custo-dav1")
+    assert r.json()["estado"] == "ok"
+    assert bling.lancamentos[0]["custo"] == 812.5
+    assert bling.leituras_custo == []
+
+
+@pytest.mark.parametrize(
+    "falha",
+    [
+        BlingCloudflareError("status=429 cf_html=False"),
+        _erro_post(500),
+        httpx.ReadTimeout("timeout"),
+        RuntimeError("bling_produto_id_divergente: pedido 880103, veio 1"),
+    ],
+    ids=["429", "500", "timeout", "outro-produto"],
+)
+async def test_custo_ilegivel_no_bling_recusa_antes_de_gravar(
+    client: AsyncClient, db: AsyncSession, produtos, bling, admin, falha
+):
+    """C2: "não deu para perguntar" nunca vira "não tem custo" — o Bling
+    gravaria custo 0 e mexeria no custo médio. Recusa (503) antes de gravar a
+    linha e sem chamar o POST /estoques."""
+    bling.custos = {880103: 37.9}
+    bling.custo_falha = falha
+    r = await _post(client, "z2819", 10, "chave-custo-erro")
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"] == {
+        "code": "custo_indisponivel",
+        "message": "Não deu para ler o custo no Bling agora; nada foi lançado. Tente de novo.",
+    }
+    assert bling.leituras_custo == [880103]
+    assert bling.tentativas == 0 and bling.lancamentos == []
+    assert await _entradas(db) == []
+    # O worker também não tem o que lançar.
+    await svc.processar_pendentes(bling, agora=datetime.now(UTC) + timedelta(minutes=5))
+    assert bling.tentativas == 0
+    # A mesma chave, com o Bling de volta: agora lança (nada ficou gravado).
+    bling.custo_falha = None
+    r = await _post(client, "z2819", 10, "chave-custo-erro")
+    assert r.status_code == 200 and r.json()["estado"] == "ok"
+    assert [x["custo"] for x in bling.lancamentos] == [37.9]
+
+
+async def test_sem_custo_de_verdade_lanca_sem_custo(
+    client: AsyncClient, db: AsyncSession, produtos, bling, admin
+):
+    """O Bling respondeu e o produto não tem custo: lança sem custo, como
+    sairia à mão no Bling."""
+    bling.custos = {880103: None}
+    r = await _post(client, "z2819", 2, "chave-sem-custo1")
+    assert r.status_code == 200 and r.json()["estado"] == "ok"
+    (lanc,) = bling.lancamentos
+    assert lanc["custo"] is None
+    (e,) = await _entradas(db)
+    assert e.custo is None
+
+
+async def test_chave_velha_recusada_e_nada_lancado(
+    client: AsyncClient, db: AsyncSession, produtos, bling, admin
+):
+    """C1: a resposta se perdeu e a chave ficou na tela; horas depois a mesma
+    inclusão (mesmo SKU e quantidade) sai com a MESMA chave. Não pode ser
+    "engolida" como se fosse a de antes: 409 `idempotency_velha`, nada
+    lançado, e a tela abre o Incluir de novo (chave nova)."""
+    r1 = await _post(client, "dg019.ra", 1, "chave-velha-0001")
+    assert r1.json()["estado"] == "ok"
+    # Dentro de 15 min a repetição é a mesma entrada (clique duplo, rede).
+    r2 = await _post(client, "dg019.ra", 1, "chave-velha-0001")
+    assert r2.status_code == 200 and r2.json()["id"] == r1.json()["id"]
+    await db.execute(
+        EstoqueEntrada.__table__.update()
+        .where(EstoqueEntrada.idem_key == "chave-velha-0001")
+        .values(created_at=datetime.now(UTC) - timedelta(minutes=16))
+    )
+    await db.commit()
+    for qtd in (1, 2):  # igual ou diferente: a chave velha não vale mais
+        r = await _post(client, "dg019.ra", qtd, "chave-velha-0001")
+        assert r.status_code == 409, r.text
+        detalhe = r.json()["detail"]
+        assert detalhe["code"] == "idempotency_velha"
+        assert detalhe["message"].startswith("Esse envio é antigo: abra o Incluir de novo.")
+        assert "Confira o saldo antes de incluir de novo." in detalhe["message"]
+    assert bling.tentativas == 1 and len(await _entradas(db)) == 1
+    # O serviço recusa igual (o caminho do router e o do criar).
+    with pytest.raises(svc.EntradaInvalidaError) as exc:
+        await svc.criar(
+            db,
+            bling,
+            idem_key="chave-velha-0001",
+            user_id=admin.id,
+            user_nome="heisenberg",
+            sku="dg019.ra",
+            quantidade=1,
+            observacao=None,
+        )
+    assert (exc.value.code, exc.value.status) == ("idempotency_velha", 409)
+    # Chave nova (Incluir aberto de novo): lança.
+    r = await _post(client, "dg019.ra", 1, "chave-velha-0002")
+    assert r.json()["estado"] == "ok"
+    assert bling.tentativas == 2
 
 
 async def test_recusa_certa_falhou_e_nao_repete(
@@ -505,3 +620,74 @@ async def test_entrada_avulsa_nao_confirma_devolucao(db: AsyncSession, produtos)
     await dsr.conferir_entradas_pendentes(db, agora=agora + timedelta(minutes=1))
     await db.refresh(dev)
     assert dev.estoque_status == "conferindo"
+
+
+# ── Cliente do Bling: custo pelo id, com erro que sobe ───────────────────
+
+
+def _cliente_http(monkeypatch, respostas: list[httpx.Response], chamadas: list):
+    from app.services.marketplaces import bling as bling_mod
+
+    class _Http:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **kw):
+            chamadas.append((method, url, kw))
+            r = respostas.pop(0)
+            r.request = httpx.Request(method, url)
+            return r
+
+    async def _nada(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(bling_mod.httpx, "AsyncClient", _Http)
+    monkeypatch.setattr(bling_mod, "_acquire_bling_rate_slot", _nada)
+    monkeypatch.setattr(bling_mod.asyncio, "sleep", _nada)
+    return bling_mod.BlingClient({"access_token": "x", "expires_at": 4102444800})
+
+
+def _produto(pid: int, **kw) -> httpx.Response:
+    return httpx.Response(200, json={"data": {"id": pid, "codigo": "z2819", **kw}})
+
+
+async def test_bling_custo_pelo_id_do_produto(monkeypatch):
+    chamadas: list = []
+    c = _cliente_http(
+        monkeypatch,
+        [_produto(880103, precoCusto=None, fornecedor={"precoCusto": 812.5, "precoCompra": 1})],
+        chamadas,
+    )
+    assert await c.preco_custo_do_produto(880103) == 812.5
+    ((metodo, url, _kw),) = chamadas
+    assert metodo == "GET" and url.endswith("/produtos/880103")
+    # Respondeu e não tem custo: None (fornecedor sem custo, ou sem fornecedor).
+    for resposta in (
+        _produto(880103, fornecedor={"id": 0, "precoCusto": 0}),
+        _produto(880103),
+        _produto(880103, fornecedor={"precoCusto": None}),
+    ):
+        c = _cliente_http(monkeypatch, [resposta], [])
+        assert await c.preco_custo_do_produto(880103) is None
+
+
+async def test_bling_custo_com_erro_sobe(monkeypatch):
+    """Diferente de `cost_by_skus`: erro do Bling nunca vira "sem custo"."""
+    casos: list[tuple[list[httpx.Response], type[Exception]]] = [
+        ([httpx.Response(429)] * 3, BlingCloudflareError),
+        ([httpx.Response(500)], httpx.HTTPStatusError),
+        ([httpx.Response(404)], httpx.HTTPStatusError),
+        ([_produto(990001, fornecedor={"precoCusto": 5})], RuntimeError),  # outro produto
+        ([httpx.Response(200, json={"data": []})], RuntimeError),
+        ([_produto(880103, fornecedor={"precoCusto": "abc"})], ValueError),
+    ]
+    for respostas, erro in casos:
+        c = _cliente_http(monkeypatch, list(respostas), [])
+        with pytest.raises(erro):
+            await c.preco_custo_do_produto(880103)

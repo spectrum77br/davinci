@@ -55,44 +55,97 @@ function sideStockPanel(){
   return `<aside class="p2-side" aria-label="Estoque do produto"><div class="p2-frame"><table class="p2-grid p2-facts"><tbody>${title}<tr class="p2-row"><td colspan="5" class="p2-note">A movimentação ocorre nas peças da composição.</td></tr></tbody></table><table class="p2-grid p2-moves p2-parts"><colgroup><col><col class="p2-col-qty"><col class="p2-col-open"></colgroup><thead><tr><th>Componente</th><th class="p2-num">Por kit</th><th class="p2-num"></th></tr></thead><tbody>${parts||empty(3,'Kit sem componentes.')}</tbody></table></div></aside>`;
  }
  const t=sideTotals(product),h=sideStockHistory?.sku===product.sku?sideStockHistory:null;
- const facts=[['Entradas',t.entries],['Saídas',t.exits],['Saldo atual',t.physical],['Reservado',t.reserved],['Disponível',t.available]].map(([k,v])=>`<td class="p2-fact"><span>${k}</span><strong>${h||!['Entradas','Saídas'].includes(k)?qty(v):'…'}</strong></td>`).join('');
+ // O número nunca é cortado: se o quadro ficar estreito, quem encurta (com reticências) é o rótulo.
+ const facts=[['Entradas',t.entries],['Saídas',t.exits],['Saldo atual',t.physical],['Reservado',t.reserved],['Disponível',t.available]].map(([k,v])=>`<td class="p2-fact"><div class="p2-fact-box"><span title="${k}">${k}</span><strong>${h||!['Entradas','Saídas'].includes(k)?qty(v):'…'}</strong></div></td>`).join('');
  const moves=h?(h.items||[]).map(m=>{const delta=Number(m.physical_delta),reserve=Number(m.reserved_delta);return `<tr><td>${esc(when(m.created_at).replace(',',''))}</td><td class="p2-num">${delta>0?qty(delta):'—'}</td><td class="p2-num">${delta<0?qty(-delta):'—'}</td><td class="p2-obs">${esc([sideReason(m.reason),reserve?`Reserva: ${qty(reserve)}`:''].filter(Boolean).join(' · '))}</td></tr>`;}).join('')||empty(4,'Nenhum lançamento para este produto.'):empty(4,'Carregando os lançamentos…');
  return `<aside class="p2-side" aria-label="Estoque do produto"><div class="p2-frame"><table class="p2-grid p2-facts"><tbody>${title}<tr class="p2-row">${facts}</tr></tbody></table><table class="p2-grid p2-moves"><colgroup><col class="p2-col-date"><col class="p2-col-qty"><col class="p2-col-qty"><col></colgroup><thead><tr><th>Data</th><th class="p2-num">Entrada</th><th class="p2-num">Saída</th><th>Observação</th></tr></thead><tbody>${moves}</tbody></table></div></aside>`;
 }
 
-// Gravações no DaVinci: Idempotency-Key gerada na tela por ação e reusada se a pessoa repetir o
-// MESMO envio (resposta perdida, erro de rede ou 5xx): o servidor não lança duas vezes. Com resposta
-// (2xx ou 4xx) a chave é descartada: um novo envio igual, de propósito, é outro lançamento.
-const actionKeyStore='erp-davinci-pending';
-function actionKeys(){try{return JSON.parse(sessionStorage.getItem(actionKeyStore)||'{}');}catch(_){return {};}}
+// Gravações no DaVinci (e o preço em massa no ERP): a Idempotency-Key vale para UM envio. Ela só é
+// reaproveitada quando a pessoa repete o MESMO envio, na MESMA janela (ou menu) aberta, logo depois
+// de ficar sem resposta (rede, 5xx): o servidor devolve o que já fez e nada é lançado duas vezes.
+// Fechou a janela, abriu outra ou passaram 10 minutos: chave nova — um envio igual feito de
+// propósito depois é outro lançamento. Com resposta (2xx ou recusa definitiva) a chave é
+// descartada; "ainda rodando" (409 em_andamento) e "chave já usada com outros dados" a mantêm,
+// para a repetição receber o resultado do primeiro envio (e não virar um envio novo).
+const actionKeyStore='erp-davinci-pending',actionKeyTtl=10*60*1000;
+const actionUncertain='Pode ter sido gravado: repita o MESMO envio para conferir (nada é lançado duas vezes).';
+function actionKeys(){
+ let keys={};try{keys=JSON.parse(sessionStorage.getItem(actionKeyStore)||'{}')||{};}catch(_){}
+ const now=Date.now();
+ // A validade só vale para a chave cuja janela/menu já não está aberto (F5, outra aba): enquanto a
+ // janela está aberta e diz "repita o MESMO envio", a repetição sai com a mesma chave, sem prazo.
+ const open=new Set([...document.querySelectorAll('[data-idem-scope]')].map(e=>e.dataset.idemScope));
+ for(const [signature,entry] of Object.entries(keys)){const age=now-Number(entry?.at);if(typeof entry?.key!=='string'||!entry.scope||!open.has(entry.scope)&&!(age>=0&&age<actionKeyTtl))delete keys[signature];}
+ return keys;
+}
+function actionKeysSave(keys){try{sessionStorage.setItem(actionKeyStore,JSON.stringify(keys));}catch(_){}}
 // crypto.randomUUID só existe em página segura (https); fora dela (http de teste), o mesmo formato.
 const actionUuid=()=>crypto.randomUUID?crypto.randomUUID():'10000000-1000-4000-8000-100000000000'.replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
-function actionKey(signature){const keys=actionKeys(),key=keys[signature]||actionUuid();keys[signature]=key;try{sessionStorage.setItem(actionKeyStore,JSON.stringify(keys));}catch(_){}return key;}
-function actionKeyDone(signature){const keys=actionKeys();delete keys[signature];try{sessionStorage.setItem(actionKeyStore,JSON.stringify(keys));}catch(_){}}
-function davinciErrorText(data,status){
+// `scope` = a janela/menu aberto (data-idem-scope). Sem ela, a chave nunca é reaproveitada.
+function actionKey(signature,scope){
+ if(!scope)return actionUuid();
+ const keys=actionKeys(),old=keys[signature],entry=old&&old.scope===scope?old:{key:actionUuid(),at:Date.now(),scope};
+ keys[signature]=entry;actionKeysSave(keys);return entry.key;
+}
+function actionKeyPending(signature,scope){const entry=scope&&actionKeys()[signature];return !!entry&&entry.scope===scope;}
+function actionKeyDone(signature){const keys=actionKeys();delete keys[signature];actionKeysSave(keys);}
+function actionKeysDrop(scope){if(!scope)return;const keys=actionKeys();for(const [s,e] of Object.entries(keys))if(e.scope===scope)delete keys[s];actionKeysSave(keys);}
+// Ao abrir uma janela nova: some a chave de toda janela que já não está aberta.
+function actionKeysPrune(){
+ const alive=new Set([...document.querySelectorAll('[data-idem-scope]')].map(e=>e.dataset.idemScope)),keys=actionKeys();
+ for(const [s,e] of Object.entries(keys))if(!alive.has(e.scope))delete keys[s];actionKeysSave(keys);
+}
+// A chave fica: 5xx/sem resposta, 408/429 (nada foi feito ainda), e 409 "ainda rodando" ou "chave
+// já usada com outros dados" (a mensagem do servidor avisa; fechar a janela dá chave nova).
+const actionKeyKeeps=(status,code)=>status>=500||status===408||status===429||status===409&&['em_andamento','idempotency_conflito','idempotency_conflict'].includes(code);
+function actionError(text,uncertain){const error=new Error(text);error.uncertain=!!uncertain;return error;}
+const davinciSignature=(url,body)=>JSON.stringify(['davinci',url,body]);
+function davinciErrorText(data,status,idempotent){
  const d=data?.detail;
  if(typeof d==='string'&&d)return d;
  if(d&&typeof d.message==='string'&&d.message)return d.message;
  const lines=(d?.linhas||[]).flatMap(l=>l.erros||[]);if(lines.length)return lines.join(' ');
  if(typeof data?.message==='string'&&data.message)return data.message;
  if(Array.isArray(d))return 'Confira os campos: '+d.map(x=>x.msg).filter(Boolean).join('; ');
- return status===403?'Só administrador pode fazer isso.':'O DaVinci não aceitou agora. Tente de novo.';
+ if(status===403)return 'Só administrador pode fazer isso.';
+ if(status>=500)return idempotent?actionUncertain:'O DaVinci não respondeu agora. Tente de novo.';
+ return 'O DaVinci não aceitou agora. Tente de novo.';
 }
-async function davinciPost(url,body,{idempotent=false}={}){
- const signature=JSON.stringify(['davinci',url,body]),headers={'Content-Type':'application/json',Accept:'application/json'};
- if(idempotent)headers['Idempotency-Key']=actionKey(signature);
+async function davinciPost(url,body,{idempotent=false,scope=''}={}){
+ const signature=davinciSignature(url,body),headers={'Content-Type':'application/json',Accept:'application/json'};
+ if(idempotent)headers['Idempotency-Key']=actionKey(signature,scope);
  let response;
  try{response=await fetch(url,{method:'POST',credentials:'same-origin',headers,body:JSON.stringify(body)});}
- catch(_){throw new Error('Sem resposta do DaVinci. Repita o mesmo envio para conferir: nada é lançado duas vezes.');}
+ catch(_){throw actionError(idempotent?actionUncertain:'Sem resposta do DaVinci. Tente de novo.',idempotent);}
  let data=null;try{data=await response.json();}catch(_){}
- if(idempotent&&response.status<500)actionKeyDone(signature);
- if(!response.ok)throw new Error(davinciErrorText(data,response.status));
+ if(idempotent&&!actionKeyKeeps(response.status,data?.detail?.code))actionKeyDone(signature);
+ if(!response.ok){const text=davinciErrorText(data,response.status,idempotent);throw actionError(text,text===actionUncertain);}
  return data||{};
 }
 function sideDialogError(form,text){const box=form.querySelector('.p2-dialog-error');box.textContent=text;box.hidden=false;}
-function sideDialogBusy(form,on){form.querySelectorAll('button').forEach(b=>{b.disabled=on;});}
-// Depois de lançar: o state de novo (o refresh relê também os lançamentos do painel aberto).
-async function afterStockWrite(){try{await refresh();}catch(error){message(error.message,true);}}
+// Enquanto envia: todos os botões desligados (Cancelar também), o ESC não fecha (o `cancel` da janela
+// confere data-busy) e o botão diz o que está acontecendo.
+function sideDialogBusy(form,on,label='Lançando…'){
+ const dialog=form.closest('dialog');if(dialog)dialog.dataset.busy=on?'1':'';
+ form.querySelectorAll('button').forEach(b=>{b.disabled=on;});
+ const go=form.querySelector('.form-footer button:not([type=button])');if(!go)return;
+ if(on){if(go.dataset.label===undefined)go.dataset.label=go.textContent;go.textContent=label;}
+ else if(go.dataset.label!==undefined){go.textContent=go.dataset.label;delete go.dataset.label;}
+}
+// Depois de lançar: a mensagem do lançamento, e o state de novo (o refresh relê também os lançamentos
+// do painel aberto). Se a releitura falhar, a mensagem continua a do lançamento — nunca vira erro.
+async function afterStockWrite(text,error=false){
+ message(text,error);
+ try{await refresh();}catch(_){message(`${text} A lista atualiza em seguida.`,error);}
+}
+// Recusa ou falta de resposta: na janela; se a janela sumiu durante o envio (o navegador fecha no
+// 2º ESC mesmo assim), na faixa de aviso — e sem pedir para repetir, porque a janela nova terá outra chave.
+function sideStockFailed(form,error){
+ if(form.isConnected){sideDialogError(form,error.message);sideDialogBusy(form,false);return;}
+ message(error.uncertain?'Pode ter sido gravado (a janela foi fechada durante o envio): confira os lançamentos antes de lançar de novo.':error.message,true);
+ refresh().catch(()=>{});
+}
 // Quantidade inteira, maior que zero (e até `max`, quando houver).
 function sideQuantity(form,max){
  const raw=String(new FormData(form).get('quantidade')||'').trim(),n=Number(raw);
@@ -107,18 +160,18 @@ function openIncludeDialog(product){
  openProductDialog('p2-include-dialog','Incluir estoque',`<form id="p2-include-form" class="p2-dialog-form" data-sku="${esc(product.sku)}"><p class="p2-dialog-info">${esc(product.sku)} - ${esc(product.name)} · saldo atual ${qty(t.physical)}</p><label>Quantidade<input name="quantidade" type="number" min="1" max="100000" step="1" inputmode="numeric" required></label><label>Observação<input name="observacao" maxlength="500" placeholder="ex.: entrada de mercadoria"></label><p class="p2-dialog-error" role="alert" hidden></p><div class="form-footer"><button type="button" class="secondary" data-dialog-close>Cancelar</button><button>Incluir</button></div></form>`);
  document.querySelector('#p2-include-form [name=quantidade]')?.focus();
 }
+// Um envio ainda rodando (a janela anterior foi fechada à força): a nova espera, e diz por quê.
+const sideStockWait=form=>{sideDialogError(form,'Espere: o envio anterior ainda não terminou.');};
 async function submitInclude(form){
- if(sideStockBusy)return;
+ if(sideStockBusy){sideStockWait(form);return;}
  const [quantidade,problem]=sideQuantity(form,null);if(problem){sideDialogError(form,problem);return;}
- const observacao=String(new FormData(form).get('observacao')||'').trim()||null;
- sideStockBusy=true;sideDialogBusy(form,true);
+ const observacao=String(new FormData(form).get('observacao')||'').trim()||null,dialog=form.closest('dialog');
+ sideStockBusy=true;sideDialogBusy(form,true,'Lançando…');
  try{
-  const r=await davinciPost('/api/estoque/entradas',{sku:form.dataset.sku,quantidade,observacao},{idempotent:true});
-  form.closest('dialog')?.remove();
-  if(r.estado==='ok')message('Entrada lançada. O saldo atualiza em alguns minutos.');
-  else message(r.texto||'Entrada registrada. O DaVinci termina sozinho e avisa se precisar de alguém.',r.estado==='falhou');
-  await afterStockWrite();
- }catch(error){sideDialogError(form,error.message);sideDialogBusy(form,false);}
+  const r=await davinciPost('/api/estoque/entradas',{sku:form.dataset.sku,quantidade,observacao},{idempotent:true,scope:dialog?.dataset.idemScope});
+  dialog?.remove();
+  await afterStockWrite(r.estado==='ok'?'Entrada lançada. O saldo atualiza em alguns minutos.':r.texto||'Entrada registrada. O DaVinci termina sozinho e avisa se precisar de alguém.',r.estado==='falhou');
+ }catch(error){sideStockFailed(form,error);}
  finally{sideStockBusy=false;}
 }
 
@@ -130,23 +183,30 @@ function openTransferDialog(product){
  document.querySelector('#p2-transfer-form [name=quantidade]')?.focus();
 }
 async function submitTransfer(form){
- if(sideStockBusy)return;
+ if(sideStockBusy){sideStockWait(form);return;}
  const available=form.dataset.available===''?null:Number(form.dataset.available);
  const [quantidade,problem]=sideQuantity(form,available);if(problem){sideDialogError(form,problem);return;}
  const f=new FormData(form),destino=String(f.get('destino')||'');
  if(!destino){sideDialogError(form,'Escolha o produto de destino.');return;}
  const linhas=[{origem:form.dataset.sku,destino,quantidade}],observacao=String(f.get('observacao')||'').trim()||null;
- sideStockBusy=true;sideDialogBusy(form,true);
+ const url='/api/estoque/transferencias',body={linhas,observacao,mesma_numeracao:true},dialog=form.closest('dialog'),scope=dialog?.dataset.idemScope;
+ sideStockBusy=true;sideDialogBusy(form,true,'Lançando…');
  try{
-  const check=await davinciPost('/api/estoque/transferencias/conferir',{linhas,mesma_numeracao:true});
-  const errors=(check.linhas||[]).flatMap(l=>l.erros||[]);
-  if(errors.length){sideDialogError(form,errors.join(' '));sideDialogBusy(form,false);return;}
-  const r=await davinciPost('/api/estoque/transferencias',{linhas,observacao,mesma_numeracao:true},{idempotent:true});
-  form.closest('dialog')?.remove();
-  if(['ok','andamento'].includes(r.estado))message('Transferência lançada. Os saldos atualizam em alguns minutos.');
-  else message((r.linhas||[]).map(l=>l.texto).filter(Boolean).join(' ')||'Confira a transferência em Controle de Estoque.',true);
-  await afterStockWrite();
- }catch(error){sideDialogError(form,error.message);sideDialogBusy(form,false);}
+  // Repetição depois de ficar sem resposta (a chave deste mesmo envio ainda está guardada): o 1º envio
+  // pode já ter baixado a origem, e a conferência recusaria pelo saldo. Vai direto com a mesma chave:
+  // o servidor devolve a transferência original (e, se ela não existir, confere o saldo sozinho).
+  if(!actionKeyPending(davinciSignature(url,body),scope)){
+   const check=await davinciPost('/api/estoque/transferencias/conferir',{linhas,mesma_numeracao:true});
+   const errors=(check.linhas||[]).flatMap(l=>l.erros||[]);
+   if(errors.length){sideStockFailed(form,actionError(errors.join(' '),false));return;}
+   // A janela foi fechada durante a conferência: nada foi lançado, e não lança.
+   if(!form.isConnected){message('A janela foi fechada antes de lançar: nada foi transferido.',true);return;}
+  }
+  const r=await davinciPost(url,body,{idempotent:true,scope});
+  dialog?.remove();
+  if(['ok','andamento'].includes(r.estado))await afterStockWrite('Transferência lançada. Os saldos atualizam em alguns minutos.');
+  else await afterStockWrite((r.linhas||[]).map(l=>l.texto).filter(Boolean).join(' ')||'Confira a transferência em Controle de Estoque.',true);
+ }catch(error){sideStockFailed(form,error);}
  finally{sideStockBusy=false;}
 }
 document.addEventListener('click',e=>{

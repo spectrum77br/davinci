@@ -1,3 +1,4 @@
+# ruff: noqa: E501 — as regras de CSS conferidas aqui são trechos exatos do bling-layout.css.
 """Produtos 2 (o ERP dentro do DaVinci, /erp?embed=1#products): sem a faixa do modo e sem o
 "Todas as lojas", e com as letras da Tabela de Preços — só nessa tela embutida (M-28, 24/11/2026).
 
@@ -78,17 +79,28 @@ def test_m40_titulo_sem_reticencias_sem_painel_e_largura_toda_so_na_lista():
         assert regra in css, regra
     # O Atualizar do canto sai só da aba Produtos (o novo fica na barra), já no primeiro desenho;
     # a aba Anúncios e o editor ficam com ele.
-    assert f"{lista}:not([data-products-tab=listings]) header #refresh{{display:none!important}}" in css
+    assert (
+        f"{lista}:not([data-products-tab=listings]) header #refresh{{display:none!important}}"
+        in css
+    )
     # As colunas e as alturas antigas (imagem, 68px, preço azul em negrito) não sobram.
-    for antiga in (".product-list td{height:68px}", ".product-price{", ".product-image{", ".price-adjust{"):
+    for antiga in (
+        ".product-list td{height:68px}",
+        ".product-price{",
+        ".product-image{",
+        ".price-adjust{",
+    ):
         assert antiga not in css, antiga
 
 
 def test_m40_grade_com_as_medidas_da_tabela_de_precos():
     css = _css()
     fonte = 'font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"'
-    assert f".p2-frame{{border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;" in css
-    assert f"{GRADE}{{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;{fonte};font-size:12px;font-weight:400;" in css
+    assert ".p2-frame{border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;" in css
+    assert (
+        f"{GRADE}{{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;{fonte};font-size:12px;font-weight:400;"
+        in css
+    )
     assert f"{GRADE}>thead>tr,{GRADE}>tbody>tr.p2-row-head{{height:24px}}" in css
     assert f"{GRADE}>tbody>tr{{height:34px}}" in css
     assert (
@@ -99,17 +111,29 @@ def test_m40_grade_com_as_medidas_da_tabela_de_precos():
         f"{GRADE}>tbody>tr>td{{padding:4px 8px;border:0;border-top:1px solid rgb(229,231,235);"
         "background:#fff;font-size:12px;font-weight:400;line-height:16px;color:rgb(15,23,41);"
     ) in css
-    assert f"{GRADE}>thead>tr>.p2-num,{GRADE}>tbody>tr>.p2-num{{text-align:center;border-left:1px solid rgb(229,231,235)}}" in css
+    assert (
+        f"{GRADE}>thead>tr>.p2-num,{GRADE}>tbody>tr>.p2-num{{text-align:center;border-left:1px solid rgb(229,231,235)}}"
+        in css
+    )
     assert f"{GRADE} .p2-col-code{{width:130px}}" in css
     assert f"{GRADE} .p2-col-price,{GRADE} .p2-col-stock{{width:110px}}" in css
     # Preço em letra normal; o número do Estoque azul, peso 500, sem fundo; contorno azul no aberto.
-    assert f"{GRADE} .p2-stock,{GRADE} .p2-link{{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);" in css
-    assert f"{GRADE}>tbody>tr>td.p2-stock-cell.is-open{{outline:2px solid rgb(37,99,235);outline-offset:-2px}}" in css
+    assert (
+        f"{GRADE} .p2-stock,{GRADE} .p2-link{{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);"
+        in css
+    )
+    assert (
+        f"{GRADE}>tbody>tr>td.p2-stock-cell.is-open{{outline:2px solid rgb(37,99,235);outline-offset:-2px}}"
+        in css
+    )
 
 
 def test_m42_tela_dividida_e_estoque_com_as_mesmas_linhas():
     css = _css()
-    assert ".p2-split{display:grid;grid-template-columns:minmax(0,55fr) minmax(0,45fr);column-gap:16px;align-items:start}" in css
+    assert (
+        ".p2-split{display:grid;grid-template-columns:minmax(0,55fr) minmax(0,45fr);column-gap:16px;align-items:start}"
+        in css
+    )
     # À direita: 24px com código - nome (linha do cabeçalho da lista), 34px para quadros, cabeçalho
     # Data | Entrada | Saída | Observação e lançamentos; quadros com rótulo 11px/600 e número 12px.
     assert ".p2-moves>thead>tr{height:34px}" in css
@@ -120,12 +144,21 @@ def test_m42_tela_dividida_e_estoque_com_as_mesmas_linhas():
 
 def test_m41_botoes_da_barra_no_tamanho_dos_filtros():
     css = _css()
-    assert ".catalog-bar .catalog-bar-primary{background:rgb(37,99,235);border-color:rgb(37,99,235);color:#fff}" in css
+    assert (
+        ".catalog-bar .catalog-bar-primary{background:rgb(37,99,235);border-color:rgb(37,99,235);color:#fff}"
+        in css
+    )
     # Excel, Atualizar e Configuração usam a mesma classe dos filtros (28px, 12px, peso 500).
-    assert ".catalog-bar .catalog-bar-button{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;" in css
+    assert (
+        ".catalog-bar .catalog-bar-button{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;"
+        in css
+    )
 
 
 def test_arquivos_novos_carregam_antes_do_app():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    ordem = [html.index(f'/assets/{nome}"') for nome in ("product-list.js", "xlsx.js", "product-stock.js", "app.js")]
+    ordem = [
+        html.index(f'/assets/{nome}"')
+        for nome in ("product-list.js", "xlsx.js", "product-stock.js", "app.js")
+    ]
     assert ordem == sorted(ordem)

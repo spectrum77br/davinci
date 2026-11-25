@@ -1484,7 +1484,7 @@ test('M-43: Incluir posts the entry to DaVinci with an Idempotency-Key, kept onl
  {field(form,'quantidade').value=bad;submit(form);await tick();assert.equal(posts().length,0,bad);assert.match(form.querySelector('.p2-dialog-error').textContent,/inteira maior que zero/);}
  field(form,'quantidade').value='10';field(form,'observacao').value='entrada de mercadoria';
  submit(form);await tick();
- assert.equal(posts().length,1);assert.match(form.querySelector('.p2-dialog-error').textContent,/Sem resposta do DaVinci/);assert.ok(d.getElementById('p2-include-dialog'),'a janela fica para repetir');
+ assert.equal(posts().length,1);assert.equal(form.querySelector('.p2-dialog-error').textContent,'Pode ter sido gravado: repita o MESMO envio para conferir (nada é lançado duas vezes).');assert.ok(d.getElementById('p2-include-dialog'),'a janela fica para repetir');
  const states=calls.filter(c=>c.path==='/api/erp-local/state').length,history=calls.filter(c=>c.path==='/api/erp-local/stock-movements').length;
  submit(form);await tick(8);
  const [first,second]=posts();
@@ -1632,6 +1632,269 @@ test('M-45/M-47: price asks first (cancel sends nothing), Novo preço goes in R$
  change(box.querySelector('[data-bulk-on=price]'),false);change(box.querySelector('[data-bulk-on=category]'),true);
  box.querySelector('[data-bulk-apply]').click();await tick(6);
  assert.equal(d.getElementById('notice').textContent,'Categoria não existe: Nova');assert.ok(d.getElementById('notice').classList.contains('error'));
+});
+
+// Revisão de M-40…M-47 (C1/C7…C11): a chave de idempotência vale para UM envio (a mesma janela, até
+// 10 minutos), a repetição do Transferir pula a conferência, nada fecha enquanto envia, o 409 "ainda
+// rodando" guarda a chave, a falha da releitura não troca o sucesso por erro, e o replay do preço diz
+// que já tinha sido aplicado.
+const uncertainText='Pode ter sido gravado: repita o MESMO envio para conferir (nada é lançado duas vezes).';
+const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
+const pendingKeys=dom=>JSON.parse(dom.window.sessionStorage.getItem('erp-davinci-pending')||'{}');
+const later=(dom,ms)=>{const now=dom.window.Date.now.bind(dom.window.Date);dom.window.Date.now=()=>now()+ms;};
+async function includeSend(ctx,quantidade='1',observacao=''){
+ const {document:d,submit}=ctx;
+ if(!d.getElementById('p2-include-dialog'))d.querySelector('.p2-side [data-stock-include]').click();
+ const form=d.querySelector('#p2-include-form');field(form,'quantidade').value=quantidade;field(form,'observacao').value=observacao;submit(form);await tick(8);return form;
+}
+async function transferSend(ctx,quantidade='10'){
+ const {document:d,submit}=ctx;
+ if(!d.getElementById('p2-transfer-dialog'))d.querySelector('.p2-side [data-stock-transfer]').click();
+ const form=d.querySelector('#p2-transfer-form');field(form,'quantidade').value=quantidade;submit(form);await tick(10);return form;
+}
+
+test('C1/C9: Incluir — a chave só volta na repetição do MESMO envio na MESMA janela (aberta não vence; fechada, F5 ou 10 min = nova)',async()=>{
+ const replies=[];
+ const ctx=await p2Page({routes:{
+  '/api/erp-local/stock-movements':{body:p2Moves},
+  '/api/estoque/entradas':body=>{const r=replies.shift();return r||{body:{id:'e1',sku:body.sku,quantidade:body.quantidade,estado:'ok',texto:''}};},
+ }});
+ const {dom,document:d,calls}=ctx,posts=()=>calls.filter(c=>c.path==='/api/estoque/entradas'),key=i=>posts()[i].headers['Idempotency-Key'];
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ // Sem resposta: o texto novo, e a chave guardada com a hora e a janela.
+ replies.push(new Error('rede'));let form=await includeSend(ctx);
+ assert.equal(form.querySelector('.p2-dialog-error').textContent,uncertainText);
+ let saved=Object.values(pendingKeys(dom));
+ assert.equal(saved.length,1);assert.equal(saved[0].key,key(0));assert.equal(saved[0].scope,d.getElementById('p2-include-dialog').dataset.idemScope);
+ assert.ok(Math.abs(saved[0].at-Date.now())<5000,'guarda a hora');
+ // Fechar a janela descarta a chave: a mesma inclusão numa janela nova sai com chave NOVA.
+ d.querySelector('#p2-include-form [data-dialog-close]').click();
+ assert.equal(d.getElementById('p2-include-dialog'),null);assert.deepEqual(pendingKeys(dom),{});
+ replies.push({status:502,body:null});form=await includeSend(ctx);
+ assert.notEqual(key(1),key(0),'janela nova = chave nova');
+ assert.equal(form.querySelector('.p2-dialog-error').textContent,uncertainText,'5xx sem detalhe: pode ter sido gravado');
+ // Repetição logo depois, na mesma janela: a MESMA chave; com resposta, a chave é descartada.
+ await includeSend(ctx);
+ assert.equal(key(2),key(1),'mesma janela, mesmo envio = mesma chave');
+ assert.equal(d.getElementById('notice').textContent,'Entrada lançada. O saldo atualiza em alguns minutos.');
+ assert.deepEqual(pendingKeys(dom),{});
+ // Sem resposta e a repetição só 10 minutos depois, com a MESMA janela ainda aberta (ela diz
+ // "repita o MESMO envio"): a MESMA chave — o servidor devolve o envio de antes ou diz o que houve.
+ replies.push(new Error('rede'));await includeSend(ctx,'1','');
+ later(dom,10*60*1000+1);
+ await includeSend(ctx,'1','');
+ assert.equal(key(4),key(3),'janela aberta: a repetição usa a mesma chave mesmo depois de 10 minutos');
+ // Abrir uma janela nova (sem Cancelar) também descarta a chave da anterior.
+ replies.push(new Error('rede'));await includeSend(ctx,'2','');
+ assert.equal(Object.keys(pendingKeys(dom)).length,1);
+ d.querySelector('.p2-side [data-stock-include]').click();
+ assert.deepEqual(pendingKeys(dom),{},'abriu outra janela: a chave da anterior some');
+ await includeSend(ctx,'2','');
+ assert.notEqual(key(6),key(5));
+});
+
+test('C7: Transferir — repetir depois de ficar sem resposta pula a conferência e reenvia com a mesma chave',async()=>{
+ let refuse=false;const replies=[];
+ const ctx=await p2Page({routes:{
+  '/api/erp-local/stock-movements':{body:p2Moves},
+  // Depois do 1º envio (que já baixou a origem), a conferência recusaria pelo saldo.
+  '/api/estoque/transferencias/conferir':body=>({body:{linhas:body.linhas.map(l=>({...l,erros:refuse?['dg019.ra tem 85 disponível no Bling e a transferência pede 10.']:[]}))}}),
+  '/api/estoque/transferencias':body=>replies.shift()||{body:{id:'t1',numero:7,estado:'ok',observacao:body.observacao,linhas:[]}},
+ }});
+ const {dom,document:d,calls}=ctx,posts=()=>calls.filter(c=>c.path==='/api/estoque/transferencias'),checks=()=>calls.filter(c=>c.path==='/api/estoque/transferencias/conferir');
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ replies.push(new Error('rede'));let form=await transferSend(ctx);
+ assert.equal(checks().length,1);assert.equal(posts().length,1);
+ assert.equal(form.querySelector('.p2-dialog-error').textContent,uncertainText);
+ // A repetição do MESMO envio: sem /conferir (que agora recusaria), direto com a mesma chave; o
+ // servidor devolve a transferência original.
+ refuse=true;form=await transferSend(ctx);
+ assert.equal(checks().length,1,'não confere de novo');
+ assert.equal(posts().length,2);assert.equal(posts()[1].headers['Idempotency-Key'],posts()[0].headers['Idempotency-Key']);
+ assert.deepEqual(posts()[1].body,posts()[0].body);
+ assert.equal(d.getElementById('p2-transfer-dialog'),null);
+ assert.equal(d.getElementById('notice').textContent,'Transferência lançada. Os saldos atualizam em alguns minutos.');
+ assert.deepEqual(pendingKeys(dom),{});
+ // Envio novo (outra janela) com os mesmos dados: passa pela conferência, que recusa pelo saldo.
+ await transferSend(ctx,'10');
+ assert.equal(checks().length,2);assert.equal(posts().length,2,'a conferência recusou: nada lançado');
+ assert.equal(d.querySelector('#p2-transfer-form .p2-dialog-error').textContent,'dg019.ra tem 85 disponível no Bling e a transferência pede 10.');
+ // Sem resposta com 5; a repetição com OUTRA quantidade é outro envio: confere de novo, chave nova.
+ refuse=false;replies.push(new Error('rede'));await transferSend(ctx,'5');
+ assert.equal(checks().length,3);assert.equal(posts().length,3);
+ await transferSend(ctx,'4');
+ assert.equal(checks().length,4,'quantidade diferente = outro envio: confere');
+ assert.notEqual(posts()[3].headers['Idempotency-Key'],posts()[2].headers['Idempotency-Key']);
+});
+
+test('C8: enquanto lança, Cancelar desligado, ESC não fecha e o botão diz Lançando…; se a janela sumir, o resultado vai para a faixa',async()=>{
+ let gate=deferred();
+ const ctx=await p2Page({routes:{
+  '/api/erp-local/stock-movements':{body:p2Moves},
+  '/api/estoque/entradas':async body=>{await gate.promise;return {body:{id:'e1',sku:body.sku,quantidade:body.quantidade,estado:'ok',texto:''}};},
+  '/api/estoque/transferencias/conferir':body=>({body:{linhas:body.linhas.map(l=>({...l,erros:[]}))}}),
+  '/api/estoque/transferencias':async()=>{await gate.promise;return {status:422,body:{detail:{code:'transferencia_invalida',linhas:[{erros:['dg019.sp está inativo.']}]}}};},
+ }});
+ const {dom,document:d,calls,submit}=ctx,states=()=>calls.filter(c=>c.path==='/api/erp-local/state').length;
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ d.querySelector('.p2-side [data-stock-include]').click();
+ let dialog=d.getElementById('p2-include-dialog'),form=dialog.querySelector('form');
+ let esc=new dom.window.Event('cancel',{cancelable:true});dialog.dispatchEvent(esc);
+ assert.equal(esc.defaultPrevented,false,'sem envio, o ESC fecha como sempre');
+ field(form,'quantidade').value='2';submit(form);await tick(4);
+ const [cancel,go]=dialog.querySelectorAll('.form-footer button');
+ assert.deepEqual([cancel.disabled,go.disabled,go.textContent],[true,true,'Lançando…']);
+ cancel.click();assert.ok(d.getElementById('p2-include-dialog'),'Cancelar desligado não fecha');
+ esc=new dom.window.Event('cancel',{cancelable:true});dialog.dispatchEvent(esc);
+ assert.equal(esc.defaultPrevented,true,'ESC bloqueado durante o envio');assert.ok(d.getElementById('p2-include-dialog'));
+ gate.resolve();await tick(8);
+ assert.equal(d.getElementById('p2-include-dialog'),null);
+ assert.equal(d.getElementById('notice').textContent,'Entrada lançada. O saldo atualiza em alguns minutos.');
+ // Transferir: o navegador fecha a janela mesmo assim (2º ESC). A recusa chega depois: vai para a
+ // faixa de aviso e a lista é relida.
+ gate=deferred();
+ d.querySelector('.p2-side [data-stock-transfer]').click();dialog=d.getElementById('p2-transfer-dialog');form=dialog.querySelector('form');
+ field(form,'quantidade').value='10';submit(form);await tick(6);
+ assert.equal(dialog.querySelector('[data-dialog-close]').disabled,true);assert.equal(dialog.querySelector('.form-footer button:not([type=button])').textContent,'Lançando…');
+ dialog.dispatchEvent(new dom.window.Event('close'));
+ assert.equal(d.getElementById('p2-transfer-dialog'),null);
+ const before=states();
+ gate.resolve();await tick(8);
+ assert.equal(d.getElementById('notice').textContent,'dg019.sp está inativo.');assert.ok(d.getElementById('notice').classList.contains('error'));
+ assert.equal(states(),before+1,'relê a lista');
+ // Sem resposta com a janela já fechada: não pede para repetir (a janela nova teria outra chave).
+ gate=deferred();
+ d.querySelector('.p2-side [data-stock-include]').click();dialog=d.getElementById('p2-include-dialog');form=dialog.querySelector('form');
+ let sent=0;const plain=dom.window.fetch;dom.window.fetch=async(url,o)=>String(url)==='/api/estoque/entradas'?(sent+=1,await gate.promise,Promise.reject(new Error('rede'))):plain(url,o);
+ field(form,'quantidade').value='3';submit(form);await tick(4);
+ dialog.dispatchEvent(new dom.window.Event('close'));
+ // Janela nova enquanto o envio anterior ainda roda: espera, e diz por quê (nada sai).
+ assert.equal(sent,1);
+ d.querySelector('.p2-side [data-stock-include]').click();const next=d.querySelector('#p2-include-form');field(next,'quantidade').value='3';submit(next);await tick(4);
+ assert.equal(next.querySelector('.p2-dialog-error').textContent,'Espere: o envio anterior ainda não terminou.');
+ assert.equal(sent,1,'nada sai enquanto o anterior roda');
+ next.querySelector('[data-dialog-close]').click();
+ gate.resolve();await tick(8);
+ assert.match(d.getElementById('notice').textContent,/^Pode ter sido gravado \(a janela foi fechada durante o envio\): confira os lançamentos antes de lançar de novo\.$/);
+});
+
+async function tagPage(replies){
+ const ctx=await p2Page({routes:{
+  '/api/produtos/trocar-tag/previa':()=>({body:{itens:[{sku:'dg019.ra',novo:'dg019.sa',acao:'alterar',motivo:null}],alterar:1,pular:0}}),
+  '/api/produtos/trocar-tag':async()=>{const r=replies.shift();return typeof r==='function'?r():r;},
+ }});
+ ctx.pick('dg019.ra');
+ ctx.openTag=async()=>{
+  const d=ctx.document;if(!d.querySelector('[data-bar-menu-box=config]'))d.querySelector('[data-bar-menu=config]').click();
+  const box=d.querySelector('[data-bar-menu-box=config]');ctx.change(box.querySelector('[data-bulk-on=tag]'),true);ctx.change(box.querySelector('[data-bulk-field="tag.value"]'),'.sa');
+  box.querySelector('[data-bulk-apply]').click();await tick(8);return d.getElementById('p2-tag-dialog');
+ };
+ ctx.swaps=()=>ctx.calls.filter(c=>c.path==='/api/produtos/trocar-tag');
+ return ctx;
+}
+const tagDone={body:{itens:[{sku:'dg019.ra',novo:'dg019.sa',estado:'ok',motivo:null}],ok:1,pulado:0,falhou:0}};
+
+test('C8/C10: Trocar a tag — Trocando… sem Cancelar nem ESC; 409 em_andamento guarda a chave e a repetição recebe a troca original',async()=>{
+ const gate=deferred(),replies=[async()=>{await gate.promise;return {status:409,body:{detail:{code:'em_andamento',message:'Esta troca ainda está rodando. Espere terminar.'}}};},tagDone];
+ const ctx=await tagPage(replies),{dom,document:d,swaps}=ctx;
+ const dialog=await ctx.openTag(),confirmButton=dialog.querySelector('[data-tag-confirm]'),cancel=dialog.querySelector('[data-tag-cancel]');
+ confirmButton.click();await tick(4);
+ assert.deepEqual([confirmButton.disabled,confirmButton.textContent,cancel.disabled],[true,'Trocando…',true]);
+ cancel.click();assert.ok(d.getElementById('p2-tag-dialog'),'Cancelar desligado');
+ const esc=new dom.window.Event('cancel',{cancelable:true});dialog.dispatchEvent(esc);assert.equal(esc.defaultPrevented,true);
+ gate.resolve();await tick(8);
+ assert.equal(dialog.querySelector('.p2-dialog-error').textContent,'Esta troca ainda está rodando. Espere terminar.');
+ assert.deepEqual([confirmButton.disabled,confirmButton.textContent,cancel.disabled],[false,'Trocar 1 código',false]);
+ assert.equal(Object.keys(pendingKeys(dom)).length,1,'409 em_andamento: a chave fica');
+ confirmButton.click();await tick(8);
+ assert.equal(swaps().length,2);assert.equal(swaps()[1].headers['Idempotency-Key'],swaps()[0].headers['Idempotency-Key'],'a repetição recebe a troca original');
+ assert.equal(dialog.querySelector('h2').textContent,'Resultado da troca de tag');assert.deepEqual(pendingKeys(dom),{});
+});
+
+test('C10: recusa definitiva descarta a chave; "chave usada com outros dados" a mantém; janela que some mostra o resultado na faixa',async()=>{
+ const gate=deferred(),replies=[
+  {status:422,body:{detail:{code:'tag',message:'A tag precisa estar na lista Tag de envio.'}}},tagDone,
+  {status:409,body:{detail:{code:'idempotency_conflito',message:'Esta janela já aplicou outra troca. Feche e abra de novo.'}}},
+  async()=>{await gate.promise;return {body:{itens:[{sku:'dg019.ra',novo:'dg019.sa',estado:'falhou',motivo:'Bling recusou'}],ok:0,pulado:0,falhou:1}};},
+ ];
+ const ctx=await tagPage(replies),{dom,document:d,calls,swaps}=ctx;
+ let dialog=await ctx.openTag();
+ dialog.querySelector('[data-tag-confirm]').click();await tick(8);
+ assert.equal(dialog.querySelector('.p2-dialog-error').textContent,'A tag precisa estar na lista Tag de envio.');
+ assert.deepEqual(pendingKeys(dom),{},'recusa definitiva: chave descartada');
+ dialog.querySelector('[data-tag-confirm]').click();await tick(8);
+ assert.notEqual(swaps()[1].headers['Idempotency-Key'],swaps()[0].headers['Idempotency-Key']);
+ dialog.querySelector('[data-tag-close]').click();await tick(8);
+ // Conflito de chave: avisa (a mensagem do servidor) e a chave fica — repetir não vira troca nova.
+ dialog=await ctx.openTag();
+ dialog.querySelector('[data-tag-confirm]').click();await tick(8);
+ assert.equal(dialog.querySelector('.p2-dialog-error').textContent,'Esta janela já aplicou outra troca. Feche e abra de novo.');
+ assert.equal(Object.keys(pendingKeys(dom)).length,1);
+ // A janela some durante a troca (2º ESC): o resultado chega na faixa de aviso e a lista é relida.
+ const states=calls.filter(c=>c.path==='/api/erp-local/state').length;
+ dialog.querySelector('[data-tag-confirm]').click();await tick(4);
+ assert.equal(swaps()[3].headers['Idempotency-Key'],swaps()[2].headers['Idempotency-Key']);
+ dialog.dispatchEvent(new dom.window.Event('close'));assert.equal(d.getElementById('p2-tag-dialog'),null);
+ assert.deepEqual(pendingKeys(dom),{},'fechou a janela: a chave some');
+ gate.resolve();await tick(10);
+ assert.equal(d.getElementById('notice').textContent,'Troca de tag: 0 alterados · 0 pulados · 1 com falha (dg019.ra: Bling recusou)');
+ assert.ok(d.getElementById('notice').classList.contains('error'));
+ assert.equal(calls.filter(c=>c.path==='/api/erp-local/state').length,states+1,'relê a lista');
+});
+
+test('C11: depois de lançar, a falha ao reler a lista não troca a mensagem do lançamento por erro',async()=>{
+ let failState=false;
+ const ctx=await p2Page({routes:{
+  '/api/erp-local/stock-movements':{body:p2Moves},
+  '/api/estoque/entradas':body=>({body:{id:'e1',sku:body.sku,quantidade:body.quantidade,estado:'ok',texto:''}}),
+  '/api/estoque/transferencias/conferir':body=>({body:{linhas:body.linhas.map(l=>({...l,erros:[]}))}}),
+  '/api/estoque/transferencias':()=>({body:{id:'t1',numero:7,estado:'andamento',linhas:[]}}),
+ }});
+ const {dom,document:d}=ctx,plain=dom.window.fetch;
+ dom.window.fetch=async(url,o)=>failState&&String(url)==='/api/erp-local/state'?{ok:false,status:502,json:async()=>({})}:plain(url,o);
+ d.querySelector('[data-stock-side="dg019.ra"]').click();await tick();
+ failState=true;await includeSend(ctx,'10');
+ const notice=d.getElementById('notice');
+ assert.equal(notice.textContent,'Entrada lançada. O saldo atualiza em alguns minutos. A lista atualiza em seguida.');
+ assert.equal(notice.classList.contains('error'),false);
+ await transferSend(ctx,'10');
+ assert.equal(notice.textContent,'Transferência lançada. Os saldos atualizam em alguns minutos. A lista atualiza em seguida.');
+ assert.equal(notice.classList.contains('error'),false);
+ failState=false;await includeSend(ctx,'1');
+ assert.equal(notice.textContent,'Entrada lançada. O saldo atualiza em alguns minutos.');
+});
+
+test('C1/C9: preço em massa — o mesmo menu repete com o mesmo operation_key e o replay diz que já tinha sido aplicado; menu aberto não vence, menu novo = chave nova',async()=>{
+ const keys=[],replies=[];
+ const ctx=await p2Page({routes:{'/api/erp-local/catalog/bulk-price':body=>{keys.push(body.operation_key);const r=replies.shift();if(r)return r;const again=keys.indexOf(body.operation_key)<keys.length-1;return {body:{changed:2,changes:[],replayed:again,message:'Preço alterado em 2 produtos'}};}}});
+ const {dom,document:d,pick,change}=ctx,notice=d.getElementById('notice');
+ dom.window.confirm=()=>true;
+ pick('dg019.ra');pick('dg019.sp');
+ const menu=()=>{if(!d.querySelector('[data-bar-menu-box=config]'))d.querySelector('[data-bar-menu=config]').click();return d.querySelector('[data-bar-menu-box=config]');};
+ const apply=async()=>{const box=menu();if(!box.querySelector('[data-bulk-on=price]').checked){change(box.querySelector('[data-bulk-on=price]'),true);const a=box.querySelector('[data-bulk-field="price.amount"]');a.value='800';a.dispatchEvent(new dom.window.Event('input',{bubbles:true}));}box.querySelector('[data-bulk-apply]').click();await tick(10);};
+ replies.push(new Error('rede'));await apply();
+ assert.equal(notice.textContent,uncertainText);assert.ok(notice.classList.contains('error'));
+ const box=d.querySelector('[data-bar-menu-box=config]');
+ assert.ok(box,'o menu fica aberto para repetir');assert.equal(box.querySelector('[data-bulk-apply]').disabled,false);assert.equal(box.querySelector('[data-bulk-apply]').textContent,'Aplicar aos 2 itens');
+ await apply();
+ assert.equal(keys[1],keys[0],'mesmo menu, mesmo envio = mesmo operation_key');
+ assert.equal(notice.textContent,'Esse preço já tinha sido aplicado (2 produtos): nada foi alterado de novo');
+ assert.doesNotMatch(notice.textContent,/Preço alterado/);assert.equal(notice.classList.contains('error'),false);
+ assert.equal(d.querySelector('[data-bar-menu-box=config]'),null,'com resposta, o menu fecha');
+ // Menu novo, mesmo envio: operation_key NOVO (um preço igual aplicado de propósito é outra operação).
+ await apply();
+ assert.notEqual(keys[2],keys[0]);assert.equal(notice.textContent,'Preço alterado em 2 produtos');
+ // Sem resposta e repetição 10 minutos depois, com o MESMO menu aberto: a mesma chave (o ERP
+ // devolve o reajuste de antes, sem aplicar de novo).
+ replies.push(new Error('rede'));await apply();
+ later(dom,10*60*1000+1);await apply();
+ assert.equal(keys[4],keys[3],'menu aberto: a repetição usa a mesma chave mesmo depois de 10 minutos');
+ // Fechar o menu depois de ficar sem resposta descarta a chave.
+ replies.push({status:503,body:{}});await apply();
+ assert.equal(notice.textContent,uncertainText,'5xx sem detalhe');
+ assert.equal(Object.keys(pendingKeys(dom)).length,1);
+ d.body.click();assert.equal(d.querySelector('[data-bar-menu-box=config]'),null);assert.deepEqual(pendingKeys(dom),{});
+ await apply();assert.notEqual(keys[6],keys[5]);
 });
 
 test('M-45/M-47: in consulta only the two bulk routes leave the screen; every other ERP write stays refused',async()=>{

@@ -8,6 +8,7 @@ leva o código novo ao DaVinci pelo caminho do webhook e registra cada item. Fal
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -35,6 +36,7 @@ from app.models.alert import Alert
 from app.models.produto_cadastro import CHAVE_TAG_ENVIO
 from app.security.cipher import encrypt_json
 from app.services import devolution_stock_return as dsr
+from app.services import produto_troca_tag as svc
 
 pytestmark = pytest.mark.asyncio
 
@@ -391,10 +393,17 @@ async def test_resposta_duvidosa_confere_com_get_e_nunca_repete_o_patch(
     assert r.status_code == 200, r.text
     itens = {i["sku"]: i for i in r.json()["itens"]}
     assert itens["z2819"]["estado"] == "ok"
+    # GET logo depois ainda no código antigo: o Bling pode aplicar depois — sem
+    # confirmação (na tela conta como falha, com o motivo), nunca "nada mudou".
     assert itens["z2820"]["estado"] == "falhou"
-    assert "continua z2820: nada mudou" in itens["z2820"]["motivo"]
+    assert itens["z2820"]["situacao"] == "sem_confirmacao"
+    assert itens["z2820"]["motivo"] == (
+        "o Bling não confirmou a troca; o DaVinci confere de novo em alguns minutos"
+    )
     assert itens["dg050.ra"]["estado"] == "falhou"
+    assert itens["dg050.ra"]["situacao"] == "sem_confirmacao"
     assert "não deu para conferir" in itens["dg050.ra"]["motivo"]
+    assert (r.json()["falhou"], r.json()["sem_confirmacao"]) == (2, 2)
     # Um PATCH por item, nunca repetido.
     assert bling.patches() == [
         (880501, "z2819.sa"),
@@ -407,13 +416,13 @@ async def test_resposta_duvidosa_confere_com_get_e_nunca_repete_o_patch(
     estados = dict(
         (await db.execute(select(ProdutoTrocaTagItem.sku_antigo, ProdutoTrocaTagItem.estado))).all()
     )
-    assert estados == {"z2819": "ok", "z2820": "falhou", "dg050.ra": "sem_confirmacao"}
+    assert estados == {"z2819": "ok", "z2820": "sem_confirmacao", "dg050.ra": "sem_confirmacao"}
     avisos = (
         (await db.execute(select(Alert).where(Alert.dedupe_key.like("produto_troca_tag:%"))))
         .scalars()
         .all()
     )
-    assert len(avisos) == 1 and avisos[0].user_id == admin.id
+    assert len(avisos) == 2 and {a.user_id for a in avisos} == {admin.id}
 
 
 async def test_confere_o_bling_ao_vivo_antes_de_trocar(
@@ -556,3 +565,235 @@ async def test_bling_consulta_do_codigo_e_estrita(monkeypatch):
     c = _cliente_http(monkeypatch, [httpx.Response(500)], [])
     with pytest.raises(httpx.HTTPStatusError):
         await c.produtos_com_codigo("z2819.sa")
+
+
+# ── Reconferência das "sem_confirmacao" (worker) ─────────────────────────
+
+
+async def _itens(db: AsyncSession) -> dict[str, ProdutoTrocaTagItem]:
+    return {
+        i.sku_antigo: i
+        for i in (
+            await db.execute(select(ProdutoTrocaTagItem).execution_options(populate_existing=True))
+        )
+        .scalars()
+        .all()
+    }
+
+
+async def test_sem_confirmacao_o_worker_reconfere_sem_outro_patch(
+    client: AsyncClient, db: AsyncSession, cenario, bling, admin
+):
+    """C4: PATCH com resposta duvidosa e o GET logo depois ainda no código
+    antigo. O Bling aplica depois (z2819): o worker vê o código novo, leva ao
+    DaVinci e marca ok. O Bling não aplica (z2820): passados 30 min, falhou
+    com aviso. Nunca outro PATCH."""
+    bling.falhas_patch[880501] = [(httpx.ReadTimeout("timeout"), False)]
+    bling.falhas_patch[880502] = [(_erro("PATCH", 504), False)]
+    corpo = {"skus": ["z2819", "z2820"], "tag": ".sa"}
+    h = {"Idempotency-Key": "chave-tag-0010"}
+    r = await client.post(URL, json=corpo, headers=h)
+    assert r.status_code == 200, r.text
+    assert [i["situacao"] for i in r.json()["itens"]] == ["sem_confirmacao"] * 2
+    itens = await _itens(db)
+    assert {k: i.estado for k, i in itens.items()} == {
+        "z2819": "sem_confirmacao",
+        "z2820": "sem_confirmacao",
+    }
+    t0 = itens["z2820"].tentativa_at
+    assert await _sku_de(db, 880501) == "z2819"
+
+    # O Bling aplicou o PATCH do z2819 depois de responder (o GET de agora vê).
+    bling.codigos[880501] = "z2819.sa"
+    out = await svc.reconferir_sem_confirmacao(bling, agora=t0 + timedelta(minutes=5))
+    assert out == {"conferidos": 2, "confirmados": 1, "falharam": 0}
+    itens = await _itens(db)
+    assert (itens["z2819"].estado, itens["z2819"].motivo) == (
+        "ok",
+        "o Bling confirmou a troca depois: o DaVinci acompanhou",
+    )
+    assert itens["z2820"].estado == "sem_confirmacao"  # antes de 30 min: espera
+    assert await _sku_de(db, 880501) == "z2819.sa"  # o mesmo reflexo da troca certa
+
+    # 30 min depois o z2820 continua o antigo no Bling: falhou, com aviso.
+    out = await svc.reconferir_sem_confirmacao(bling, agora=t0 + timedelta(minutes=31))
+    assert out == {"conferidos": 1, "confirmados": 0, "falharam": 1}
+    itens = await _itens(db)
+    assert itens["z2820"].estado == "falhou"
+    assert "30 min depois o código continua z2820: nada mudou" in itens["z2820"].motivo
+    assert await _sku_de(db, 880502) == "z2820"
+    avisos = (
+        (
+            await db.execute(
+                select(Alert.dedupe_key).where(
+                    Alert.dedupe_key.like(f"produto_troca_tag:{itens['z2820'].id}%")
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # O "confira" da hora e o "não mudou" da reconferência.
+    assert sorted(avisos) == [
+        f"produto_troca_tag:{itens['z2820'].id}",
+        f"produto_troca_tag:{itens['z2820'].id}:falhou",
+    ]
+    # Um PATCH por item, nunca repetido; a reconferência só fez GET.
+    assert bling.patches() == [(880501, "z2819.sa"), (880502, "z2820.sa")]
+    # Nada mais a reconferir: zero Bling.
+    antes = len(bling.chamadas)
+    out = await svc.reconferir_sem_confirmacao(bling, agora=t0 + timedelta(minutes=40))
+    assert out == {"conferidos": 0, "confirmados": 0, "falharam": 0}
+    assert len(bling.chamadas) == antes
+    # A mesma chave devolve o resultado reconferido.
+    r2 = await client.post(URL, json=corpo, headers=h)
+    estados = {i["sku"]: (i["estado"], i["situacao"]) for i in r2.json()["itens"]}
+    assert estados == {"z2819": ("ok", "ok"), "z2820": ("falhou", "falhou")}
+
+
+async def test_reconferencia_pelo_worker_e_janela_de_24h(
+    client: AsyncClient, db: AsyncSession, cenario, bling, admin
+):
+    """O tick do worker (o mesmo caminho) resolve na hora quando o Bling já
+    está com o código novo; item de mais de 24 h não é mais lido; GET com
+    erro ou outro código no Bling: fica para a pessoa/próximo tick."""
+    from app.worker import produto_troca_tag_tick
+
+    for pid in (880501, 880502, 880503):
+        bling.falhas_patch[pid] = [(_erro("PATCH", 502), False)]
+    r = await client.post(
+        URL,
+        json={"skus": ["z2819", "z2820", "dg050.ra"], "tag": ".sa"},
+        headers={"Idempotency-Key": "chave-tag-0011"},
+    )
+    assert r.status_code == 200, r.text
+    itens = await _itens(db)
+    # dg050.ra: de mais de 24 h — não é mais reconferido.
+    await db.execute(
+        ProdutoTrocaTagItem.__table__.update()
+        .where(ProdutoTrocaTagItem.id == itens["dg050.ra"].id)
+        .values(tentativa_at=datetime.now(UTC) - timedelta(hours=25))
+    )
+    await db.commit()
+    bling.codigos[880501] = "z2819.sa"  # aplicado depois
+    bling.codigos[880503] = "dg050.sa"
+    bling.codigos[880502] = "z2820-x"  # alguém mexeu no Bling: a pessoa confere
+
+    gets_dg050 = bling.chamadas.count(("GET", 880503))
+    await produto_troca_tag_tick({})
+    itens = await _itens(db)
+    assert {k: i.estado for k, i in itens.items()} == {
+        "z2819": "ok",
+        "z2820": "sem_confirmacao",
+        "dg050.ra": "sem_confirmacao",
+    }
+    assert await _sku_de(db, 880501) == "z2819.sa"
+    assert await _sku_de(db, 880503) == "dg050.ra"  # fora da janela: não mexe
+    assert bling.chamadas.count(("GET", 880503)) == gets_dg050
+    # GET com erro: fica (e o outro código também), mesmo depois de 30 min.
+    bling.falhas_get[880502] = [httpx.ConnectError("caiu")]
+    out = await svc.reconferir_sem_confirmacao(
+        bling, agora=datetime.now(UTC) + timedelta(minutes=31)
+    )
+    assert out == {"conferidos": 1, "confirmados": 0, "falharam": 0}
+    out = await svc.reconferir_sem_confirmacao(
+        bling, agora=datetime.now(UTC) + timedelta(minutes=32)
+    )
+    assert out == {"conferidos": 1, "confirmados": 0, "falharam": 0}
+    assert (await _itens(db))["z2820"].estado == "sem_confirmacao"
+    assert len(bling.patches()) == 3
+
+
+async def test_carrefour_vinculada_e_pulada_na_previa_e_na_execucao(
+    client: AsyncClient, db: AsyncSession, cenario, bling, admin
+):
+    """C3: a Carrefour acha a oferta pelo SKU e exige o SKU do vínculo igual ao
+    do produto — depois da troca a oferta pararia de receber estoque e preço.
+    Pula com o motivo do canal (vínculo com SKU ou sem; pelo canal do vínculo
+    ou da integração). Mercado Livre, Shopee, TikTok, Temu e Magalu endereçam
+    pelo id do anúncio: não pulam. A troca leva o código novo também ao
+    vínculo do próprio Bling (a Carrefour de um lote irmão confere esse SKU)."""
+    dono = cenario["z2819"].user_id
+
+    def integ(plataforma, nome):
+        return Integration(
+            user_id=dono,
+            platform=plataforma,
+            name=nome,
+            credentials=encrypt_json({}),
+        )
+
+    carrefour = integ(IntegrationPlatform.CARREFOUR, "carrefour-teste")
+    outros = {
+        p: integ(p, f"{p.value}-teste")
+        for p in (
+            IntegrationPlatform.ML,
+            IntegrationPlatform.SHOPEE,
+            IntegrationPlatform.TIKTOK,
+            IntegrationPlatform.TEMU,
+            IntegrationPlatform.MAGALU,
+        )
+    }
+    bling_integ = integ(IntegrationPlatform.BLING, "bling-teste")
+    db.add_all([carrefour, bling_integ, *outros.values()])
+    await db.flush()
+
+    def link(sku, integracao, plataforma, ext_id, ext_sku):
+        return ProductLink(
+            user_id=dono,
+            product_id=cenario[sku].id,
+            integration_id=integracao.id,
+            platform=plataforma,
+            external_id=ext_id,
+            external_sku=ext_sku,
+            last_sync_status=LinkSyncStatus.OK,
+        )
+
+    db.add_all(
+        [
+            # dg050.ra: oferta da Carrefour com o SKU do produto.
+            link("dg050.ra", carrefour, IntegrationPlatform.CARREFOUR, "OF-1", "dg050.ra"),
+            # z2820: vínculo sem SKU (a Carrefour usa o do produto) e com o
+            # canal só na integração.
+            link("z2820", carrefour, IntegrationPlatform.BLING, "OF-2", None),
+            # z2819: só canais que endereçam pelo id do anúncio + o do Bling.
+            *[link("z2819", i, p, f"{p.value}-1", "z2819") for p, i in outros.items()],
+            link("z2819", bling_integ, IntegrationPlatform.BLING, "880501", "z2819"),
+        ]
+    )
+    await db.commit()
+
+    corpo = {"skus": ["z2819", "z2820", "dg050.ra"], "tag": ".sa"}
+    r = await client.post(f"{URL}/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    previa = {i["sku"]: (i["acao"], i["motivo"]) for i in r.json()["itens"]}
+    assert previa == {
+        "z2819": ("alterar", None),
+        "z2820": ("pular", "tem anúncio da Carrefour vinculado"),
+        "dg050.ra": ("pular", "tem anúncio da Carrefour vinculado"),
+    }
+    r = await client.post(URL, json=corpo, headers={"Idempotency-Key": "chave-tag-0012"})
+    assert r.status_code == 200, r.text
+    estados = {i["sku"]: (i["estado"], i["motivo"]) for i in r.json()["itens"]}
+    assert estados == {
+        "z2819": ("ok", None),
+        "z2820": ("pulado", "tem anúncio da Carrefour vinculado"),
+        "dg050.ra": ("pulado", "tem anúncio da Carrefour vinculado"),
+    }
+    assert bling.patches() == [(880501, "z2819.sa")]
+    assert await _sku_de(db, 880503) == "dg050.ra"
+    links = {
+        (lk.platform, lk.external_id): lk.external_sku
+        for lk in (
+            await db.execute(
+                select(ProductLink)
+                .where(ProductLink.product_id == cenario["z2819"].id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    }
+    # O vínculo do Bling acompanha o código; os anúncios guardam o SKU deles.
+    assert links[(IntegrationPlatform.BLING, "880501")] == "z2819.sa"
+    assert all(v == "z2819" for k, v in links.items() if k[0] != IntegrationPlatform.BLING)

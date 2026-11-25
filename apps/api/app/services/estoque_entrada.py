@@ -10,9 +10,12 @@ Mesmas proteções da transferência (services/estoque_transferencia.py):
   estoque próprio: "Kit não tem estoque próprio: inclua nas peças".
 - A linha é gravada ANTES de lançar e marcada "enviando" (transação própria, já commitada) antes
   do POST: um 2º clique, o worker ou outro processo nunca lançam a mesma entrada de novo. A mesma
-  Idempotency-Key devolve a mesma entrada.
+  Idempotency-Key devolve a mesma entrada — só por 15 min: depois disso a chave é recusada
+  (409 `idempotency_velha`, nada lançado) e a tela abre o Incluir de novo.
 - O custo atual do produto vai no lançamento (sem ele o Bling grava custo 0 e mexe no custo
-  médio); a pessoa não digita custo.
+  médio); a pessoa não digita custo. Custo do DaVinci primeiro; sem ele, o do Bling lido pelo id
+  do produto. Não deu para ler no Bling → 503 `custo_indisponivel` antes de gravar (nada
+  lançado); só sai sem custo quando o Bling respondeu e o produto não tem custo.
 - A observação digitada vai no lançamento do Bling, junto com "Entrada DaVinci #N" e quem lançou.
 - Erro em que o Bling pode ter gravado (5xx/timeout depois de enviar) vira "conferindo": o worker
   procura o movimento no extrato (stock_movements) antes de qualquer outra coisa — nunca lança de
@@ -55,6 +58,19 @@ SEM_CONFIRMACAO = transf.SEM_CONFIRMACAO
 MAX_QUANTIDADE = transf.MAX_QUANTIDADE
 KIT = "Kit não tem estoque próprio: inclua nas peças"
 TEXTO_OK = "Entrada lançada. O saldo atualiza em alguns minutos."
+CUSTO_INDISPONIVEL = "custo_indisponivel"
+TEXTO_CUSTO_INDISPONIVEL = (
+    "Não deu para ler o custo no Bling agora; nada foi lançado. Tente de novo."
+)
+IDEMPOTENCY_VELHA = "idempotency_velha"
+TEXTO_IDEMPOTENCY_VELHA = "Esse envio é antigo: abra o Incluir de novo."
+
+# A chave da tela vale só para repetir o MESMO envio logo em seguida (clique
+# duplo, rede que caiu). Entrada criada há mais tempo que isto não é
+# reaproveitada: a mesma chave depois disso é recusada (409) e nada é lançado
+# — senão uma inclusão igual feita de propósito horas depois, na mesma aba,
+# seria "engolida" com "Entrada lançada" (C1, revisão de 25/11/2026).
+_CHAVE_VALIDADE = timedelta(minutes=15)
 
 # "enviando" parado: o processo caiu no meio do POST — confere no extrato.
 _ENVIANDO_ORFA = timedelta(minutes=5)
@@ -82,6 +98,35 @@ async def por_idem(session: AsyncSession, idem_key: str) -> EstoqueEntrada | Non
     return (
         await session.execute(select(EstoqueEntrada).where(EstoqueEntrada.idem_key == idem_key))
     ).scalar_one_or_none()
+
+
+def conferir_repeticao(
+    existente: EstoqueEntrada, sku: str, quantidade: int, *, agora: datetime | None = None
+) -> None:
+    """A tela mandou de novo uma chave que já tem entrada. Só vale como
+    repetição do MESMO envio, feita logo em seguida: entrada criada há mais de
+    15 min → 409 `idempotency_velha` (a tela abre o Incluir de novo, com chave
+    nova); outro produto ou outra quantidade → 409 `idempotency_conflito`. Em
+    nenhum dos dois nada é lançado. Sem exceção: quem chama devolve a entrada
+    de antes."""
+    agora = agora or datetime.now(UTC)
+    criada = existente.created_at
+    if criada is not None and agora - criada > _CHAVE_VALIDADE:
+        # A janela ficou aberta além da validade: nada é lançado e a pessoa fica
+        # sabendo o que aconteceu com o envio de antes (para não incluir em dobro).
+        _, texto = situacao(existente)
+        raise EntradaInvalidaError(
+            IDEMPOTENCY_VELHA,
+            f"{TEXTO_IDEMPOTENCY_VELHA} Envio anterior (Entrada DaVinci #{existente.numero}): "
+            f"{texto} Confira o saldo antes de incluir de novo.",
+            409,
+        )
+    if norm(existente.sku) != norm(sku) or int(existente.quantidade) != int(quantidade):
+        raise EntradaInvalidaError(
+            "idempotency_conflito",
+            "Esta janela já lançou outra entrada. Feche e abra de novo para incluir outra.",
+            409,
+        )
 
 
 async def produto_para_entrada(session: AsyncSession, sku: str) -> Product:
@@ -143,19 +188,31 @@ async def produto_para_entrada(session: AsyncSession, sku: str) -> Product:
 
 
 async def custo_atual(client: Any, produto: Product) -> Decimal | None:
-    """O custo do cadastro (o do Bling primeiro); sem custo no DaVinci, o
-    `precoCusto` atual do Bling. None = o produto não tem custo em lugar
-    nenhum (o lançamento sai sem custo, como sairia à mão no Bling)."""
+    """O custo do cadastro (o do Bling primeiro, como a transferência); sem
+    custo no DaVinci, o preço de custo atual do Bling, lido PELO ID do produto
+    (`preco_custo_do_produto`, em que erro sobe). None = o Bling respondeu e o
+    produto não tem custo (o lançamento sai sem custo, como sairia à mão no
+    Bling).
+
+    Não deu para ler o custo no Bling (limite de chamadas, Cloudflare, 5xx,
+    timeout, resposta com outro produto) → EntradaInvalidaError 503
+    `custo_indisponivel` ANTES de gravar a linha: sem custo o Bling grava 0 e
+    mexe no custo médio, então "não sei" nunca vira "sem custo" (C2,
+    revisão de 25/11/2026)."""
     for c in (produto.bling_cost_price, produto.cost_price):
         if c is not None and Decimal(c) > 0:
             return Decimal(c)
-    sku = (produto.sku or "").strip()
+    pid = int(produto.bling_product_id)
     try:
-        custos = await client.cost_by_skus({sku})
-    except Exception:  # noqa: BLE001 — sem custo é o mesmo que no Bling à mão
-        logger.warning("estoque_entrada_custo_bling_falhou", sku=sku)
-        return None
-    valor = custos.get(sku)
+        valor = await client.preco_custo_do_produto(pid)
+    except Exception as exc:  # noqa: BLE001 — qualquer falha = não sei o custo
+        logger.warning(
+            "estoque_entrada_custo_bling_falhou",
+            sku=(produto.sku or "").strip(),
+            bling_product_id=pid,
+            erro=str(exc)[:200],
+        )
+        raise EntradaInvalidaError(CUSTO_INDISPONIVEL, TEXTO_CUSTO_INDISPONIVEL, 503) from exc
     if valor is not None and valor > 0:
         return Decimal(str(valor))
     return None
@@ -174,16 +231,13 @@ async def criar(
 ) -> tuple[EstoqueEntrada, bool]:
     """Grava a entrada (sem lançar). Mesma `idem_key` = a mesma entrada de
     antes (`False` no 2º item): a tela repetiu o POST — com outro produto ou
-    outra quantidade, é recusada (409). Produto que não pode receber entrada
-    → EntradaInvalidaError e nada gravado."""
+    outra quantidade, ou com a entrada criada há mais de 15 min, é recusada
+    (409, `conferir_repeticao`). Produto que não pode receber entrada, ou
+    custo que não deu para ler no Bling → EntradaInvalidaError e nada
+    gravado."""
     existente = await por_idem(session, idem_key)
     if existente is not None:
-        if norm(existente.sku) != norm(sku) or int(existente.quantidade) != int(quantidade):
-            raise EntradaInvalidaError(
-                "idempotency_conflito",
-                "Esta janela já lançou outra entrada. Feche e abra de novo para incluir outra.",
-                409,
-            )
+        conferir_repeticao(existente, sku, quantidade)
         return existente, False
     if not isinstance(quantidade, int) or not (1 <= quantidade <= MAX_QUANTIDADE):
         raise EntradaInvalidaError(

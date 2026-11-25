@@ -255,6 +255,10 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .catalog-bar .catalog-bar-count button:hover{background:rgb(243,244,246);filter:none}
 .catalog-bar .catalog-bar-menu-wide{width:520px}
 .catalog-bar .catalog-bar-config{width:430px}
+/* Excel ▾ e Configuração ▾ ficam no fim da barra: o menu abre preso pela DIREITA do botão (como o
+   Popover da Tabela de Preços troca de lado) e nunca passa da largura da janela; se a barra quebrar
+   numa tela estreita e ainda faltar espaço, fitBarMenu (product-list.js) desliza o menu até caber. */
+.catalog-bar .catalog-bar-menu-wide,.catalog-bar .catalog-bar-config{left:auto;right:0;max-width:calc(100vw - 16px)}
 .catalog-bar-menu-title{padding:0 4px 2px;font-size:11px;font-weight:600;line-height:16px;color:rgb(107,114,128)}
 .catalog-bar .catalog-bar-note{margin:0;padding:2px 4px 6px;font-size:12px;line-height:16px;color:rgb(107,114,128)}
 .catalog-bar .catalog-bar-line{display:flex;align-items:center;gap:8px;margin:0;padding:4px;border-radius:4px;font-size:14px;line-height:20px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
@@ -309,6 +313,13 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .p2-grid .p2-side-button:disabled{opacity:.5;cursor:not-allowed}
 .p2-fact span{margin-right:6px;font-size:11px;font-weight:600;line-height:14px}
 .p2-fact strong{font-size:12px;font-weight:400;color:rgb(15,23,41)}
+/* O número do quadro nunca é cortado: rótulo e número lado a lado; se faltar espaço, só o rótulo
+   encurta (com reticências) e o número fica inteiro. Respiro lateral de 6px (e não 8px) nos quadros:
+   com a moldura de 1070px (tela de 1366 com o menu do DaVinci), cabe "Entradas 220" inteiro. */
+.p2-grid>tbody>tr>td.p2-fact{padding:4px 6px}
+.p2-fact-box{display:flex;align-items:baseline;min-width:0}
+.p2-fact-box>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.p2-fact-box>strong{flex:none;white-space:nowrap}
 .p2-grid>tbody>tr>td.p2-fact+td.p2-fact{border-left:1px solid rgb(229,231,235)}
 .p2-grid>tbody>tr>td.p2-note{color:rgb(107,114,128)}
 .p2-moves>thead>tr{height:34px}

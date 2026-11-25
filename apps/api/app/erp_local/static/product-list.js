@@ -106,7 +106,18 @@ function productSelectionTools(matches){
 }
 // Fechar sem redesenhar: o mesmo clique ainda segue para o que foi clicado fora da caixinha.
 function closeCatalogMenu(){catalogMenu='';document.querySelector('[data-catalog-menu-box]')?.remove();document.querySelectorAll('[data-catalog-menu]').forEach(b=>b.setAttribute('aria-expanded','false'));}
-function closeProductBarMenu(){productBarMenu='';document.querySelector('[data-bar-menu-box]')?.remove();document.querySelectorAll('[data-bar-menu]').forEach(b=>b.setAttribute('aria-expanded','false'));}
+// O menu aberto cabe na janela: preso pela direita do botão (CSS); se ainda passar de uma borda (barra
+// quebrada numa tela estreita), desliza até ficar a 8px dela. Chamado depois de cada render.
+function fitBarMenu(){
+ const box=document.querySelector('[data-bar-menu-box]');if(!box)return;
+ box.style.transform='';
+ const r=box.getBoundingClientRect(),w=document.documentElement.clientWidth;if(!r.width||!w)return;
+ let dx=0;if(r.right>w-8)dx=w-8-r.right;if(r.left+dx<8)dx=8-r.left;
+ if(dx)box.style.transform=`translateX(${Math.round(dx)}px)`;
+}
+addEventListener('resize',fitBarMenu);
+// Fechar o menu Configuração descarta a chave do preço guardada nele (abrir de novo = envio novo).
+function closeProductBarMenu(){if(productBarMenu==='config')actionKeysDrop(bulkScope);productBarMenu='';document.querySelector('[data-bar-menu-box]')?.remove();document.querySelectorAll('[data-bar-menu]').forEach(b=>b.setAttribute('aria-expanded','false'));}
 function catalogFilterChanged(focus){
  catalogOffset=0;productSelection.clear();render();
  if(focus)[...document.querySelectorAll(`[data-catalog-option="${focus[0]}"]`)].find(i=>i.value===focus[1])?.focus();
@@ -140,16 +151,20 @@ function excelDownload(){
 // M-45/M-46/M-47: Configuração ▾ → "Alterar em massa" nos itens marcados. Abre sempre sem nada
 // marcado (ninguém altera sem querer); só muda o que estiver marcado.
 const bulkDefaults=()=>({category:{on:false,value:catalogListOf('categorias')[0]||''},tag:{on:false,value:catalogListOf('tags_envio')[0]||''},price:{on:false,action:'set',amount:'',mode:'value'}});
-let bulkEdit=null,bulkBusy=false;
+let bulkEdit=null,bulkBusy=false,bulkScope='';
+// O botão Aplicar: "Aplicando…" enquanto envia (o menu continua aberto: repetir depois de ficar sem
+// resposta é clicar de novo no MESMO menu, com a mesma chave do preço).
+function bulkApplyLabel(n){return bulkBusy?'Aplicando…':n?`Aplicar ${n===1?'ao item':`aos ${qty(n)} itens`}`:'Aplicar';}
+function bulkApplyState(){const go=document.querySelector('[data-bulk-apply]'),n=productSelection.size;if(go){go.disabled=bulkBusy||!n;go.textContent=bulkApplyLabel(n);}}
 function productConfigMenu(){
  const open=productBarMenu==='config',n=productSelection.size,b=bulkEdit||=bulkDefaults();
  const select=(field,label,values,current)=>`<select data-bulk-field="${field}" aria-label="${label}">${values.map(([v,t])=>`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(t)}</option>`).join('')}</select>`;
  const line=(key,label,fields)=>`<div class="catalog-bar-bulk"><label class="catalog-bar-line"><input type="checkbox" data-bulk-on="${key}" ${b[key].on?'checked':''}>${label}</label>${fields}</div>`;
- const menu=open?`<div class="catalog-bar-menu catalog-bar-config" data-bar-menu-box="config" role="group" aria-label="Alterar em massa"><div class="catalog-bar-menu-title">Alterar em massa</div><p class="catalog-bar-note" data-bulk-count>${n?plural(n,'item selecionado','itens selecionados'):'Selecione itens na lista'}</p>${
+ const menu=open?`<div class="catalog-bar-menu catalog-bar-config" data-bar-menu-box="config" data-idem-scope="${esc(bulkScope)}" role="group" aria-label="Alterar em massa"><div class="catalog-bar-menu-title">Alterar em massa</div><p class="catalog-bar-note" data-bulk-count>${n?plural(n,'item selecionado','itens selecionados'):'Selecione itens na lista'}</p>${
   line('category','Categoria',select('category.value','Categoria nova',catalogListOf('categorias').map(c=>[c,c]),b.category.value))}${
   line('tag','Tag',select('tag.value','Tag nova',catalogListOf('tags_envio').map(t=>[t,t]),b.tag.value))}${
   line('price','Preço',select('price.action','Ação no preço',[['set','Novo preço'],['increase','Acrescer'],['decrease','Descontar']],b.price.action)+`<input data-bulk-field="price.amount" value="${esc(b.price.amount)}" inputmode="decimal" placeholder="0,00" aria-label="Valor" autocomplete="off">`+select('price.mode','Tipo do valor',[['value','R$'],['percent','%']],b.price.action==='set'?'value':b.price.mode).replace('<select',`<select ${b.price.action==='set'?'disabled':''}`))
- }<p class="catalog-bar-note">Só muda o que estiver marcado. Vale para todos os itens selecionados.</p><div class="catalog-bar-menu-foot"><button type="button" class="catalog-bar-button catalog-bar-primary" data-bulk-apply ${n?'':'disabled'}>${n?`Aplicar ${n===1?'ao item':`aos ${qty(n)} itens`}`:'Aplicar'}</button></div></div>`:'';
+ }<p class="catalog-bar-note">Só muda o que estiver marcado. Vale para todos os itens selecionados.</p><div class="catalog-bar-menu-foot"><button type="button" class="catalog-bar-button catalog-bar-primary" data-bulk-apply ${n&&!bulkBusy?'':'disabled'}>${bulkApplyLabel(n)}</button></div></div>`:'';
  return `<div class="catalog-bar-filter" data-bar-menu-wrap><button type="button" class="catalog-bar-button" data-bar-menu="config" aria-haspopup="true" aria-expanded="${open}">${catalogBarIcons.gear}Configuração${catalogBarIcons.down}</button>${menu}</div>`;
 }
 // "800,00", "1.234,56", "12.5" → "800.00", "1234.56", "12.5"; null se não for número.
@@ -159,16 +174,20 @@ function bulkAmount(text){
  return /^\d+(\.\d+)?$/.test(v)?v:null;
 }
 // Rotas do ERP liberadas no modo Consulta (state.consulta.writes). Com `once`, leva um
-// operation_key: o mesmo envio repetido (resposta perdida) não aplica duas vezes.
-async function erpPost(url,body,{once=false}={}){
- const signature=JSON.stringify(['erp',url,body]),sent=once?{...body,operation_key:actionKey(signature)}:body;
+// operation_key do menu aberto (`scope`; regras em product-stock.js, actionKey): o mesmo envio
+// repetido no mesmo menu, logo depois de ficar sem resposta, não aplica duas vezes.
+async function erpPost(url,body,{once=false,scope=''}={}){
+ const signature=JSON.stringify(['erp',url,body]),sent=once?{...body,operation_key:actionKey(signature,scope)}:body;
  let r;
  try{r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-ERP-Local':'1'},body:JSON.stringify(sent)});}
- catch(_){throw new Error('Sem resposta do ERP. Repita o mesmo envio para conferir: nada é aplicado duas vezes.');}
+ catch(_){throw actionError(once?actionUncertain:'Sem resposta do ERP. Repita o mesmo envio para conferir: nada é aplicado duas vezes.',once);}
  let d=null;try{d=await r.json();}catch(_){}
- if(once&&r.status<500)actionKeyDone(signature);
- if(!r.ok)throw new Error(d?.message||(typeof d?.detail==='string'?d.detail:d?.detail?.message)||'Não foi possível gravar agora.');
- return d||{};
+ if(once&&!actionKeyKeeps(r.status,d?.code))actionKeyDone(signature);
+ if(r.ok)return d||{};
+ const text=d?.message||(typeof d?.detail==='string'?d.detail:d?.detail?.message);
+ if(d?.code==='idempotency_conflict')throw actionError(`${text||'Esse envio já foi usado com outros dados.'} Confira a lista; para aplicar de novo, feche e abra o menu.`,false);
+ if(text)throw actionError(text,false);
+ throw once&&r.status>=500?actionError(actionUncertain,true):actionError('Não foi possível gravar agora.',false);
 }
 // Na ordem: Categoria (ERP), Preço (ERP, confirmado antes), Tag por último (DaVinci: prévia →
 // confirmação → troca no Bling). Para no primeiro erro, dizendo o que já mudou.
@@ -183,8 +202,8 @@ async function applyBulk(){
  if(b.price.on&&n>1000){message('O preço aceita até 1.000 produtos por vez: marque menos itens.',true);return;}
  if(b.tag.on&&n>200){message('A troca de tag aceita até 200 produtos por vez: marque menos itens.',true);return;}
  if(b.price.on&&!confirm(`Alterar o preço de ${plural(n,'produto','produtos')}?`))return;
- closeProductBarMenu();bulkBusy=true;
- const done=[];let wrote=false;
+ const scope=bulkScope;bulkBusy=true;bulkApplyState();
+ const done=[];let wrote=false,tagError=false;
  try{
   if(b.category.on){
    let changed=0;const skipped=[];
@@ -192,15 +211,27 @@ async function applyBulk(){
    done.push(`Categoria alterada em ${plural(changed,'produto','produtos')}`+(skipped.length?` (sem mudança: ${skipped.slice(0,5).map(s=>`${s.sku} — ${s.reason}`).join('; ')}${skipped.length>5?'…':''})`:''));
   }
   if(b.price.on){
-   const r=await erpPost('/api/erp-local/catalog/bulk-price',{skus,action:b.price.action,mode:b.price.action==='set'?'value':b.price.mode,amount},{once:true});wrote=true;
-   done.push(`Preço alterado em ${plural(Number(r.changed||0),'produto','produtos')}`);
+   const r=await erpPost('/api/erp-local/catalog/bulk-price',{skus,action:b.price.action,mode:b.price.action==='set'?'value':b.price.mode,amount},{once:true,scope});wrote=true;
+   // Repetição de um envio que já tinha sido aplicado (a resposta se perdeu): o ERP devolve o de
+   // antes com replayed — nada mudou agora, e a tela não diz que alterou.
+   done.push(r.replayed?`Esse preço já tinha sido aplicado (${plural(Number(r.changed||0),'produto','produtos')}): nada foi alterado de novo`:`Preço alterado em ${plural(Number(r.changed||0),'produto','produtos')}`);
   }
+  bulkBusy=false;closeProductBarMenu();
   if(done.length)message(done.join(' · '));
   if(wrote)await refresh().catch(()=>{});
-  if(b.tag.on){if(await bulkTag(skus,b.tag.value))await refresh().catch(()=>{});}
-  if(done.length)message(done.join(' · '));
- }catch(error){message([...done,error.message].join(' · '),true);if(wrote)refresh().catch(()=>{});}
- finally{bulkBusy=false;}
+  if(b.tag.on){
+   const t=await bulkTag(skus,b.tag.value);
+   if(t.refresh)await refresh().catch(()=>{});
+   if(t.note){done.push(t.note);tagError=!!t.error;}
+  }
+  if(done.length)message(done.join(' · '),tagError);
+ }catch(error){
+  // Sem resposta com o menu já fechado: a repetição sairia com outra chave, então não pede para repetir.
+  const open=!!document.querySelector(`[data-bar-menu-box="config"][data-idem-scope="${scope}"]`);
+  message([...done,error.uncertain&&!open?'Pode ter sido gravado (o menu foi fechado durante o envio): confira a lista antes de aplicar de novo.':error.message].join(' · '),true);
+  if(wrote)refresh().catch(()=>{});
+ }
+ finally{bulkBusy=false;bulkApplyState();}
 }
 // M-46: a tag é o fim do código, então trocar a tag é trocar o código no Bling (rota do DaVinci).
 // Antes de gravar, a prévia do servidor: quantos mudam, quantos pulam e por quê; só com o OK.
@@ -211,28 +242,45 @@ async function bulkTag(skus,tag){
  const summary=`${qty(change)} ${change===1?'será alterado':'serão alterados'}, ${qty(skip)} ${skip===1?'será pulado':'serão pulados'}`;
  const list=tagDialogList(itens,i=>`<li class="${i.acao==='alterar'?'is-ok':'is-skip'}" data-tag-item="${esc(i.sku)}"><span class="p2-code">${esc(i.sku)}</span>${i.novo?` → <span class="p2-code">${esc(i.novo)}</span>`:''}${i.acao==='alterar'?'':` <em>pulado: ${esc(i.motivo||'')}</em>`}</li>`);
  const dialog=openProductDialog('p2-tag-dialog',`Trocar a tag para ${esc(tag)}`,`<div class="p2-tag-body"><p class="p2-tag-summary"><strong>${summary}</strong></p>${list}<p class="p2-dialog-error" role="alert" hidden></p><div class="form-footer"><button type="button" class="secondary" data-tag-cancel>${change?'Cancelar':'Fechar'}</button>${change?`<button type="button" data-tag-confirm>Trocar ${change===1?'1 código':`${qty(change)} códigos`}</button>`:''}</div></div>`);
+ // Resolve {refresh, note, error}: refresh = a lista tem de ser relida; note = o resultado, quando a
+ // janela sumiu antes de a resposta chegar (vai para a faixa de aviso).
  return new Promise(resolve=>{
   let settled=false;const finish=v=>{if(!settled){settled=true;resolve(v);}};
-  dialog.addEventListener('close',()=>finish(false));
+  const shown=()=>({refresh:dialog.dataset.done==='1'});
+  // ESC: bloqueado enquanto troca (openProductDialog); fora disso, fecha — com o resultado na tela, relê.
+  dialog.addEventListener('close',()=>{if(dialog.dataset.busy!=='1')finish(shown());});
   dialog.addEventListener('click',async e=>{
-   if(e.target.closest('[data-tag-cancel],[data-tag-close]')){dialog.remove();finish(dialog.dataset.done==='1');return;}
-   const go=e.target.closest('[data-tag-confirm]');if(!go||go.disabled)return;
-   go.disabled=true;
+   if(e.target.closest('[data-tag-cancel],[data-tag-close]')){if(dialog.dataset.busy==='1')return;actionKeysDrop(dialog.dataset.idemScope);dialog.remove();finish(shown());return;}
+   const go=e.target.closest('[data-tag-confirm]');if(!go||go.disabled||dialog.dataset.busy==='1')return;
+   const cancel=dialog.querySelector('[data-tag-cancel]'),label=go.textContent,box=dialog.querySelector('.p2-dialog-error');
+   dialog.dataset.busy='1';go.disabled=true;go.textContent='Trocando…';if(cancel)cancel.disabled=true;box.hidden=true;
    try{
-    const r=await davinciPost('/api/produtos/trocar-tag',{skus,tag},{idempotent:true});
+    const r=await davinciPost('/api/produtos/trocar-tag',{skus,tag},{idempotent:true,scope:dialog.dataset.idemScope});
     const ok=Number(r.ok||0),skipped=Number(r.pulado||0),failed=Number(r.falhou||0),word={ok:'trocado',pulado:'pulado',falhou:'falhou'};
-    dialog.dataset.done='1';
+    dialog.dataset.busy='';dialog.dataset.done='1';
+    if(!dialog.isConnected){
+     const bad=(r.itens||[]).filter(i=>i.estado==='falhou');
+     finish({refresh:true,error:failed>0,note:`Troca de tag: ${plural(ok,'alterado','alterados')} · ${plural(skipped,'pulado','pulados')} · ${qty(failed)} com falha`+(bad.length?` (${bad.slice(0,5).map(i=>`${i.sku}: ${i.motivo||'falhou'}`).join('; ')}${bad.length>5?'…':''})`:'')});
+     return;
+    }
     dialog.querySelector('h2').textContent='Resultado da troca de tag';
     dialog.querySelector('.p2-tag-body').innerHTML=`<p class="p2-tag-summary"><strong>${plural(ok,'alterado','alterados')} · ${plural(skipped,'pulado','pulados')} · ${qty(failed)} com falha</strong></p>${tagDialogList(r.itens||[],i=>`<li class="is-${esc(i.estado)}" data-tag-result="${esc(i.sku)}"><span class="p2-code">${esc(i.sku)}</span>${i.novo?` → <span class="p2-code">${esc(i.novo)}</span>`:''} — ${esc(word[i.estado]||i.estado)}${i.motivo?`: ${esc(i.motivo)}`:''}</li>`)}<p class="p2-tag-warning">A lista de Produtos 2 leva até ~1 hora para mostrar o código novo.</p><div class="form-footer"><button type="button" data-tag-close>Fechar</button></div>`;
-   }catch(error){go.disabled=false;const box=dialog.querySelector('.p2-dialog-error');box.textContent=error.message;box.hidden=false;}
+   }catch(error){
+    dialog.dataset.busy='';
+    if(!dialog.isConnected){finish({refresh:true,error:true,note:error.uncertain?'Troca de tag: pode ter sido gravada (a janela foi fechada durante o envio): confira os códigos na lista antes de trocar de novo.':`Troca de tag: ${error.message}`});return;}
+    go.disabled=false;go.textContent=label;if(cancel)cancel.disabled=false;box.textContent=error.message;box.hidden=false;
+   }
   });
  });
 }
 function productBatchItems(skus=[...productSelection]){return skus.map(sku=>({sku,version:state.products.find(p=>p.sku===sku)?.details?.version||0}));}
+// Cada janela aberta tem o seu escopo de chave (data-idem-scope): abrir outra ou fechar esta descarta
+// a chave guardada. Enquanto envia (data-busy), o ESC não fecha.
 function openProductDialog(id,label,body){
- document.getElementById(id)?.remove();
- const dialog=document.createElement('dialog');dialog.id=id;dialog.className='product-supplier-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label',label);dialog.innerHTML=`<h2>${label}</h2>${body}`;
- dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);
+ document.getElementById(id)?.remove();actionKeysPrune();
+ const dialog=document.createElement('dialog');dialog.id=id;dialog.className='product-supplier-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label',label);dialog.dataset.idemScope=actionUuid();dialog.innerHTML=`<h2>${label}</h2>${body}`;
+ dialog.addEventListener('cancel',e=>{if(dialog.dataset.busy==='1')e.preventDefault();});
+ dialog.addEventListener('close',()=>{actionKeysDrop(dialog.dataset.idemScope);dialog.remove();});document.body.append(dialog);
  if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');return dialog;
 }
 document.addEventListener('click',async e=>{
@@ -242,8 +290,8 @@ document.addEventListener('click',async e=>{
  if(barMenu){
   const key=barMenu.dataset.barMenu;catalogMenu='';
   if(productBarMenu===key)productBarMenu='';
-  else{productBarMenu=key;if(key==='excel'){excelOnlySelected=false;excelOff={category:new Set(),tag:new Set(),stock:new Set()};}else bulkEdit=bulkDefaults();}
-  render();return;
+  else{productBarMenu=key;if(key==='excel'){excelOnlySelected=false;excelOff={category:new Set(),tag:new Set(),stock:new Set()};}else{bulkEdit=bulkDefaults();bulkScope=actionUuid();}}
+  render();actionKeysPrune();return;
  }
  const all=e.target.closest('[data-catalog-all]');
  if(all){catalogUnchecked[all.dataset.catalogAll]=new Set();catalogFilterChanged();return;}
@@ -261,7 +309,8 @@ document.addEventListener('click',async e=>{
   const count=productSelection.size;if(!count)return;
   openProductDialog('product-delete-dialog','Excluir selecionados',`<form id="product-delete-form"><p>${count} produto${count>1?'s serão movidos':' será movido'} para Excluídos. Documentos, movimentos e histórico são preservados; produtos com estoque ou que compõem kits são recusados.</p><div class="form-footer"><button type="button" class="secondary" data-dialog-close>Cancelar</button><button>Excluir</button></div></form>`);return;
  }
- if(e.target.closest('[data-dialog-close]'))e.target.closest('dialog').remove();
+ const close=e.target.closest('[data-dialog-close]');
+ if(close){const dialog=close.closest('dialog');if(!dialog||dialog.dataset.busy==='1')return;actionKeysDrop(dialog.dataset.idemScope);dialog.remove();}
 });
 document.addEventListener('change',e=>{
  const excel=e.target.closest('[data-excel-option]');

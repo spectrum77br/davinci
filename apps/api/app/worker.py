@@ -2882,6 +2882,32 @@ async def estoque_entrada_tick(ctx: dict) -> None:
         logger.exception("estoque_entrada_tick_failed")
 
 
+async def produto_troca_tag_tick(ctx: dict) -> None:
+    """A cada 2 min (junto com a entrada): reconfere no Bling as trocas de tag
+    do Produtos 2 (M-46, revisão C4 de 25/11/2026) que ficaram
+    "sem_confirmacao" nas últimas 24 h — o PATCH teve resposta duvidosa e o
+    GET logo depois ainda mostrava o código antigo. Um GET por item, nunca
+    outro PATCH: código novo no Bling → acompanha no DaVinci e marca ok;
+    ainda o antigo 30 min depois → falhou, com aviso no sino. Sem item = 1
+    SELECT, zero Bling."""
+    from app.services import produto_troca_tag as svc
+    from app.services.devolution_stock_return import _get_bling_client
+
+    try:
+        async with session_scope() as s:
+            if not await svc.ha_para_reconferir(s):
+                return
+            # Cliente e sessão juntos: a renovação do token grava nesta sessão.
+            client = await _get_bling_client(s)
+            if client is None:
+                return
+            out = await svc.reconferir_sem_confirmacao(client)
+        if any(out.values()):
+            logger.info("produto_troca_tag_tick", **out)
+    except Exception:  # noqa: BLE001
+        logger.exception("produto_troca_tag_tick_failed")
+
+
 async def devolucao_prazo_sync(ctx: dict) -> None:
     """A cada 30 min: pergunta à Shopee/TikTok até quando dá pra contestar cada
     devolução recente e avisa no Threema quando o motivo ainda está vazio a
@@ -5962,6 +5988,7 @@ class WorkerSettings:
         prioridade_estoque_estorno_tick,
         func(estoque_transferencia_tick, timeout=600),
         func(estoque_entrada_tick, timeout=600),
+        func(produto_troca_tag_tick, timeout=600),
         # Flex por anúncio (etapa 3): varredura, botão "Sincronizar" e o
         # gancho do pedido Flex. 15 min de teto: até 400 leituras do ML + as
         # escritas da rodada, uma de cada vez.
@@ -6681,6 +6708,15 @@ class WorkerSettings:
         # como a transferência; 1 SELECT quando não há nada.
         cron(
             estoque_entrada_tick,
+            minute=set(range(1, 60, 2)),
+            run_at_startup=True,
+            timeout=600,
+        ),
+        # "Trocar a tag" do Produtos 2 (M-46, revisão C4 de 25/11): reconfere
+        # no Bling os itens "sem_confirmacao" das últimas 24 h (só GET). Nos
+        # mesmos minutos da entrada; 1 SELECT quando não há nada.
+        cron(
+            produto_troca_tag_tick,
             minute=set(range(1, 60, 2)),
             run_at_startup=True,
             timeout=600,

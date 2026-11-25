@@ -7,10 +7,12 @@ Bling, o estado e o motivo.
 
 Estados do item:
   pendente (vai ser trocado) → enviando (gravado ANTES do PATCH no Bling) → ok | falhou (o Bling
-  com certeza não trocou) | sem_confirmacao (o Bling respondeu erro e não deu para conferir com
-  GET se o código mudou — a pessoa confere no Bling; se trocou, o aviso do Bling leva a troca ao
-  DaVinci sozinho);
-  pulado = não foi trocado por regra (o motivo diz qual: kit, peça de kit, mala, Amazon…).
+  com certeza não trocou) | sem_confirmacao (resposta duvidosa do Bling e o GET logo depois ainda
+  mostra o código antigo, ou não deu para conferir: aviso no sino e o worker relê só com GET, nunca
+  outro PATCH — código novo no Bling → reflete no DaVinci e vira ok; ainda o antigo depois de
+  30 min → falhou, com aviso);
+  pulado = não foi trocado por regra (o motivo diz qual: kit, peça de kit, mala, Amazon,
+  Carrefour…).
 """
 
 from datetime import datetime

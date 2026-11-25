@@ -968,6 +968,46 @@ class BlingClient:
                 return out
         raise RuntimeError(f"bling_codigo_muitos_resultados: {codigo!r}")
 
+    async def preco_custo_do_produto(self, bling_product_id: int) -> float | None:
+        """O preço de custo atual do produto no Bling, lido pelo id
+        (`GET /produtos/{id}`). Para o "Incluir" do Produtos 2 (M-43): a
+        entrada vai com o custo do produto, e sem custo o Bling grava 0 e mexe
+        no custo médio.
+
+        Diferente de `cost_by_skus` (que engole o erro e devolve {}), aqui erro
+        SOBE: 429 depois das tentativas, Cloudflare, 4xx/5xx, timeout, resposta
+        sem o produto ou com OUTRO id — "não deu para perguntar" nunca vira
+        "não tem custo". None = o Bling respondeu e o produto não tem custo.
+
+        Onde mora o custo (spec oficial do Bling v3, `ProdutosDadosDTO`): no
+        detalhe por id é `fornecedor.precoCusto` ("Preço de custo do produto no
+        fornecedor"); o `precoCusto` da raiz só vem na LISTA (`/produtos`), mas
+        vale também se vier."""
+        pid = int(bling_product_id)
+        r = await self._request("GET", f"/produtos/{pid}")
+        r.raise_for_status()
+        data = r.json().get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"bling_produto_sem_dados: {pid}")
+        try:
+            veio = int(data.get("id"))
+        except (TypeError, ValueError):
+            veio = None
+        if veio != pid:
+            raise RuntimeError(f"bling_produto_id_divergente: pedido {pid}, veio {veio}")
+        fornecedor = data.get("fornecedor")
+        bruto = data.get("precoCusto")
+        if bruto in (None, "") and isinstance(fornecedor, dict):
+            bruto = fornecedor.get("precoCusto")
+        if bruto in (None, ""):
+            return None
+        if isinstance(bruto, bool):
+            raise RuntimeError(f"bling_preco_custo_invalido: {bruto!r}")
+        valor = float(bruto)  # ValueError sobe: custo ilegível não é "sem custo"
+        if valor != valor or valor in (float("inf"), float("-inf")):
+            raise RuntimeError(f"bling_preco_custo_invalido: {bruto!r}")
+        return valor if valor > 0 else None
+
     async def update_product_codigo(self, bling_product_id: int, codigo: str) -> dict:
         """Troca SÓ o código do produto: PATCH /produtos/{id} {"codigo": ...}
         ("Altera parcialmente um produto … Somente os campos informados terão

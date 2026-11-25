@@ -52,8 +52,13 @@ class PreviaOut(BaseModel):
 class ItemOut(BaseModel):
     sku: str
     novo: str | None
+    # ok | pulado | falhou (o contrato da tela: "sem_confirmacao" conta como
+    # falhou, com o motivo dizendo que o DaVinci confere de novo).
     estado: str
     motivo: str | None
+    # O estado gravado, sem juntar: ok | pulado | falhou | sem_confirmacao |
+    # pendente | enviando (campo a mais; a tela atual não usa).
+    situacao: str
 
 
 class TrocaOut(BaseModel):
@@ -61,6 +66,8 @@ class TrocaOut(BaseModel):
     ok: int
     pulado: int
     falhou: int
+    # Quantos dos "falhou" ainda estão sem confirmação (o worker reconfere).
+    sem_confirmacao: int = 0
 
 
 async def _client(session: AsyncSession):
@@ -130,6 +137,7 @@ async def trocar(
             novo=i.sku_novo,
             estado=svc.estado_na_tela(i.estado),
             motivo=i.motivo,
+            situacao=i.estado,
         )
         for i in itens
     ]
@@ -138,4 +146,5 @@ async def trocar(
         ok=sum(1 for i in out if i.estado == svc.OK),
         pulado=sum(1 for i in out if i.estado == svc.PULADO),
         falhou=sum(1 for i in out if i.estado == svc.FALHOU),
+        sem_confirmacao=sum(1 for i in out if i.situacao == svc.SEM_CONFIRMACAO),
     )

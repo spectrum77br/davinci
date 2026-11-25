@@ -21,7 +21,8 @@ Cada SKU é PULADO, com o motivo na tela, quando (riscos da resposta P-39):
   numa linha de departamento mala da Tabela, ou o produto é do segmento Mala, ou a tag do
   Controle de Estoque o dá como mala (`sku_tags.classify_sku_tag`); idem catálogo (também casa
   pelo código inteiro);
-- anúncio da Amazon vinculado: o envio de preço acha o anúncio pelo SKU do produto;
+- anúncio da Amazon ou da Carrefour vinculado: a escrita de estoque/preço desses canais depende
+  de o SKU do vínculo ser o do produto (lista conferida canal a canal em `CANAIS_SKU_IGUAL`);
 - o código novo já existe no DaVinci (qualquer situação) ou no Bling (qualquer situação, com
   conferência estrita: erro na consulta também pula) → "já existe: use Transferir no estoque";
 - outro item da mesma lista já vai virar o mesmo código.
@@ -29,8 +30,12 @@ Cada SKU é PULADO, com o motivo na tela, quando (riscos da resposta P-39):
 Execução (`executar`): uma troca de tag por vez (trava no banco); recalcula tudo no servidor (não
 confia na prévia da tela); para cada "alterar", lê o produto no Bling (o código lá tem de ser o
 antigo; formato/situação conferidos ao vivo), grava "enviando" e só então o PATCH. Resposta
-duvidosa (5xx/timeout) → GET para ver se o código mudou; nunca repete às cegas. Recusa certa →
-"falhou" e segue para o próximo. Cada item fica registrado (`produto_trocas_tag_itens`).
+duvidosa (5xx/timeout) → GET para ver se o código mudou; nunca repete às cegas. Se o GET ainda
+mostra o código antigo, o item fica "sem_confirmacao" (o Bling pode aplicar o PATCH depois) com
+aviso no sino, e o worker reconfere (`reconferir_sem_confirmacao`): código novo no Bling →
+acompanha no DaVinci e marca ok; ainda o antigo depois de 30 min → falhou, com aviso. Nunca
+outro PATCH. Recusa certa → "falhou" e segue para o próximo. Cada item fica registrado
+(`produto_trocas_tag_itens`).
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -87,6 +92,7 @@ MOTIVO_KIT = "kit não muda de tag: troque nas peças"
 MOTIVO_MALA = "mala: a Tabela de Preços casa pelo código inteiro"
 MOTIVO_CATALOGO = "catálogo: a Tabela de Preços casa pelo código inteiro"
 MOTIVO_AMAZON = "tem anúncio da Amazon vinculado"
+MOTIVO_CARREFOUR = "tem anúncio da Carrefour vinculado"
 MOTIVO_NAO_ENCONTRADO = "não encontrado"
 MOTIVO_INATIVO = "inativo no Bling"
 MOTIVO_EXCLUIDO = "excluído no Bling"
@@ -94,7 +100,30 @@ MOTIVO_SEM_BLING = "sem id no Bling"
 MOTIVO_VARIACOES = "produto com variações não muda de tag"
 MOTIVO_REPETIDO = "repetido na lista"
 MOTIVO_JA_NO_BLING = "o Bling já está com o código novo: o DaVinci acompanha"
+MOTIVO_NAO_CONFIRMOU = "o Bling não confirmou a troca; o DaVinci confere de novo em alguns minutos"
+MOTIVO_CONFIRMADO_DEPOIS = "o Bling confirmou a troca depois: o DaVinci acompanhou"
 _KITS_NO_MOTIVO = 5
+
+# Canais em que a escrita de estoque/preço depende de o SKU do vínculo (ou o
+# do produto, usado como SKU do anúncio) ser IGUAL ao código do produto. Depois
+# da troca o produto muda de código e o anúncio não: o canal para de receber.
+# Conferido em 25/11/2026 (revisão C3), canal por canal:
+# - Amazon: o envio de preço acha o anúncio pelo SKU do PRODUTO
+#   (pricing/push.py `_dispatch_price_update_link`: `product_sku or external_sku`).
+# - Carrefour: a oferta é achada pelo SKU e o vínculo tem de ter exatamente o
+#   SKU do produto (carrefour_offer_write `_source_valid`/`enqueue_offer_write`
+#   → `carrefour_sku_mismatch`; carrefour_stock_source
+#   `refresh_carrefour_stock_target` → None).
+# NÃO dependem (endereçam pelo id do anúncio e seguem recebendo depois da
+# troca): Mercado Livre (item/variação; a conferência do SELLER_SKU cai no
+# envio de sempre com o aviso `sku_divergente`), Shopee (item/model), TikTok
+# (product/sku id), Temu (goodsId/skuId), Magalu (o SKU da Magalu fica no
+# `external_id` do vínculo e não muda) e o próprio Bling (id do produto).
+# Shein não tem cliente (501) e Netshoes não tem integração.
+CANAIS_SKU_IGUAL: dict[IntegrationPlatform, str] = {
+    IntegrationPlatform.AMAZON: MOTIVO_AMAZON,
+    IntegrationPlatform.CARREFOUR: MOTIVO_CARREFOUR,
+}
 
 
 class TrocaInvalidaError(Exception):
@@ -262,17 +291,26 @@ async def previa(
     raizes = await _load_segment_roots(session)
 
     ids_produtos = [p.id for p in produtos]
-    amazon_produtos: set[UUID] = set()
-    amazon_skus: set[str] = set()
-    for prod_id, ext_sku in (
+    # Canais cuja escrita de estoque/preço depende de o SKU do vínculo ser o
+    # do produto (ver `CANAIS_SKU_IGUAL`): produto → canais; SKU do vínculo →
+    # canais.
+    canais_do_produto: dict[UUID, set[IntegrationPlatform]] = defaultdict(set)
+    canais_do_sku: dict[str, set[IntegrationPlatform]] = defaultdict(set)
+    plataformas = list(CANAIS_SKU_IGUAL)
+    for prod_id, ext_sku, plat_link, plat_integ in (
         await session.execute(
-            select(ProductLink.product_id, ProductLink.external_sku)
+            select(
+                ProductLink.product_id,
+                ProductLink.external_sku,
+                ProductLink.platform,
+                Integration.platform,
+            )
             .select_from(ProductLink)
             .outerjoin(Integration, Integration.id == ProductLink.integration_id)
             .where(
                 or_(
-                    ProductLink.platform == IntegrationPlatform.AMAZON,
-                    Integration.platform == IntegrationPlatform.AMAZON,
+                    ProductLink.platform.in_(plataformas),
+                    Integration.platform.in_(plataformas),
                 ),
                 or_(
                     ProductLink.product_id.in_(ids_produtos),
@@ -281,9 +319,11 @@ async def previa(
             )
         )
     ).all():
-        amazon_produtos.add(prod_id)
-        if ext_sku:
-            amazon_skus.add(norm(ext_sku))
+        for plat in (plat_link, plat_integ):
+            if plat in CANAIS_SKU_IGUAL:
+                canais_do_produto[prod_id].add(plat)
+                if ext_sku:
+                    canais_do_sku[norm(ext_sku)].add(plat)
 
     novos = {norm(codigo_com_tag(s, tag, tags)) for s in limpos}
     existentes = set(
@@ -366,8 +406,12 @@ async def previa(
         if k in catalogo_tabela:
             item.pular(MOTIVO_CATALOGO)
             continue
-        if k in amazon_skus or any(x.id in amazon_produtos for x in linhas):
-            item.pular(MOTIVO_AMAZON)
+        canais = set(canais_do_sku.get(k, ()))
+        for x in linhas:
+            canais |= canais_do_produto.get(x.id, set())
+        motivo_canal = next((m for c, m in CANAIS_SKU_IGUAL.items() if c in canais), None)
+        if motivo_canal:
+            item.pular(motivo_canal)
             continue
         novo = norm(item.novo)
         if novo in existentes:
@@ -459,13 +503,35 @@ async def _gravar_item(item_id: UUID, **campos: Any) -> None:
 async def _refletir(product_id: UUID | None, pid: int, novo: str) -> bool:
     """Leva o código novo ao DaVinci pelo caminho do webhook "Bling renomeou o
     código do produto" (`aplicar_codigo_do_bling`), sem esperar o aviso. O
-    produto é o que foi conferido; se sumiu, o que o webhook acharia."""
+    produto é o que foi conferido; se sumiu, o que o webhook acharia.
+
+    O vínculo do PRÓPRIO Bling (o id do produto no `external_id`) também passa
+    a guardar o código novo: é o código do produto lá, e a Carrefour confere o
+    SKU do vínculo do Bling de cada lote da família antes de mandar estoque
+    (`carrefour_stock_source`) — com o código velho, a oferta de um lote irmão
+    pararia de receber."""
     try:
         async with session_scope() as s:
             p = await s.get(Product, product_id) if product_id else None
             if p is None or p.bling_product_id is None or int(p.bling_product_id) != int(pid):
                 p = await resolver_produto(s, sku=novo, bling_product_id=pid)
             aplicar_codigo_do_bling(p, novo, pid, evento="produto_troca_tag_sku_renomeado")
+            if p is not None:
+                for link in (
+                    (
+                        await s.execute(
+                            select(ProductLink).where(
+                                ProductLink.product_id == p.id,
+                                ProductLink.platform == IntegrationPlatform.BLING,
+                                ProductLink.external_id == str(int(pid)),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                ):
+                    if link.external_sku and link.external_sku.strip() != novo:
+                        link.external_sku = novo
         return True
     except Exception:  # noqa: BLE001 — o Bling já trocou; o webhook leva depois
         logger.exception("produto_troca_tag_refletir_falhou", bling_product_id=pid, novo=novo)
@@ -507,7 +573,12 @@ def _texto_recusa(exc: Exception) -> str:
     return f"o Bling não respondeu direito: {str(exc)[:160]}"
 
 
-async def _avisar(user_id: UUID | None, item_id: UUID, titulo: str, msg: str) -> None:
+async def _avisar(
+    user_id: UUID | None, item_id: UUID, titulo: str, msg: str, *, chave: str | None = None
+) -> None:
+    """Sino de quem pediu a troca (best-effort). `chave`: um aviso por
+    acontecimento do item (o "confira" da hora e o "não trocou" da
+    reconferência são dois avisos)."""
     if user_id is None:
         return
     try:
@@ -520,7 +591,7 @@ async def _avisar(user_id: UUID | None, item_id: UUID, titulo: str, msg: str) ->
                 severity=AlertSeverity.WARNING,
                 title=titulo,
                 message=msg,
-                dedupe_key=f"produto_troca_tag:{item_id}",
+                dedupe_key=f"produto_troca_tag:{item_id}" + (f":{chave}" if chave else ""),
                 payload={"item_id": str(item_id)},
             )
     except Exception:  # noqa: BLE001
@@ -599,8 +670,15 @@ async def _trocar_item(client: Any, item: ProdutoTrocaTagItem, prev: ItemPrevia,
             await fim(OK, None)
             return
         if depois is not None and depois.casefold() == antigo.casefold():
-            await fim(
-                FALHOU, f"o Bling respondeu com erro e o código continua {antigo}: nada mudou"
+            # O Bling pode aplicar o PATCH depois de responder erro (pedido
+            # que leva até ~1 min — casos 300334/298826): não é "nada mudou".
+            # O worker reconfere (`reconferir_sem_confirmacao`).
+            await fim(SEM_CONFIRMACAO, MOTIVO_NAO_CONFIRMOU)
+            await _avisar(
+                quem,
+                item.id,
+                f"Trocar a tag: {antigo} ainda sem confirmação no Bling",
+                f"{antigo} → {novo}: {MOTIVO_NAO_CONFIRMOU}.",
             )
             return
         motivo = (
@@ -770,3 +848,156 @@ def estado_na_tela(estado: str) -> str:
     if estado in (OK, PULADO):
         return estado
     return FALHOU
+
+
+# ── Worker: reconfere no Bling as trocas sem confirmação ─────────────────
+
+# Só os itens das últimas 24 h (depois disso fica o aviso que já foi dado).
+_RECONFERIR_JANELA = timedelta(hours=24)
+# Ainda o código antigo no Bling 30 min depois do PATCH: o Bling não trocou.
+_RECONFERIR_PRAZO = timedelta(minutes=30)
+
+
+def _quando_item():
+    return func.coalesce(
+        ProdutoTrocaTagItem.tentativa_at,
+        ProdutoTrocaTagItem.concluido_at,
+        ProdutoTrocaTagItem.created_at,
+    )
+
+
+def _filtro_reconferir(agora: datetime) -> list:
+    return [
+        ProdutoTrocaTagItem.estado == SEM_CONFIRMACAO,
+        ProdutoTrocaTagItem.bling_product_id.is_not(None),
+        ProdutoTrocaTagItem.sku_novo.is_not(None),
+        _quando_item() >= agora - _RECONFERIR_JANELA,
+    ]
+
+
+async def ha_para_reconferir(session: AsyncSession, *, agora: datetime | None = None) -> bool:
+    """Há item "sem_confirmacao" das últimas 24 h? (1 SELECT; o worker só
+    abre o Bling quando há.)"""
+    agora = agora or datetime.now(UTC)
+    return (
+        await session.execute(
+            select(ProdutoTrocaTagItem.id).where(*_filtro_reconferir(agora)).limit(1)
+        )
+    ).first() is not None
+
+
+async def _produto_do_item(session: AsyncSession, it: ProdutoTrocaTagItem) -> UUID | None:
+    """O produto do DaVinci do item, pelo id do Bling (o que ainda tem o
+    código antigo primeiro)."""
+    rows = (
+        await session.execute(
+            select(Product.id, Product.sku).where(
+                Product.bling_product_id == int(it.bling_product_id)
+            )
+        )
+    ).all()
+    for prod_id, sku in rows:
+        if norm(sku) == norm(it.sku_antigo):
+            return prod_id
+    return rows[0][0] if rows else None
+
+
+async def _reconferir_item(client: Any, item_id: UUID, agora: datetime) -> str | None:
+    """UM GET do produto no Bling (nunca PATCH). Devolve "confirmado",
+    "falhou" ou None (fica para o próximo tick)."""
+    aviso: tuple[UUID | None, str, str] | None = None
+    resultado: str | None = None
+    async with session_scope() as s:
+        it = (
+            await s.execute(
+                select(ProdutoTrocaTagItem)
+                .where(
+                    ProdutoTrocaTagItem.id == item_id,
+                    ProdutoTrocaTagItem.estado == SEM_CONFIRMACAO,
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).scalar_one_or_none()
+        if it is None:
+            return None
+        pid = int(it.bling_product_id)
+        antigo, novo = it.sku_antigo, it.sku_novo
+        try:
+            raw = await client.get_product(pid)
+        except Exception as exc:  # noqa: BLE001 — confere de novo no próximo tick
+            logger.warning("produto_troca_tag_reconferir_get", pid=pid, erro=str(exc)[:200])
+            return None
+        codigo = str((raw or {}).get("codigo") or "").strip()
+        if codigo.casefold() == novo.casefold():
+            await _refletir(await _produto_do_item(s, it), pid, novo)
+            it.estado, it.motivo, it.concluido_at = OK, MOTIVO_CONFIRMADO_DEPOIS, agora
+            resultado = "confirmado"
+            logger.info("produto_troca_tag_confirmado_depois", pid=pid, antigo=antigo, novo=novo)
+        elif codigo.casefold() == antigo.casefold():
+            t0 = it.tentativa_at or it.concluido_at or it.created_at or agora
+            if agora - t0 < _RECONFERIR_PRAZO:
+                return None
+            minutos = int(_RECONFERIR_PRAZO.total_seconds() // 60)
+            motivo = (
+                f"o Bling não aplicou a troca: {minutos} min depois o código continua "
+                f"{antigo}: nada mudou"
+            )
+            it.estado, it.motivo, it.concluido_at = FALHOU, motivo, agora
+            quem = (
+                await s.execute(
+                    select(ProdutoTrocaTag.criado_por).where(ProdutoTrocaTag.id == it.troca_id)
+                )
+            ).scalar_one_or_none()
+            aviso = (
+                quem,
+                f"Trocar a tag: {antigo} não mudou no Bling",
+                f"{antigo} → {novo}: {motivo}.",
+            )
+            resultado = "falhou"
+            logger.warning("produto_troca_tag_nao_aplicou", pid=pid, antigo=antigo, novo=novo)
+        else:
+            # Outro código (alguém mexeu no Bling): fica para a pessoa conferir.
+            return None
+    if aviso is not None:
+        quem, titulo, msg = aviso
+        await _avisar(quem, item_id, titulo, msg, chave=FALHOU)
+    return resultado
+
+
+async def reconferir_sem_confirmacao(
+    client: Any, *, agora: datetime | None = None
+) -> dict[str, int]:
+    """Worker (a cada 2 min): os itens "sem_confirmacao" das últimas 24 h
+    (o PATCH teve resposta duvidosa e o GET logo depois não confirmou). Para
+    cada um, um GET do produto no Bling — nunca outro PATCH:
+    - o Bling já está com o código novo → o mesmo reflexo no DaVinci da troca
+      certa (`_refletir`) e "ok";
+    - ainda o código antigo 30 min depois do PATCH → "falhou", com aviso no
+      sino de quem pediu;
+    - antes disso, outro código ou GET com erro → fica para o próximo tick."""
+    agora = agora or datetime.now(UTC)
+    out = {"conferidos": 0, "confirmados": 0, "falharam": 0}
+    async with session_scope() as s:
+        ids = (
+            (
+                await s.execute(
+                    select(ProdutoTrocaTagItem.id)
+                    .where(*_filtro_reconferir(agora))
+                    .order_by(_quando_item())
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for item_id in ids:
+        out["conferidos"] += 1
+        try:
+            r = await _reconferir_item(client, item_id, agora)
+        except Exception:  # noqa: BLE001 — um item não para os outros
+            logger.exception("produto_troca_tag_reconferir_falhou", item=str(item_id))
+            continue
+        if r == "confirmado":
+            out["confirmados"] += 1
+        elif r == "falhou":
+            out["falharam"] += 1
+    return out

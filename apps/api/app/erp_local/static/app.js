@@ -196,6 +196,7 @@ function render() {
   content.innerHTML=({inicio:inicioPage,overview,access:accessPage,inbound:inboundPage,guides:guidesPage,companies:companiesPage,products,contacts:contactsPage,cash_register:cashRegisterPage,pos:posPage,proposals:proposalsPage,returns:returnsPage,deposits:depositsPage,sellers:sellersPage,commissions:commissionsPage,price_lists:priceListsPage,categories:categoriesPage,production:productionPage,payment_methods:paymentMethodsPage,inventory:inventoryPage,stock,orders,purchases,accounts,history:historyPage,connections,reference,channels,parity,costs:costsPage,fiscal:fiscalPage,logistics:logisticsPage,release:releasePage,integrations:integrationsWithIngest}[page])();
   applyBlingLayout();
   if(page==='accounts')applyPayablesFilter();
+  if(page==='products')fitBarMenu();
 }
 
 function message(value,error=false) {

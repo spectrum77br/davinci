@@ -4,7 +4,10 @@ Entrada avulsa de estoque lançada direto no Bling, pela API do DaVinci (fora de
 a trava do modo Consulta do ERP não vale aqui, de propósito). Regras e o passo a passo em
 `services/estoque_entrada.py`.
 
-  POST /api/estoque/entradas         grava e lança (Idempotency-Key obrigatório)
+  POST /api/estoque/entradas         grava e lança (Idempotency-Key obrigatório; a mesma chave
+                                     só repete a entrada até 15 min depois — então 409
+                                     `idempotency_velha`; custo ilegível no Bling → 503
+                                     `custo_indisponivel`, nada gravado)
   GET  /api/estoque/entradas?sku=    últimas entradas (do produto), mais recente primeiro
 """
 
@@ -104,20 +107,14 @@ async def incluir(
             },
         )
     # A tela repetiu o POST (clique duplo, rede): a mesma entrada, sem lançar de novo — nem
-    # precisa do Bling para responder.
+    # precisa do Bling para responder. Chave de entrada criada há mais de 15 min, ou com outro
+    # pedido: 409, nada lançado (`svc.conferir_repeticao`).
     existente = await svc.por_idem(session, chave)
     if existente is not None:
-        if svc.norm(existente.sku) != svc.norm(body.sku) or existente.quantidade != body.quantidade:
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "idempotency_conflito",
-                    "message": (
-                        "Esta janela já lançou outra entrada. Feche e abra de novo para incluir "
-                        "outra."
-                    ),
-                },
-            )
+        try:
+            svc.conferir_repeticao(existente, body.sku, body.quantidade)
+        except svc.EntradaInvalidaError as exc:
+            raise _erro(exc) from exc
         return _out(existente)
     client = await _client(session)
     try:
