@@ -2134,7 +2134,8 @@ async def pecas_do_pedido(
                         cost_price::double precision AS cost_price
                     FROM "{SCHEMA}".products
                     WHERE lower(btrim(sku)) = ANY(:keys)
-                    ORDER BY lower(btrim(sku)), situacao = 'A' DESC NULLS LAST
+                    ORDER BY lower(btrim(sku)), situacao = 'A' DESC NULLS LAST,
+                             updated_at DESC NULLS LAST
                     """  # noqa: S608
                 ),
                 {"keys": part_skus},
@@ -2272,7 +2273,8 @@ async def _kit_components_for_skus(
                     cp.sku               AS comp_sku,
                     cp.name              AS comp_name,
                     cp.cost_price        AS comp_cost,
-                    kc.quantidade        AS qty
+                    kc.quantidade        AS qty,
+                    kc.component_bling_product_id AS comp_bid
                 FROM "{SCHEMA}".bling_kit_components kc
                 JOIN "{SCHEMA}".products kp ON kp.bling_product_id = kc.kit_bling_product_id
                 JOIN "{SCHEMA}".products cp ON cp.bling_product_id = kc.component_bling_product_id
@@ -2290,8 +2292,88 @@ async def _kit_components_for_skus(
             "name": r["comp_name"],
             "cost": r["comp_cost"],
             "qty": r["qty"],
+            "bid": r["comp_bid"],
         })
     return out
+
+
+_TAMANHO_INICIAL_RE = re.compile(r"^([0-9]+)")
+
+
+def _tamanhos_sem_peca(kit_sku: str, comps: list[dict]) -> list[str]:
+    """Kit de mala cujo SKU diz os tamanhos (`b027.12.24` = 12 + 24) e cuja
+    composição ATUAL no Bling perdeu um deles. Acontece quando a peça é
+    excluída no Bling depois da venda: o Bling tira a peça da estrutura do kit
+    e o cache `bling_kit_components` fica só com o resto (308307, 25/11/2026:
+    a b027.24, excluída em 18/11, sumiu do kit b027.12.24 e a devolução só
+    mostrava a mala 12; 16 de 719 kits de mala estavam assim).
+
+    Devolve os SKUs `base.tamanho` que faltam, um por unidade, na ordem do
+    SKU. O tamanho casa pelas peças da MESMA base (`b027.24us` vale como 24).
+    SKU que não é de mala com tamanhos → nada.
+
+    Só acrescenta quando a composição tem MENOS peças (de qualquer base,
+    somando a quantidade) do que tamanhos no SKU, e o buraco é exatamente o
+    número de tamanhos sem par. Peça RENOMEADA no Bling continua na
+    composição com outro SKU (revisão de 25/11: a b028.24 virou
+    `z002800.mala`, mesmo id, nos 4 kits b028.*.24) e não vira peça a mais;
+    conta que não fecha é ambígua e fica como estava."""
+    partes = (kit_sku or "").strip().lower().split(".")
+    if not (
+        len(partes) >= 3
+        and _MALA_BASE_RE.match(partes[0])
+        and all(_MALA_SIZE_RE.match(p) for p in partes[1:])
+    ):
+        return []
+    base = partes[0]
+    tem: dict[str, int] = {}
+    for c in comps:
+        cp = (c.get("sku") or "").strip().lower().split(".")
+        m = _TAMANHO_INICIAL_RE.match(cp[1]) if len(cp) >= 2 and cp[0] == base else None
+        if m:
+            tem[m.group(1)] = tem.get(m.group(1), 0) + max(1, int(c.get("qty") or 1))
+    faltam: list[str] = []
+    for t in partes[1:]:
+        if tem.get(t, 0) > 0:
+            tem[t] -= 1
+        else:
+            faltam.append(f"{base}.{t}")
+    pecas = sum(max(1, int(c.get("qty") or 1)) for c in comps)
+    buraco = (len(partes) - 1) - pecas
+    if buraco <= 0 or len(faltam) != buraco:
+        return []
+    return faltam
+
+
+async def _faltam_no_catalogo(
+    session: AsyncSession, faltam: list[str], comps: list[dict]
+) -> list[str]:
+    """Das peças que faltam, só as que existem no catálogo `products` (em
+    qualquer situação, inclusive excluída 'E') com id do Bling FORA da
+    composição de hoje. Peça que nunca foi cadastrada ou que é a mesma de um
+    componente (renomeada) não entra: sem ela no catálogo não há nome, custo
+    nem produto para a entrada no estoque."""
+    if not faltam:
+        return []
+    ids_do_kit = {int(c["bid"]) for c in comps if c.get("bid") is not None}
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                SELECT lower(btrim(sku)) AS k, bling_product_id AS bid
+                FROM "{SCHEMA}".products
+                WHERE lower(btrim(sku)) = ANY(:keys)
+                """  # noqa: S608
+            ),
+            {"keys": sorted(set(faltam))},
+        )
+    ).mappings().all()
+    ids_por_sku: dict[str, set[int | None]] = {}
+    for p in rows:
+        ids_por_sku.setdefault(p["k"], set()).add(
+            int(p["bid"]) if p["bid"] is not None else None
+        )
+    return [s for s in faltam if s in ids_por_sku and not (ids_por_sku[s] & ids_do_kit)]
 
 
 async def _split_kit_composition(
@@ -2332,6 +2414,41 @@ async def _split_kit_composition(
                         "sku": c["sku"],
                         "produtos": c["name"] or r.get("produtos"),
                         "custo_produto": cost,
+                        "quantidade": 1,
+                        "_compound": True,
+                    })
+            # Peça que o SKU do kit diz ter e a composição de HOJE perdeu
+            # (excluída no Bling depois da venda): volta como unidade própria.
+            faltam = await _faltam_no_catalogo(
+                session, _tamanhos_sem_peca(r.get("sku") or "", comps), comps
+            )
+            if faltam:
+                logger.info(
+                    "devolucao_kit_peca_fora_da_composicao",
+                    pedido_bling=r.get("pedido_bling"), kit=r.get("sku"), faltam=faltam,
+                )
+                # Custo: o do catálogo entra depois (linha `_compound`); este é
+                # só o fallback: o custo do kit menos o das peças presentes
+                # (308307: 167 − 41 = 126); sem todos os custos, divide pelos
+                # tamanhos, igual ao `_split_mala_sizes`.
+                tamanhos = len((r.get("sku") or "").strip().split(".")) - 1
+                custos = [
+                    float(c["cost"]) * max(1, int(c["qty"] or 1))
+                    for c in comps if c["cost"] is not None
+                ]
+                resto = base_cost - sum(custos) if len(custos) == len(comps) else 0.0
+                if base_cost and resto > 0:
+                    fallback = resto / len(faltam)
+                elif base_cost and tamanhos > 0:
+                    fallback = base_cost / tamanhos
+                else:
+                    fallback = base_cost
+                for sku_falta in faltam:
+                    out.append({
+                        **r,
+                        "sku": sku_falta,
+                        "produtos": r.get("produtos"),
+                        "custo_produto": fallback,
                         "quantidade": 1,
                         "_compound": True,
                     })
