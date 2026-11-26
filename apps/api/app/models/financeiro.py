@@ -43,6 +43,15 @@ class FinanceiroConsorcio(Base, TimestampMixin):
     imposto1_manual: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
 
 
+# Valores do Certificado (sempre em minúsculas; '' ou NULL = sem certificado).
+# A trava do banco (ck_financeiro_suprimentos_..._certificado, migrations 0083 e
+# 0512) aceita estes e ''. Anvisa entrou com a M-68 (26/11/2026) e é SÓ MANUAL:
+# não existe consulta de Anvisa, e as consultas da Anatel e do Inmetro não se
+# ligam a uma linha Anvisa nem a mudam (`so_manual`).
+CERTIFICADOS = ("anatel", "inmetro", "anvisa", "isento")
+CERTIFICADOS_SO_MANUAIS = frozenset({"anvisa"})
+
+
 class FinanceiroSuprimentos(Base, TimestampMixin):
     __tablename__ = "financeiro_suprimentos"
     __table_args__ = (
@@ -91,6 +100,12 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
     @property
     def tem_pdf(self) -> bool:
         return bool(self.pdf_nome)
+
+    @property
+    def so_manual(self) -> bool:
+        """Certificado só manual (Anvisa, M-68): as consultas da Anatel e do
+        Inmetro não se ligam a esta linha nem a mudam."""
+        return (self.certificado or "").strip().lower() in CERTIFICADOS_SO_MANUAIS
 
 
 class CertificacoesSyncState(Base):

@@ -126,11 +126,12 @@ async function run() {
     await loading
     for (const [field, value] of Object.entries(changes)) assert.equal(s.rows.value[0][field], value)
     s.selectedRow.value = s.rows.value[0]
-    assert.match(s.officialSituation(s.selectedRow.value), /Cadastro editado/)
+    // M-68: no lugar de "Cadastro editado · consultar fonte", a situação da fonte.
+    assert.equal(s.officialSituation(s.selectedRow.value), 'Inmetro · Ativo')
     assert.doesNotMatch(s.officialSituationClass(s.selectedRow.value), /emerald/)
     const html = await render(s)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
+    assert.equal(controls.length, 7, 'Produto, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
     for (const control of controls) assert.doesNotMatch(control, /readonly|disabled/)
     const dialog = html.slice(html.indexOf('<dialog'))
     assert.match(dialog, /MODERNA-0069\/25/)
@@ -236,7 +237,7 @@ async function run() {
     assert.deepEqual(current, before)
     const html = await render(s)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
+    assert.equal(controls.length, 7, 'Produto, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
     for (const control of controls) assert.match(control, /disabled/)
     assert.doesNotMatch(html, /Atualizar Inmetro|Atualizar agora/)
     assert.doesNotMatch(html, /data-campo="atualizar-inmetro"/, 'quem só vê não consulta o Inmetro')

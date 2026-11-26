@@ -304,3 +304,51 @@ async def test_history_survives_deleting_its_row_reference(db, source):
     assert history.anatel_numero == "071972618234"
     assert history.depois["anatel_dados"] == _record()
     assert await db.scalar(select(func.count()).select_from(FinanceiroSuprimentos)) == 0
+
+
+# ── M-68: Anvisa é só manual ───────────────────────────────────────────
+
+
+async def test_anvisa_manual_com_o_mesmo_numero_nao_e_ligada_pela_anatel(db, source):
+    anvisa = FinanceiroSuprimentos(
+        certificado="anvisa", numero="07197-26-18234", produto="Produto Anvisa",
+        modelo="Modelo Anvisa",
+    )
+    db.add(anvisa)
+    await db.commit()
+    result = await sync.sincronizar_certificacoes(db)
+    assert result["criados"] == 1
+    assert result["conflitos"] == 0
+    assert anvisa.anatel_numero is None
+    assert (anvisa.certificado, anvisa.modelo, anvisa.produto) == (
+        "anvisa", "Modelo Anvisa", "Produto Anvisa",
+    )
+    rows = await _rows(db)
+    assert len(rows) == 2
+    assert sum(1 for row in rows if row.anatel_numero) == 1
+    assert all(item.suprimento_id != anvisa.id for item in await _history(db))
+
+
+async def test_linha_ligada_que_virou_anvisa_nao_e_mudada_pela_anatel(db, source):
+    await sync.sincronizar_certificacoes(db)
+    row = (await _rows(db))[0]
+    row.certificado = "anvisa"
+    row.campos_manuais = ["certificado"]
+    await db.commit()
+    historico = len(await _history(db))
+    antes = deepcopy(sync._snapshot(row))
+    source.return_value = _payload(_record(
+        modelos=["USM003", "USM003B"], fim="2029-07-30", situacao_requerimento="Suspenso",
+    ), sha256="b" * 64)
+    result = await sync.sincronizar_certificacoes(db, force=True)
+    assert result == {"status": "ok", "criados": 0, "atualizados": 0,
+                      "nao_localizados": 0, "conflitos": 0}
+    assert sync._snapshot(row) == antes
+    assert len(await _rows(db)) == 1, "nem cria outra linha para o mesmo número"
+    # Fora da base: também não é marcada como "não localizado".
+    source.return_value = _payload(_record("082162518234"), sha256="c" * 64)
+    result = await sync.sincronizar_certificacoes(db, force=True)
+    assert result["nao_localizados"] == 0
+    assert row.anatel_encontrado is True
+    assert sync._snapshot(row) == antes
+    assert len(await _history(db)) == historico + 1  # só a criação do 082162518234

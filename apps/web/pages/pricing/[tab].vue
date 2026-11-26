@@ -1257,7 +1257,7 @@ function garantiaTitulo(p: PricingProduct): string {
 function validadeTitulo(p: PricingProduct): string {
   if (!p.certificacao) return 'Sem certificado: escolha o certificado na coluna Modelo para ter a validade.'
   if (!canEditProdutos.value) return certTitulo(p.certificacao)
-  return `${certTitulo(p.certificacao)} Clique para mudar a data (o Fim do certificado): vale para todos os produtos dele.`
+  return `${certTitulo(p.certificacao)} Clique para mudar a data (a Validade do certificado): vale para todos os produtos dele.`
 }
 // O input de data da Validade com data incompleta ou que não existe: o
 // navegador mostra o que foi digitado, mas o value vem "" (igual ao campo
@@ -6790,11 +6790,11 @@ watch(department, async () => {
                 >Modelo</th>
                 <th
                   class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]"
-                  title="Número do certificado (Anatel/Inmetro), copiado da Certificações."
+                  title="Número do certificado (Anatel/Inmetro/Anvisa), copiado da Certificações."
                 >Nº certificado</th>
                 <th
                   class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-24"
-                  title="Quantos dias faltam para o certificado vencer (coluna Fim da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias. Clique para mudar a data: grava no Fim do certificado e vale para todos os produtos dele."
+                  title="Quantos dias faltam para o certificado vencer (coluna Validade da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias. Clique para mudar a data: grava na Validade do certificado e vale para todos os produtos dele."
                   data-col-cert-validade
                 >Validade</th>
               </template>

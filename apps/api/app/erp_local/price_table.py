@@ -57,6 +57,16 @@ def index(db):
     return out
 
 
+# O nome do certificado como a tela mostra (o DaVinci grava em minúsculas).
+# Anvisa entrou com a M-68 (26/11/2026), só manual.
+CERTIFICATE_NAMES = {
+    "anatel": "Anatel",
+    "inmetro": "Inmetro",
+    "anvisa": "Anvisa",
+    "isento": "Isento",
+}
+
+
 def for_sku(lines, sku):
     code = family(sku)
     line = lines.get(code)
@@ -68,7 +78,7 @@ def for_sku(lines, sku):
         "line_name": line.get("name"),
         "department": DEPARTMENTS.get(str(line.get("department") or ""), ""),
         "ean": _ean_for(line.get("ean"), code),
-        "certificate": {"anatel": "Anatel", "inmetro": "Inmetro"}.get(certificate, certificate),
+        "certificate": CERTIFICATE_NAMES.get(certificate, certificate),
         "certificate_number": line.get("certificate_number") or "",
         "model": line.get("certificate_model") or line.get("model") or "",
         "warranty_months": line.get("warranty_months"),

@@ -153,6 +153,10 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
         numero = record["numero"]
         seen.add(numero)
         row = linked.get(numero)
+        if row is not None and row.so_manual:
+            # Anvisa é só manual (M-68): a linha que alguém marcou como Anvisa
+            # não é mudada pela consulta da Anatel.
+            continue
         is_new = False
         evento = "atualizacao"
         if row is None:
@@ -188,7 +192,7 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
             result["atualizados"] += 1
 
     for numero, row in linked.items():
-        if numero in seen:
+        if numero in seen or row.so_manual:
             continue
         before = _snapshot(row)
         row.anatel_encontrado = False

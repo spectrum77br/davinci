@@ -65,6 +65,16 @@ def test_a_sku_finds_its_price_table_line_by_family(erp):
     assert snapshot["demo.aparelho"]["price_table"] is None
 
 
+def test_certificate_name_shows_anvisa_and_isento_like_the_certificacoes_screen():
+    # M-68: Anvisa (só manual) e Isento aparecem com inicial maiúscula, como Anatel e Inmetro.
+    for stored, shown in (
+        ("anatel", "Anatel"), ("inmetro", "Inmetro"), ("anvisa", "Anvisa"),
+        ("isento", "Isento"), (" ANVISA ", "Anvisa"), ("", ""), (None, ""),
+    ):
+        lines = {"dg053": {**LINE, "certificate": stored}}
+        assert price_table.for_sku(lines, "dg053.sp")["certificate"] == shown, stored
+
+
 def test_every_cost_change_keeps_its_result_on_the_stock_at_that_moment(erp):
     update(erp, "c1", cost_price="100")
     update(erp, "c2", cost_price="120")

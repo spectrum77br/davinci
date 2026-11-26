@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Suprimentos — certificações (Anatel/Inmetro/isento) com alerta visual
+// Suprimentos — certificações (Anatel/Inmetro/Anvisa/isento) com alerta visual
 // de validade: linha âmbar quando faltam < 30 dias, vermelha quando já
 // venceu. Auto-save inline, mesmo padrão da página Consórcio.
 // Desde 05/11/2026 é componente: aba "Certificações" da Importação (no
@@ -13,6 +13,11 @@
 // edição e os botões Recarregar / Atualizar agora / Atualizar Inmetro: tudo
 // virou o botão azul "Atualizar ▾" com as caixas Anatel e Inmetro. A Anvisa
 // fica fora do menu: não existe consulta de Anvisa no sistema.
+// M-68 (26/11/2026): sai a coluna Início (o dado continua guardado); Fim virou
+// Validade; o Certificado mostra só o nome, centralizado, e abre caixas
+// Inmetro / Anatel / Anvisa / Isento (Anvisa é nova e só manual); a Situação
+// oficial mostra só órgão + situação e abre a janela dos dados da fonte (o
+// "Ver" saiu); os avisos por linha viraram selos laranja curtos.
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ChevronDown, Download, ExternalLink, Loader2, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
@@ -140,8 +145,8 @@ onBeforeUnmount(() => { void autosave.flush().catch(() => {}) })
 
 // Layout ▾ (M-67): caixas para mostrar ou esconder colunas da tabela, como o
 // Layout da Tabela de Preços (marcada = aparece; tudo marcado no começo;
-// lembrado neste navegador). Produto, Nome comercial, Certificado, Início,
-// Fim, Garantia e PDF do certificado ficam sempre à mostra. O menu mostra só a
+// lembrado neste navegador). Produto, Nome comercial, Certificado, Validade,
+// Garantia e PDF do certificado ficam sempre à mostra. O menu mostra só a
 // caixa e o nome. O Excel leva só as colunas à mostra.
 const COLUNAS_LAYOUT = [
   { chave: 'modelo', rotulo: 'Modelo' },
@@ -169,9 +174,9 @@ function lerColunasOcultas(texto: string | null): string[] {
   return [...new Set((texto || '').split(',').map((s) => s.trim()).filter((s) => validas.has(s)))]
 }
 
-// Colunas da tabela (o colspan da linha "Nenhuma certificação"): as 11 menos
-// as escondidas, mais a lixeira de quem pode excluir.
-const totalColunas = computed(() => 11 - colunasOcultas.value.length + (canDelete.value ? 1 : 0))
+// Colunas da tabela (o colspan da linha "Nenhuma certificação"): as 10 menos
+// as escondidas, mais a lixeira de quem pode excluir (M-68: saiu o Início).
+const totalColunas = computed(() => 10 - colunasOcultas.value.length + (canDelete.value ? 1 : 0))
 
 // Lidas só depois de montar (no servidor não há localStorage).
 function lerPreferencia(chave: string): string | null {
@@ -193,7 +198,39 @@ onMounted(() => {
   watch(colunasOcultas, (v) => gravarPreferencia(CHAVE_COLUNAS_OCULTAS, v.join(',')))
 })
 
-const CERT_OPTIONS = ['', 'anatel', 'inmetro', 'isento']
+// Certificado (M-68): a célula mostra só o nome; clicar abre as caixas nesta
+// ordem. Uma marcada por vez; desmarcar a marcada deixa vazio. Grava em
+// minúsculas no mesmo campo (as consultas comparam 'anatel'/'inmetro').
+// Anvisa é só manual: não existe consulta de Anvisa.
+const CERT_OPTIONS = [
+  { valor: 'inmetro', rotulo: 'Inmetro' },
+  { valor: 'anatel', rotulo: 'Anatel' },
+  { valor: 'anvisa', rotulo: 'Anvisa' },
+  { valor: 'isento', rotulo: 'Isento' },
+]
+function valorCertificado(row: Row): string {
+  return (row.certificado || '').trim().toLowerCase()
+}
+// O nome na tela: "Inmetro", "Anatel", "Anvisa", "Isento"; vazio = ''.
+function rotuloCertificado(valor: string | null | undefined): string {
+  const v = (valor || '').trim().toLowerCase()
+  if (!v) return ''
+  return CERT_OPTIONS.find((o) => o.valor === v)?.rotulo ?? v.charAt(0).toUpperCase() + v.slice(1)
+}
+// Id da linha com o menu do Certificado aberto (um por vez).
+const menuCertificado = ref<string | null>(null)
+function abrirMenuCertificado(row: Row, aberto: boolean) {
+  if (aberto) menuCertificado.value = row.id
+  else if (menuCertificado.value === row.id) menuCertificado.value = null
+}
+function escolherCertificado(row: Row, valor: string, marcado: boolean) {
+  menuCertificado.value = null
+  const atual = valorCertificado(row)
+  // Desmarcar só vale para a caixa marcada (a do valor atual).
+  const novo = marcado ? valor : atual === valor ? '' : atual
+  if (atual === novo) return
+  scheduleSave(row, 'certificado', novo)
+}
 const ANATEL_SOURCE_URL = 'https://www.anatel.gov.br/dadosabertos/paineis_de_dados/certificacao_de_produtos/produtos_certificados.zip'
 const INMETRO_SOURCE_URL = 'http://www.inmetro.gov.br/prodcert/'
 const OFFICIAL_FIELDS = new Set<keyof Row>(['modelo', 'nome_comercial', 'certificado', 'numero', 'inicio', 'fim'])
@@ -356,11 +393,22 @@ function fieldSourceTitle(row: Row, field: keyof Row) {
   return ''
 }
 
+// Situação oficial (M-68): só órgão + situação, por exemplo "Anatel ·
+// Homologação Emitida" ou "Inmetro · Ativo". Linha manual (sem ligação com a
+// Anatel ou o Inmetro) fica em branco; linha com o cadastro editado mostra a
+// situação que veio da fonte; fonte sem situação = em branco. Clicar no texto
+// abre a janela dos dados da fonte.
 function officialSituation(row: Row) {
-  if (!isLinked(row)) return 'Manual · sem confirmação automática'
-  if (hasManualOfficialFields(row)) return 'Cadastro editado · consultar fonte'
+  if (!isLinked(row)) return ''
   const situation = row.anatel_numero ? row.anatel_dados?.situacao_requerimento : row.inmetro_dados?.situacao_certificado
-  return `${officialSource(row)} · ${situation || 'Situação não informada na fonte'}`
+  return situation?.trim() ? `${officialSource(row)} · ${situation.trim()}` : ''
+}
+
+// O balão do texto da situação. Cadastro editado à mão: a situação é a da
+// fonte e o texto fica cinza (como hoje), então o balão explica.
+function officialSituationTitle(row: Row) {
+  if (hasManualOfficialFields(row)) return `Cadastro editado à mão: esta é a situação da fonte (${officialSource(row)}). Clique para ver os dados.`
+  return `Clique para ver os dados de ${officialSource(row)}.`
 }
 
 function officialSituationClass(row: Row) {
@@ -540,8 +588,10 @@ async function downloadPdf(path: string, filename: string) {
 
 // Excel (M-67, no lugar do "Baixar tabela em PDF"): todas as linhas da lista,
 // na ordem da tela, com as colunas à mostra (Layout), na ordem da tabela.
-// Início e Fim vão como data; Valor e Garantia (meses) como número; vazio fica
-// em branco. "PDF do certificado" leva o nome do arquivo anexado.
+// Validade vai como data; Valor e Garantia (meses) como número; vazio fica em
+// branco. "PDF do certificado" leva o nome do arquivo anexado. M-68: o Início
+// saiu (não está mais na tela), Fim virou Validade e o Certificado sai com o
+// nome da tela ("Anatel").
 function linhasExcel(): CelulaPlanilha[][] {
   const numero = (v: unknown): number | '' => {
     if (v == null || v === '') return ''
@@ -554,17 +604,17 @@ function linhasExcel(): CelulaPlanilha[][] {
   cab.push('Nome comercial', 'Certificado')
   if (mostraColuna('numero')) cab.push('Número')
   if (mostraColuna('valor')) cab.push('Valor')
-  cab.push('Início', 'Fim', 'Garantia (meses)')
+  cab.push('Validade', 'Garantia (meses)')
   if (mostraColuna('situacao')) cab.push('Situação oficial')
   cab.push('PDF do certificado')
   const linhas: CelulaPlanilha[][] = [cab]
   for (const row of rows.value) {
     const l: CelulaPlanilha[] = [row.produto ?? '']
     if (mostraColuna('modelo')) l.push(row.modelo ?? '')
-    l.push(row.nome_comercial ?? '', row.certificado ?? '')
+    l.push(row.nome_comercial ?? '', rotuloCertificado(row.certificado))
     if (mostraColuna('numero')) l.push(row.numero ?? '')
     if (mostraColuna('valor')) l.push(numero(row.valor))
-    l.push(data(row.inicio), data(row.fim), numero(row.garantia_meses))
+    l.push(data(row.fim), numero(row.garantia_meses))
     if (mostraColuna('situacao')) l.push(officialSituation(row))
     l.push(row.tem_pdf ? (row.pdf_nome || 'Sim') : '')
     linhas.push(l)
@@ -797,12 +847,12 @@ function rowStatusClass(row: Row): string {
       <article v-for="row in rows" :key="row.id" class="min-w-0 rounded-xl border p-3" :class="rowStatusClass(row)">
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div class="min-w-0"><h2 class="break-words text-sm font-semibold">{{ row.produto || 'Produto não informado' }}</h2><p class="mt-1 break-words text-xs text-muted-foreground">{{ row.modelo || 'Modelo não informado' }}</p></div>
-          <span class="rounded-md bg-muted px-2 py-1 text-xs uppercase">{{ row.certificado || 'Não informado' }}</span>
+          <span class="rounded-md bg-muted px-2 py-1 text-xs">{{ rotuloCertificado(row.certificado) || 'Não informado' }}</span>
         </div>
         <dl class="mt-3 space-y-2 text-xs">
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Validade</dt><dd class="text-right font-medium">{{ formatDate(row.fim) }}</dd></div>
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Garantia</dt><dd class="text-right">{{ row.garantia_meses == null ? 'Não definida' : row.garantia_meses === 0 ? 'Sem garantia' : `${row.garantia_meses} ${row.garantia_meses === 1 ? 'mês' : 'meses'}` }}</dd></div>
-          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
+          <div v-if="officialSituation(row)" class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
         </dl>
         <p v-if="isMissingSource(row)" class="mt-2 text-xs text-amber-700 dark:text-amber-400">Não localizado na última consulta · dados anteriores</p>
         <details class="mt-3 border-t pt-2 text-xs">
@@ -810,7 +860,6 @@ function rowStatusClass(row: Row): string {
           <dl class="space-y-2 pt-2">
             <div><dt class="text-muted-foreground">Nome comercial</dt><dd class="break-words">{{ row.nome_comercial || '—' }}</dd></div>
             <div><dt class="text-muted-foreground">Número</dt><dd class="break-all">{{ row.numero || '—' }}</dd></div>
-            <div><dt class="text-muted-foreground">Início</dt><dd>{{ formatDate(row.inicio) }}</dd></div>
             <div><dt class="text-muted-foreground">Valor</dt><dd>{{ row.valor == null ? '—' : Number(row.valor).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) }}</dd></div>
           </dl>
           <p v-if="officialAlerts(row).length" class="mt-2 text-amber-700 dark:text-amber-400">Confira as observações nos dados oficiais.</p>
@@ -831,11 +880,10 @@ function rowStatusClass(row: Row): string {
             <th class="text-left">Produto</th>
             <th v-if="mostraColuna('modelo')" class="text-left">Modelo</th>
             <th class="text-left">Nome comercial</th>
-            <th class="text-left">Certificado</th>
+            <th class="text-center">Certificado</th>
             <th v-if="mostraColuna('numero')" class="text-left">Número</th>
             <th v-if="mostraColuna('valor')" class="text-right">Valor</th>
-            <th class="text-left">Início</th>
-            <th class="text-left">Fim</th>
+            <th class="text-left">Validade</th>
             <th class="text-right" data-col-garantia-meses
               title="Prazo da garantia, em meses (0 = sem garantia). Mudar aqui muda a Garantia (meses) de todos os produtos deste certificado na Tabela de Preços. Vazio = o certificado não define (cada produto fica com o seu).">Garantia (meses)</th>
             <th v-if="mostraColuna('situacao')" class="text-left">Situação oficial</th>
@@ -866,11 +914,38 @@ function rowStatusClass(row: Row): string {
                 :title="row.nome_comercial || ''"
                 @input="(e) => scheduleSave(row, 'nome_comercial', (e.target as HTMLInputElement).value)" />
             </td>
-            <td>
-              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                @change="(e) => scheduleSave(row, 'certificado', (e.target as HTMLSelectElement).value)">
-                <option v-for="o in CERT_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
-              </select>
+            <td class="text-center">
+              <!-- Certificado (M-68): só o nome; clicar abre as caixas (uma por vez). -->
+              <PopoverRoot v-if="canEdit" :open="menuCertificado === row.id" @update:open="(aberto) => abrirMenuCertificado(row, aberto)">
+                <PopoverTrigger as-child>
+                  <button type="button" class="cert-cell" data-cert-certificado :disabled="busy || rowBusy[row.id]"
+                    :aria-label="`Certificado de ${row.produto || 'certificação'}: ${rotuloCertificado(row.certificado) || 'nenhum'}`">
+                    <span v-if="rotuloCertificado(row.certificado)">{{ rotuloCertificado(row.certificado) }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverPortal>
+                  <PopoverContent
+                    side="bottom"
+                    align="center"
+                    :side-offset="2"
+                    :collision-padding="8"
+                    data-menu-certificado
+                    class="z-[70] w-36 rounded-md border bg-background p-1 shadow-lg"
+                  >
+                    <label v-for="o in CERT_OPTIONS" :key="o.valor"
+                      class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/50">
+                      <input type="checkbox" class="size-4" :checked="valorCertificado(row) === o.valor" :data-campo="`certificado-${o.valor}`"
+                        @change="(e) => escolherCertificado(row, o.valor, (e.target as HTMLInputElement).checked)" />
+                      {{ o.rotulo }}
+                    </label>
+                  </PopoverContent>
+                </PopoverPortal>
+              </PopoverRoot>
+              <span v-else class="cert-cell" data-cert-certificado>
+                <span v-if="rotuloCertificado(row.certificado)">{{ rotuloCertificado(row.certificado) }}</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </span>
             </td>
             <td v-if="mostraColuna('numero')">
               <input class="cell-input" :value="row.numero ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
@@ -881,11 +956,6 @@ function rowStatusClass(row: Row): string {
               <input type="number" step="0.01" class="cell-input text-right"
                 :value="row.valor ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @input="(e) => scheduleSave(row, 'valor', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" />
-            </td>
-            <td>
-              <input type="date" class="cell-input" :value="row.inicio ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :title="fieldSourceTitle(row, 'inicio')"
-                @input="(e) => scheduleSave(row, 'inicio', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.fim ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
@@ -900,17 +970,20 @@ function rowStatusClass(row: Row): string {
                 @change="(e) => salvarGarantia(row, (e.target as HTMLInputElement).value)" />
             </td>
             <td v-if="mostraColuna('situacao')" class="official-status-cell">
-              <div class="flex items-center gap-2">
-                <span :class="officialSituationClass(row)">{{ officialSituation(row) }}</span>
-                <button v-if="isLinked(row)" class="shrink-0 text-primary hover:underline" @click="openDetails(row)"
-                  :aria-label="`Ver dados de ${officialSource(row)} de ${row.produto || row.numero}`">Ver</button>
+              <!-- M-68: só órgão + situação; clicar abre os dados da fonte. Os
+                   avisos da linha viraram selos curtos (texto completo no title). -->
+              <div class="flex flex-wrap items-center gap-1.5">
+                <button v-if="officialSituation(row)" type="button" class="situacao-link" :class="officialSituationClass(row)"
+                  data-situacao-oficial :title="officialSituationTitle(row)"
+                  :aria-label="`Ver dados de ${officialSource(row)} de ${row.produto || row.numero}`"
+                  @click="openDetails(row)">{{ officialSituation(row) }}</button>
+                <button v-if="isMissingSource(row)" type="button" class="selo-aviso" data-selo-aviso="nao-localizado"
+                  title="Não localizado na última consulta. Os dados são da consulta anterior."
+                  @click="openDetails(row)">não localizado</button>
+                <button v-else-if="officialAlerts(row).length" type="button" class="selo-aviso" data-selo-aviso="observacoes"
+                  title="Confira as observações da fonte."
+                  @click="openDetails(row)">observações</button>
               </div>
-              <span v-if="isMissingSource(row)" class="block text-[10px] text-amber-700 dark:text-amber-400">
-                Não localizado na última consulta · dados anteriores
-              </span>
-              <span v-else-if="officialAlerts(row).length" class="block text-[10px] text-amber-700 dark:text-amber-400">
-                Confira as observações da fonte em “Ver”
-              </span>
             </td>
             <td>
               <div class="flex items-center gap-2">
@@ -1042,6 +1115,50 @@ function rowStatusClass(row: Row): string {
   min-width: 170px;
   max-width: 270px;
   white-space: normal;
+}
+/* Certificado (M-68): só o nome, centralizado; clicar abre as caixas. */
+.cert-cell {
+  display: block;
+  width: 100%;
+  min-height: 18px;
+  padding: 2px 4px;
+  font-size: 11px;
+  text-align: center;
+  color: inherit;
+}
+button.cert-cell {
+  cursor: pointer;
+  background: rgb(254 252 232 / 0.6);
+}
+:global(.dark) button.cert-cell {
+  background: rgb(120 53 15 / 0.15);
+}
+button.cert-cell:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+  background: transparent;
+}
+/* Situação oficial (M-68): o texto abre os dados da fonte. */
+.situacao-link {
+  cursor: pointer;
+  text-align: left;
+}
+.situacao-link:hover {
+  text-decoration: underline;
+}
+.selo-aviso {
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 16px;
+  background: rgb(254 243 199);
+  color: rgb(146 64 14);
+}
+:global(.dark) .selo-aviso {
+  background: rgb(120 53 15 / 0.4);
+  color: rgb(252 211 77);
 }
 .certification-dialog {
   width: min(720px, calc(100vw - 32px));

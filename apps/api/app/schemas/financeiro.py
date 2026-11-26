@@ -2,8 +2,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.models.financeiro import CERTIFICADOS
 
 # ── Consórcio ──────────────────────────────────────────────────────────
 
@@ -79,6 +80,8 @@ class SuprimentosPatch(BaseModel):
     produto: str | None = None
     modelo: str | None = None
     nome_comercial: str | None = None
+    # Anatel, Inmetro, Anvisa (M-68, só manual) ou Isento; '' = sem. Grava em
+    # minúsculas (é o que as consultas e a Tabela de Preços comparam).
     certificado: str | None = None
     numero: str | None = None
     valor: Decimal | None = None
@@ -87,6 +90,17 @@ class SuprimentosPatch(BaseModel):
     # 0 a 120 (0 = sem garantia); null = o certificado não define o prazo (os
     # produtos ficam com o que têm).
     garantia_meses: int | None = Field(None, ge=0, le=120)
+
+    @field_validator("certificado")
+    @classmethod
+    def _certificado_aceito(cls, valor: str | None) -> str | None:
+        # Fora da lista o banco recusaria (trava da 0083/0512) com erro 500.
+        if valor is None:
+            return None
+        limpo = valor.strip().lower()
+        if limpo and limpo not in CERTIFICADOS:
+            raise ValueError("Certificado: use Anatel, Inmetro, Anvisa, Isento ou deixe vazio.")
+        return limpo
 
 
 class CertificacoesFonteStatusOut(BaseModel):

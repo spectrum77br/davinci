@@ -30,8 +30,9 @@ const exportsForTest = `return {
   exportTable, load, loadAnatelStatus, loadInmetroStatus,
   menuAtualizarAberto, atualizarAnatel, atualizarInmetro, atualizandoAlgo, rotuloAtualizar,
   abrirMenuAtualizar, executarAtualizar, avisoFalhaConsulta,
+  valorCertificado, rotuloCertificado, menuCertificado, abrirMenuCertificado, escolherCertificado,
   attachPdf, addRow, removeRow, downloadCertificate, rowStatusClass, officialSituation,
-  officialSituationClass, isLinked, isOfficialField, hasManualOfficialFields, officialSource, officialData,
+  officialSituationClass, officialSituationTitle, isLinked, isOfficialField, hasManualOfficialFields, officialSource, officialData,
   isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj,
   GARANTIA_MESES_MAX, lerGarantiaMeses, salvarGarantia,
   COLUNAS_LAYOUT, CHAVE_COLUNAS_OCULTAS, colunasOcultas, mostraColuna, alternarColuna, lerColunasOcultas,
@@ -249,13 +250,18 @@ async function run() {
     await loading
     const saved = s.rows.value[0]
     for (const [field, value] of Object.entries(changes)) assert.equal(saved[field], value)
-    assert.match(s.officialSituation(saved), /Cadastro editado/)
+    // M-68: "Cadastro editado · consultar fonte" deu lugar à situação da fonte
+    // (em cinza, como hoje, porque o cadastro foi editado).
+    assert.equal(s.officialSituation(saved), 'Anatel · Homologação Emitida')
     assert.doesNotMatch(s.officialSituationClass(saved), /emerald/)
     s.selectedRow.value = saved
     const html = await render(s)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
+    assert.equal(controls.length, 7, 'Produto, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
     for (const control of controls) assert.doesNotMatch(control, /readonly|disabled/)
+    const certificado = html.match(/<button[^>]*class="cert-cell"[^>]*data-cert-certificado[^>]*>/)
+    assert.ok(certificado, 'Certificado é um botão para quem edita')
+    assert.doesNotMatch(certificado[0], /disabled/)
     const dialog = html.slice(html.indexOf('<dialog'))
     assert.match(dialog, /Dados da fonte original/)
     assert.match(dialog, /07197-26-18234/)
@@ -281,8 +287,11 @@ async function run() {
     assert.doesNotMatch(html, /Baixar tabela em PDF/)
     assert.match(html, /Baixar PDF de Telefone/)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
+    assert.equal(controls.length, 7, 'Produto, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
     for (const control of controls) assert.match(control, /disabled/)
+    // Quem só vê: o Certificado é só texto, sem menu.
+    assert.match(html, /<span class="cert-cell" data-cert-certificado><span>Anatel<\/span><\/span>/)
+    assert.doesNotMatch(html, /data-menu-certificado/)
   }
   {
     const { state: s, calls } = page()
@@ -306,7 +315,9 @@ async function run() {
     const html = await render(s)
     assert.match(html, /Homologação Emitida/)
     assert.match(html, /Em Análise - RE/)
-    assert.match(html, /Manual · sem confirmação automática/)
+    // M-68: linha manual = Situação oficial em branco (sem "Manual · …").
+    assert.doesNotMatch(html, /Manual · sem confirmação automática/)
+    assert.equal(s.officialSituation(s.rows.value[2]), '')
     // M-66: os blocos Anatel/Inmetro saíram do topo.
     assert.doesNotMatch(html, /Atualização diária/)
     assert.equal((html.match(/readonly/g) || []).length, 0, 'linked source fields are editable in the table')
@@ -410,7 +421,6 @@ async function run() {
     assert.doesNotMatch(html, /&lt; 30 dias|vencido<\/span>/, 'sem a legenda de cores')
     assert.doesNotMatch(html, /Recarregar|Atualizar agora|Atualizar Inmetro|Atualização diária|Última consulta bem-sucedida/)
     assert.doesNotMatch(html, /Todos os campos do cadastro podem ser editados/)
-    assert.doesNotMatch(html, /data-campo="atualizar-anvisa"|>\s*Anvisa\s*<\/label>/, 'Anvisa fica fora do menu: não existe consulta')
     assert.doesNotMatch(html, /data-aviso-falha-consulta/, 'sem falha, sem aviso')
     assert.match(html, /class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white" data-acao="atualizar"/, 'Atualizar azul, como o da Tabela')
     assert.match(html, /class="btn btn-sm h-7 py-0 btn-primary ml-auto" data-acao="nova-certificacao"/, '+ Nova certificação à direita')
@@ -419,6 +429,7 @@ async function run() {
     assert.ok(ordem.every((p, i) => p > 0 && (i === 0 || p > ordem[i - 1])), 'ordem: Layout, Excel, Atualizar, Nova certificação')
     const menu = html.slice(html.indexOf('data-menu-atualizar'), html.indexOf('data-acao="atualizar-executar"'))
     assert.deepEqual([...menu.matchAll(/data-campo="atualizar-(\w+)"/g)].map((m) => m[1]), ['anatel', 'inmetro'])
+    assert.doesNotMatch(menu, /Anvisa/, 'Anvisa fica fora do menu: não existe consulta')
     for (const campo of ['atualizar-anatel', 'atualizar-inmetro']) {
       const caixa = html.match(new RegExp(`<input[^>]*data-campo="${campo}"[^>]*>`))
       assert.ok(caixa, campo)

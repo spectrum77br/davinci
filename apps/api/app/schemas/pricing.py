@@ -346,7 +346,7 @@ class CertificacaoDoProdutoOut(BaseModel):
     id: UUID
     produto: str | None = None
     modelo: str | None = None
-    certificado: str | None = None  # anatel / inmetro / isento
+    certificado: str | None = None  # anatel / inmetro / anvisa / isento
     numero: str | None = None
     fim: date | None = None  # validade (coluna Fim da Certificações)
     # Garantia (meses) do certificado (06/11/2026). Com valor, a coluna

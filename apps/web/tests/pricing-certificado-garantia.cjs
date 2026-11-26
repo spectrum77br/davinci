@@ -85,7 +85,7 @@ async function run() {
     assert.match(s.garantiaTitulo(produto({ certificacao: cert({ modelo: null }) })), /vem do certificado smartphone 4G:/)
     // Validade: sem certificado não edita; com certificado avisa que vale para todos.
     assert.match(s.validadeTitulo(produto({ certificacao: null })), /escolha o certificado na coluna Modelo/)
-    assert.match(s.validadeTitulo(produto()), /^Da Certificações: .*Válido até 30\/07\/2028\..* Clique para mudar a data \(o Fim do certificado\): vale para todos os produtos dele\.$/)
+    assert.match(s.validadeTitulo(produto()), /^Da Certificações: .*Válido até 30\/07\/2028\..* Clique para mudar a data \(a Validade do certificado\): vale para todos os produtos dele\.$/)
     const leitor = pagina({ podeEditar: false })
     assert.equal(leitor.validadeTitulo(produto()), leitor.certTitulo(cert()), 'quem só vê não recebe o "clique"')
   }
@@ -284,7 +284,10 @@ async function run() {
   const iCab = tpl.indexOf('data-col-cert-validade')
   assert.ok(iCab > 0, 'cabeçalho marcado')
   const th = tpl.slice(tpl.lastIndexOf('<th', iCab), tpl.indexOf('</th>', iCab))
-  assert.match(th, /Clique para mudar a data: grava no Fim do certificado e vale para todos os produtos dele\./)
+  // M-68: a coluna Fim da Certificações passou a se chamar Validade.
+  assert.match(th, /coluna Validade da Certificações/)
+  assert.match(th, /Clique para mudar a data: grava na Validade do certificado e vale para todos os produtos dele\./)
+  assert.doesNotMatch(th, /\bFim\b/)
   const corpo = tpl.slice(tpl.indexOf('<!-- data rows -->'))
   const iCel = corpo.indexOf('data-cert-validade\n')
   assert.ok(iCel > 0, 'célula da linha existe')
