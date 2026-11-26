@@ -26,8 +26,10 @@ const exportsForTest = `return {
   rows, mobileTableMode, loading, errorText, statusError, syncMessage, exporting, adding, synchronizing,
   anatelStatus, selectedRow, detailsDialog, rowBusy, busy, hasBusyRow, canEdit, canDelete, canAttach,
   inmetroStatus, inmetroStatusError, inmetroSyncMessage, inmetroSyncError, synchronizingInmetro,
-  CERT_OPTIONS, ANATEL_SOURCE_URL, INMETRO_SOURCE_URL, totalRows, scheduleSave, syncAnatel, syncInmetro,
+  CERT_OPTIONS, ANATEL_SOURCE_URL, INMETRO_SOURCE_URL, scheduleSave, syncAnatel, syncInmetro,
   exportTable, load, loadAnatelStatus, loadInmetroStatus,
+  menuAtualizarAberto, atualizarAnatel, atualizarInmetro, atualizandoAlgo, rotuloAtualizar,
+  abrirMenuAtualizar, executarAtualizar, avisoFalhaConsulta,
   attachPdf, addRow, removeRow, downloadCertificate, rowStatusClass, officialSituation,
   officialSituationClass, isLinked, isOfficialField, hasManualOfficialFields, officialSource, officialData,
   isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj,
@@ -104,10 +106,11 @@ const status = (values = {}) => ({
 
 async function render(state) {
   const app = Vue.createSSRApp({ setup: () => state, render: rendered.render })
-  for (const name of ['ChevronDown', 'Download', 'ExternalLink', 'Paperclip', 'Plus', 'RefreshCw', 'Trash2', 'X']) {
+  for (const name of ['ChevronDown', 'Download', 'ExternalLink', 'Loader2', 'Paperclip', 'Plus', 'RefreshCw', 'Trash2', 'X']) {
     app.component(name, { render: () => Vue.h('span') })
   }
-  // Popover do Layout (reka-ui): aqui sempre aberto, para conferir as caixas.
+  // Popovers do Layout e do Atualizar (reka-ui): aqui sempre abertos, para
+  // conferir as caixas.
   for (const name of ['PopoverRoot', 'PopoverTrigger', 'PopoverPortal', 'PopoverContent']) {
     app.component(name, { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) })
   }
@@ -188,7 +191,7 @@ async function run() {
     assert.equal(s.rows.value.length, 1)
     assert.equal(s.anatelStatus.value.ultimo_sucesso_em, '2026-09-14T13:00:00Z')
     assert.match(s.errorText.value, /dados anteriores foram preservados/)
-    assert.match(s.statusError.value, /Tente recarregar/)
+    assert.match(s.statusError.value, /Tente atualizar/)
   }
   {
     const { state: s, calls } = page()
@@ -304,7 +307,8 @@ async function run() {
     assert.match(html, /Homologação Emitida/)
     assert.match(html, /Em Análise - RE/)
     assert.match(html, /Manual · sem confirmação automática/)
-    assert.match(html, /Atualização diária/)
+    // M-66: os blocos Anatel/Inmetro saíram do topo.
+    assert.doesNotMatch(html, /Atualização diária/)
     assert.equal((html.match(/readonly/g) || []).length, 0, 'linked source fields are editable in the table')
     assert.equal((html.match(/aria-label="Excluir certificação"/g) || []).length, 1, 'only manual row exposes delete')
     assert.match(s.rowStatusClass(emitted), /red/, 'expiry styling is independent of official status')
@@ -389,6 +393,192 @@ async function run() {
     assert.match(await render(s), /<dt class="text-muted-foreground">Garantia<\/dt><dd class="text-right">Sem garantia<\/dd>/)
     s.rows.value[0].garantia_meses = 18
     assert.match(await render(s), /<dd class="text-right">18 meses<\/dd>/)
+  }
+  // ── M-66: topo limpo e um só "Atualizar ▾" (Anatel, Inmetro) ──────────
+  {
+    // Topo: título e barra [Layout] [Excel] [Atualizar ▾] … [+ Nova certificação];
+    // nada de contagem, legenda, blocos, frase e Recarregar / Atualizar agora /
+    // Atualizar Inmetro. Sem falha, sem aviso.
+    const { state: s } = page()
+    s.rows.value = [row(), row({ id: 'two', fim: '2020-01-01' })]
+    s.anatelStatus.value = status()
+    s.inmetroStatus.value = status()
+    // Sem os comentários do template (o build de produção também tira).
+    const html = (await render(s)).replace(/<!--[\s\S]*?-->/g, '')
+    assert.match(html, /<div class="flex flex-wrap items-center gap-2" data-barra-certificacoes><h1[^>]*>Certificações<\/h1>/, 'título na barra')
+    assert.doesNotMatch(html, /\d+ itens?\b/, 'sem a contagem de itens')
+    assert.doesNotMatch(html, /&lt; 30 dias|vencido<\/span>/, 'sem a legenda de cores')
+    assert.doesNotMatch(html, /Recarregar|Atualizar agora|Atualizar Inmetro|Atualização diária|Última consulta bem-sucedida/)
+    assert.doesNotMatch(html, /Todos os campos do cadastro podem ser editados/)
+    assert.doesNotMatch(html, /data-campo="atualizar-anvisa"|>\s*Anvisa\s*<\/label>/, 'Anvisa fica fora do menu: não existe consulta')
+    assert.doesNotMatch(html, /data-aviso-falha-consulta/, 'sem falha, sem aviso')
+    assert.match(html, /class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white" data-acao="atualizar"/, 'Atualizar azul, como o da Tabela')
+    assert.match(html, /class="btn btn-sm h-7 py-0 btn-primary ml-auto" data-acao="nova-certificacao"/, '+ Nova certificação à direita')
+    const ordem = ['data-acao="layout-certificacoes"', 'data-acao="excel-certificacoes"', 'data-acao="atualizar"', 'data-acao="nova-certificacao"']
+      .map((m) => html.indexOf(m))
+    assert.ok(ordem.every((p, i) => p > 0 && (i === 0 || p > ordem[i - 1])), 'ordem: Layout, Excel, Atualizar, Nova certificação')
+    const menu = html.slice(html.indexOf('data-menu-atualizar'), html.indexOf('data-acao="atualizar-executar"'))
+    assert.deepEqual([...menu.matchAll(/data-campo="atualizar-(\w+)"/g)].map((m) => m[1]), ['anatel', 'inmetro'])
+    for (const campo of ['atualizar-anatel', 'atualizar-inmetro']) {
+      const caixa = html.match(new RegExp(`<input[^>]*data-campo="${campo}"[^>]*>`))
+      assert.ok(caixa, campo)
+      assert.match(caixa[0], /type="checkbox"/)
+      assert.match(caixa[0], /checked/, `${campo} marcado por padrão`)
+    }
+    assert.match(html, /data-acao="atualizar-executar"/)
+    // As cores das linhas continuam (só a legenda saiu).
+    assert.match(s.rowStatusClass(s.rows.value[1]), /red/)
+    // Abrir o menu de novo volta com as duas marcadas.
+    s.atualizarAnatel.value = false
+    s.atualizarInmetro.value = false
+    s.abrirMenuAtualizar(true)
+    assert.equal(s.menuAtualizarAberto.value, true)
+    assert.equal(s.atualizarAnatel.value, true)
+    assert.equal(s.atualizarInmetro.value, true)
+  }
+  {
+    // Só Anatel marcada: salva a edição pendente, consulta só a Anatel e relê a lista uma vez.
+    const { state: s, calls } = page()
+    const current = row()
+    s.rows.value = [current]
+    s.abrirMenuAtualizar(true)
+    s.atualizarInmetro.value = false
+    s.scheduleSave(current, 'produto', 'Edição antes de atualizar')
+    const atualizando = s.executarAtualizar()
+    assert.equal(s.menuAtualizarAberto.value, false, 'o menu fecha ao confirmar')
+    await settle()
+    assert.equal(calls[0].options.method, 'PATCH')
+    assert.deepEqual(calls[0].options.body, { produto: 'Edição antes de atualizar' })
+    calls[0].resolve()
+    await settle()
+    assert.equal(calls[1].url, '/api/financeiro/suprimentos/anatel/sincronizar')
+    assert.equal(s.rotuloAtualizar.value, 'Consultando Anatel...')
+    calls[1].resolve({ status: 'ok', criados: 1, atualizados: 2, nao_localizados: 0, conflitos: 1 })
+    await settle()
+    assert.equal(calls.length, 5, 'relê a lista e a situação das duas consultas, uma vez só')
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([row({ produto: 'Edição antes de atualizar', anatel_numero: '07197-26-18234' })])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await atualizando
+    assert.ok(!calls.some(c => c.url.endsWith('/inmetro/sincronizar')), 'Inmetro desmarcado não é consultado')
+    assert.equal(s.rows.value[0].anatel_numero, '07197-26-18234')
+    assert.match(s.syncMessage.value, /1 novos registros e 2 atualizados/)
+    assert.match(s.syncMessage.value, /conferência/)
+    assert.equal(s.errorText.value, null)
+    assert.equal(s.busy.value, false)
+    assert.equal(s.rotuloAtualizar.value, 'Atualizar')
+  }
+  {
+    // Só Inmetro marcado: consulta só o Inmetro e relê a lista.
+    const { state: s, calls } = page()
+    s.rows.value = [row()]
+    s.abrirMenuAtualizar(true)
+    s.atualizarAnatel.value = false
+    const atualizando = s.executarAtualizar()
+    await settle()
+    assert.equal(calls[0].url, '/api/financeiro/suprimentos/inmetro/sincronizar')
+    calls[0].resolve({ status: 'ok', criados: 0, atualizados: 1, nao_localizados: 0, conflitos: 0 })
+    await settle()
+    assert.equal(calls.length, 4)
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([row()])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await atualizando
+    assert.ok(!calls.some(c => c.url.endsWith('/anatel/sincronizar')))
+    assert.match(s.inmetroSyncMessage.value, /0 novos registros e 1 atualizados/)
+  }
+  {
+    // As duas marcadas; a Anatel falha e o Inmetro funciona: o aviso de erro
+    // da Anatel fica, a mensagem do Inmetro aparece e a lista é relida.
+    const { state: s, calls } = page()
+    s.rows.value = [row()]
+    s.abrirMenuAtualizar(true)
+    const atualizando = s.executarAtualizar()
+    await settle()
+    assert.equal(calls[0].url, '/api/financeiro/suprimentos/anatel/sincronizar')
+    calls[0].resolve({ status: 'error', erro: 'detalhe interno' })
+    await settle()
+    assert.ok(calls[1].url.endsWith('/anatel/status'))
+    calls[1].resolve(status({ erro: 'detalhe interno' }))
+    await settle()
+    assert.equal(calls[2].url, '/api/financeiro/suprimentos/inmetro/sincronizar')
+    calls[2].resolve({ status: 'ok', criados: 2, atualizados: 0, nao_localizados: 0, conflitos: 3 })
+    await settle()
+    assert.equal(calls.length, 6)
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([row()])
+    calls.filter(c => c.url.endsWith('/anatel/status')).at(-1).resolve(status({ erro: 'detalhe interno' }))
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await atualizando
+    assert.match(s.errorText.value, /consulta à Anatel/, 'o aviso da Anatel não some ao reler a lista')
+    assert.match(s.inmetroSyncMessage.value, /2 novos registros e 0 atualizados/)
+    assert.match(s.inmetroSyncMessage.value, /3 registros precisam de conferência/)
+    assert.match(s.avisoFalhaConsulta.value, /^A última tentativa de consulta à Anatel falhou\./)
+    let html = await render(s)
+    assert.equal((html.match(/data-aviso-falha-consulta/g) || []).length, 1, 'uma linha só')
+    assert.match(html, /<p[^>]*class="truncate text-xs text-amber-700/)
+    assert.doesNotMatch(html, /detalhe interno/)
+    // As duas falhando: uma frase só.
+    s.inmetroStatus.value = status({ erro: 'x' })
+    assert.match(s.avisoFalhaConsulta.value, /consulta à Anatel e ao Inmetro falhou/)
+    // Não deu para ler a situação: também avisa, na mesma linha.
+    s.statusError.value = 'Não foi possível consultar a atualização automática da Anatel. Tente atualizar em instantes.'
+    assert.match(s.avisoFalhaConsulta.value, /^A última tentativa de consulta ao Inmetro falhou\..*Não foi possível consultar a atualização automática da Anatel/)
+    // A consulta volta a funcionar: o aviso some.
+    s.statusError.value = null
+    s.anatelStatus.value = status()
+    s.inmetroStatus.value = status()
+    assert.equal(s.avisoFalhaConsulta.value, '')
+    html = await render(s)
+    assert.doesNotMatch(html, /data-aviso-falha-consulta/)
+  }
+  {
+    // Edição pendente que não salvou: para tudo (não consulta nem relê por cima).
+    const { state: s, calls } = page()
+    const current = row()
+    s.rows.value = [current]
+    s.scheduleSave(current, 'produto', 'Não salvou')
+    const atualizando = s.executarAtualizar()
+    await settle()
+    calls[0].reject(new Error('offline'))
+    await atualizando
+    assert.equal(calls.length, 1)
+    assert.equal(s.rows.value[0].produto, 'Não salvou')
+    assert.match(s.errorText.value, /não foram salvas/)
+    assert.equal(s.busy.value, false)
+  }
+  {
+    // Admin desmarca as duas: só salva e relê a lista (o que o Recarregar fazia).
+    const { state: s, calls } = page()
+    s.rows.value = [row()]
+    s.abrirMenuAtualizar(true)
+    s.atualizarAnatel.value = false
+    s.atualizarInmetro.value = false
+    const atualizando = s.executarAtualizar()
+    await settle()
+    assert.equal(calls.length, 3)
+    assert.ok(!calls.some(c => c.url.endsWith('/sincronizar')))
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([row()])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await atualizando
+    assert.equal(s.loading.value, false)
+  }
+  {
+    // Quem só vê: o Atualizar não tem menu nem caixas e só relê a lista.
+    const { state: s, calls } = page({ isAdmin: false, user: { permissions: { financeiro_suprimentos: { view: true } } } })
+    s.rows.value = [row()]
+    const html = await render(s)
+    assert.match(html, /data-acao="atualizar"/)
+    assert.doesNotMatch(html, /data-menu-atualizar|data-campo="atualizar-anatel"|data-campo="atualizar-inmetro"/)
+    const atualizando = s.executarAtualizar()
+    await settle()
+    assert.equal(calls.length, 3)
+    assert.ok(!calls.some(c => c.url.endsWith('/sincronizar')))
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([row()])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await atualizando
+    assert.equal(s.loading.value, false)
   }
   console.log('PASS: Anatel editing, saved patches, official data isolation, permissions and synchronization scenarios')
 }

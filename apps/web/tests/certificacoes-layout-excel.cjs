@@ -88,9 +88,11 @@ async function run() {
     assert.match(html, /data-acao="excel-certificacoes"/)
     assert.doesNotMatch(html, /Baixar tabela em PDF/)
     assert.ok(html.indexOf('data-acao="layout-certificacoes"') < html.indexOf('data-acao="excel-certificacoes"'), 'ordem: Layout, Excel')
-    const recarregar = html.search(/<\/span>\s*Recarregar\s*<\/button>/)
-    assert.ok(recarregar > 0, 'botão Recarregar')
-    assert.ok(html.indexOf('data-acao="excel-certificacoes"') < recarregar, 'ordem: Excel, Recarregar')
+    // M-66: o Atualizar ▾ ficou no lugar do Recarregar.
+    assert.doesNotMatch(html.replace(/<!--[\s\S]*?-->/g, ''), /Recarregar/)
+    const atualizar = html.indexOf('data-acao="atualizar"')
+    assert.ok(atualizar > 0, 'botão Atualizar')
+    assert.ok(html.indexOf('data-acao="excel-certificacoes"') < atualizar, 'ordem: Excel, Atualizar')
   }
 
   // ---------- Layout: desmarcar Valor esconde a coluna e fica lembrado

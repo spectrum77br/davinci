@@ -8,8 +8,13 @@
 // `embutido` tira o recuo da página quando vem dentro da Importação.
 // M-67 (25/11/2026): barra com Layout ▾ (mostra/esconde Modelo, Número, Valor
 // e Situação oficial) e Excel (.xlsx), no lugar do "Baixar tabela em PDF".
+// M-66 (26/11/2026): topo limpo, no padrão da Tabela de Preços. Saíram a
+// contagem de itens, a legenda de cores, os blocos Anatel/Inmetro, a frase de
+// edição e os botões Recarregar / Atualizar agora / Atualizar Inmetro: tudo
+// virou o botão azul "Atualizar ▾" com as caixas Anatel e Inmetro. A Anvisa
+// fica fora do menu: não existe consulta de Anvisa no sistema.
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ChevronDown, Download, ExternalLink, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { ChevronDown, Download, ExternalLink, Loader2, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { createCertificacoesAutosave } from '~/utils/certificacoesAutosave'
 import { gerarXlsx, TIPO_XLSX, type CelulaPlanilha } from '~/lib/planilhaXlsx'
@@ -199,7 +204,7 @@ async function loadAnatelStatus() {
     anatelStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/anatel/status')
     statusError.value = null
   } catch {
-    statusError.value = 'Não foi possível consultar a atualização automática da Anatel. Tente recarregar em instantes.'
+    statusError.value = 'Não foi possível consultar a atualização automática da Anatel. Tente atualizar em instantes.'
   }
 }
 
@@ -208,7 +213,7 @@ async function loadInmetroStatus() {
     inmetroStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/inmetro/status')
     inmetroStatusError.value = null
   } catch {
-    inmetroStatusError.value = 'Não foi possível consultar a atualização automática do Inmetro. Tente recarregar em instantes.'
+    inmetroStatusError.value = 'Não foi possível consultar a atualização automática do Inmetro. Tente atualizar em instantes.'
   }
 }
 
@@ -221,19 +226,21 @@ async function reloadData(source?: 'anatel' | 'inmetro') {
   if (result.status === 'fulfilled') {
     rows.value = result.value
   } else {
-    errorText.value = 'Não foi possível recarregar as certificações. Os dados exibidos foram preservados. Tente novamente.'
+    errorText.value = 'Não foi possível reler a lista de certificações. Os dados exibidos foram preservados. Tente novamente.'
   }
 }
 
-async function load() {
+// `limparAviso = false` (M-66): o Atualizar ▾ relê a lista depois das
+// consultas sem apagar o aviso de erro que uma consulta deixou.
+async function load(limparAviso = true) {
   if (busy.value || hasBusyRow.value) return
   loading.value = true
-  errorText.value = null
+  if (limparAviso) errorText.value = null
   try {
     await autosave.flush()
     await reloadData()
   } catch {
-    errorText.value = 'Não foi possível salvar as alterações. Tente recarregar novamente.'
+    errorText.value = 'Não foi possível salvar as alterações. Tente atualizar novamente.'
   } finally {
     loading.value = false
   }
@@ -275,8 +282,11 @@ function salvarGarantia(row: Row, raw: string) {
   scheduleSave(row, 'garantia_meses', n)
 }
 
-async function syncAnatel() {
-  if (!canAttach.value || busy.value || hasBusyRow.value) return
+// Devolve false quando não deu para salvar as edições pendentes (o Atualizar ▾
+// para aí, para não reler a lista por cima delas). `recarregar = false`: quem
+// chamou relê a lista inteira no fim (Atualizar ▾).
+async function syncAnatel(recarregar = true): Promise<boolean> {
+  if (!canAttach.value || busy.value || hasBusyRow.value) return false
   synchronizing.value = true
   errorText.value = null
   syncMessage.value = null
@@ -285,16 +295,16 @@ async function syncAnatel() {
       await autosave.flush()
     } catch {
       errorText.value = 'As alterações não foram salvas. Tente atualizar novamente para preservar suas edições.'
-      return
+      return false
     }
     const result = await api<SyncResult>('/api/financeiro/suprimentos/anatel/sincronizar', { method: 'POST' })
     if (result.status === 'ok') {
       syncMessage.value = `Consulta concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
       if (result.nao_localizados) syncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
       if (result.conflitos) syncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
-      await reloadData('anatel')
+      if (recarregar) await reloadData('anatel')
     } else if (result.status === 'busy') {
-      syncMessage.value = 'Uma consulta à Anatel já está em andamento. Recarregue em instantes para ver o resultado.'
+      syncMessage.value = 'Uma consulta à Anatel já está em andamento. Atualize em instantes para ver o resultado.'
       await loadAnatelStatus()
     } else {
       errorText.value = 'Não foi possível concluir a consulta à Anatel. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.'
@@ -306,6 +316,7 @@ async function syncAnatel() {
   } finally {
     synchronizing.value = false
   }
+  return true
 }
 
 function isLinked(row: Row) {
@@ -366,8 +377,9 @@ function officialSituationClass(row: Row) {
   return 'text-muted-foreground'
 }
 
-async function syncInmetro() {
-  if (!canAttach.value || busy.value || hasBusyRow.value) return
+// Mesmo contrato do syncAnatel (devolve false se as edições não foram salvas).
+async function syncInmetro(recarregar = true): Promise<boolean> {
+  if (!canAttach.value || busy.value || hasBusyRow.value) return false
   synchronizingInmetro.value = true
   inmetroSyncError.value = null
   inmetroSyncMessage.value = null
@@ -376,16 +388,16 @@ async function syncInmetro() {
       await autosave.flush()
     } catch {
       inmetroSyncError.value = 'As alterações não foram salvas. Tente atualizar o Inmetro novamente para preservar suas edições.'
-      return
+      return false
     }
     const result = await api<SyncResult>('/api/financeiro/suprimentos/inmetro/sincronizar', { method: 'POST' })
     if (result.status === 'ok') {
       inmetroSyncMessage.value = `Consulta ao Inmetro concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
       if (result.nao_localizados) inmetroSyncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
       if (result.conflitos) inmetroSyncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
-      await reloadData('inmetro')
+      if (recarregar) await reloadData('inmetro')
     } else if (result.status === 'busy') {
-      inmetroSyncMessage.value = 'Uma consulta ao Inmetro já está em andamento. Recarregue em instantes para ver o resultado.'
+      inmetroSyncMessage.value = 'Uma consulta ao Inmetro já está em andamento. Atualize em instantes para ver o resultado.'
       await loadInmetroStatus()
     } else {
       inmetroSyncError.value = 'Não foi possível concluir a consulta ao Inmetro. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.'
@@ -397,7 +409,64 @@ async function syncInmetro() {
   } finally {
     synchronizingInmetro.value = false
   }
+  return true
 }
+
+// ── Atualizar ▾ (M-66) ─────────────────────────────────────────────────
+// No padrão do Atualizar da Tabela de Preços: o menu tem as caixas Anatel e
+// Inmetro (as duas marcadas toda vez que abre) e o botão azul "Atualizar".
+// Confirmar faz, para cada órgão marcado, o que faziam os antigos "Atualizar
+// agora" (Anatel) e "Atualizar Inmetro" e, no fim, o que fazia o Recarregar:
+// salva as edições pendentes e relê a lista e a situação das duas consultas.
+// Quem só vê não tem o menu: o Atualizar só relê a lista.
+// Anvisa: fica fora até existir uma consulta de Anvisa no sistema.
+const menuAtualizarAberto = ref(false)
+const atualizarAnatel = ref(true)
+const atualizarInmetro = ref(true)
+const atualizandoAlgo = computed(() => loading.value || synchronizing.value || synchronizingInmetro.value)
+const rotuloAtualizar = computed(() =>
+  synchronizing.value ? 'Consultando Anatel...'
+    : synchronizingInmetro.value ? 'Consultando Inmetro...'
+      : loading.value ? 'Atualizando...' : 'Atualizar')
+
+function abrirMenuAtualizar(aberto: boolean) {
+  menuAtualizarAberto.value = aberto
+  if (aberto) {
+    atualizarAnatel.value = true
+    atualizarInmetro.value = true
+  }
+}
+
+async function executarAtualizar() {
+  if (busy.value || hasBusyRow.value) return
+  menuAtualizarAberto.value = false
+  const anatel = canAttach.value && atualizarAnatel.value
+  const inmetro = canAttach.value && atualizarInmetro.value
+  // As mensagens da vez anterior saem; as desta vez ficam até a próxima.
+  errorText.value = null
+  syncMessage.value = null
+  inmetroSyncMessage.value = null
+  inmetroSyncError.value = null
+  if (anatel && !(await syncAnatel(false))) return
+  if (inmetro && !(await syncInmetro(false))) return
+  await load(false)
+}
+
+// Aviso de falha da consulta diária (M-66): uma linha só, abaixo da barra, e
+// só quando a última tentativa falhou ou não deu para ler a situação (some
+// quando a consulta volta a funcionar). É o único aviso de que o robô parou.
+const avisoFalhaConsulta = computed(() => {
+  const orgaos: string[] = []
+  if (!statusError.value && anatelStatus.value?.erro) orgaos.push('à Anatel')
+  if (!inmetroStatusError.value && inmetroStatus.value?.erro) orgaos.push('ao Inmetro')
+  const partes: string[] = []
+  if (orgaos.length) {
+    partes.push(`A última tentativa de consulta ${orgaos.join(' e ')} falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.`)
+  }
+  if (statusError.value) partes.push(statusError.value)
+  if (inmetroStatusError.value) partes.push(inmetroStatusError.value)
+  return partes.join(' ')
+})
 
 function formatTimestamp(value: string | null | undefined) {
   if (!value) return 'Ainda não realizada'
@@ -588,120 +657,138 @@ function rowStatusClass(row: Row): string {
   if (d < 30) return 'bg-amber-100/60 dark:bg-amber-900/30'
   return ''
 }
-
-const totalRows = computed(() => rows.value.length)
 </script>
 
 <template>
   <div class="space-y-3" :class="{ 'p-4': !embutido }">
-    <div class="flex flex-wrap items-center gap-3">
-      <div class="flex items-center gap-2">
-        <h1 class="text-xl font-semibold">Certificações</h1>
-        <span class="text-xs text-muted-foreground">{{ totalRows }} {{ totalRows === 1 ? 'item' : 'itens' }}</span>
-      </div>
-      <div class="text-[10px] text-muted-foreground inline-flex items-center gap-3 ml-2">
-        <span class="inline-flex items-center gap-1"><span class="size-2 rounded bg-amber-400"></span> &lt; 30 dias</span>
-        <span class="inline-flex items-center gap-1"><span class="size-2 rounded bg-red-500"></span> vencido</span>
-      </div>
-      <!-- Barra no padrão da Tabela de Preços (M-67): Layout ▾ | Excel | Recarregar. -->
-      <div class="ml-auto flex flex-wrap items-center gap-2">
-        <!-- Layout ▾: mostra/esconde Modelo, Número, Valor e Situação oficial.
-             Só a caixa e o nome; lembrado neste navegador. -->
-        <PopoverRoot>
-          <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-certificacoes" title="Escolher as colunas que a tabela mostra">
-              Layout
-              <ChevronDown class="h-3 w-3 ml-1" />
-            </button>
-          </PopoverTrigger>
-          <PopoverPortal>
-            <PopoverContent
-              side="bottom"
-              align="start"
-              :side-offset="4"
-              :collision-padding="8"
-              data-menu-layout-certificacoes
-              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+    <!-- Barra no padrão da Tabela de Preços (M-66/M-67): título, Layout ▾,
+         Excel, Atualizar ▾ e, à direita, o botão de criar linha. -->
+    <div class="flex flex-wrap items-center gap-2" data-barra-certificacoes>
+      <h1 class="mr-1 text-xl font-semibold">Certificações</h1>
+      <!-- Layout ▾: mostra/esconde Modelo, Número, Valor e Situação oficial.
+           Só a caixa e o nome; lembrado neste navegador. -->
+      <PopoverRoot>
+        <PopoverTrigger as-child>
+          <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-certificacoes" title="Escolher as colunas que a tabela mostra">
+            Layout
+            <ChevronDown class="h-3 w-3 ml-1" />
+          </button>
+        </PopoverTrigger>
+        <PopoverPortal>
+          <PopoverContent
+            side="bottom"
+            align="start"
+            :side-offset="4"
+            :collision-padding="8"
+            data-menu-layout-certificacoes
+            class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+          >
+            <label
+              v-for="c in COLUNAS_LAYOUT"
+              :key="c.chave"
+              class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
             >
-              <label
-                v-for="c in COLUNAS_LAYOUT"
-                :key="c.chave"
-                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              <input
+                type="checkbox"
+                class="size-4"
+                :checked="mostraColuna(c.chave)"
+                :data-campo="`layout-certificacoes-${c.chave}`"
+                @change="alternarColuna(c.chave)"
+              />
+              <span>{{ c.rotulo }}</span>
+            </label>
+          </PopoverContent>
+        </PopoverPortal>
+      </PopoverRoot>
+      <button class="btn btn-sm h-7 py-0" :disabled="busy || hasBusyRow" data-acao="excel-certificacoes" @click="exportTable">
+        <Download class="h-4 w-4 mr-1" /> {{ exporting ? 'Gerando...' : 'Excel' }}
+      </button>
+      <!-- Atualizar ▾ (M-66; no lugar do Recarregar e dos botões das consultas).
+           Toda vez que abre: Anatel e Inmetro marcadas. Anvisa não entra: não
+           existe consulta de Anvisa. Quem só vê: o botão só relê a lista. -->
+      <PopoverRoot v-if="canAttach" :open="menuAtualizarAberto" @update:open="abrirMenuAtualizar">
+        <PopoverTrigger as-child>
+          <button
+            type="button"
+            class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+            data-acao="atualizar"
+            :disabled="busy || hasBusyRow"
+            title="Consultar a Anatel e o Inmetro e reler a lista"
+          >
+            <Loader2 v-if="atualizandoAlgo" class="h-4 w-4 mr-1 animate-spin" />
+            <RefreshCw v-else class="h-4 w-4 mr-1" />
+            {{ rotuloAtualizar }}
+            <ChevronDown class="h-3 w-3 ml-1" />
+          </button>
+        </PopoverTrigger>
+        <PopoverPortal>
+          <PopoverContent
+            side="bottom"
+            align="start"
+            :side-offset="4"
+            :collision-padding="8"
+            data-menu-atualizar
+            class="z-[70] w-56 max-w-[calc(100vw-16px)] rounded-md border bg-background py-1 shadow-lg"
+          >
+            <div class="flex h-[26px] items-center px-3 text-[11px] font-semibold text-muted-foreground">
+              O que consultar
+            </div>
+            <label class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50">
+              <input v-model="atualizarAnatel" type="checkbox" class="size-4 shrink-0" data-campo="atualizar-anatel" />
+              Anatel
+            </label>
+            <label class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50">
+              <input v-model="atualizarInmetro" type="checkbox" class="size-4 shrink-0" data-campo="atualizar-inmetro" />
+              Inmetro
+            </label>
+            <div class="mt-1 border-t px-3 pb-1 pt-2">
+              <button
+                type="button"
+                class="btn btn-sm h-7 w-full py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+                data-acao="atualizar-executar"
+                :disabled="busy || hasBusyRow"
+                title="Consulta os órgãos marcados e relê a lista"
+                @click="executarAtualizar"
               >
-                <input
-                  type="checkbox"
-                  class="size-4"
-                  :checked="mostraColuna(c.chave)"
-                  :data-campo="`layout-certificacoes-${c.chave}`"
-                  @change="alternarColuna(c.chave)"
-                />
-                <span>{{ c.rotulo }}</span>
-              </label>
-            </PopoverContent>
-          </PopoverPortal>
-        </PopoverRoot>
-        <button class="btn btn-sm h-7 py-0" :disabled="busy || hasBusyRow" data-acao="excel-certificacoes" @click="exportTable">
-          <Download class="h-4 w-4 mr-1" /> {{ exporting ? 'Gerando...' : 'Excel' }}
-        </button>
-        <button
-          class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-          :disabled="busy || hasBusyRow"
-          @click="load"
-        >
-          <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
-          Recarregar
-        </button>
-      </div>
+                <RefreshCw class="h-4 w-4 mr-1" /> Atualizar
+              </button>
+            </div>
+          </PopoverContent>
+        </PopoverPortal>
+      </PopoverRoot>
+      <button
+        v-else
+        type="button"
+        class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+        data-acao="atualizar"
+        :disabled="busy || hasBusyRow"
+        title="Reler a lista"
+        @click="executarAtualizar"
+      >
+        <Loader2 v-if="atualizandoAlgo" class="h-4 w-4 mr-1 animate-spin" />
+        <RefreshCw v-else class="h-4 w-4 mr-1" />
+        {{ rotuloAtualizar }}
+      </button>
       <button
         v-if="canEdit"
-        class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+        type="button"
+        class="btn btn-sm h-7 py-0 btn-primary ml-auto"
+        data-acao="nova-certificacao"
         :disabled="busy"
         @click="addRow"
       >
-        <Plus class="size-3.5" /> Nova certificação
+        <Plus class="h-4 w-4 mr-1" /> Nova certificação
       </button>
     </div>
 
-    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
-      <div class="space-y-1">
-        <p class="font-medium">Anatel · Makisa Trading LTDA · Atualização diária</p>
-        <p class="text-muted-foreground">
-          Última consulta bem-sucedida: {{ formatTimestamp(anatelStatus?.ultimo_sucesso_em) }}
-          <span v-if="anatelStatus?.source_updated_at"> · Base publicada em {{ formatTimestamp(anatelStatus.source_updated_at) }}</span>
-        </p>
-      </div>
-      <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
-        :disabled="busy || hasBusyRow" @click="syncAnatel">
-        <RefreshCw class="size-3.5" :class="{ 'animate-spin': synchronizing }" />
-        {{ synchronizing ? 'Consultando Anatel...' : 'Atualizar agora' }}
-      </button>
-    </div>
-
-    <p v-if="statusError || anatelStatus?.erro" role="status" class="text-xs text-amber-700 dark:text-amber-400">
-      {{ statusError || 'A última tentativa de consulta à Anatel falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
+    <!-- Uma linha só, e só quando a consulta diária falhou (M-66). -->
+    <p v-if="avisoFalhaConsulta" role="status" class="truncate text-xs text-amber-700 dark:text-amber-400" :title="avisoFalhaConsulta" data-aviso-falha-consulta>
+      {{ avisoFalhaConsulta }}
     </p>
     <p v-if="syncMessage" role="status" class="text-xs text-muted-foreground">{{ syncMessage }}</p>
-
-    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
-      <div class="space-y-1">
-        <p class="font-medium">Inmetro · Makisa Trading LTDA · Atualização diária</p>
-        <p class="text-muted-foreground">Última consulta bem-sucedida: {{ formatTimestamp(inmetroStatus?.ultimo_sucesso_em) }}</p>
-        <p class="text-muted-foreground">Fonte: ProdCert. Os dados oficiais podem ser consultados em “Ver”.</p>
-      </div>
-      <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
-        :disabled="busy || hasBusyRow" @click="syncInmetro">
-        <RefreshCw class="size-3.5" :class="{ 'animate-spin': synchronizingInmetro }" />
-        {{ synchronizingInmetro ? 'Consultando Inmetro...' : 'Atualizar Inmetro' }}
-      </button>
-    </div>
-    <p v-if="inmetroStatusError || inmetroStatus?.erro" role="status" class="text-xs text-amber-700 dark:text-amber-400">
-      {{ inmetroStatusError || 'A última tentativa de consulta ao Inmetro falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
-    </p>
     <p v-if="inmetroSyncMessage" role="status" class="text-xs text-muted-foreground">{{ inmetroSyncMessage }}</p>
     <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
-
-    <p v-if="canEdit" class="text-xs text-muted-foreground">Todos os campos do cadastro podem ser editados. As alterações são salvas automaticamente e preservadas nas próximas consultas. A Garantia (meses) e o Fim valem para todos os produtos do certificado na Tabela de Preços.</p>
 
     <div class="flex justify-end lg:hidden">
       <button class="rounded-lg border px-3 py-2 text-xs" :aria-pressed="mobileTableMode" @click="mobileTableMode = !mobileTableMode">{{ mobileTableMode ? 'Ver cartões' : 'Ver tabela' }}</button>

@@ -208,8 +208,11 @@ async function run() {
     assert.match(html, /UAF001-M1/)
     assert.match(html, /MODERNA CERTIFICADORA/)
     assert.match(html, /40.191.104\/0001-45/)
-    assert.match(html, /Atualizar agora/)
-    assert.match(html, /Atualizar Inmetro/)
+    // M-66: os botões "Atualizar agora" e "Atualizar Inmetro" viraram as
+    // caixas Anatel e Inmetro do menu Atualizar ▾.
+    assert.doesNotMatch(html.replace(/<!--[\s\S]*?-->/g, ''), /Atualizar agora|Atualizar Inmetro/)
+    assert.match(html, /data-campo="atualizar-anatel"/)
+    assert.match(html, /data-campo="atualizar-inmetro"/)
     assert.match(html, /PDF do certificado/)
     assert.equal((html.match(/readonly/g) || []).length, 0, 'all registered fields are editable')
     const dialog = html.slice(html.indexOf('<dialog'))
@@ -236,6 +239,7 @@ async function run() {
     assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
     for (const control of controls) assert.match(control, /disabled/)
     assert.doesNotMatch(html, /Atualizar Inmetro|Atualizar agora/)
+    assert.doesNotMatch(html, /data-campo="atualizar-inmetro"/, 'quem só vê não consulta o Inmetro')
     assert.match(html, /data-acao="excel-certificacoes"/)
     assert.doesNotMatch(html, /Baixar tabela em PDF/)
     assert.match(html, /Ver dados de Inmetro/)
