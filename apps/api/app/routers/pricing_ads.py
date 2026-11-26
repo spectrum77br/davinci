@@ -43,7 +43,9 @@ M-53 (25/11/2026): conta ML do par (Clássico + Premium, mesmo `par_id`) grava o
 mesmo na irmã, nas duas rotas. M-56: Afiliado % + Desconto % + Ads % da conta
 não passa do Custo total (`app/services/pricing/custo_total.py`); o PUT que
 estoura (inclusive religar uma caixa) é recusado com 422 `custo_total_estourado`
-e nada é gravado.
+e nada é gravado. Revisão da M-86: com a conta já acima do teto (o Custo total
+calculado pela Margem mínima ficou abaixo da soma), o PUT que não aumenta o
+maior Ads (baixar o %, desligar a caixa) passa, mesmo sem caber ainda.
 
 M-79 (26/11/2026): o GET manda também a categoria de venda de cada produto (o
 `segment_id`, filho do centro de custo da aba) e a lista `categorias` para o
@@ -358,10 +360,14 @@ async def gravar_ads_da_conta(
         irma = await _irma_de(session, acc)
         contas = [acc] if irma is None else [acc, irma]
         # M-56: o % e as caixas mexem na soma; o gasto por dia, não.
+        # Conta que já está acima do teto (M-86): baixar o Ads passa, mesmo
+        # sem caber ainda; aumentar, não (ver `_recusar_custo_total_estourado`).
         if mudancas.keys() - {"gasto_dia"}:
             for conta in contas:
-                novo = (await estado_ads(session, conta.id)).com_geral(mudancas)
-                _recusar_custo_total_estourado(conta, novo)
+                gravado = await estado_ads(session, conta.id)
+                _recusar_custo_total_estourado(
+                    conta, gravado.com_geral(mudancas), ads_gravado=gravado
+                )
         for conta in contas:
             stmt = pg_insert(PricingAdsConta).values(
                 pricing_account_id=conta.id, atualizado_por=user.id, **mudancas
@@ -431,13 +437,16 @@ async def gravar_ads_do_produto(
     mudancas = body.model_dump(exclude_unset=True)
     irma = await _irma_de(session, acc)
     contas = [acc] if irma is None else [acc, irma]
-    # M-56: o % do produto mexe na soma; o gasto por dia, não.
+    # M-56: o % do produto mexe na soma; o gasto por dia, não. Conta que já
+    # está acima do teto (M-86): o que não aumenta o maior Ads passa.
     if "pode_gastar_pct" in mudancas:
         for conta in contas:
-            novo = (await estado_ads(session, conta.id)).com_produto(
-                product_id, mudancas["pode_gastar_pct"]
+            gravado = await estado_ads(session, conta.id)
+            _recusar_custo_total_estourado(
+                conta,
+                gravado.com_produto(product_id, mudancas["pode_gastar_pct"]),
+                ads_gravado=gravado,
             )
-            _recusar_custo_total_estourado(conta, novo)
     for conta in contas:
         await _gravar_produto_na_conta(session, user, conta.id, product_id, mudancas)
     await session.commit()

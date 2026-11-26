@@ -11,6 +11,9 @@
   custo ou as categorias ativas. Custo total digitado → 409. Abaixo de Afiliado
   + Desconto + Ads já gravados: grava mesmo assim (a tela avisa); a trava do
   M-56 continua para quem mexe em Afiliado, Desconto ou Ads.
+- Revisão da M-86: com a conta já acima do teto, baixar Afiliado, Desconto ou
+  Ads (um campo por vez, como a tela grava) passa mesmo sem caber ainda; o que
+  aumenta a soma, ou baixa o Custo total digitado, continua recusado.
 Contas FABRICADAS no schema de teste.
 """
 
@@ -39,6 +42,7 @@ from app.models import (
     Base,
     PricingAccount,
     PricingPlatform,
+    PricingProduct,
     Segment,
     UserRole,
 )
@@ -433,15 +437,23 @@ async def test_custo_total_abaixo_da_soma_grava_e_a_trava_continua(
         D("7.00"),
     )
 
-    # Afiliado/Desconto/Ads: a trava usa o 7 calculado.
-    r = await client.patch(url, json={"afiliado_pct": 3})
+    # Afiliado/Desconto/Ads: a trava usa o 7 calculado. A conta já está acima
+    # (9 > 7): aumentar a soma é recusado; baixar passa, mesmo sem caber ainda
+    # (revisão da M-86).
+    r = await client.patch(url, json={"afiliado_pct": 5})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 3% + Desconto 2% + Ads 3% = 8%. Passa do Custo total (7%). Não gravado."
+        "Afiliado 5% + Desconto 2% + Ads 3% = 10%. Passa do Custo total (7%). Não gravado."
     )
-    r = await client.put(ads, json={"pode_gastar_pct": 2.5})
+    r = await client.put(ads, json={"pode_gastar_pct": 3.5})
     assert r.status_code == 422, r.text
-    # Corrigir para caber: aceito.
+    # 8 > 7, mas baixou de 9: grava.
+    r = await client.patch(url, json={"afiliado_pct": 3})
+    assert r.status_code == 200, r.text
+    # 7,5 > 7, mas baixou de 8: grava.
+    r = await client.put(ads, json={"pode_gastar_pct": 2.5})
+    assert r.status_code == 200, r.text
+    # Corrigir para caber: aceito. Cabendo, a trava é a de sempre.
     r = await client.patch(url, json={"afiliado_pct": 2})
     assert r.status_code == 200, r.text
     assert (await client.put(ads, json={"pode_gastar_pct": 2})).status_code == 200
@@ -461,6 +473,173 @@ async def test_custo_total_abaixo_da_soma_grava_e_a_trava_continua(
         D("9.00"),
         D("13.00"),
     )
+
+
+async def test_conta_acima_do_teto_se_corrige_um_campo_por_vez(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Revisão da M-86 (1º defeito): Afiliado 4 + Desconto 2 + Ads Geral 3 = 9;
+    a Margem mínima 25 e a marg2 30% deixam o Custo total em 3. A sobra (6) é
+    maior que cada campo sozinho; a tela grava um campo por vez. Quem só edita
+    Contas (não é ADM) consegue baixar cada um, até caber; aumentar a soma é
+    recusado. O Custo total digitado (Margem mínima apagada) não baixa abaixo
+    da soma, mas pode subir mesmo sem caber ainda."""
+    conta = await _conta(db, cena, "aguiar", commission=D("0.14"), **AGUIAR)
+    url = f"/api/pricing/accounts/{conta.id}"
+    ads = f"/api/pricing/ads/{conta.id}"
+    auth_as(cena.admin)
+    assert (await client.patch(url, json={"custo_total_pct": 10})).status_code == 200
+    assert (await client.patch(url, json={"afiliado_pct": 4, "desconto_pct": 2})).status_code == 200
+    assert (await client.put(ads, json={"pode_gastar_pct": 3})).status_code == 200
+    assert (await client.patch(url, json={"margem_minima_pct": 25})).status_code == 200
+    r = await client.patch(url, json={"margin2": "0.30"})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("3")
+
+    # ADM, Margem mínima apagada: o Custo total (3) volta a ser digitado. Baixar
+    # para 2 (abaixo da soma 9) continua recusado; subir para 5 passa, mesmo
+    # sem caber ainda (não piora).
+    assert (await client.patch(url, json={"margem_minima_pct": None})).status_code == 200
+    r = await client.patch(url, json={"custo_total_pct": 2})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 4% + Desconto 2% + Ads 3% = 9%. Passa do Custo total (2%). Não gravado."
+    )
+    r = await client.patch(url, json={"custo_total_pct": 5})
+    assert r.status_code == 200, r.text
+    # A Margem mínima de volta: o Custo total é 3 de novo.
+    r = await client.patch(url, json={"margem_minima_pct": 25})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("3")
+
+    auth_as(cena.vendedor)
+    # Ads 0: 4 + 2 + 0 = 6 > 3, mas baixou de 9.
+    r = await client.put(ads, json={"pode_gastar_pct": 0})
+    assert r.status_code == 200, r.text
+    # Desmarcar o Geral: a soma fica igual (6), não piora.
+    r = await client.put(ads, json={"ads_geral_ligada": False})
+    assert r.status_code == 200, r.text
+    assert (r.json()["ads_geral_ligada"], r.json()["ads_por_produto_ligada"]) == (False, False)
+    # Desconto 0: 4 > 3, baixou de 6.
+    assert (await client.patch(url, json={"desconto_pct": 0})).status_code == 200
+    # Aumentar continua recusado, mesmo abaixo do que estava antes.
+    r = await client.patch(url, json={"desconto_pct": 1})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 4% + Desconto 1% + Ads 0% = 5%. Passa do Custo total (3%). Não gravado."
+    )
+    # Afiliado 3: cabe (3 ≤ 3). Daí em diante a trava é a de sempre.
+    assert (await client.patch(url, json={"afiliado_pct": 3})).status_code == 200
+    r = await client.patch(url, json={"afiliado_pct": 3.5})
+    assert r.status_code == 422, r.text
+    linha = await _ler(db, conta.id)
+    assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+        D("3.00"),
+        D("0.00"),
+        D("3.00"),
+    )
+
+
+async def test_custo_total_zero_se_corrige_pela_tela_tambem_no_modo_produto(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Revisão da M-86 (2º defeito): Margem mínima 36 com a menor marg 35,6%
+    → Custo total 0, com Afiliado 3, Desconto 2 e Ads "Produto" (A 2%, B 1%).
+    Nenhum campo sozinho cabe em 0; quem não é ADM consegue dar ou apagar o %
+    de um produto que não é o maior, baixar o maior, desmarcar o Ads e apagar o
+    Afiliado e o Desconto. O que aumenta o maior Ads (ou a soma) é recusado."""
+    conta = await _conta(db, cena, "aguiar", commission=D("0.14"), **AGUIAR)
+    url = f"/api/pricing/accounts/{conta.id}"
+    ads = f"/api/pricing/ads/{conta.id}"
+    produto_a = PricingProduct(
+        user_id=cena.admin.id, sku="cel-a", name="Capa A", segment_id=cena.folhas["celular"][0].id
+    )
+    produto_b = PricingProduct(
+        user_id=cena.admin.id, sku="cel-b", name="Capa B", segment_id=cena.folhas["celular"][1].id
+    )
+    db.add_all([produto_a, produto_b])
+    await db.commit()
+    url_a, url_b = f"{ads}/produto/{produto_a.id}", f"{ads}/produto/{produto_b.id}"
+
+    auth_as(cena.admin)
+    assert (await client.patch(url, json={"custo_total_pct": 10})).status_code == 200
+    assert (await client.patch(url, json={"afiliado_pct": 3, "desconto_pct": 2})).status_code == 200
+    assert (await client.put(ads, json={"ads_por_produto_ligada": True})).status_code == 200
+    assert (await client.put(url_a, json={"pode_gastar_pct": 2})).status_code == 200
+    assert (await client.put(url_b, json={"pode_gastar_pct": 1})).status_code == 200
+    r = await client.patch(url, json={"margem_minima_pct": 36})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("0")
+
+    auth_as(cena.vendedor)
+    # O % do B (não é o maior): apagar e dar de novo não mexe na soma (7).
+    assert (await client.put(url_b, json={"pode_gastar_pct": None})).status_code == 200
+    assert (await client.put(url_b, json={"pode_gastar_pct": 1.5})).status_code == 200
+    # B passando do A aumenta o maior Ads: recusado.
+    r = await client.put(url_b, json={"pode_gastar_pct": 2.5})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 3% + Desconto 2% + Ads 2,5% = 7,5%. Passa do Custo total (0%). Não gravado."
+    )
+    # Baixar o maior (A): o maior passa a ser o B (1,5).
+    assert (await client.put(url_a, json={"pode_gastar_pct": None})).status_code == 200
+    # Voltar para "Geral" sem % Geral (0) baixa; desmarcar tudo também.
+    r = await client.put(ads, json={"ads_por_produto_ligada": False})
+    assert r.status_code == 200, r.text
+    assert (r.json()["ads_geral_ligada"], r.json()["ads_por_produto_ligada"]) == (False, False)
+    # Afiliado apagado: 2 > 0, baixou de 5.
+    assert (await client.patch(url, json={"afiliado_pct": None})).status_code == 200
+    r = await client.patch(url, json={"afiliado_pct": 0.5})
+    assert r.status_code == 422, r.text
+    # Desconto 0: cabe.
+    assert (await client.patch(url, json={"desconto_pct": 0})).status_code == 200
+    linha = await _ler(db, conta.id)
+    assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+        None,
+        D("0.00"),
+        D("0.00"),
+    )
+
+
+async def test_par_do_ml_acima_do_teto_se_corrige_nas_duas_linhas(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Revisão da M-86 no par do ML: baixar Afiliado ou Ads pela linha do
+    Premium passa nas duas linhas, mesmo sem caber ainda."""
+    auth_as(cena.admin)
+    r = await client.post(
+        "/api/pricing/accounts",
+        json={"name": "atlas", "platform": "mercadolivre", "department": "celular"},
+    )
+    assert r.status_code == 201, r.text
+    classico_id, par_id = r.json()["id"], uuid.UUID(r.json()["par_id"])
+    url = f"/api/pricing/accounts/{classico_id}"
+    r = await client.patch(url, json={k: str(v) for k, v in ATLAS_ML.items()})
+    assert r.status_code == 200, r.text
+    assert (await client.patch(url, json={"custo_total_pct": 10})).status_code == 200
+    assert (await client.patch(url, json={"afiliado_pct": 4, "desconto_pct": 2})).status_code == 200
+    r = await client.put(f"/api/pricing/ads/{classico_id}", json={"pode_gastar_pct": 3})
+    assert r.status_code == 200, r.text
+    # (0,30 − 0,25) × 0,84 ÷ 1,30 × 100 = 3,23 → 3, nas duas.
+    r = await client.patch(url, json={"margem_minima_pct": 25, "margin2": "0.30"})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("3")
+
+    premium_id = (await _par(db, par_id))[PREMIUM].id
+    auth_as(cena.vendedor)
+    r = await client.patch(f"/api/pricing/accounts/{premium_id}", json={"afiliado_pct": 1})
+    assert r.status_code == 200, r.text
+    r = await client.put(f"/api/pricing/ads/{premium_id}", json={"pode_gastar_pct": 1})
+    assert r.status_code == 200, r.text
+    r = await client.put(f"/api/pricing/ads/{premium_id}", json={"pode_gastar_pct": 2})
+    assert r.status_code == 422, r.text
+    par = await _par(db, par_id)
+    for linha in par.values():
+        assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+            D("1.00"),
+            D("2.00"),
+            D("3.00"),
+        )
 
 
 async def test_so_as_categorias_ativas_contam_e_mudar_a_categoria_recalcula(

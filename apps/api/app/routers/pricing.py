@@ -118,7 +118,9 @@ from app.services.pricing.custo_total import (
     custo_total_pela_margem_minima,
     estado_ads,
     estouro,
+    nao_piora,
     recalcular,
+    soma_do_custo_total,
     valores_finais,
 )
 from app.services.pricing.push import (
@@ -695,11 +697,22 @@ def _erro_custo_total(mensagem: str) -> HTTPException:
 
 
 def _recusar_custo_total_estourado(
-    conta: PricingAccount, ads: EstadoAds, novos: dict | None = None
+    conta: PricingAccount,
+    ads: EstadoAds,
+    novos: dict | None = None,
+    ads_gravado: EstadoAds | None = None,
 ) -> None:
     """M-56: 422 `custo_total_estourado` se Afiliado + Desconto + Ads da conta
     passa do Custo total, com os valores que FICARIAM gravados (`novos` vence
-    o da conta; `ads` já é o estado novo do Ads). Nada foi gravado ainda."""
+    o da conta; `ads` já é o estado novo do Ads). Nada foi gravado ainda.
+
+    Revisão da M-86: a conta pode já estar acima do teto (o Custo total
+    calculado pela Margem mínima, uma marg ou a comissão ficou abaixo da soma
+    gravada). Aí a gravação que não aumenta a soma nem baixa o Custo total é
+    aceita, mesmo que a soma ainda não caiba (`nao_piora`): a tela grava um
+    campo por vez e precisa dar para baixar Afiliado, Desconto ou Ads até
+    caber. `ads_gravado` = o Ads como está no banco (sem ele, o PATCH da conta,
+    que não mexe no Ads: o mesmo `ads`); a conta ainda tem os valores gravados."""
     novos = novos or {}
 
     def valor(campo: str):
@@ -708,9 +721,22 @@ def _recusar_custo_total_estourado(
     mensagem = estouro(
         valor("afiliado_pct"), valor("desconto_pct"), ads.maximo(), valor("custo_total_pct")
     )
-    if mensagem:
-        logger.info("pricing.custo_total_estourado", account_id=str(conta.id), mensagem=mensagem)
-        raise _erro_custo_total(mensagem)
+    if not mensagem:
+        return
+    antes = ads_gravado if ads_gravado is not None else ads
+    soma_gravada = soma_do_custo_total(conta.afiliado_pct, conta.desconto_pct, antes.maximo())
+    soma_nova = soma_do_custo_total(valor("afiliado_pct"), valor("desconto_pct"), ads.maximo())
+    if nao_piora(soma_gravada, conta.custo_total_pct, soma_nova, valor("custo_total_pct")):
+        logger.info(
+            "pricing.custo_total_acima_sem_piorar",
+            account_id=str(conta.id),
+            soma_gravada=str(soma_gravada),
+            soma_nova=str(soma_nova),
+            custo_total_pct=str(valor("custo_total_pct")),
+        )
+        return
+    logger.info("pricing.custo_total_estourado", account_id=str(conta.id), mensagem=mensagem)
+    raise _erro_custo_total(mensagem)
 
 
 # O que entra na soma do Custo total (M-56) na própria conta.
@@ -1153,7 +1179,9 @@ async def patch_account(
     # com o Custo total recalculado acima; nas duas linhas do par). Recusa antes
     # de gravar qualquer coisa. Só segura quem mexeu em Afiliado, Desconto ou no
     # Custo total: o recálculo pela Margem mínima, margem ou comissão grava
-    # mesmo abaixo da soma (M-86; a tela mostra o aviso).
+    # mesmo abaixo da soma (M-86; a tela mostra o aviso). Conta que já está
+    # acima: baixar Afiliado ou Desconto passa, mesmo sem caber ainda (revisão
+    # da M-86, `nao_piora`); aumentar a soma ou baixar o teto, não.
     if pedidos & _CAMPOS_DO_CUSTO_TOTAL:
         _recusar_custo_total_estourado(row, await estado_ads(session, row.id), data)
         if irma is not None:

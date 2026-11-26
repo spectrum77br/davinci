@@ -46,6 +46,14 @@ Mudar a Margem mínima, uma margem ou a comissão NÃO é recusado se o Custo to
 calculado ficar abaixo de Afiliado + Desconto + Ads já gravados (a tela mostra
 o aviso até alguém corrigir); a trava só segura quem mexe em Afiliado,
 Desconto ou Ads.
+
+Revisão da M-86: com a conta já acima do teto, a trava aceita a gravação que
+NÃO aumenta a soma e não baixa o Custo total (`nao_piora`), mesmo que a soma
+ainda não caiba. A tela grava um campo por vez: sem isso, quando a sobra é
+maior que cada campo sozinho (ex.: Custo total calculado 0 com Afiliado e
+Desconto preenchidos), toda correção era recusada e ninguém saía do aviso. A
+gravação que aumenta a soma acima do teto, ou que baixa o teto abaixo dela,
+continua recusada como antes.
 """
 
 from __future__ import annotations
@@ -184,6 +192,35 @@ def pct_br(valor: Decimal) -> str:
     return texto.replace(".", ",") or "0"
 
 
+def soma_do_custo_total(
+    afiliado: Decimal | None, desconto: Decimal | None, ads: Decimal
+) -> Decimal:
+    """Afiliado + Desconto + Ads (vazio conta como zero)."""
+    return (
+        (afiliado if afiliado is not None else ZERO)
+        + (desconto if desconto is not None else ZERO)
+        + ads
+    )
+
+
+def nao_piora(
+    soma_gravada: Decimal,
+    teto_gravado: Decimal | None,
+    soma_nova: Decimal,
+    teto_novo: Decimal | None,
+) -> bool:
+    """Revisão da M-86 (ver o topo): True se a gravação não deixa a conta pior
+    do que já está — a soma nova não passa da gravada e o Custo total não baixa
+    (vazio = sem teto, o mais alto). Só é usado com a soma nova acima do teto
+    novo: aí True quer dizer que a conta JÁ estava acima e a mudança corrige
+    (ou não mexe), então grava."""
+    if soma_nova > soma_gravada:
+        return False
+    if teto_novo is None:
+        return True
+    return teto_gravado is not None and teto_novo >= teto_gravado
+
+
 def estouro(
     afiliado: Decimal | None,
     desconto: Decimal | None,
@@ -196,7 +233,7 @@ def estouro(
         return None
     afiliado = afiliado if afiliado is not None else ZERO
     desconto = desconto if desconto is not None else ZERO
-    soma = afiliado + desconto + ads
+    soma = soma_do_custo_total(afiliado, desconto, ads)
     if soma <= custo_total:
         return None
     return (
