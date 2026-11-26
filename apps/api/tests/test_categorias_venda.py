@@ -497,3 +497,21 @@ async def test_so_administrador_mexe(client, make_user, auth_as, centros):
         r = await pedido
         assert r.status_code == 403, r.text
         assert r.json()["detail"]["code"] == "admin_only"
+
+
+async def test_duas_ao_mesmo_tempo_no_mesmo_centro_nao_repetem_posicao(
+    client, db, make_user, auth_as, centros
+):
+    """Revisão M-75/M-76: duas criações simultâneas no mesmo centro esperam uma pela outra
+    (trava na raiz) — nunca duas categorias na mesma posição de margem/frete."""
+    import asyncio
+
+    await _admin(make_user, auth_as)
+    r1, r2 = await asyncio.gather(
+        _nova(client, centros, "Eletro", "Corrida A"),
+        _nova(client, centros, "Eletro", "Corrida B"),
+    )
+    assert sorted([r1.status_code, r2.status_code]) == [201, 201], (r1.text, r2.text)
+    posicoes = [p for _n, p, _a in await _filhos(db, centros["Eletro"])]
+    assert len(posicoes) == len(set(posicoes)) == 5
+    assert posicoes == [0, 1, 2, 3, 4]

@@ -111,6 +111,13 @@ async def raiz_de(session: AsyncSession, seg: Segment) -> Segment | None:
     return pai
 
 
+async def travar_centro(session: AsyncSession, raiz_id: UUID) -> None:
+    """Trava a raiz do centro até o fim da transação: duas pessoas criando, excluindo ou
+    (des)ativando categorias do MESMO centro ao mesmo tempo esperam uma pela outra, e a posição
+    (que escolhe a margem/frete) nunca fica repetida nem com buraco."""
+    await session.execute(select(Segment.id).where(Segment.id == raiz_id).with_for_update())
+
+
 async def filhas(session: AsyncSession, raiz_id: UUID) -> list[Segment]:
     """As categorias de venda do centro de custo, na ordem das colunas (inativas também)."""
     return list(
@@ -199,6 +206,7 @@ async def conferir_nova(session: AsyncSession, raiz: Segment, nome: str) -> int:
             "categoria_venda_nome_reservado",
             f"“{fixo}” é um nome que outras partes do sistema procuram; escolha outro nome.",
         )
+    await travar_centro(session, raiz.id)
     await sem_repetir_no_centro(session, raiz, nome)
     atuais = await filhas(session, raiz.id)
     if len(atuais) >= LIMITE:
@@ -288,6 +296,7 @@ async def conferir_ativacao(
 ) -> None:
     """Desativar só a última ativa; reativar só com as de antes ativas (as ativas ficam sempre
     nas primeiras posições e os cabeçalhos da aba Contas não escorregam)."""
+    await travar_centro(session, raiz.id)
     irmas = [s for s in await filhas(session, raiz.id) if s.id != seg.id]
     if not ativa:
         depois = [s for s in irmas if s.sort_order > seg.sort_order and s.active]
@@ -364,6 +373,7 @@ async def bloqueio_exclusao(
     session: AsyncSession, seg: Segment, raiz: Segment
 ) -> tuple[Uso, Bloqueio | None]:
     """(uso, o porquê de não poder excluir — None = pode)."""
+    await travar_centro(session, raiz.id)
     uso = await contar_uso(session, seg.id)
     if uso.produtos or uso.contas:
         partes = []
