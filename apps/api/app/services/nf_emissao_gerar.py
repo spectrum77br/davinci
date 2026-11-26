@@ -304,10 +304,12 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     próprio produto (M-74, Produtos 2) e, sem ela, o texto do segmento (0488).
     Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
     pela mesma ordem — a peça importada leva a DUIMP dela e só a peça sem DUIMP
-    leva a DUIMP padrão do kit (M-74; sem ela, a da peça) ou o texto do
-    segmento; as partes juntam na ordem das peças (revisão de
-    16/11: antes o kit olhava só o código-base da 1ª peça e o resultado mudava
-    com a ordem das peças)."""
+    leva a DUIMP padrão do KIT (M-74) ou, sem ela, o texto do segmento da peça
+    (a categoria de venda); a DUIMP padrão da peça nunca vale no kit, como a
+    Margem mín e a Condição especial (pedido M-74: "para kit, usar o valor
+    cadastrado no próprio kit e, em branco, o da categoria de venda dele").
+    As partes juntam na ordem das peças (revisão de 16/11: antes o kit olhava
+    só o código-base da 1ª peça e o resultado mudava com a ordem das peças)."""
     skus = {s for s in skus if s}
     if not skus:
         return {}
@@ -325,19 +327,15 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     importacao = await _duimp_da_importacao(session, simples)
     sem_importacao = {s for s in simples if s not in importacao}
     # 3º passo (M-74, 26/11/2026): a DUIMP padrão do PRÓPRIO produto (Produtos 2, pela numeração
-    # sem a tag). No kit, a do kit vale para as peças sem DUIMP na Importação; sem a do kit, a da
-    # peça. Ninguém preencheu (o dia em que foi ao ar) → {} e nada muda.
+    # sem a tag). No kit, só a do kit, para as peças sem DUIMP na Importação; sem ela, o segmento
+    # da peça (a da peça não vale no kit). Ninguém preencheu (o dia em que foi ao ar) → {} e
+    # nada muda.
     produto = await duimp_padrao_dos_produtos(session, sem_importacao | set(pecas_de))
     # 4º passo (16/11/2026): quem continua sem DUIMP leva o texto do segmento.
     segmento = await _texto_segmento_por_sku(session, sem_importacao)
 
     def _de(s: str, kit: str | None = None) -> str | None:
-        return (
-            importacao.get(s)
-            or (produto.get(kit) if kit else None)
-            or produto.get(s)
-            or segmento.get(s)
-        )
+        return importacao.get(s) or produto.get(kit or s) or segmento.get(s)
 
     for s in skus - set(mapa) - kits:
         if t := _de(s):

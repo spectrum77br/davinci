@@ -974,7 +974,15 @@ async def test_duimp_da_nota_importacao_produto_segmento(db: AsyncSession, make_
         ]
     )
     await db.commit()
-    skus = {"dg019.ra", "dg020.ra", "dg019.ra+a020.ra", "dg020.ra+a001.ra", "a020.ra"}
+    skus = {
+        "dg019.ra",
+        "dg020.ra",
+        "dg019.ra+a020.ra",
+        "dg020.ra+a001.ra",
+        "dg019.ra+a001.ra",
+        "a020.ra",
+        "a001.ra",
+    }
     # Ninguém preencheu: igual a antes (texto do segmento).
     antes = await nf._duimp_por_sku(db, skus)
     assert antes == {
@@ -982,7 +990,9 @@ async def test_duimp_da_nota_importacao_produto_segmento(db: AsyncSession, make_
         "dg020.ra": _DUIMP_REGULAR,
         "dg019.ra+a020.ra": f"{_DUIMP_REGULAR} | {_DUIMP_ACESS}",
         "dg020.ra+a001.ra": f"{_DUIMP_REGULAR} | {_DUIMP_ACESS}",
+        "dg019.ra+a001.ra": f"{_DUIMP_REGULAR} | {_DUIMP_ACESS}",
         "a020.ra": _DUIMP_ACESS,
+        "a001.ra": _DUIMP_ACESS,
     }
     db.add_all(
         [
@@ -1004,10 +1014,14 @@ async def test_duimp_da_nota_importacao_produto_segmento(db: AsyncSession, make_
         "dg020.ra": _DUIMP_REGULAR,
         # kit: a peça com DUIMP na Importação leva a dela; a outra leva a do kit
         "dg019.ra+a020.ra": f"kit pela duimp K | {_DUIMP_IMPORT}",
-        # kit sem valor próprio: cada peça com a sua (produto da peça → segmento)
-        "dg020.ra+a001.ra": f"{_DUIMP_REGULAR} | fone pela duimp F",
+        # kit sem valor próprio: a categoria de venda (o segmento) de cada peça; a DUIMP padrão
+        # da peça (a001) não vale no kit, como a Margem mín e a Condição especial
+        "dg020.ra+a001.ra": f"{_DUIMP_REGULAR} | {_DUIMP_ACESS}",
+        "dg019.ra+a001.ra": f"{_DUIMP_REGULAR} | {_DUIMP_ACESS}",
         # a Importação continua vencendo
         "a020.ra": _DUIMP_IMPORT,
+        # vendida sozinha, a peça leva a dela
+        "a001.ra": "fone pela duimp F",
     }
 
 
