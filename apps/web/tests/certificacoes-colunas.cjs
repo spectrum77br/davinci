@@ -36,21 +36,22 @@ async function run() {
     const { state: s } = page()
     s.rows.value = [row()]
     const html = semComentarios(await render(s))
+    // M-69: o SKU entrou entre Produto e Modelo.
     assert.deepEqual(cabecalhos(html).map(([t]) => t), [
-      'Produto', 'Modelo', 'Nome comercial', 'Certificado', 'Número', 'Valor', 'Validade',
+      'Produto', 'SKU', 'Modelo', 'Nome comercial', 'Certificado', 'Número', 'Valor', 'Validade',
       'Garantia (meses)', 'Situação oficial', 'PDF do certificado', '',
     ])
-    assert.equal(cabecalhos(html)[3][1], 'text-center', 'título do Certificado centralizado')
-    assert.equal(s.totalColunas.value, 11, '10 colunas + lixeira')
+    assert.equal(cabecalhos(html)[4][1], 'text-center', 'título do Certificado centralizado')
+    assert.equal(s.totalColunas.value, 12, '11 colunas + lixeira')
     assert.doesNotMatch(html, /<th[^>]*>\s*(Início|Fim)\s*<\/th>/)
     assert.doesNotMatch(html, /type="date"[^>]*value="2026-07-30"/, 'a data de Início não aparece na tabela')
     assert.match(html, /type="date"[^>]*value="2028-07-30"/, 'a Validade continua editável')
     assert.doesNotMatch(html, /<select/, 'Certificado sem a setinha (não é mais caixa de seleção)')
     // O dado do Início continua na linha (só saiu da tela).
     assert.equal(s.rows.value[0].inicio, '2026-07-30')
-    // Lista vazia: o colspan acompanha (10 + lixeira).
+    // Lista vazia: o colspan acompanha (11 + lixeira).
     s.rows.value = []
-    assert.match(await render(s), /<td colspan="11"[^>]*>\s*Nenhuma certificação/)
+    assert.match(await render(s), /<td colspan="12"[^>]*>\s*Nenhuma certificação/)
   }
 
   // ---------- Certificado: só o nome, centralizado; vazio = "—" cinza

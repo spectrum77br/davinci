@@ -18,6 +18,11 @@
 // Inmetro / Anatel / Anvisa / Isento (Anvisa é nova e só manual); a Situação
 // oficial mostra só órgão + situação e abre a janela dos dados da fonte (o
 // "Ver" saiu); os avisos por linha viraram selos laranja curtos.
+// M-69 (26/11/2026): coluna SKU entre Produto e Modelo. É a ligação do
+// certificado com os produtos (Tabela de Preços e Produtos 2): vários SKUs por
+// certificação, sem a tag ("dg019" vale para dg019.ra, dg019.sp…). Salva ao
+// sair do campo; SKU que já está em outra certificação não grava e avisa onde
+// está; SKU que não existe em produto nenhum grava e avisa.
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ChevronDown, Download, ExternalLink, Loader2, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
@@ -114,6 +119,8 @@ type Row = {
   // Garantia (meses) do certificado (06/11/2026): vale para todos os produtos
   // dele na Tabela de Preços. null = não define; 0 = sem garantia.
   garantia_meses: number | null
+  // Coluna SKU (M-69): os SKUs sem a tag, em ordem ("dg017", "dg018").
+  skus?: string[]
 }
 
 const rows = ref<Row[]>([])
@@ -134,8 +141,10 @@ const inmetroSyncError = ref<string | null>(null)
 const selectedRow = ref<Row | null>(null)
 const detailsDialog = ref<HTMLDialogElement | null>(null)
 const rowBusy = reactive<Record<string, boolean>>({})
+// Coluna SKU (M-69) gravando nesta linha: o Atualizar e o Excel esperam.
+const skusSalvando = reactive<Record<string, boolean>>({})
 const busy = computed(() => loading.value || exporting.value || adding.value || synchronizing.value || synchronizingInmetro.value)
-const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean))
+const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean) || Object.values(skusSalvando).some(Boolean))
 const canAttach = computed(() => auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.edit))
 const autosave = createCertificacoesAutosave(
   (id, patch) => api(`/api/financeiro/suprimentos/${id}`, { method: 'PATCH', body: patch }),
@@ -145,9 +154,9 @@ onBeforeUnmount(() => { void autosave.flush().catch(() => {}) })
 
 // Layout ▾ (M-67): caixas para mostrar ou esconder colunas da tabela, como o
 // Layout da Tabela de Preços (marcada = aparece; tudo marcado no começo;
-// lembrado neste navegador). Produto, Nome comercial, Certificado, Validade,
-// Garantia e PDF do certificado ficam sempre à mostra. O menu mostra só a
-// caixa e o nome. O Excel leva só as colunas à mostra.
+// lembrado neste navegador). Produto, SKU (M-69), Nome comercial,
+// Certificado, Validade, Garantia e PDF do certificado ficam sempre à mostra.
+// O menu mostra só a caixa e o nome. O Excel leva só as colunas à mostra.
 const COLUNAS_LAYOUT = [
   { chave: 'modelo', rotulo: 'Modelo' },
   { chave: 'numero', rotulo: 'Número' },
@@ -174,9 +183,10 @@ function lerColunasOcultas(texto: string | null): string[] {
   return [...new Set((texto || '').split(',').map((s) => s.trim()).filter((s) => validas.has(s)))]
 }
 
-// Colunas da tabela (o colspan da linha "Nenhuma certificação"): as 10 menos
-// as escondidas, mais a lixeira de quem pode excluir (M-68: saiu o Início).
-const totalColunas = computed(() => 10 - colunasOcultas.value.length + (canDelete.value ? 1 : 0))
+// Colunas da tabela (o colspan da linha "Nenhuma certificação"): as 11 menos
+// as escondidas, mais a lixeira de quem pode excluir (M-68: saiu o Início;
+// M-69: entrou o SKU).
+const totalColunas = computed(() => 11 - colunasOcultas.value.length + (canDelete.value ? 1 : 0))
 
 // Lidas só depois de montar (no servidor não há localStorage).
 function lerPreferencia(chave: string): string | null {
@@ -317,6 +327,45 @@ function salvarGarantia(row: Row, raw: string) {
   if (errorText.value?.startsWith('Garantia:')) errorText.value = null
   if ((row.garantia_meses ?? null) === n) return
   scheduleSave(row, 'garantia_meses', n)
+}
+
+// ── Coluna SKU (M-69) ──────────────────────────────────────────────────
+// Mostrada como "dg017, dg018, dg019". Salva ao sair do campo (ou Enter),
+// direto, sem esperar o salvamento automático das outras células: a resposta
+// diz o que ficou gravado (sem a tag, sem repetidos, em ordem). SKU que já
+// está em outra certificação: o servidor não grava nada (409) e a célula
+// volta ao que era. SKU que não existe em produto nenhum: grava e avisa.
+const avisoSkus = ref<string | null>(null)
+function textoSkus(row: Row): string {
+  return (row.skus || []).join(', ')
+}
+async function salvarSkus(row: Row, el: HTMLInputElement) {
+  const anterior = textoSkus(row)
+  if (!canEdit.value || busy.value || rowBusy[row.id] || skusSalvando[row.id]) {
+    el.value = anterior
+    return
+  }
+  const texto = el.value
+  if (texto.trim() === anterior) return
+  skusSalvando[row.id] = true
+  try {
+    // As outras edições desta linha vão antes (a ordem fica a da tela).
+    await autosave.flushRow(row.id)
+    const salvo = await api<Row>(`/api/financeiro/suprimentos/${row.id}`, { method: 'PATCH', body: { skus: texto } })
+    row.skus = salvo.skus || []
+    el.value = textoSkus(row)
+    const avisos = (salvo as Row & { avisos?: string[] }).avisos || []
+    avisoSkus.value = avisos.length ? `SKU: ${avisos.join('; ')}. Foi gravado assim mesmo.` : null
+    if (errorText.value?.startsWith('SKU:')) errorText.value = null
+  } catch (e: any) {
+    el.value = anterior
+    const detalhe = e?.data?.detail
+    errorText.value = detalhe?.code === 'sku_em_outro_certificado'
+      ? `SKU: ${detalhe.message}. Nada foi gravado.`
+      : 'SKU: não foi possível salvar. Tente novamente.'
+  } finally {
+    delete skusSalvando[row.id]
+  }
 }
 
 // Devolve false quando não deu para salvar as edições pendentes (o Atualizar ▾
@@ -591,7 +640,8 @@ async function downloadPdf(path: string, filename: string) {
 // Validade vai como data; Valor e Garantia (meses) como número; vazio fica em
 // branco. "PDF do certificado" leva o nome do arquivo anexado. M-68: o Início
 // saiu (não está mais na tela), Fim virou Validade e o Certificado sai com o
-// nome da tela ("Anatel").
+// nome da tela ("Anatel"). M-69: o SKU vai logo depois do Produto ("dg017,
+// dg018"), como na tela.
 function linhasExcel(): CelulaPlanilha[][] {
   const numero = (v: unknown): number | '' => {
     if (v == null || v === '') return ''
@@ -599,7 +649,7 @@ function linhasExcel(): CelulaPlanilha[][] {
     return Number.isFinite(n) ? n : ''
   }
   const data = (v: string | null): CelulaPlanilha => (v ? { data: v } : '')
-  const cab: CelulaPlanilha[] = ['Produto']
+  const cab: CelulaPlanilha[] = ['Produto', 'SKU']
   if (mostraColuna('modelo')) cab.push('Modelo')
   cab.push('Nome comercial', 'Certificado')
   if (mostraColuna('numero')) cab.push('Número')
@@ -609,7 +659,7 @@ function linhasExcel(): CelulaPlanilha[][] {
   cab.push('PDF do certificado')
   const linhas: CelulaPlanilha[][] = [cab]
   for (const row of rows.value) {
-    const l: CelulaPlanilha[] = [row.produto ?? '']
+    const l: CelulaPlanilha[] = [row.produto ?? '', textoSkus(row)]
     if (mostraColuna('modelo')) l.push(row.modelo ?? '')
     l.push(row.nome_comercial ?? '', rotuloCertificado(row.certificado))
     if (mostraColuna('numero')) l.push(row.numero ?? '')
@@ -837,6 +887,7 @@ function rowStatusClass(row: Row): string {
     </p>
     <p v-if="syncMessage" role="status" class="text-xs text-muted-foreground">{{ syncMessage }}</p>
     <p v-if="inmetroSyncMessage" role="status" class="text-xs text-muted-foreground">{{ inmetroSyncMessage }}</p>
+    <p v-if="avisoSkus" role="status" class="text-xs text-amber-700 dark:text-amber-400" data-aviso-skus>{{ avisoSkus }}</p>
     <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
 
@@ -850,6 +901,7 @@ function rowStatusClass(row: Row): string {
           <span class="rounded-md bg-muted px-2 py-1 text-xs">{{ rotuloCertificado(row.certificado) || 'Não informado' }}</span>
         </div>
         <dl class="mt-3 space-y-2 text-xs">
+          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">SKU</dt><dd class="break-words text-right" data-cartao-skus>{{ textoSkus(row) || '—' }}</dd></div>
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Validade</dt><dd class="text-right font-medium">{{ formatDate(row.fim) }}</dd></div>
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Garantia</dt><dd class="text-right">{{ row.garantia_meses == null ? 'Não definida' : row.garantia_meses === 0 ? 'Sem garantia' : `${row.garantia_meses} ${row.garantia_meses === 1 ? 'mês' : 'meses'}` }}</dd></div>
           <div v-if="officialSituation(row)" class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
@@ -878,6 +930,8 @@ function rowStatusClass(row: Row): string {
         <thead>
           <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
             <th class="text-left">Produto</th>
+            <th class="text-left" data-col-skus
+              title="SKUs dos produtos deste certificado, sem a tag (dg019 vale para dg019.ra, dg019.sp…), separados por vírgula. Um SKU fica num certificado só.">SKU</th>
             <th v-if="mostraColuna('modelo')" class="text-left">Modelo</th>
             <th class="text-left">Nome comercial</th>
             <th class="text-center">Certificado</th>
@@ -903,6 +957,14 @@ function rowStatusClass(row: Row): string {
             <td>
               <input class="cell-input" :value="row.produto ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @input="(e) => scheduleSave(row, 'produto', (e.target as HTMLInputElement).value)" />
+            </td>
+            <td class="skus-cell">
+              <!-- SKU (M-69): salva ao sair do campo (ou Enter). -->
+              <input class="cell-input" :value="textoSkus(row)" :disabled="!canEdit || busy || rowBusy[row.id] || skusSalvando[row.id]"
+                placeholder="—" data-cert-skus
+                :title="textoSkus(row) || 'SKUs sem a tag (ex.: dg017, dg018), separados por vírgula'"
+                :aria-label="`SKUs de ${row.produto || 'certificação'}`"
+                @change="(e) => salvarSkus(row, e.target as HTMLInputElement)" />
             </td>
             <td v-if="mostraColuna('modelo')">
               <input class="cell-input" :value="row.modelo ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
@@ -1110,6 +1172,11 @@ function rowStatusClass(row: Row): string {
 }
 .cell-input:read-only {
   background: transparent;
+}
+/* SKU (M-69): a lista pode ser longa; o title mostra tudo. */
+.grid-table .skus-cell {
+  min-width: 130px;
+  max-width: 220px;
 }
 .grid-table .official-status-cell {
   min-width: 170px;

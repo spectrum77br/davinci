@@ -48,7 +48,8 @@ function caixas(html) {
 }
 
 // M-68: o Início saiu da tela (e do Excel) e o Fim virou Validade.
-const CAB_TUDO = ['Produto', 'Modelo', 'Nome comercial', 'Certificado', 'Número', 'Valor', 'Validade',
+// M-69: o SKU vai logo depois do Produto (sempre à mostra).
+const CAB_TUDO = ['Produto', 'SKU', 'Modelo', 'Nome comercial', 'Certificado', 'Número', 'Valor', 'Validade',
   'Garantia (meses)', 'Situação oficial', 'PDF do certificado']
 
 async function run() {
@@ -75,7 +76,7 @@ async function run() {
     mounted[0]()
     s.rows.value = [row()]
     assert.deepEqual(s.colunasOcultas.value, [])
-    assert.equal(s.totalColunas.value, 11, '10 colunas + lixeira')
+    assert.equal(s.totalColunas.value, 12, '11 colunas + lixeira')
     const html = await render(s)
     assert.deepEqual(caixas(html), [['modelo', true], ['numero', true], ['valor', true], ['situacao', true]])
     const ini = html.indexOf('data-menu-layout-certificacoes')
@@ -110,7 +111,7 @@ async function run() {
     assert.ok(!html.includes('<th class="text-right">Valor</th>'), 'coluna Valor some')
     assert.doesNotMatch(html, /<input type="number"/, 'célula do Valor some')
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 6, 'os 7 campos editáveis menos o Valor')
+    assert.equal(controls.length, 7, 'os 8 campos editáveis menos o Valor')
     assert.deepEqual(caixas(html), [['modelo', true], ['numero', true], ['valor', false], ['situacao', true]])
     // Marcar de novo volta.
     s.alternarColuna('valor')
@@ -125,10 +126,10 @@ async function run() {
     const { state: s, mounted } = page({ isAdmin: false, user: { permissions: { financeiro_suprimentos: { view: true } } } }, { localStorage: ls })
     mounted[0]()
     assert.deepEqual(s.colunasOcultas.value, ['situacao', 'modelo'])
-    assert.equal(s.totalColunas.value, 8, '10 - 2, sem lixeira')
+    assert.equal(s.totalColunas.value, 9, '11 - 2, sem lixeira')
     s.rows.value = []
     const html = await render(s)
-    assert.match(html, /<td colspan="8"[^>]*>\s*Nenhuma certificação/)
+    assert.match(html, /<td colspan="9"[^>]*>\s*Nenhuma certificação/)
     assert.ok(!html.includes('<th class="text-left">Modelo</th>'))
     assert.ok(!html.includes('<th class="text-left">Situação oficial</th>'))
     assert.ok(html.includes('<th class="text-left">Número</th>'))
@@ -148,7 +149,7 @@ async function run() {
   // ---------- Excel: todas as colunas; Validade como data; Valor como número
   {
     const { state: s, planilhas, baixados } = page()
-    s.rows.value = [row(), row({ id: 'two', produto: 'Fone', valor: '1234.5', inicio: null, fim: '2027-01-15', tem_pdf: false, pdf_nome: null, garantia_meses: 12 })]
+    s.rows.value = [row(), row({ id: 'two', produto: 'Fone', valor: '1234.5', inicio: null, fim: '2027-01-15', tem_pdf: false, pdf_nome: null, garantia_meses: 12, skus: ['dg017', 'dg018'] })]
     await s.exportTable()
     assert.equal(s.errorText.value, null)
     assert.equal(planilhas.length, 1)
@@ -156,18 +157,18 @@ async function run() {
     // M-68: Certificado com o nome da tela; Situação de linha manual em branco.
     assert.deepEqual(planilhas[0].linhas, [
       CAB_TUDO,
-      ['Telefone', 'USM003', 'Modelo comercial', 'Anatel', '07197-26-18234', 53000, { data: '2028-07-30' },
+      ['Telefone', '', 'USM003', 'Modelo comercial', 'Anatel', '07197-26-18234', 53000, { data: '2028-07-30' },
         '', '', 'certificado.pdf'],
-      ['Fone', 'USM003', 'Modelo comercial', 'Anatel', '07197-26-18234', 1234.5, { data: '2027-01-15' },
+      ['Fone', 'dg017, dg018', 'USM003', 'Modelo comercial', 'Anatel', '07197-26-18234', 1234.5, { data: '2027-01-15' },
         12, '', ''],
     ])
     assert.equal(baixados.length, 1)
     assert.match(baixados[0], /^certificacoes-\d{4}-\d{2}-\d{2}\.xlsx$/)
     const sheet = abrirZip(planilhas[0].bytes)['xl/worksheets/sheet1.xml']
-    assert.ok(sheet.includes('<c r="F2"><v>53000</v></c>'), 'Valor como número')
-    assert.ok(sheet.includes(`<c r="G2" s="2"><v>${X.serialDaData('2028-07-30')}</v></c>`), 'Validade como data')
+    assert.ok(sheet.includes('<c r="G2"><v>53000</v></c>'), 'Valor como número')
+    assert.ok(sheet.includes(`<c r="H2" s="2"><v>${X.serialDaData('2028-07-30')}</v></c>`), 'Validade como data')
     assert.ok(!sheet.includes(`<v>${X.serialDaData('2026-07-30')}</v>`), 'sem o Início')
-    assert.ok(sheet.includes('<c r="H3"><v>12</v></c>'), 'Garantia como número')
+    assert.ok(sheet.includes('<c r="I3"><v>12</v></c>'), 'Garantia como número')
   }
 
   // ---------- Excel: sem a coluna Valor quando ela está desmarcada (exemplo do pedido)
@@ -181,13 +182,13 @@ async function run() {
     assert.deepEqual(cab, CAB_TUDO.filter((c) => c !== 'Valor'))
     assert.ok(!linha.includes(53000))
     const sheet = abrirZip(planilhas[0].bytes)['xl/worksheets/sheet1.xml']
-    assert.ok(sheet.includes(`<c r="F2" s="2"><v>${X.serialDaData('2028-07-30')}</v></c>`), 'Validade sobe para a coluna F')
+    assert.ok(sheet.includes(`<c r="G2" s="2"><v>${X.serialDaData('2028-07-30')}</v></c>`), 'Validade sobe para a coluna G')
     // Escondendo as quatro: só as colunas fixas.
     s.alternarColuna('modelo')
     s.alternarColuna('numero')
     s.alternarColuna('situacao')
     await s.exportTable()
-    assert.deepEqual(planilhas[1].linhas[0], ['Produto', 'Nome comercial', 'Certificado', 'Validade', 'Garantia (meses)', 'PDF do certificado'])
+    assert.deepEqual(planilhas[1].linhas[0], ['Produto', 'SKU', 'Nome comercial', 'Certificado', 'Validade', 'Garantia (meses)', 'PDF do certificado'])
   }
 
   // ---------- Excel: salva as edições pendentes antes e sai com elas

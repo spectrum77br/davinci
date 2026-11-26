@@ -36,7 +36,8 @@ const exportsForTest = `return {
   isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj,
   GARANTIA_MESES_MAX, lerGarantiaMeses, salvarGarantia,
   COLUNAS_LAYOUT, CHAVE_COLUNAS_OCULTAS, colunasOcultas, mostraColuna, alternarColuna, lerColunasOcultas,
-  totalColunas, linhasExcel
+  totalColunas, linhasExcel,
+  skusSalvando, avisoSkus, textoSkus, salvarSkus
 }`
 
 // `opcoes.localStorage`: o armazenamento falso do navegador (Layout, M-67).
@@ -88,7 +89,7 @@ const row = (values = {}) => ({
   inicio: '2026-07-30', fim: '2028-07-30', tem_pdf: true, pdf_nome: 'certificado.pdf', campos_manuais: null,
   anatel_numero: null, anatel_dados: null, anatel_consultado_em: null, anatel_encontrado: null,
   inmetro_chave: null, inmetro_dados: null, inmetro_consultado_em: null, inmetro_encontrado: null,
-  garantia_meses: null,
+  garantia_meses: null, skus: [],
   ...values,
 })
 const source = (values = {}) => ({
@@ -257,7 +258,7 @@ async function run() {
     s.selectedRow.value = saved
     const html = await render(s)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 7, 'Produto, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
+    assert.equal(controls.length, 8, 'Produto, SKU, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
     for (const control of controls) assert.doesNotMatch(control, /readonly|disabled/)
     const certificado = html.match(/<button[^>]*class="cert-cell"[^>]*data-cert-certificado[^>]*>/)
     assert.ok(certificado, 'Certificado é um botão para quem edita')
@@ -287,7 +288,7 @@ async function run() {
     assert.doesNotMatch(html, /Baixar tabela em PDF/)
     assert.match(html, /Baixar PDF de Telefone/)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 7, 'Produto, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
+    assert.equal(controls.length, 8, 'Produto, SKU, Modelo, Nome comercial, Número, Valor, Validade e Garantia (meses)')
     for (const control of controls) assert.match(control, /disabled/)
     // Quem só vê: o Certificado é só texto, sem menu.
     assert.match(html, /<span class="cert-cell" data-cert-certificado><span>Anatel<\/span><\/span>/)
