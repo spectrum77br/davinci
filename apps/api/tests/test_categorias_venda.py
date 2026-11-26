@@ -8,8 +8,10 @@ São os segmentos filhos das raízes (mesma tabela `segments`), não um cadastro
   contando as inativas ("Este centro de custo já tem 5 categorias de venda."); o mesmo nome em
   outro centro pode, no mesmo não; "Apple"/"Queima de estoque" não são usados por outra;
 - renomear: "Apple" e "Queima de estoque" não trocam de nome (nas duas telas);
-- excluir: em uso (produto ou conta apontando DIRETO para ela) recusa com as contagens; os
-  vínculos slot1..5 das contas não contam e são limpos; só a última do centro sai;
+- excluir: em uso na tabela dela (produto da Tabela de Preços ou conta apontando DIRETO para
+  ela) pede o destino (M-90) — outra ativa do mesmo centro — e transfere e exclui; sem destino,
+  recusa com as contagens; produtos da tela Produtos não travam (vão junto ou ficam sem
+  segmento); os vínculos slot1..5 das contas não contam e são limpos; só a última do centro sai;
 - incluir na posição N preenche o slot{N} vazio das contas daquele centro (nas duas telas);
 - o menu de centros de custo (sem o Catálogo) e a ordem Celular, Eletro, Mala, Catálogo;
 - posição e centro de custo não mudam pela aba Segmentos; nome repetido no centro também não;
@@ -27,6 +29,7 @@ from app.models import (
     PricingAccount,
     PricingPlatform,
     PricingProduct,
+    Product,
     Segment,
     UserRole,
 )
@@ -310,32 +313,144 @@ async def test_renomear_e_nomes_fixos(client, make_user, auth_as, centros):
 # ================================================================ excluir
 
 
-async def test_em_uso_nao_sai_e_diz_quantos(client, db, make_user, auth_as, centros):
-    """Conta usa = `pricing_accounts.segment_id` apontando DIRETO para ela; o vínculo slot não."""
+async def _segmento_de(db, modelo, id_):
+    """O segment_id da linha como está no banco agora (a API grava por outra sessão)."""
+    return (await db.execute(select(modelo.segment_id).where(modelo.id == id_))).scalar_one()
+
+
+async def test_em_uso_pede_destino_transfere_e_exclui(client, db, make_user, auth_as, centros):
+    """M-90: em uso na tabela dela (Tabela de Preços / conta apontando DIRETO para ela; o
+    vínculo slot não conta) a exclusão não bloqueia — pede o destino entre as outras ATIVAS do
+    mesmo centro; com o destino, produtos, contas e produtos da tela Produtos passam para ele e
+    a categoria sai."""
     dono = await _admin(make_user, auth_as)
     apple = centros["Celular/Apple"]
-    db.add_all(
-        [
-            PricingProduct(user_id=dono.id, sku="i001", name="iPhone", segment_id=apple.id),
-            PricingProduct(user_id=dono.id, sku="i002", name="iPad", segment_id=apple.id),
-        ]
-    )
+    acessorios = centros["Celular/Acessórios"]
+    i1 = PricingProduct(user_id=dono.id, sku="i001", name="iPhone", segment_id=apple.id)
+    i2 = PricingProduct(user_id=dono.id, sku="i002", name="iPad", segment_id=apple.id)
+    velho = Product(user_id=dono.id, sku="i001.us", name="iPhone usado", segment_id=apple.id)
+    db.add_all([i1, i2, velho])
     await db.commit()
-    await _conta(db, dono, apple, "direta")
-    await _conta(db, dono, centros["Celular"], "só o vínculo", slot5_segment_id=apple.id)
+    direta = await _conta(db, dono, apple, "direta")
+    vinculo = await _conta(
+        db, dono, centros["Celular"], "só o vínculo", slot5_segment_id=apple.id
+    )
 
     r = await client.get(f"{ROTA}/{apple.id}/uso")
     assert r.status_code == 200, r.text
     uso = r.json()
-    assert (uso["regra"], uso["produtos"], uso["bloqueia"]) == ("categoria_venda", 2, True)
-    assert "2 produtos da Tabela de Preços e 1 conta." in uso["mensagem"]
-    assert "Passe esses produtos e essa conta para outra categoria de venda" in uso["mensagem"]
+    assert (uso["regra"], uso["produtos"], uso["contas"], uso["bloqueia"]) == (
+        "categoria_venda",
+        2,
+        1,
+        False,
+    )
+    assert uso["precisa_destino"] is True
+    assert uso["produtos_tela_produtos"] == 1
+    assert uso["centro_custo"] == "Celular"
+    assert uso["mensagem"] == (
+        "“Apple” (Celular) está em uso: 2 produtos da Tabela de Preços e 1 conta. Escolha para "
+        "qual categoria de venda eles vão antes de excluir."
+    )
+    # As outras ATIVAS do Celular, na ordem das colunas (nem ela, nem outro centro).
+    nomes = [d["nome"] for d in uso["destinos"]]
+    assert nomes == ["Acessórios", "Diversos", "Regular", "Robusto"]
+    assert uso["destinos"][0]["id"] == str(acessorios.id)
+    # Com destino, os produtos da tela Produtos "vão junto" (a tela diz); fica o nome reservado.
+    assert uso["avisos"] == [
+        "“Apple” é um nome reservado: depois de excluída, não dá para criar de novo pela tela."
+    ]
+
+    # Sem destino: recusa (nas duas telas — a aba Segmentos não pergunta o destino).
     for rota in (f"{ROTA}/{apple.id}", f"/api/segments/{apple.id}"):
         r = await client.delete(rota)
         assert r.status_code == 409, rota
         d = r.json()["detail"]
         assert (d["code"], d["produtos"], d["contas"]) == ("categoria_venda_em_uso", 2, 1)
+    # Destino que não vale: ela mesma, de outro centro, a raiz.
+    for ruim in (apple.id, centros["Mala/Acessórios"].id, centros["Celular"].id):
+        r = await client.delete(f"{ROTA}/{apple.id}", params={"destino_id": str(ruim)})
+        assert r.status_code == 409, ruim
+        assert r.json()["detail"]["code"] == "categoria_venda_destino_invalido"
     assert ("Apple", 4, True) in await _filhos(db, centros["Celular"])
+    assert await _segmento_de(db, PricingProduct, i1.id) == apple.id
+
+    r = await client.delete(f"{ROTA}/{apple.id}", params={"destino_id": str(acessorios.id)})
+    assert r.status_code == 204, r.text
+    assert "Apple" not in [n for n, _p, _a in await _filhos(db, centros["Celular"])]
+    for modelo, id_ in (
+        (PricingProduct, i1.id),
+        (PricingProduct, i2.id),
+        (PricingAccount, direta.id),
+        (Product, velho.id),
+    ):
+        assert await _segmento_de(db, modelo, id_) == acessorios.id, modelo
+    # O vínculo slot5 é limpo; a conta continua no centro.
+    assert await _slots(db, vinculo) == [None, None, None, None, None]
+    assert await _segmento_de(db, PricingAccount, vinculo.id) == centros["Celular"].id
+
+
+async def test_destino_inativo_nao_vale(client, db, make_user, auth_as, centros):
+    """M-90: a "Queima de estoque" (inativa) não recebe; sem nenhuma outra ativa no centro, a
+    exclusão em uso fica bloqueada."""
+    dono = await _admin(make_user, auth_as)
+    db.add(
+        PricingProduct(user_id=dono.id, sku="b001", name="Mala", segment_id=centros["Eletro/3"].id)
+    )
+    await db.commit()
+    r = await client.delete(
+        f"{ROTA}/{centros['Eletro/3'].id}",
+        params={"destino_id": str(centros["Mala/Queima de estoque"].id)},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "categoria_venda_destino_invalido"
+
+    # Eletro só com a "3" ativa: em uso e sem para onde mandar → bloqueia.
+    for chave in ("Eletro/1", "Eletro/2"):
+        seg = await db.get(Segment, centros[chave].id)
+        seg.active = False
+    await db.commit()
+    uso = (await client.get(f"{ROTA}/{centros['Eletro/3'].id}/uso")).json()
+    assert (uso["bloqueia"], uso["precisa_destino"], uso["destinos"]) == (True, False, [])
+    assert uso["mensagem"] == (
+        "“3” (Eletro) está em uso: 1 produto da Tabela de Preços, e não há outra categoria de "
+        "venda ativa em Eletro para recebê-los."
+    )
+    r = await client.delete(f"{ROTA}/{centros['Eletro/3'].id}")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "categoria_venda_sem_destino"
+
+
+async def test_produtos_da_tela_produtos_nao_travam(client, db, make_user, auth_as, centros):
+    """M-90, o exemplo do pedido: "Apple" (Contas Celular) sem conta e sem produto da Tabela de
+    Preços, só com produtos da tela Produtos (carga antiga) → confirmação simples avisando que
+    eles ficam sem segmento e do nome reservado → exclui; os produtos ficam com segment_id
+    vazio."""
+    dono = await _admin(make_user, auth_as)
+    apple = centros["Celular/Apple"]
+    velhos = [
+        Product(user_id=dono.id, sku=f"i{n:03d}", name=f"iPhone {n}", segment_id=apple.id)
+        for n in range(3)
+    ]
+    db.add_all(velhos)
+    await db.commit()
+
+    uso = (await client.get(f"{ROTA}/{apple.id}/uso")).json()
+    assert (uso["produtos"], uso["contas"], uso["produtos_tela_produtos"]) == (0, 0, 3)
+    assert (uso["bloqueia"], uso["precisa_destino"], uso["mensagem"]) == (False, False, None)
+    assert uso["destinos"] == []
+    assert uso["avisos"] == [
+        "“Apple” é um nome reservado: depois de excluída, não dá para criar de novo pela tela.",
+        "3 produtos da tela Produtos ficam sem segmento.",
+    ]
+    r = await client.delete(f"{ROTA}/{apple.id}")
+    assert r.status_code == 204, r.text
+    for p in velhos:
+        assert await _segmento_de(db, Product, p.id) is None
+    # E o nome reservado não volta pela tela.
+    r = await _nova(client, centros, "Celular", "Apple")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "categoria_venda_nome_reservado"
 
 
 async def test_vinculo_slot_nao_conta_e_e_limpo_ao_excluir(client, db, make_user, auth_as, centros):
@@ -358,6 +473,12 @@ async def test_vinculo_slot_nao_conta_e_e_limpo_ao_excluir(client, db, make_user
         "produtos": 0,
         "bloqueia": False,
         "mensagem": None,
+        "contas": 0,
+        "produtos_tela_produtos": 0,
+        "precisa_destino": False,
+        "destinos": [],
+        "centro_custo": "Eletro",
+        "avisos": [],
     }
     assert (await client.delete(f"{ROTA}/{e['3']}")).status_code == 204
     assert await _slots(db, a) == [e["1"], e["2"], None, None, None]
@@ -407,12 +528,14 @@ async def test_so_a_ultima_sai_e_nenhuma_muda_de_coluna(client, db, make_user, a
         assert r.json()["detail"]["code"] == "categoria_venda_do_meio"
 
     r = await client.get(f"{ROTA}/{centros['Eletro/3'].id}/uso")
-    assert r.json() == {
-        "regra": "categoria_venda",
-        "produtos": 0,
-        "bloqueia": False,
-        "mensagem": None,
-    }
+    uso = r.json()
+    assert (uso["regra"], uso["produtos"], uso["bloqueia"], uso["mensagem"]) == (
+        "categoria_venda",
+        0,
+        False,
+        None,
+    )
+    assert uso["precisa_destino"] is False
     assert (await client.delete(f"{ROTA}/{centros['Eletro/3'].id}")).status_code == 204
     assert await _filhos(db, centros["Eletro"]) == [("1", 0, True), ("2", 1, True)]
     # A próxima ocupa a posição que ficou livre no fim.

@@ -253,6 +253,9 @@ async def delete_segment(
     # para ela, e só a última do centro de custo (as outras não mudam de
     # coluna). Antes vinha um erro genérico do banco quando havia produto.
     # Os vínculos slot1..5 das contas não contam como uso e são limpos junto.
+    # M-90: produto da tela Produtos (products.segment_id) não conta como uso e
+    # fica sem segmento; transferir para outra categoria só pela lixeira de
+    # Cadastros › Produtos (esta rota não recebe destino: em uso, recusa).
     # M-76: a raiz de um centro de custo não sai por aqui (Celular, Eletro e Mala nunca saem;
     # a de um centro novo, só depois que o centro sair de Cadastros › Centro de custo). Sem
     # isto o banco recusaria (RESTRICT) com um erro genérico.

@@ -22,6 +22,10 @@
 //    só para ver ("—" em Ações, fora dos menus, sem renomear); o Novo cadastro escolhe primeiro a
 //    Tabela (Produtos 2 → Categoria/Tag de envio; Contas … → Categoria de venda, com o centro da
 //    tabela; centro sem raiz fora do menu); no lápis a Tabela só aparece.
+//  - M-90: lixeira da Categoria de venda em uso não bloqueia — quadro vermelho, "Transferir
+//    para" (escolha única entre os destinos do servidor), textos da transferência, botão
+//    "Transferir e excluir" apagado até escolher e DELETE com ?destino_id=; sem uso, os avisos
+//    do servidor (nome reservado, produtos da tela Produtos sem segmento) e DELETE simples.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -116,6 +120,7 @@ const factory = new AsyncFunction(
     excluindo, excluirUso, excluirErro, pedirExclusao, confirmarExclusao,
     centros, cadCentro, cadEhVenda, tiposDoMenu,
     cadTabela, tabelasDoMenu, trocarTabela, podeMexer, cadEditando,
+    excluirDestino, escolherDestino, precisaDestino, textoTransferencia, textoPrecos, textoTelaProdutos,
   }`,
 )
 
@@ -328,25 +333,116 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.equal(p.excluindo.value, null, 'a lixeira não abre')
     assert.ok(!calls.some((c) => c.url.includes('/uso')), 'nada vai ao servidor')
   }
-  // M-75: lixeira de Categoria de venda — uso pela rota dela; em uso não tem Excluir;
-  // livre, exclui sem confirmar=true
+  // M-75: lixeira de Categoria de venda — uso pela rota dela; bloqueada (ex.: não é a última)
+  // não tem Excluir; livre, exclui sem confirmar=true
   {
-    const emUso = '“Apple” (Celular) está em uso: 12 produtos da Tabela de Preços e 40 contas. Troque a categoria de venda desses produtos e a coluna dessas contas antes de excluir.'
+    const doMeio = 'Só dá para excluir a última categoria de venda de Celular (“Apple”): excluir “Regular” deixaria um buraco nas colunas de margem/frete da aba Contas.'
     const { p, calls } = await pagina({
       respostas: {
-        'GET /api/produto-cadastros/categorias-venda/s1/uso': { regra: 'categoria_venda', produtos: 12, bloqueia: true, mensagem: emUso },
-        'GET /api/produto-cadastros/categorias-venda/s2/uso': { regra: 'categoria_venda', produtos: 0, bloqueia: false, mensagem: null },
+        'GET /api/produto-cadastros/categorias-venda/s1/uso': { regra: 'categoria_venda', produtos: 0, bloqueia: true, mensagem: doMeio, precisa_destino: false, destinos: [], avisos: [] },
+        'GET /api/produto-cadastros/categorias-venda/s2/uso': { regra: 'categoria_venda', produtos: 0, bloqueia: false, mensagem: null, precisa_destino: false, destinos: [], avisos: [] },
       },
     })
     await p.pedirExclusao(CADS[2])
     assert.equal(p.excluirUso.value.bloqueia, true)
-    assert.equal(p.excluirUso.value.mensagem, emUso)
+    assert.equal(p.excluirUso.value.mensagem, doMeio)
+    assert.equal(p.precisaDestino.value, false, 'bloqueada não pede destino')
     await p.pedirExclusao(CADS[3])
     await p.confirmarExclusao()
     assert.deepEqual(
       calls.filter((c) => c.method === 'DELETE').map((c) => c.url),
       ['/api/produto-cadastros/categorias-venda/s2'],
     )
+  }
+  // M-90: Categoria de venda sem uso na tabela dela — confirmação simples com os avisos do
+  // servidor (nome reservado; produtos da tela Produtos sem segmento); DELETE sem destino
+  {
+    const avisos = [
+      '“Apple” é um nome reservado: depois de excluída, não dá para criar de novo pela tela.',
+      '264 produtos da tela Produtos ficam sem segmento.',
+    ]
+    const { p, calls } = await pagina({
+      respostas: {
+        'GET /api/produto-cadastros/categorias-venda/s1/uso': {
+          regra: 'categoria_venda', produtos: 0, bloqueia: false, mensagem: null, contas: 0,
+          produtos_tela_produtos: 264, precisa_destino: false, destinos: [], centro_custo: 'Celular', avisos,
+        },
+      },
+    })
+    await p.pedirExclusao(CADS[2])
+    assert.equal(p.precisaDestino.value, false)
+    assert.deepEqual(p.excluirUso.value.avisos, avisos)
+    await p.confirmarExclusao()
+    assert.deepEqual(
+      calls.filter((c) => c.method === 'DELETE').map((c) => c.url),
+      ['/api/produto-cadastros/categorias-venda/s1'],
+    )
+    assert.match(tpl, /v-for="a in excluirUso\?\.avisos \?\? \[\]"[\s\S]{0,120}data-aviso="aviso"/)
+  }
+  // M-90: Categoria de venda em uso na tabela dela — pede o destino, mostra o que vai acontecer
+  // e manda ?destino_id=; sem destino, nada vai ao servidor
+  {
+    const emUso = '“Apple” (Celular) está em uso: 12 produtos da Tabela de Preços e 40 contas. Escolha para qual categoria de venda eles vão antes de excluir.'
+    const { p, calls } = await pagina({
+      respostas: {
+        'GET /api/produto-cadastros/categorias-venda/s1/uso': {
+          regra: 'categoria_venda', produtos: 12, bloqueia: false, mensagem: emUso, contas: 40,
+          produtos_tela_produtos: 264, precisa_destino: true, centro_custo: 'Celular', avisos: [],
+          destinos: [{ id: 'd1', nome: 'Acessórios' }, { id: 'd2', nome: 'Robusto' }],
+        },
+      },
+    })
+    await p.pedirExclusao(CADS[2])
+    assert.equal(p.precisaDestino.value, true)
+    assert.equal(p.excluirUso.value.mensagem, emUso)
+    assert.equal(p.textoTransferencia.value, null, 'sem destino, sem texto')
+    await p.confirmarExclusao()
+    assert.ok(!calls.some((c) => c.method === 'DELETE'), 'sem destino nada é excluído')
+    // escolha única
+    p.escolherDestino('d1')
+    p.escolherDestino('d2')
+    assert.equal(p.excluirDestino.value, 'd2')
+    p.escolherDestino('d2')
+    assert.equal(p.excluirDestino.value, null, 'clicar na marcada desmarca')
+    p.escolherDestino('d1')
+    assert.equal(
+      p.textoTransferencia.value,
+      'Os 12 produtos e as 40 contas passam para “Acessórios” (Celular) e a categoria “Apple” é excluída. Não dá para desfazer.',
+    )
+    assert.equal(p.textoPrecos.value, 'Os preços desses produtos passam a usar a margem e o frete de “Acessórios”.')
+    assert.equal(p.textoTelaProdutos.value, '264 produtos da tela Produtos vão junto para “Acessórios”.')
+    await p.confirmarExclusao()
+    assert.deepEqual(
+      calls.filter((c) => c.method === 'DELETE').map((c) => c.url),
+      ['/api/produto-cadastros/categorias-venda/s1?destino_id=d1'],
+    )
+    assert.equal(p.excluindo.value, null, 'a janela fecha')
+    assert.equal(p.excluirDestino.value, null)
+    // o desenho: quadro vermelho, "Transferir para" com caixinhas e o botão apagado até escolher
+    assert.match(tpl, /v-else-if="precisaDestino"[\s\S]{0,250}data-aviso="em-uso"/)
+    assert.match(tpl, /data-campo="transferir-para"[\s\S]{0,150}Transferir para[\s\S]{0,700}type="checkbox" :checked="excluirDestino === d\.id" @change="escolherDestino\(d\.id\)"/)
+    assert.match(tpl, /:disabled="excluirCarregando \|\| \(precisaDestino && !excluirDestino\)"/)
+    assert.match(tpl, /\{\{ precisaDestino \? 'Transferir e excluir' : 'Excluir' \}\}/)
+  }
+  // M-90: só uma conta, sem produto da Tabela de Preços — singular e sem o texto dos preços
+  {
+    const { p } = await pagina({
+      respostas: {
+        'GET /api/produto-cadastros/categorias-venda/s1/uso': {
+          regra: 'categoria_venda', produtos: 0, bloqueia: false, mensagem: 'x', contas: 1,
+          produtos_tela_produtos: 0, precisa_destino: true, centro_custo: 'Celular', avisos: [],
+          destinos: [{ id: 'd1', nome: 'Acessórios' }],
+        },
+      },
+    })
+    await p.pedirExclusao(CADS[2])
+    p.escolherDestino('d1')
+    assert.equal(
+      p.textoTransferencia.value,
+      'A conta passa para “Acessórios” (Celular) e a categoria “Apple” é excluída. Não dá para desfazer.',
+    )
+    assert.equal(p.textoPrecos.value, null)
+    assert.equal(p.textoTelaProdutos.value, null)
   }
   console.log('cadastro-produtos-sfc: ok')
 })().catch((e) => { console.error(e); process.exit(1) })

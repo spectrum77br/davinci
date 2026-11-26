@@ -26,6 +26,12 @@
 // "Tipo de conta" (tabela "Lojas": Celular, Eletro, Mala) só para ver — sem lápis nem lixeira.
 // No Novo cadastro a pessoa escolhe primeiro a Tabela; o Tipo depende dela e, nas tabelas de
 // Contas, a tabela é o centro de custo da Categoria de venda. No lápis a Tabela só aparece.
+// M-90 (Harry 26/11/2026): a lixeira da Categoria de venda confere o uso só na tabela dela
+// (Tabela de Preços e contas). Em uso, a janela não bloqueia: pede "Transferir para" (as outras
+// categorias de venda ativas do mesmo centro, escolha única) e o botão "Transferir e excluir"
+// manda o destino (DELETE ?destino_id=); o servidor transfere e exclui de uma vez. Sem uso,
+// confirmação simples com os avisos do servidor (nome reservado, produtos da tela Produtos que
+// ficam sem segmento). Categoria e Tag de envio seguem como antes.
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -46,7 +52,19 @@ type Cadastro = {
   tabela?: string | null
 }
 type Centro = { id: string; nome: string; aceita_categoria?: boolean; tabela?: string | null }
-type Uso = { regra: string | null; produtos: number | null; bloqueia: boolean; mensagem: string | null }
+type Uso = {
+  regra: string | null
+  produtos: number | null
+  bloqueia: boolean
+  mensagem: string | null
+  // M-90: só na Categoria de venda (rota /categorias-venda/{id}/uso).
+  contas?: number
+  produtos_tela_produtos?: number
+  precisa_destino?: boolean
+  destinos?: { id: string; nome: string }[]
+  centro_custo?: string | null
+  avisos?: string[]
+}
 // Uma opção do menu "Tabela" do Novo cadastro; `centro` = o centro de custo (tabelas de Contas).
 type Tabela = { id: string; nome: string; centro: string | null }
 
@@ -256,6 +274,57 @@ const excluindo = ref<Cadastro | null>(null)
 const excluirUso = ref<Uso | null>(null)
 const excluirErro = ref<string | null>(null)
 const excluirCarregando = ref(false)
+// M-90: o destino escolhido em "Transferir para" (Categoria de venda em uso).
+const excluirDestino = ref<string | null>(null)
+
+// Escolha única: marcar uma desmarca a outra; clicar na marcada desmarca.
+function escolherDestino(id: string) {
+  excluirDestino.value = excluirDestino.value === id ? null : id
+}
+
+const precisaDestino = computed(() => !!excluirUso.value?.precisa_destino && !excluirUso.value?.bloqueia)
+const destinoNome = computed(
+  () => excluirUso.value?.destinos?.find((d) => d.id === excluirDestino.value)?.nome ?? null,
+)
+
+function numero(n: number): string {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+}
+
+// «Os N produtos e as N contas passam para “Y” (Centro) e a categoria “X” é excluída. …»
+const textoTransferencia = computed(() => {
+  const u = excluirUso.value
+  const nome = excluindo.value?.nome
+  if (!precisaDestino.value || !u || !destinoNome.value || !nome) return null
+  const p = u.produtos ?? 0
+  const c = u.contas ?? 0
+  const partes: string[] = []
+  if (p) partes.push(p === 1 ? 'o produto' : `os ${numero(p)} produtos`)
+  if (c) partes.push(c === 1 ? 'a conta' : `as ${numero(c)} contas`)
+  if (!partes.length) return null
+  const quem = partes.join(' e ')
+  const centro = u.centro_custo ? ` (${u.centro_custo})` : ''
+  return (
+    `${quem.charAt(0).toUpperCase()}${quem.slice(1)} ${p + c === 1 ? 'passa' : 'passam'} para ` +
+    `“${destinoNome.value}”${centro} e a categoria “${nome}” é excluída. Não dá para desfazer.`
+  )
+})
+// Com produtos da Tabela de Preços: o preço deles muda de margem/frete.
+const textoPrecos = computed(() => {
+  const p = excluirUso.value?.produtos ?? 0
+  if (!precisaDestino.value || !destinoNome.value || !p) return null
+  return p === 1
+    ? `O preço desse produto passa a usar a margem e o frete de “${destinoNome.value}”.`
+    : `Os preços desses produtos passam a usar a margem e o frete de “${destinoNome.value}”.`
+})
+// Produtos da tela Produtos (não travam): vão junto para o destino.
+const textoTelaProdutos = computed(() => {
+  const n = excluirUso.value?.produtos_tela_produtos ?? 0
+  if (!precisaDestino.value || !destinoNome.value || !n) return null
+  return n === 1
+    ? `1 produto da tela Produtos vai junto para “${destinoNome.value}”.`
+    : `${numero(n)} produtos da tela Produtos vão junto para “${destinoNome.value}”.`
+})
 
 // M-89: Tipo de conta não tem lápis nem lixeira (na coluna Ações aparece "—").
 const podeMexer = (c: Cadastro) => !ehTipoConta(c)
@@ -270,6 +339,7 @@ async function pedirExclusao(c: Cadastro) {
   excluindo.value = c
   excluirUso.value = null
   excluirErro.value = null
+  excluirDestino.value = null
   excluirCarregando.value = true
   try {
     excluirUso.value = await api<Uso>(`${rotaDe(c)}/uso`)
@@ -283,16 +353,25 @@ async function pedirExclusao(c: Cadastro) {
 function fecharExclusao() {
   excluindo.value = null
   excluirUso.value = null
+  excluirDestino.value = null
 }
 
 async function confirmarExclusao() {
   if (!excluindo.value) return
+  // M-90: Categoria de venda em uso só vai com o destino escolhido.
+  if (ehVenda(excluindo.value) && precisaDestino.value && !excluirDestino.value) return
   excluirCarregando.value = true
   excluirErro.value = null
   try {
     // A pessoa já viu a contagem (tag em uso) nesta janela: vai com confirmar.
-    // Categoria de venda não tem confirmação: em uso, o servidor recusa.
-    const url = ehVenda(excluindo.value) ? rotaDe(excluindo.value) : `${rotaDe(excluindo.value)}?confirmar=true`
+    // Categoria de venda não tem confirmar: em uso vai com o destino (M-90), e o servidor
+    // transfere e exclui de uma vez.
+    let url = `${rotaDe(excluindo.value)}?confirmar=true`
+    if (ehVenda(excluindo.value)) {
+      url = precisaDestino.value
+        ? `${rotaDe(excluindo.value)}?destino_id=${encodeURIComponent(excluirDestino.value ?? '')}`
+        : rotaDe(excluindo.value)
+    }
     await api(url, { method: 'DELETE' })
     fecharExclusao()
     await load()
@@ -522,7 +601,8 @@ async function confirmarExclusao() {
       </div>
     </div>
 
-    <!-- Lixeira: sempre pergunta antes. Categoria com produto: só avisa (não exclui). -->
+    <!-- Lixeira: sempre pergunta antes. Categoria com produto: só avisa (não exclui).
+         M-90: Categoria de venda em uso pede "Transferir para" e vira "Transferir e excluir". -->
     <div
       v-if="excluindo"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -544,20 +624,56 @@ async function confirmarExclusao() {
         >
           {{ excluirUso.mensagem }}
         </div>
+        <div
+          v-else-if="precisaDestino"
+          class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+          data-aviso="em-uso"
+        >
+          {{ excluirUso?.mensagem }}
+        </div>
         <p v-else-if="excluirUso?.mensagem" class="text-xs text-amber-800 dark:text-amber-300" data-aviso="contagem">
           {{ excluirUso.mensagem }} Excluir mesmo assim?
         </p>
+        <!-- M-90: nome reservado; produtos da tela Produtos que ficam sem segmento. -->
+        <p
+          v-for="a in excluirUso?.avisos ?? []"
+          :key="a"
+          class="text-xs text-amber-800 dark:text-amber-300"
+          data-aviso="aviso"
+        >
+          {{ a }}
+        </p>
+        <!-- M-90: o destino (escolha única) entre as outras categorias de venda ativas do centro. -->
+        <div v-if="precisaDestino" class="space-y-1" data-campo="transferir-para">
+          <div class="text-xs text-muted-foreground">Transferir para</div>
+          <div class="max-h-48 overflow-y-auto rounded border border-border divide-y divide-border">
+            <label
+              v-for="d in excluirUso?.destinos ?? []"
+              :key="d.id"
+              class="flex items-center gap-2 px-2 h-8 text-xs cursor-pointer hover:bg-accent/30"
+              :data-destino="d.nome"
+            >
+              <input type="checkbox" :checked="excluirDestino === d.id" @change="escolherDestino(d.id)" />
+              {{ d.nome }}
+            </label>
+          </div>
+          <div v-if="textoTransferencia" class="space-y-1 pt-1 text-xs text-destructive" data-aviso="transferencia">
+            <p>{{ textoTransferencia }}</p>
+            <p v-if="textoPrecos">{{ textoPrecos }}</p>
+            <p v-if="textoTelaProdutos">{{ textoTelaProdutos }}</p>
+          </div>
+        </div>
         <div class="flex justify-end gap-2">
           <Button size="sm" variant="ghost" @click="fecharExclusao">{{ excluirUso?.bloqueia ? 'Fechar' : 'Cancelar' }}</Button>
           <Button
             v-if="excluirUso && !excluirUso.bloqueia"
             size="sm"
             variant="destructive"
-            :disabled="excluirCarregando"
+            :disabled="excluirCarregando || (precisaDestino && !excluirDestino)"
             data-acao="confirmar-exclusao"
             @click="confirmarExclusao"
           >
-            Excluir
+            {{ precisaDestino ? 'Transferir e excluir' : 'Excluir' }}
           </Button>
         </div>
       </div>

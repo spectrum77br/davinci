@@ -36,6 +36,13 @@ M-89 (26/11/2026): coluna "Tabela" — a tabela do sistema que cada cadastro ali
   Segmentos e em todo cálculo que as lê;
 - tipo novo "Tipo de conta" (tabela "Lojas"): os centros de custo com raiz (Celular, Eletro,
   Mala), no fim da lista. Só para ver: não tem rota de criar, editar nem excluir.
+
+M-90 (26/11/2026): a lixeira da Categoria de venda confere o uso só na tabela dela (Tabela de
+Preços e contas). Em uso, a janela pede o destino (outra categoria de venda ativa do mesmo
+centro) e o DELETE vai com `destino_id`: transfere e exclui num commit só. Os produtos da tela
+Produtos (products.segment_id) não travam: vão junto ou ficam sem segmento. Categoria e Tag de
+envio (Produtos 2) seguem como antes: a ligação produto → categoria/tag mora na base do ERP, que
+esta API só lê — transferir exigiria gravar lá (e a tag faz parte do SKU).
 """
 
 from __future__ import annotations
@@ -126,6 +133,26 @@ class UsoOut(BaseModel):
     produtos: int | None
     bloqueia: bool
     mensagem: str | None
+
+
+class DestinoOut(BaseModel):
+    id: UUID
+    nome: str
+
+
+class UsoVendaOut(UsoOut):
+    """M-90: a lixeira da Categoria de venda. `produtos` = os da Tabela de Preços (a tabela dela);
+    em uso (`precisa_destino`), `mensagem` é o quadro vermelho e a tela pede o destino entre
+    `destinos` (as outras ativas do mesmo centro). `produtos_tela_produtos` (products.segment_id)
+    não trava: vão junto para o destino ou ficam sem segmento. `avisos`: frases da confirmação
+    simples (nome reservado; produtos da tela Produtos que ficam sem segmento)."""
+
+    contas: int = 0
+    produtos_tela_produtos: int = 0
+    precisa_destino: bool = False
+    destinos: list[DestinoOut] = []
+    centro_custo: str | None = None
+    avisos: list[str] = []
 
 
 class TipoIn(BaseModel):
@@ -624,20 +651,35 @@ async def renomear_categoria_venda(
     return _venda_out(seg, raiz, centro_nome)
 
 
-@router.get("/categorias-venda/{venda_id}/uso", response_model=UsoOut)
+@router.get("/categorias-venda/{venda_id}/uso", response_model=UsoVendaOut)
 async def uso_categoria_venda(
     venda_id: UUID,
     _admin: Annotated[User, Depends(require_admin)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> UsoOut:
-    """Para a lixeira avisar antes: quantos produtos usam e se a exclusão é barrada."""
+) -> UsoVendaOut:
+    """Para a lixeira avisar antes: o uso na tabela dela, se a exclusão é barrada e, em uso
+    (M-90), para quais categorias de venda dá para transferir."""
     seg, raiz = await _venda(session, venda_id)
     uso, bloqueio = await cv.bloqueio_exclusao(session, seg, raiz)
-    return UsoOut(
+    precisa_destino = bloqueio is None and uso.em_uso
+    opcoes = await cv.destinos(session, seg, raiz) if precisa_destino else []
+    if bloqueio is not None:
+        mensagem: str | None = bloqueio.mensagem
+    elif precisa_destino:
+        mensagem = cv.mensagem_em_uso(seg, raiz, uso)
+    else:
+        mensagem = None
+    return UsoVendaOut(
         regra=cv.CHAVE,
         produtos=uso.produtos,
         bloqueia=bloqueio is not None,
-        mensagem=bloqueio.mensagem if bloqueio else None,
+        mensagem=mensagem,
+        contas=uso.contas,
+        produtos_tela_produtos=uso.produtos_cadastro,
+        precisa_destino=precisa_destino,
+        destinos=[DestinoOut(id=s.id, nome=s.name) for s in opcoes],
+        centro_custo=raiz.name,
+        avisos=cv.avisos_exclusao(seg, uso) if bloqueio is None else [],
     )
 
 
@@ -646,9 +688,12 @@ async def excluir_categoria_venda(
     venda_id: UUID,
     _admin: Annotated[User, Depends(require_admin)],
     session: Annotated[AsyncSession, Depends(get_session)],
+    destino_id: Annotated[UUID | None, Query()] = None,
 ) -> Response:
+    """M-90: em uso na tabela dela, vai com `destino_id` (outra categoria de venda ativa do
+    mesmo centro): produtos e contas passam para ela e a categoria sai — tudo num commit só."""
     seg, raiz = await _venda(session, venda_id)
-    await cv.excluir(session, seg, raiz)
+    await cv.excluir(session, seg, raiz, destino_id)
     # M-86: a coluna "marg" dela sai da aba Contas (ver o criar).
     await recalcular_contas_da_raiz(session, raiz.id)
     await session.commit()

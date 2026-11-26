@@ -19,11 +19,15 @@ Por isso as regras abaixo, que seguram as posições (valem aqui e em Cadastros 
 - ao nascer na posição N, as contas daquele centro com o vínculo slot{N} vazio passam a apontar
   para ela (a mesma regra de routers/pricing._default_slot_segments): sem isso a página Margem
   ficaria sem o frete "Projetado" dos produtos dela;
-- excluir: só sem produto (`pricing_products.segment_id` / `products.segment_id`) e sem conta
-  apontando DIRETO para ela (`pricing_accounts.segment_id`), e só a ÚLTIMA do centro de custo —
-  nenhuma posição é renumerada, então nenhuma outra muda de coluna. Os vínculos automáticos
-  slot1..5 NÃO contam como uso (toda conta aponta para todas as categorias do seu centro): são
-  limpos na mesma transação;
+- excluir: só a ÚLTIMA do centro de custo — nenhuma posição é renumerada, então nenhuma outra
+  muda de coluna. O uso é conferido só na tabela dela (M-90, Harry 26/11/2026): produtos da
+  Tabela de Preços (`pricing_products.segment_id`) e contas apontando DIRETO para ela
+  (`pricing_accounts.segment_id`). Em uso, a exclusão pede o DESTINO (outra categoria de venda
+  ATIVA do mesmo centro): produtos e contas passam para ela e a categoria sai, na mesma
+  transação. Os produtos da tela Produtos (`products.segment_id`, sobra da carga antiga) não
+  travam: vão junto para o destino ou, sem destino, ficam sem segmento (NULL — o mesmo que o
+  banco já faria, FK ON DELETE SET NULL). Os vínculos automáticos slot1..5 NÃO contam como uso
+  (toda conta aponta para todas as categorias do seu centro): são limpos na mesma transação;
 - desativar: só a última ATIVA; reativar: só se as de antes estiverem ativas. Assim as ativas
   ficam sempre nas primeiras posições e nenhum cabeçalho escorrega de coluna;
 - a posição e o centro de custo de uma categoria não mudam depois de criada (PATCH de
@@ -331,18 +335,25 @@ def recusar_mudanca_de_lugar() -> HTTPException:
 @dataclass
 class Uso:
     produtos_tabela: int
+    # products.segment_id (a primeira tela Produtos): M-90 — não trava a exclusão.
     produtos_cadastro: int
     contas: int
     subsegmentos: int
 
     @property
     def produtos(self) -> int:
-        return self.produtos_tabela + self.produtos_cadastro
+        """M-90: só os da tabela dela (Tabela de Preços)."""
+        return self.produtos_tabela
+
+    @property
+    def em_uso(self) -> bool:
+        """Em uso NA TABELA DELA (Tabela de Preços e contas): pede o destino ao excluir."""
+        return bool(self.produtos_tabela or self.contas)
 
 
 async def contar_uso(session: AsyncSession, seg_id: UUID) -> Uso:
-    """Quem USA a categoria: produtos (Tabela de Preços e cadastro) e contas que apontam direto
-    para ela. Os vínculos slot1..5 não contam (são limpos ao excluir)."""
+    """Quem aponta para a categoria: produtos (Tabela de Preços e tela Produtos) e contas que
+    apontam direto para ela. Os vínculos slot1..5 não contam (são limpos ao excluir)."""
 
     async def conta(q) -> int:
         return int((await session.execute(q)).scalar_one() or 0)
@@ -369,44 +380,67 @@ class Bloqueio:
     contas: int
 
 
+def _texto_uso(uso: Uso) -> str:
+    """ "2 produtos da Tabela de Preços e 1 conta" (só as partes que existem)."""
+    partes: list[str] = []
+    if uso.produtos_tabela:
+        partes.append(
+            _qtd(
+                uso.produtos_tabela,
+                "produto da Tabela de Preços",
+                "produtos da Tabela de Preços",
+            )
+        )
+    if uso.contas:
+        partes.append(_qtd(uso.contas, "conta", "contas"))
+    return " e ".join(partes)
+
+
+def mensagem_em_uso(seg: Segment, raiz: Segment, uso: Uso) -> str:
+    """O quadro vermelho da lixeira quando a categoria está em uso na tabela dela (M-90)."""
+    if uso.produtos_tabela + uso.contas == 1:
+        quem = "ele vai" if uso.produtos_tabela else "ela vai"
+    else:
+        quem = "eles vão"
+    return (
+        f"“{seg.name}” ({raiz.name}) está em uso: {_texto_uso(uso)}. Escolha para qual "
+        f"categoria de venda {quem} antes de excluir."
+    )
+
+
+def avisos_exclusao(seg: Segment, uso: Uso) -> list[str]:
+    """Os avisos da confirmação SEM destino (M-90): o nome reservado e os produtos da tela
+    Produtos que ficam sem segmento. Com destino a tela diz que eles "vão junto"."""
+    avisos: list[str] = []
+    if nome_procurado(seg.name):
+        avisos.append(
+            f"“{seg.name}” é um nome reservado: depois de excluída, não dá para criar de novo "
+            "pela tela."
+        )
+    if uso.produtos_cadastro and not uso.em_uso:
+        n = uso.produtos_cadastro
+        avisos.append(
+            _qtd(n, "produto da tela Produtos", "produtos da tela Produtos")
+            + (" fica sem segmento." if n == 1 else " ficam sem segmento.")
+        )
+    return avisos
+
+
+async def destinos(session: AsyncSession, seg: Segment, raiz: Segment) -> list[Segment]:
+    """Para onde os produtos e as contas podem ir (M-90): as outras categorias de venda ATIVAS
+    do mesmo centro de custo (a mesma tabela da aba Contas), na ordem das colunas."""
+    return [s for s in await filhas(session, raiz.id) if s.id != seg.id and s.active]
+
+
 async def bloqueio_exclusao(
     session: AsyncSession, seg: Segment, raiz: Segment
 ) -> tuple[Uso, Bloqueio | None]:
-    """(uso, o porquê de não poder excluir — None = pode)."""
+    """(uso, o porquê de não poder excluir — None = pode).
+
+    M-90: estar em uso na tabela dela NÃO é bloqueio — a exclusão pede o destino (ver excluir).
+    Só bloqueia quando não há destino possível (nenhuma outra ativa no centro)."""
     await travar_centro(session, raiz.id)
     uso = await contar_uso(session, seg.id)
-    if uso.produtos or uso.contas:
-        partes = []
-        if uso.produtos_tabela:
-            partes.append(
-                _qtd(
-                    uso.produtos_tabela,
-                    "produto da Tabela de Preços",
-                    "produtos da Tabela de Preços",
-                )
-            )
-        if uso.produtos_cadastro:
-            partes.append(
-                _qtd(uso.produtos_cadastro, "produto do cadastro", "produtos do cadastro")
-            )
-        if uso.contas:
-            partes.append(_qtd(uso.contas, "conta", "contas"))
-        texto = partes[0] if len(partes) == 1 else ", ".join(partes[:-1]) + " e " + partes[-1]
-        quem = " e ".join(
-            q
-            for q, n in (
-                ("esse produto" if uso.produtos == 1 else "esses produtos", uso.produtos),
-                ("essa conta" if uso.contas == 1 else "essas contas", uso.contas),
-            )
-            if n
-        )
-        return uso, Bloqueio(
-            "categoria_venda_em_uso",
-            f"“{seg.name}” ({raiz.name}) está em uso: {texto}. Passe {quem} para outra "
-            "categoria de venda antes de excluir.",
-            uso.produtos,
-            uso.contas,
-        )
     if uso.subsegmentos:
         return uso, Bloqueio(
             "categoria_venda_com_subsegmentos",
@@ -424,6 +458,14 @@ async def bloqueio_exclusao(
             0,
             0,
         )
+    if uso.em_uso and not await destinos(session, seg, raiz):
+        return uso, Bloqueio(
+            "categoria_venda_sem_destino",
+            f"“{seg.name}” ({raiz.name}) está em uso: {_texto_uso(uso)}, e não há outra "
+            f"categoria de venda ativa em {raiz.name} para recebê-los.",
+            uso.produtos,
+            uso.contas,
+        )
     return uso, None
 
 
@@ -431,12 +473,61 @@ def recusa(b: Bloqueio) -> HTTPException:
     return _recusa(b.code, b.mensagem, produtos=b.produtos, contas=b.contas)
 
 
-async def excluir(session: AsyncSession, seg: Segment, raiz: Segment) -> None:
-    """Confere e exclui (sem commit): limpa os vínculos slot1..5 que apontam para ela na mesma
-    transação — a FK já é ON DELETE SET NULL, mas assim não depende do banco."""
-    _uso, bloqueio = await bloqueio_exclusao(session, seg, raiz)
+async def excluir(
+    session: AsyncSession, seg: Segment, raiz: Segment, destino_id: UUID | None = None
+) -> Segment | None:
+    """Confere, transfere e exclui (sem commit — quem chama faz um commit só: se algo falhar,
+    nada muda). Devolve o destino (None = sem transferência).
+
+    M-90: em uso na tabela dela (Tabela de Preços / contas) exige `destino_id` — outra categoria
+    de venda ativa do mesmo centro; sem ele, 409 `categoria_venda_em_uso` (a aba Segmentos, que
+    não pergunta o destino, continua recusando). Os produtos da tela Produtos vão para o destino
+    ou, sem destino, ficam sem segmento. Limpa os vínculos slot1..5 que apontam para ela na
+    mesma transação — a FK já é ON DELETE SET NULL, mas assim não depende do banco."""
+    uso, bloqueio = await bloqueio_exclusao(session, seg, raiz)
     if bloqueio is not None:
         raise recusa(bloqueio)
+    destino: Segment | None = None
+    if destino_id is not None:
+        opcoes = await destinos(session, seg, raiz)
+        destino = next((s for s in opcoes if s.id == destino_id), None)
+        if destino is None:
+            raise _recusa(
+                "categoria_venda_destino_invalido",
+                f"Escolha outra categoria de venda ativa de {raiz.name} para receber os "
+                f"produtos e as contas de “{seg.name}”.",
+            )
+    elif uso.em_uso:
+        # Só chega aqui sem destino pela aba Segmentos (ou se o uso mudou com a janela aberta).
+        raise _recusa(
+            "categoria_venda_em_uso",
+            mensagem_em_uso(seg, raiz, uso)
+            + " A transferência é feita pela lixeira de Cadastros › Produtos.",
+            produtos=uso.produtos,
+            contas=uso.contas,
+        )
+    if destino is not None:
+        # Tabela de Preços e contas passam para o destino (mesmo centro: o `department` dos
+        # produtos não muda).
+        await session.execute(
+            update(PricingProduct)
+            .where(PricingProduct.segment_id == seg.id)
+            .values(segment_id=destino.id)
+            .execution_options(synchronize_session=False)
+        )
+        await session.execute(
+            update(PricingAccount)
+            .where(PricingAccount.segment_id == seg.id)
+            .values(segment_id=destino.id)
+            .execution_options(synchronize_session=False)
+        )
+    # Tela Produtos: vão junto para o destino ou ficam sem segmento.
+    await session.execute(
+        update(Product)
+        .where(Product.segment_id == seg.id)
+        .values(segment_id=destino.id if destino is not None else None)
+        .execution_options(synchronize_session=False)
+    )
     for coluna in _SLOTS:
         await session.execute(
             update(PricingAccount)
@@ -445,3 +536,4 @@ async def excluir(session: AsyncSession, seg: Segment, raiz: Segment) -> None:
             .execution_options(synchronize_session=False)
         )
     await session.delete(seg)
+    return destino
