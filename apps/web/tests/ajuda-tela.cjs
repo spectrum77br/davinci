@@ -310,7 +310,10 @@ async function principal() {
       'só o administrador vê e muda', 'diferente da \\"Margem Mín\\" da categoria de venda e da do produto',
       'seguram o pedido na Margem', 'esta define o Custo total', 'arredondado para baixo', 'Frete não entra',
       'números de exemplo', 'Custo total 9%', 'é calculado e não se digita', 'borda vermelha até alguém corrigir',
-      'baixar Afiliado, Desconto ou Ads um de cada vez', 'o que aumenta a soma continua recusado']) {
+      'baixar Afiliado, Desconto ou Ads um de cada vez', 'o que aumenta a soma continua recusado',
+      // M-94: a venda vem por Ads ou por afiliado; o teto vale para o maior dos dois.
+      'teto de Desconto + Afiliado ou de Desconto + Ads (vale o maior dos dois)',
+      'Desconto + o maior entre Afiliado e Ads']) {
       assert.ok(tudoC.includes(trecho), `o texto da aba Contas fala de: ${trecho}`)
     }
     // O SFC inteiro continua compilando.

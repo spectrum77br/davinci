@@ -1,7 +1,8 @@
 """Custo total da conta (M-56, 25/11/2026, migration 0511).
 
 Pedido do dono: na aba Contas da Tabela de Preços, Afiliado % + Desconto % +
-Ads % da conta não pode passar do Custo total (%) da conta. Vazio conta como
+Ads % da conta não pode passar do Custo total (%) da conta (desde a M-94,
+Desconto + o MAIOR entre Afiliado e Ads; ver abaixo). Vazio conta como
 zero; Custo total vazio = sem teto. É só controle e anotação: nada disso entra
 no cálculo do preço.
 
@@ -43,9 +44,9 @@ custo da conta ou as categorias ativas do centro. Margem mínima apagada: o
 Custo total fica com o último valor e volta a ser digitado.
 
 Mudar a Margem mínima, uma margem ou a comissão NÃO é recusado se o Custo total
-calculado ficar abaixo de Afiliado + Desconto + Ads já gravados (a tela mostra
-o aviso até alguém corrigir); a trava só segura quem mexe em Afiliado,
-Desconto ou Ads.
+calculado ficar abaixo do que já está gravado (M-94: Desconto + o maior entre
+Afiliado e Ads; a tela mostra o aviso até alguém corrigir); a trava só segura
+quem mexe em Afiliado, Desconto ou Ads.
 
 Revisão da M-86: com a conta já acima do teto, a trava aceita a gravação que
 NÃO aumenta a soma e não baixa o Custo total (`nao_piora`), mesmo que a soma
@@ -54,6 +55,13 @@ maior que cada campo sozinho (ex.: Custo total calculado 0 com Afiliado e
 Desconto preenchidos), toda correção era recusada e ninguém saía do aviso. A
 gravação que aumenta a soma acima do teto, ou que baixa o teto abaixo dela,
 continua recusada como antes.
+
+M-94 (26/11/2026): a venda vem por Ads OU por afiliado, nunca pelos dois. A
+trava passa a ser Desconto + o MAIOR entre Afiliado e Ads ≤ Custo total, ou
+seja, as duas contas têm de caber: Afiliado + Desconto e Ads + Desconto (o Ads
+é o de sempre, o maior que pode valer). A "soma" da trava, do `nao_piora` e do
+aviso da tela é esse Desconto + o maior; a mensagem de recusa mostra só a dupla
+que estourou (a maior). Nada que cabia antes passa a estourar.
 """
 
 from __future__ import annotations
@@ -195,11 +203,9 @@ def pct_br(valor: Decimal) -> str:
 def soma_do_custo_total(
     afiliado: Decimal | None, desconto: Decimal | None, ads: Decimal
 ) -> Decimal:
-    """Afiliado + Desconto + Ads (vazio conta como zero)."""
-    return (
-        (afiliado if afiliado is not None else ZERO)
-        + (desconto if desconto is not None else ZERO)
-        + ads
+    """Desconto + o MAIOR entre Afiliado e Ads (M-94; vazio conta como zero)."""
+    return (desconto if desconto is not None else ZERO) + max(
+        afiliado if afiliado is not None else ZERO, ads
     )
 
 
@@ -227,8 +233,10 @@ def estouro(
     ads: Decimal,
     custo_total: Decimal | None,
 ) -> str | None:
-    """A mensagem do aviso se a soma passa do Custo total; None se cabe (ou se
-    a conta não tem teto). Igual ao teto é aceito."""
+    """A mensagem do aviso se Desconto + o maior entre Afiliado e Ads passa do
+    Custo total; None se cabe (ou se a conta não tem teto). Igual ao teto é
+    aceito. A mensagem mostra só a dupla que estourou; se as duas estouram, a
+    maior (empate: a do Afiliado)."""
     if custo_total is None:
         return None
     afiliado = afiliado if afiliado is not None else ZERO
@@ -236,9 +244,13 @@ def estouro(
     soma = soma_do_custo_total(afiliado, desconto, ads)
     if soma <= custo_total:
         return None
+    if ads > afiliado:
+        dupla = f"Desconto {pct_br(desconto)}% + Ads {pct_br(ads)}%"
+    else:
+        dupla = f"Afiliado {pct_br(afiliado)}% + Desconto {pct_br(desconto)}%"
     return (
-        f"Afiliado {pct_br(afiliado)}% + Desconto {pct_br(desconto)}% + Ads {pct_br(ads)}%"
-        f" = {pct_br(soma)}%. Passa do Custo total ({pct_br(custo_total)}%). Não gravado."
+        f"{dupla} = {pct_br(soma)}%."
+        f" Passa do Custo total ({pct_br(custo_total)}%). Não gravado."
     )
 
 

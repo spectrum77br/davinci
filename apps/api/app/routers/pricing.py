@@ -702,8 +702,9 @@ def _recusar_custo_total_estourado(
     novos: dict | None = None,
     ads_gravado: EstadoAds | None = None,
 ) -> None:
-    """M-56: 422 `custo_total_estourado` se Afiliado + Desconto + Ads da conta
-    passa do Custo total, com os valores que FICARIAM gravados (`novos` vence
+    """M-56: 422 `custo_total_estourado` se Desconto + o maior entre Afiliado e
+    Ads da conta (M-94: a venda vem por um ou pelo outro) passa do Custo total,
+    com os valores que FICARIAM gravados (`novos` vence
     o da conta; `ads` já é o estado novo do Ads). Nada foi gravado ainda.
 
     Revisão da M-86: a conta pode já estar acima do teto (o Custo total
@@ -1095,7 +1096,7 @@ async def create_account(
     # a trava do M-56 não segura a conta nova (a tela mostra o aviso).
     _recusar_custo_total_digitado(None, body.model_dump(exclude_unset=True))
     if data.get("margem_minima_pct") is None:
-        # M-56: conta nova não tem Ads; a soma é Afiliado + Desconto.
+        # M-56: conta nova não tem Ads; a trava é Afiliado + Desconto.
         mensagem = estouro(
             data.get("afiliado_pct"),
             data.get("desconto_pct"),
@@ -1175,7 +1176,8 @@ async def patch_account(
     _recusar_custo_total_digitado(row, data)
     if pedidos & CAMPOS_DA_MARGEM_MINIMA:
         await _custo_total_da_margem_minima(session, row, data, irma, dados_irma)
-    # M-56: Afiliado + Desconto + Ads não passa do Custo total (valores novos,
+    # M-56/M-94: Desconto + o maior entre Afiliado e Ads não passa do Custo
+    # total (valores novos,
     # com o Custo total recalculado acima; nas duas linhas do par). Recusa antes
     # de gravar qualquer coisa. Só segura quem mexeu em Afiliado, Desconto ou no
     # Custo total: o recálculo pela Margem mínima, margem ou comissão grava

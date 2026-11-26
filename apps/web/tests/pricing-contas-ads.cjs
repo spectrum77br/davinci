@@ -317,8 +317,9 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   assert.equal(avisos.length, 0)
 
   // M-56: Custo total estourado — volta ao salvo e o aviso do servidor fica
-  // junto do campo (na janela aberta, sem aviso solto).
-  const MSG = 'Afiliado 4% + Desconto 10% + Ads 10% = 24%. Passa do Custo total (20%). Não gravado.'
+  // junto do campo (na janela aberta, sem aviso solto). M-94: o servidor manda
+  // só a dupla que passou (Desconto + Ads, ou Afiliado + Desconto).
+  const MSG = 'Desconto 5% + Ads 10% = 15%. Passa do Custo total (10%). Não gravado.'
   const estouro = () => Object.assign(new Error('x'), {
     status: 422, data: { detail: { code: 'custo_total_estourado', mensagem: MSG } },
   })

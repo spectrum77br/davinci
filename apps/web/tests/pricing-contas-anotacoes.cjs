@@ -8,8 +8,10 @@
 // (26/11/2026): "Margem mínima" depois do Custo total, só o ADM vê e muda. M-86:
 // com ela preenchida o Custo total é calculado (travado para todos, cinza, title
 // "Calculado pela Margem mínima") e, abaixo de Afiliado + Desconto + Ads, fica
-// com a borda vermelha e o aviso até alguém corrigir. Executa as funções reais
-// da página e confere o template.
+// com a borda vermelha e o aviso até alguém corrigir. M-94: a trava passa a ser
+// Desconto + o MAIOR entre Afiliado e Ads (a venda vem por um ou pelo outro) e
+// o aviso mostra só a dupla que passou. Executa as funções reais da página e
+// confere o template.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -72,6 +74,9 @@ assert.deepEqual(
 const margemMinima = f.STORE_NOTE_FIELDS.find((c) => c.key === 'margem_minima_pct')
 assert.deepEqual(margemMinima.cabecalho, ['Margem', 'mínima'])
 assert.equal(margemMinima.titulo, 'Margem mínima da conta (%). Só o administrador vê e muda.')
+// M-94: o title do Custo total fala das duas duplas.
+assert.equal(f.STORE_NOTE_FIELDS.find((c) => c.key === 'custo_total_pct').titulo,
+  'Teto de Desconto + Afiliado ou de Desconto + Ads (vale o maior dos dois). Vazio = sem teto. Só o administrador muda')
 assert.deepEqual(f.camposAnotacao.value.map((c) => c.key),
   ['afiliado_pct', 'desconto_pct', 'ads', 'custo_total_pct', 'observation'], 'quem não é ADM não vê')
 isAdmin.value = true
@@ -146,7 +151,7 @@ isAdmin.value = true
 
 // Aviso do Custo total estourado: só no campo recusado; gravar de novo o
 // mesmo campo tira o aviso antes de mandar.
-const MSG = 'Afiliado 4% + Desconto 1% + Ads 6% = 11%. Passa do Custo total (10%). Não gravado.'
+const MSG = 'Desconto 5% + Ads 6% = 11%. Passa do Custo total (10%). Não gravado.'
 assert.equal(f.erroCustoTotalDe({ data: { detail: { code: 'custo_total_estourado', mensagem: MSG } } }), MSG)
 assert.equal(f.erroCustoTotalDe({ data: { detail: { code: 'campos_so_admin' } } }), null)
 erroCustoTotal.value = { id: 'c1', campo: 'desconto_pct', mensagem: MSG }
@@ -198,30 +203,43 @@ const prods = porProduto({ p1: { pode_gastar_pct: 2 }, p2: { pode_gastar_pct: 5 
 assert.equal(f.maiorAdsDaConta(prods, ['p1', 'p2', 'p3']), 5)
 assert.equal(f.maiorAdsDaConta({ ...prods, pode_gastar_pct: 7 }, ['p1']), 2, 'com Produto a Geral não vale')
 
-const aguiar = { id: 'ag', afiliado_pct: '4.00', desconto_pct: '2.00', custo_total_pct: '6.00', margem_minima_pct: '25.00' }
-assert.equal(f.avisoSomaAcimaDoCustoTotal(aguiar, 3), 'Afiliado + Desconto + Ads (9%) passa do Custo total (6%)')
-assert.equal(f.avisoSomaAcimaDoCustoTotal(aguiar, 0), null, 'igual ao teto cabe')
-assert.equal(f.avisoSomaAcimaDoCustoTotal({ ...aguiar, custo_total_pct: null }, 3), null, 'sem Custo total não há teto')
+// M-94: Desconto + o MAIOR entre Afiliado e Ads; o aviso mostra só a dupla que passou.
+const aguiar = { id: 'ag', afiliado_pct: '1.00', desconto_pct: '2.00', custo_total_pct: '6.00', margem_minima_pct: '25.00' }
+assert.equal(f.avisoSomaAcimaDoCustoTotal(aguiar, 7), 'Desconto 2% + Ads 7% = 9% passa do Custo total (6%)')
+assert.equal(f.avisoSomaAcimaDoCustoTotal({ ...aguiar, afiliado_pct: '7.00' }, 3),
+  'Afiliado 7% + Desconto 2% = 9% passa do Custo total (6%)')
+assert.equal(f.avisoSomaAcimaDoCustoTotal(aguiar, 4), null, 'igual ao teto cabe')
+assert.equal(f.avisoSomaAcimaDoCustoTotal(aguiar, 0), null)
+assert.equal(f.avisoSomaAcimaDoCustoTotal({ ...aguiar, custo_total_pct: null }, 7), null, 'sem Custo total não há teto')
+// Os exemplos do pedido (Custo total 10).
+const dez = (afiliado, desconto) => ({ ...aguiar, afiliado_pct: afiliado, desconto_pct: desconto, custo_total_pct: '10.00' })
+assert.equal(f.avisoSomaAcimaDoCustoTotal(dez('4.00', '6.00'), 4), null, '4 + 6 = 10 e 4 + 6 = 10: cabe (antes, 14)')
+assert.equal(f.avisoSomaAcimaDoCustoTotal(dez('4.00', '3.00'), 7), null, '4 + 3 = 7 e 7 + 3 = 10: cabe')
+assert.equal(f.avisoSomaAcimaDoCustoTotal(dez('4.00', '5.00'), 6), 'Desconto 5% + Ads 6% = 11% passa do Custo total (10%)')
+assert.equal(f.avisoSomaAcimaDoCustoTotal(dez('7.00', '5.00'), 2), 'Afiliado 7% + Desconto 5% = 12% passa do Custo total (10%)')
+// As duas passam: a maior.
+assert.equal(f.avisoSomaAcimaDoCustoTotal(dez('8.00', '5.00'), 6), 'Afiliado 8% + Desconto 5% = 13% passa do Custo total (10%)')
+assert.equal(f.avisoSomaAcimaDoCustoTotal(dez('6.00', '5.00'), 8), 'Desconto 5% + Ads 8% = 13% passa do Custo total (10%)')
 // Centésimos: 0,1 + 0,2 = 0,3 cabe num teto de 0,3 (em float daria 0,30000000000000004).
 assert.equal(f.avisoSomaAcimaDoCustoTotal({ ...aguiar, afiliado_pct: '0.10', desconto_pct: '0.20', custo_total_pct: '0.30' }, 0), null)
 assert.equal(f.avisoSomaAcimaDoCustoTotal({ ...aguiar, afiliado_pct: '4.50', desconto_pct: '0.25', custo_total_pct: '0.00' }, 1.5),
-  'Afiliado + Desconto + Ads (6,25%) passa do Custo total (0%)')
+  'Afiliado 4,5% + Desconto 0,25% = 4,75% passa do Custo total (0%)')
 
 // Das contas da aba, com o Ads da janela; o X fecha a caixinha e a borda fica.
 accountsCurrent.value = [aguiar, digitada]
-assert.equal(f.avisoNoCampo(aguiar, campo('custo_total_pct')), null, 'sem o Ads carregado, Afiliado + Desconto = 6 cabe')
-ads.value = { produtos: [{ id: 'p1' }], contas: { ag: geral(3), c4: geral(10) } }
-assert.equal(f.avisoNoCampo(aguiar, campo('custo_total_pct')), 'Afiliado + Desconto + Ads (9%) passa do Custo total (6%)')
+assert.equal(f.avisoNoCampo(aguiar, campo('custo_total_pct')), null, 'sem o Ads carregado, Afiliado + Desconto = 3 cabe')
+ads.value = { produtos: [{ id: 'p1' }], contas: { ag: geral(7), c4: geral(10) } }
+assert.equal(f.avisoNoCampo(aguiar, campo('custo_total_pct')), 'Desconto 2% + Ads 7% = 9% passa do Custo total (6%)')
 assert.equal(f.avisoNoCampo(aguiar, campo('afiliado_pct')), null, 'o aviso é da caixinha do Custo total')
-assert.equal(f.avisoNoCampo(digitada, campo('custo_total_pct')), 'Afiliado + Desconto + Ads (10%) passa do Custo total (6%)')
+assert.equal(f.avisoNoCampo(digitada, campo('custo_total_pct')), 'Desconto 0% + Ads 10% = 10% passa do Custo total (6%)')
 assert.equal(f.tituloAnotacao(aguiar, campo('custo_total_pct')),
-  'Calculado pela Margem mínima. Afiliado + Desconto + Ads (9%) passa do Custo total (6%)')
-assert.equal(f.avisoAberto(aguiar, campo('custo_total_pct')), 'Afiliado + Desconto + Ads (9%) passa do Custo total (6%)')
+  'Calculado pela Margem mínima. Desconto 2% + Ads 7% = 9% passa do Custo total (6%)')
+assert.equal(f.avisoAberto(aguiar, campo('custo_total_pct')), 'Desconto 2% + Ads 7% = 9% passa do Custo total (6%)')
 f.fecharAvisoCustoTotal(aguiar)
 assert.equal(f.avisoAberto(aguiar, campo('custo_total_pct')), null, 'fechado')
 assert.ok(f.avisoNoCampo(aguiar, campo('custo_total_pct')), 'a borda continua')
-ads.value.contas.ag = geral(4)
-assert.equal(f.avisoAberto(aguiar, campo('custo_total_pct')), 'Afiliado + Desconto + Ads (10%) passa do Custo total (6%)',
+ads.value.contas.ag = geral(8)
+assert.equal(f.avisoAberto(aguiar, campo('custo_total_pct')), 'Desconto 2% + Ads 8% = 10% passa do Custo total (6%)',
   'outro valor reabre')
 // Corrigido (Ads 0): some.
 ads.value.contas.ag = geral(0)

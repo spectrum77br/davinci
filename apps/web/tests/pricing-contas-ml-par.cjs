@@ -413,7 +413,8 @@ async function estouroNaTabela() {
   fpC.desconto_pct = null
   fpP.desconto_pct = null
   accounts.value = [fpC, fpP, kfa]
-  const MSG = 'Afiliado 4% + Desconto 10% + Ads 10% = 24%. Passa do Custo total (20%). Não gravado.'
+  // M-94: o servidor manda só a dupla que passou.
+  const MSG = 'Afiliado 4% + Desconto 10% = 14%. Passa do Custo total (10%). Não gravado.'
   respostas = [Object.assign(new Error('x'), { status: 422, data: { detail: { code: 'custo_total_estourado', mensagem: MSG } } })]
   await p('fpC', 'desconto_pct', '10')
   assert.deepEqual(pedidos.pop(), ['/api/pricing/accounts/fpC', 'PATCH', { desconto_pct: 10 }])

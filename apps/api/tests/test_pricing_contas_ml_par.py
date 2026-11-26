@@ -8,7 +8,8 @@
 - PUT /comissao-ml grava as duas comissões (só o ADM); excluir exclui as duas;
   o catálogo liga/desliga nas duas e a margem dele vale para as duas; o Ads
   grava nas duas.
-- Custo total: Afiliado + Desconto + Ads ≤ teto, conferido no servidor com os
+- Custo total: Desconto + o maior entre Afiliado e Ads ≤ teto (M-94: a venda
+  vem por Ads ou por afiliado, nunca os dois), conferido no servidor com os
   valores novos (PATCH, PUT do Ads da conta e do produto); quem não é ADM vê
   mas não grava.
 - A migration de dados: pareia todos os pares, harmoniza só os visíveis e
@@ -587,14 +588,33 @@ async def test_mensagem_e_numeros_em_pt_br():
     assert pct_br(Decimal("0")) == "0"
     assert pct_br(Decimal("100")) == "100"
     assert pct_br(Decimal("0.25")) == "0,25"
-    assert estouro(Decimal("4"), Decimal("10"), Decimal("10"), Decimal("20")) == (
-        "Afiliado 4% + Desconto 10% + Ads 10% = 24%. Passa do Custo total (20%). Não gravado."
+    # M-94: Desconto + o MAIOR entre Afiliado e Ads (exemplos do pedido, teto 10).
+    dez = Decimal("10")
+    assert estouro(Decimal("4"), Decimal("6"), Decimal("4"), dez) is None
+    assert estouro(Decimal("4"), Decimal("3"), Decimal("7"), dez) is None
+    assert estouro(Decimal("4"), Decimal("5"), Decimal("6"), dez) == (
+        "Desconto 5% + Ads 6% = 11%. Passa do Custo total (10%). Não gravado."
     )
+    assert estouro(Decimal("7"), Decimal("5"), Decimal("2"), dez) == (
+        "Afiliado 7% + Desconto 5% = 12%. Passa do Custo total (10%). Não gravado."
+    )
+    # As duas estouram: mostra a maior.
+    assert estouro(Decimal("8"), Decimal("5"), Decimal("6"), dez) == (
+        "Afiliado 8% + Desconto 5% = 13%. Passa do Custo total (10%). Não gravado."
+    )
+    assert estouro(Decimal("6"), Decimal("5"), Decimal("8"), dez) == (
+        "Desconto 5% + Ads 8% = 13%. Passa do Custo total (10%). Não gravado."
+    )
+    # Vazio conta como 0.
     assert estouro(Decimal("4.5"), None, Decimal("0"), Decimal("4")) == (
-        "Afiliado 4,5% + Desconto 0% + Ads 0% = 4,5%. Passa do Custo total (4%). Não gravado."
+        "Afiliado 4,5% + Desconto 0% = 4,5%. Passa do Custo total (4%). Não gravado."
+    )
+    assert estouro(None, Decimal("3"), Decimal("4.5"), Decimal("7")) == (
+        "Desconto 3% + Ads 4,5% = 7,5%. Passa do Custo total (7%). Não gravado."
     )
     # Igual ao teto passa; sem teto passa.
     assert estouro(Decimal("4"), None, Decimal("6"), Decimal("10")) is None
+    assert estouro(Decimal("10"), None, Decimal("10"), Decimal("10")) is None
     assert estouro(Decimal("99"), Decimal("99"), Decimal("99"), None) is None
     # Ads da soma: o maior % que pode valer (M-78: Geral OU Produto).
     produto, outro = uuid.uuid4(), uuid.uuid4()
@@ -639,8 +659,9 @@ async def test_mensagem_e_numeros_em_pt_br():
 async def test_custo_total_aceita_e_recusa_sem_gravar(
     db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
 ):
-    """O exemplo do pedido: Custo total 10%, Afiliado 4% e Ads 6% passa;
-    Desconto 1% é recusado."""
+    """Custo total 10%, Afiliado 4% e Ads 6%: Desconto 5% é recusado (5 + 6 =
+    11); Desconto 4% passa (4 + 6 = 10 e 4 + 4 = 8 — M-94: Desconto + o maior
+    entre Afiliado e Ads)."""
     auth_as(cena.admin)
     corpo = await _criar_ml(client)
     par = await _par(db, corpo["par_id"])
@@ -650,28 +671,28 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
     assert (await client.patch(url, json={"afiliado_pct": 4})).status_code == 200
     assert (await client.put(ads, json={"pode_gastar_pct": 6})).status_code == 200
 
-    r = await client.patch(url, json={"desconto_pct": 1, "observation": "não grava"})
+    r = await client.patch(url, json={"desconto_pct": 5, "observation": "não grava"})
     assert r.status_code == 422, r.text
     assert r.json()["detail"] == {
         "code": "custo_total_estourado",
-        "mensagem": (
-            "Afiliado 4% + Desconto 1% + Ads 6% = 11%. Passa do Custo total (10%). Não gravado."
-        ),
+        "mensagem": "Desconto 5% + Ads 6% = 11%. Passa do Custo total (10%). Não gravado.",
     }
+    # Igual ao teto: aceito (antes da M-94 era recusado: 4 + 4 + 6 = 14).
+    assert (await client.patch(url, json={"desconto_pct": 4})).status_code == 200
     # Baixar o próprio Custo total para menos que a soma: recusado.
     r = await client.patch(url, json={"custo_total_pct": 9.5})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 4% + Desconto 0% + Ads 6% = 10%. Passa do Custo total (9,5%). Não gravado."
+        "Desconto 4% + Ads 6% = 10%. Passa do Custo total (9,5%). Não gravado."
     )
-    # Baixar o Afiliado e o teto juntos (valores novos): aceito.
-    r = await client.patch(url, json={"afiliado_pct": 3.5, "custo_total_pct": 9.5})
+    # Baixar o Desconto e o teto juntos (valores novos): aceito.
+    r = await client.patch(url, json={"desconto_pct": 3.5, "custo_total_pct": 9.5})
     assert r.status_code == 200, r.text
     par = await _par(db, corpo["par_id"])
     for linha in par.values():
         assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+            Decimal("4.00"),
             Decimal("3.50"),
-            None,
             Decimal("9.50"),
         )
         assert linha.observation is None
@@ -699,7 +720,7 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
     r = await client.put(ads, json={"ads_por_produto_ligada": True})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 3,5% + Desconto 0% + Ads 9% = 12,5%. Passa do Custo total (9,5%). Não gravado."
+        "Desconto 3,5% + Ads 9% = 12,5%. Passa do Custo total (9,5%). Não gravado."
     )
     # Com 6 no produto a troca cabe; a Geral fica desmarcada e o % dela gravado.
     assert (await client.put(produto, json={"pode_gastar_pct": 6})).status_code == 200
@@ -711,18 +732,25 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
     r = await client.put(produto, json={"pode_gastar_pct": 6.5})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 3,5% + Desconto 0% + Ads 6,5% = 10%. Passa do Custo total (9,5%). Não gravado."
+        "Desconto 3,5% + Ads 6,5% = 10%. Passa do Custo total (9,5%). Não gravado."
     )
     # Em "Produto" a Geral não vale; produto sem % próprio = sem Ads (0).
-    assert (await client.put(ads, json={"pode_gastar_pct": 3})).status_code == 200
+    assert (await client.put(ads, json={"pode_gastar_pct": 5})).status_code == 200
     assert (await client.put(produto, json={"pode_gastar_pct": None})).status_code == 200
-    r = await client.patch(url, json={"desconto_pct": 6})
+    # Sem Ads valendo: 5,5 + Afiliado 4 = 9,5 cabe.
+    r = await client.patch(url, json={"desconto_pct": 5.5})
     assert r.status_code == 200, r.text
-    # Voltar para "Geral" faz valer o 3: recusado.
+    # Voltar para "Geral" faz valer o 5 (maior que o Afiliado 4): recusado.
     r = await client.put(ads, json={"ads_geral_ligada": True})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 3,5% + Desconto 6% + Ads 3% = 12,5%. Passa do Custo total (9,5%). Não gravado."
+        "Desconto 5,5% + Ads 5% = 10,5%. Passa do Custo total (9,5%). Não gravado."
+    )
+    # A dupla do Afiliado também é conferida.
+    r = await client.patch(url, json={"afiliado_pct": 4.5})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 4,5% + Desconto 5,5% = 10%. Passa do Custo total (9,5%). Não gravado."
     )
     # As duas linhas do par ficaram iguais o tempo todo.
     gerais = {
@@ -731,7 +759,7 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
             await db.execute(select(PricingAdsConta).execution_options(populate_existing=True))
         ).scalars()
     }
-    assert gerais[par[CLASSICO].id] == gerais[par[PREMIUM].id] == (False, Decimal("3.00"), True)
+    assert gerais[par[CLASSICO].id] == gerais[par[PREMIUM].id] == (False, Decimal("5.00"), True)
 
     # Conta nova também não nasce acima do teto.
     r = await client.post(
@@ -746,6 +774,58 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
     )
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "custo_total_estourado"
+
+
+async def test_m94_venda_por_ads_ou_por_afiliado(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """M-94, os exemplos do pedido com Custo total 10: Desconto + o MAIOR entre
+    Afiliado e Ads. Vale nas duas linhas do par do ML."""
+    auth_as(cena.admin)
+    corpo = await _criar_ml(client)
+    url = f"/api/pricing/accounts/{corpo['id']}"
+    ads = f"/api/pricing/ads/{corpo['id']}"
+    assert (await client.patch(url, json={"custo_total_pct": 10})).status_code == 200
+    # Afiliado 4, Desconto 6, Ads 4: 4 + 6 = 10 e 4 + 6 = 10 → aceita.
+    assert (await client.patch(url, json={"afiliado_pct": 4, "desconto_pct": 6})).status_code == 200
+    r = await client.put(ads, json={"pode_gastar_pct": 4})
+    assert r.status_code == 200, r.text
+    # Afiliado 4, Desconto 3, Ads 7: 4 + 3 = 7 e 7 + 3 = 10 → aceita.
+    assert (await client.patch(url, json={"desconto_pct": 3})).status_code == 200
+    r = await client.put(ads, json={"pode_gastar_pct": 7})
+    assert r.status_code == 200, r.text
+    # Afiliado 4, Desconto 5, Ads 6: 6 + 5 = 11 → recusa.
+    assert (await client.put(ads, json={"pode_gastar_pct": 6})).status_code == 200
+    r = await client.patch(url, json={"desconto_pct": 5})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Desconto 5% + Ads 6% = 11%. Passa do Custo total (10%). Não gravado."
+    )
+    # Afiliado 7, Desconto 5, Ads 2: 7 + 5 = 12 → recusa, com a versão do
+    # Afiliado (pela linha do Premium também).
+    assert (await client.put(ads, json={"pode_gastar_pct": 2})).status_code == 200
+    assert (await client.patch(url, json={"desconto_pct": 5})).status_code == 200
+    par = await _par(db, corpo["par_id"])
+    for linha in par.values():
+        r = await client.patch(f"/api/pricing/accounts/{linha.id}", json={"afiliado_pct": 7})
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["mensagem"] == (
+            "Afiliado 7% + Desconto 5% = 12%. Passa do Custo total (10%). Não gravado."
+        )
+    par = await _par(db, corpo["par_id"])
+    for linha in par.values():
+        assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+            Decimal("4.00"),
+            Decimal("5.00"),
+            Decimal("10.00"),
+        )
+    gerais = (
+        (await db.execute(select(PricingAdsConta).execution_options(populate_existing=True)))
+        .scalars()
+        .all()
+    )
+    assert {g.pode_gastar_pct for g in gerais} == {Decimal("2.00")}
+    assert len(gerais) == 2
 
 
 async def test_quem_nao_e_admin_ve_o_custo_total_mas_nao_grava(
@@ -881,7 +961,7 @@ async def test_ads_de_produto_fora_do_departamento_nao_conta_no_custo_total(
     r = await client.put(f"{ads}/produto/{cena.produto_b.id}", json={"pode_gastar_pct": 6})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 0% + Desconto 0% + Ads 6% = 6%. Passa do Custo total (5%). Não gravado."
+        "Desconto 0% + Ads 6% = 6%. Passa do Custo total (5%). Não gravado."
     )
     r = await client.put(ads, json={"pode_gastar_pct": 5})
     assert r.status_code == 200, r.text
@@ -896,19 +976,19 @@ async def test_custo_total_confere_o_valor_com_as_2_casas_do_banco(
     corpo = await _criar_ml(client)
     url = f"/api/pricing/accounts/{corpo['id']}"
     ads = f"/api/pricing/ads/{corpo['id']}"
-    # 3,333 × 3 = 9,999 passaria de 9,99; gravado é 3,33 × 3 = 9,99: cabe.
+    # M-94: Desconto + o maior entre Afiliado e Ads. 6,663 + 3,333 = 9,996
+    # passaria de 9,99; gravado é 6,66 + 3,33 = 9,99: cabe.
     r = await client.patch(url, json={"custo_total_pct": 9.99, "afiliado_pct": 3.333})
     assert r.status_code == 200, r.text
-    assert (await client.patch(url, json={"desconto_pct": 3.333})).status_code == 200
+    assert (await client.patch(url, json={"desconto_pct": 6.663})).status_code == 200
     r = await client.put(ads, json={"pode_gastar_pct": 3.333})
     assert r.status_code == 200, r.text
     assert r.json()["pode_gastar_pct"] == 3.33
-    # 3,335 vira 3,34 (meio para cima): 3,34 + 3,33 + 3,33 = 10 > 9,99.
+    # 3,335 vira 3,34 (meio para cima): 6,66 + 3,34 = 10 > 9,99.
     r = await client.patch(url, json={"afiliado_pct": 3.335})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 3,34% + Desconto 3,33% + Ads 3,33% = 10%. Passa do Custo total (9,99%)."
-        " Não gravado."
+        "Afiliado 3,34% + Desconto 6,66% = 10%. Passa do Custo total (9,99%). Não gravado."
     )
     # O teto também: 9,985 vira 9,99 e cabe; 9,984 vira 9,98 e não.
     assert (await client.patch(url, json={"custo_total_pct": 9.985})).status_code == 200
@@ -928,7 +1008,7 @@ async def test_custo_total_confere_o_valor_com_as_2_casas_do_banco(
     for linha in par.values():
         assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
             Decimal("3.33"),
-            Decimal("3.33"),
+            Decimal("6.66"),
             Decimal("9.99"),
         )
     gerais = (

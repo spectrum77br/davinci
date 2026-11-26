@@ -41,7 +41,8 @@ duas ligadas no banco (antes da M-78), a conta lê como "Geral"
 
 M-53 (25/11/2026): conta ML do par (Clássico + Premium, mesmo `par_id`) grava o
 mesmo na irmã, nas duas rotas. M-56: Afiliado % + Desconto % + Ads % da conta
-não passa do Custo total (`app/services/pricing/custo_total.py`); o PUT que
+(M-94: Desconto + o maior entre Afiliado e Ads) não passa do Custo total
+(`app/services/pricing/custo_total.py`); o PUT que
 estoura (inclusive religar uma caixa) é recusado com 422 `custo_total_estourado`
 e nada é gravado. Revisão da M-86: com a conta já acima do teto (o Custo total
 calculado pela Margem mínima ficou abaixo da soma), o PUT que não aumenta o

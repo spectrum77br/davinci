@@ -158,8 +158,8 @@ const AJUDA_CONTAS = {
         { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) por tipo de produto; são eles que formam o preço.' },
         { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
         { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado. Com Produto, a lista mostra a categoria de venda de cada produto; o botão Categoria de venda mostra só os produtos das categorias marcadas (nenhuma marcada = todos) e a caixinha Ads só os que têm % ou gasto por dia nesta conta. Os dois somam com a busca, não gravam nada e voltam zerados ao abrir a janela.' },
-        { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem. Com a Margem mínima preenchida, ele é calculado e não se digita (fica cinza).' },
-        { termo: 'Margem mínima (ADM)', texto: 'margem mínima (%) da conta; só o administrador vê e muda. É diferente da "Margem Mín" da categoria de venda e da do produto: aquelas seguram o pedido na Margem; esta define o Custo total. Preenchida, o Custo total sai do caso mais apertado da conta: a folga entre a menor marg da conta e a Margem mínima, tirada a comissão (no ML, a maior entre Clássico e Premium) e dividida por 1 mais a menor marg; arredondado para baixo, nunca abaixo de 0. Frete não entra. Ex. (números de exemplo): conta com menor marg 40%, comissão 15% e Margem mínima 25%: (40% − 25%) × (1 − 15%) ÷ 1,40 = 9,1% → Custo total 9%. Sem nenhuma marg, o Custo total fica vazio. Muda sozinho quando mudam a Margem mínima, uma marg ou a comissão. Apagando a Margem mínima, o Custo total fica com o último valor e volta a ser digitado. Se ficar abaixo de Afiliado + Desconto + Ads, grava assim mesmo e a caixinha do Custo total fica com a borda vermelha até alguém corrigir: enquanto isso, dá para baixar Afiliado, Desconto ou Ads um de cada vez, mesmo que a soma ainda não caiba; o que aumenta a soma continua recusado.' },
+        { termo: 'Custo total (ADM)', texto: 'teto de Desconto + Afiliado ou de Desconto + Ads (vale o maior dos dois): a venda vem por Ads ou por afiliado, nunca pelos dois. Se passar, o sistema não grava e mostra a conta que passou. Todos veem. Com a Margem mínima preenchida, ele é calculado e não se digita (fica cinza).' },
+        { termo: 'Margem mínima (ADM)', texto: 'margem mínima (%) da conta; só o administrador vê e muda. É diferente da "Margem Mín" da categoria de venda e da do produto: aquelas seguram o pedido na Margem; esta define o Custo total. Preenchida, o Custo total sai do caso mais apertado da conta: a folga entre a menor marg da conta e a Margem mínima, tirada a comissão (no ML, a maior entre Clássico e Premium) e dividida por 1 mais a menor marg; arredondado para baixo, nunca abaixo de 0. Frete não entra. Ex. (números de exemplo): conta com menor marg 40%, comissão 15% e Margem mínima 25%: (40% − 25%) × (1 − 15%) ÷ 1,40 = 9,1% → Custo total 9%. Sem nenhuma marg, o Custo total fica vazio. Muda sozinho quando mudam a Margem mínima, uma marg ou a comissão. Apagando a Margem mínima, o Custo total fica com o último valor e volta a ser digitado. Se ficar abaixo de Desconto + o maior entre Afiliado e Ads, grava assim mesmo e a caixinha do Custo total fica com a borda vermelha até alguém corrigir: enquanto isso, dá para baixar Afiliado, Desconto ou Ads um de cada vez, mesmo que a soma ainda não caiba; o que aumenta a soma continua recusado.' },
       ],
     },
     {
@@ -565,7 +565,7 @@ type Account = {
   // limite saíram da tela na M-55 (25/11/2026); ficam no banco, fora da tela.
   afiliado_pct: string | number | null
   // M-55: Desconto (%), só anotação como o Afiliado. M-56: Custo total (%) =
-  // teto de Afiliado + Desconto + Ads, conferido no servidor; todos veem, só o
+  // teto de Desconto + o maior entre Afiliado e Ads (M-94), conferido no servidor; todos veem, só o
   // ADM muda. Nenhum dos dois entra no preço.
   desconto_pct?: string | number | null
   custo_total_pct?: string | number | null
@@ -1556,7 +1556,7 @@ const STORE_NOTE_FIELDS: CampoAnotacao[] = [
   { key: 'ads', label: 'Ads', titulo: '% Geral que a conta pode gastar em Ads — clique para abrir o Ads (gasto por dia e % por produto)' },
   {
     key: 'custo_total_pct', label: 'Custo total', tipo: 'pct', soAdmin: true,
-    titulo: 'Teto de Afiliado + Desconto + Ads (%). Vazio = sem teto. Só o administrador muda',
+    titulo: 'Teto de Desconto + Afiliado ou de Desconto + Ads (vale o maior dos dois). Vazio = sem teto. Só o administrador muda',
   },
   {
     key: 'margem_minima_pct', label: 'Margem mínima', tipo: 'pct', soAdmin: true, soAdminVe: true,
@@ -1604,7 +1604,8 @@ function textoAnotacao(acc: Account, f: CampoAnotacao): string {
 }
 
 // M-56: o servidor recusa (422 custo_total_estourado) a gravação que faria
-// Afiliado + Desconto + Ads passar do Custo total. O campo fica com a borda
+// Desconto + o maior entre Afiliado e Ads (M-94) passar do Custo total; o aviso
+// mostra só a dupla que passou. O campo fica com a borda
 // vermelha, o aviso do servidor aparece junto dele e o valor volta ao anterior.
 // Conta que já está acima do teto (M-86): o servidor aceita o que não aumenta a
 // soma (baixar um campo por vez), mesmo sem caber ainda.
@@ -1749,12 +1750,13 @@ function pctDoProdutoAds(c: AdsConta, prodId: string): number | null {
   return modoAds(c) === 'produto' ? (c.produtos[prodId]?.pode_gastar_pct ?? null) : null
 }
 
-// ---------- Custo total abaixo de Afiliado + Desconto + Ads (M-86, item 7)
+// ---------- Custo total abaixo de Desconto + o maior entre Afiliado e Ads (M-86, item 7)
 // O Custo total calculado pela Margem mínima pode ficar abaixo do que já está
 // gravado: o servidor grava assim mesmo (não barra quem mexeu na Margem mínima,
 // na marg ou na comissão) e a caixinha do Custo total fica com a borda vermelha
-// e o aviso até alguém corrigir. A soma é a da trava do servidor
-// (services/pricing/custo_total.py): Afiliado + Desconto + o MAIOR Ads que vale
+// e o aviso até alguém corrigir. A conta é a da trava do servidor
+// (services/pricing/custo_total.py). M-94: a venda vem por Ads OU por afiliado,
+// então é Desconto + o MAIOR entre Afiliado e Ads — o Ads é o MAIOR que vale
 // (com "Geral", o % Geral; com "Produto", o maior % próprio dos produtos da aba).
 
 // O maior Ads que vale na conta; sem Ads, 0.
@@ -1770,17 +1772,25 @@ function maiorAdsDaConta(c: AdsConta, produtos: string[]): number {
   return maior
 }
 
-// "Afiliado + Desconto + Ads (9%) passa do Custo total (6%)", ou null se cabe
-// (ou se a conta não tem Custo total). Conta em centésimos: os % têm 2 casas.
+// Só a dupla que passou (a maior; empate, a do Afiliado, como o servidor):
+// "Desconto 2% + Ads 7% = 9% passa do Custo total (6%)" ou "Afiliado 7% +
+// Desconto 2% = 9% passa do Custo total (6%)"; null se cabe (ou se a conta não
+// tem Custo total). Conta em centésimos: os % têm 2 casas.
 function avisoSomaAcimaDoCustoTotal(acc: Account, adsPct: number): string | null {
   const teto = acc.custo_total_pct
   if (teto == null || teto === '') return null
   const centesimos = (v: unknown) => Math.round(Number(v || 0) * 100)
-  const soma = centesimos(acc.afiliado_pct) + centesimos(acc.desconto_pct) + centesimos(adsPct)
+  const afiliado = centesimos(acc.afiliado_pct)
+  const desconto = centesimos(acc.desconto_pct)
+  const adsC = centesimos(adsPct)
+  const soma = desconto + Math.max(afiliado, adsC)
   const limite = centesimos(teto)
   if (soma <= limite) return null
   const pct = (c: number) => String(c / 100).replace('.', ',')
-  return `Afiliado + Desconto + Ads (${pct(soma)}%) passa do Custo total (${pct(limite)}%)`
+  const dupla = adsC > afiliado
+    ? `Desconto ${pct(desconto)}% + Ads ${pct(adsC)}%`
+    : `Afiliado ${pct(afiliado)}% + Desconto ${pct(desconto)}%`
+  return `${dupla} = ${pct(soma)}% passa do Custo total (${pct(limite)}%)`
 }
 
 // conta → aviso, das contas da aba (o Ads só depois que a janela de Ads carrega).
@@ -6521,7 +6531,7 @@ watch(department, async () => {
                      preenchida (M-86) o Custo total é calculado e fica travado para
                      todos, em cinza. Recusa do Custo total (M-56): borda vermelha e o
                      aviso do servidor junto do campo. Custo total calculado abaixo de
-                     Afiliado + Desconto + Ads (M-86): borda vermelha e o aviso até
+                     Desconto + o maior entre Afiliado e Ads (M-86/M-94): borda vermelha e o aviso até
                      alguém corrigir. -->
                 <td
                   v-if="f.tipo"
