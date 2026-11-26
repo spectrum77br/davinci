@@ -3,6 +3,8 @@
 NÃO é um cadastro novo: são os segmentos FILHOS das raízes de Cadastros › Segmentos (tabela
 `segments`), mostrados e editados também em Cadastros › Produtos. A raiz é o "centro de custo"
 (Celular, Eletro, Mala; Catálogo só aparece na lista) e o filho é a categoria de venda.
+M-76: o menu de centros de custo vem de Cadastros › Centro de custo (tabela centros_custo, cujos
+fixos apontam para essas raízes); centro novo, sem raiz, ainda não recebe categoria de venda.
 
 O que liga o produto à margem/frete da conta é a POSIÇÃO do filho: sort_order 0..4 →
 margin1..5 / shipping1..5 (routers/pricing._segment_index, services/pricing/push,
@@ -40,8 +42,9 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import PricingAccount, PricingProduct, Product, Segment
+from app.models import CentroCusto, PricingAccount, PricingProduct, Product, Segment
 from app.schemas.segments import _slugify
+from app.services import centros_custo
 from app.services.categorias_ordem import posicao_categoria
 from app.services.produto_cadastros import ordem
 
@@ -57,9 +60,9 @@ LIMITE = 5
 # Procuradas pelo nome (lower(name) = 'apple' / 'queima de estoque') fora daqui.
 NOMES_PROCURADOS = ("Apple", "Queima de estoque")
 
-# A raiz "Catálogo" é antiga (o Catálogo ML virou coluna da conta de kit): mostra as
-# categorias dela na lista, mas não é centro de custo para incluir categoria nova (M-76).
-_FORA_DO_MENU = frozenset({"catalogo"})
+# M-76: centro de custo sem raiz em Cadastros › Segmentos (todo centro novo) ainda não recebe
+# categoria de venda — ver centro_para_nova_categoria.
+MSG_SO_FIXOS = "Categoria de venda só em Celular, Eletro e Mala por enquanto."
 
 _SLOTS = (
     PricingAccount.slot1_segment_id,
@@ -132,12 +135,47 @@ async def listar(session: AsyncSession) -> list[tuple[Segment, Segment]]:
     return vendas
 
 
-async def centros_do_menu(session: AsyncSession) -> list[Segment]:
+async def centros_do_menu(session: AsyncSession) -> list[tuple[CentroCusto, Segment | None]]:
     """O ÚNICO lugar que monta a lista de centros de custo onde se inclui categoria de venda
-    (o menu do "Novo cadastro" e a conferência do servidor). Hoje: as raízes de Segmentos,
-    menos o Catálogo. A M-76 troca a fonte para o cadastro de Centro de custo."""
-    raizes = (await session.execute(select(Segment).where(Segment.parent_id.is_(None)))).scalars()
-    return sorted((r for r in raizes if r.slug not in _FORA_DO_MENU), key=ordem_centro)
+    (o menu do "Novo cadastro" e a conferência do servidor). M-76: é a lista de
+    Cadastros › Centro de custo, inteira — Celular, Eletro e Mala (com a raiz) e os centros novos
+    (sem raiz: aparecem, mas centro_para_nova_categoria recusa). O Catálogo não é centro de custo
+    e não entra."""
+    return await centros_custo.listar(session)
+
+
+async def centro_para_nova_categoria(
+    session: AsyncSession, centro_id: UUID
+) -> tuple[CentroCusto, Segment]:
+    """O centro de custo escolhido no menu e a raiz dele.
+
+    `centro_id` é o id do centro (Cadastros › Centro de custo); o id da raiz também é aceito
+    (a tela da M-75, antes da M-76, mandava o id do segmento-raiz).
+
+    Centro SEM raiz → recusa (MSG_SO_FIXOS). Criar a 1ª categoria dele exigiria uma raiz nova em
+    `segments`, e uma raiz — mesmo criada desativada — aparece: na aba Segmentos (onde quem
+    reativa vira botão na Tabela de Preços) e, pelas categorias dela (ativas), no menu de
+    segmento e no filtro da tela Produtos, onde escolher uma faria o produto sair do departamento
+    na tela e perder a DUIMP/mensagem da nota (o segmento do produto vence a Tabela de Preços em
+    nf_emissao_gerar._texto_segmento_por_sku). Mais seguro: só Celular, Eletro e Mala por
+    enquanto."""
+    par = next(
+        (
+            (c, r)
+            for c, r in await centros_do_menu(session)
+            if c.id == centro_id or (c.segment_id is not None and c.segment_id == centro_id)
+        ),
+        None,
+    )
+    if par is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "centro_nao_encontrado", "mensagem": "Centro de custo não encontrado."},
+        )
+    centro, raiz = par
+    if raiz is None or raiz.parent_id is not None:
+        raise _recusa("categoria_venda_centro_sem_raiz", MSG_SO_FIXOS)
+    return centro, raiz
 
 
 # ---------------------------------------------------------------- incluir

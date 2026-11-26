@@ -46,6 +46,7 @@ PAGINAS: dict[str, str] = {
     "/financeiro/dnp": "DNP",
     "/imobilizado": "Cadastros › Imobilizado",
     "/cadastro-produtos": "Cadastros › Produtos",
+    "/cadastro-centro-custo": "Cadastros › Centro de custo",
     "/garantias": "Pós-venda › Garantias",
     "/importacao": "Importação",
     # Integrações virou aba de Cadastros em 17/11/2026, com o Histórico dentro
@@ -133,6 +134,7 @@ API: dict[str, str] = {
     "/api/tarefas": "Tarefas",
     "/api/imobilizado": "Cadastros › Imobilizado",
     "/api/produto-cadastros": "Cadastros › Produtos",
+    "/api/centros-custo": "Cadastros › Centro de custo",
     "/api/garantias": "Pós-venda › Garantias",
     "/api/claude-conector": "Tarefas › Conector do Claude",
     "/api/claude-mcp": "Claude (conector)",
@@ -435,6 +437,8 @@ TABELAS: dict[str, str] = {
     "company_certificates": "Certificado digital",
     "cadastros": "Cadastro",
     "segments": "Segmento",
+    # M-76 (25/11/2026, migration 0514): Cadastros › Centro de custo.
+    "centros_custo": "Centro de custo",
     "marcas": "Marca",
     "redes_sociais": "Rede social",
     "marca_emails": "E-mail da marca (Tuta)",

@@ -89,6 +89,7 @@ from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
 from app.routers import organizar as organizar_router
 from app.routers import produto_cadastros as produto_cadastros_router
+from app.routers import centros_custo as centros_custo_router
 from app.routers import produtos_atualizar as produtos_atualizar_router
 from app.routers import produtos_trocar_tag as produtos_trocar_tag_router
 from app.routers import ouvidoria as ouvidoria_router
@@ -308,6 +309,8 @@ app.include_router(tarefas_router.router)
 app.include_router(imobilizado_router.router)
 # Cadastros › Produtos (M-29, 24/11/2026): categorias e tags de envio.
 app.include_router(produto_cadastros_router.router)
+# M-76: Cadastros › Centro de custo (a aba logo depois de Produtos).
+app.include_router(centros_custo_router.router)
 app.include_router(garantias_router.router)
 # Garantias: nada de query de /api/garantias no access log (nome/CPF ficam no corpo).
 garantias_router.mascarar_query_no_access_log()

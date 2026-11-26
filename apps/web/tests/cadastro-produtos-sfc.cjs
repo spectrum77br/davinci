@@ -13,6 +13,9 @@
 //    centro); tipo "Categoria de venda" (os segmentos filhos) pede o centro de custo no Novo
 //    cadastro e vai pelas rotas /categorias-venda (criar, renomear, uso, excluir sem confirmar);
 //    a marca "inativa"; o tipo não troca com os outros no lápis.
+//  - M-76: a aba "Centro de custo" vem logo depois de Produtos (tests/cadastro-centro-custo-sfc.cjs
+//    trava a tela dela); o menu "Centro de custo" é a lista de Cadastros › Centro de custo e o
+//    centro novo (aceita_categoria false) avisa e trava o Salvar.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -30,8 +33,9 @@ const transpile = (source, module = ts.ModuleKind.CommonJS) => ts.transpileModul
   const exp = {}
   new Function('exports', 'require', transpile(fs.readFileSync(path.join(__dirname, '../lib/navGroups.ts'), 'utf8')))(exp, require)
   const labels = exp.TABS_CADASTROS.map((t) => t.label)
-  assert.deepEqual(labels.slice(-2), ['Integrações', 'Produtos'], 'Produtos logo depois de Integrações')
-  const aba = exp.TABS_CADASTROS.at(-1)
+  // M-76: Centro de custo entrou logo depois de Produtos.
+  assert.deepEqual(labels.slice(-3), ['Integrações', 'Produtos', 'Centro de custo'], 'Produtos logo depois de Integrações')
+  const aba = exp.TABS_CADASTROS.at(-2)
   assert.equal(aba.to, '/cadastro-produtos')
   assert.equal(aba.resource, 'cadastro_produtos')
   const ver = { role: 'user', permissions: { cadastro_produtos: { view: true } } }
@@ -100,7 +104,7 @@ const factory = new AsyncFunction(
     tipoAberto, tipoNome, tipoErro, abrirTipo, criarTipo, editarTipo, tipoEditNome, salvarTipo,
     cadAberto, cadTipo, cadNome, cadErro, cadAviso, abrirCadastro, salvarCadastro,
     excluindo, excluirUso, excluirErro, pedirExclusao, confirmarExclusao,
-    centros, cadCentro, cadEhVenda, tiposDoMenu,
+    centros, cadCentro, cadEhVenda, tiposDoMenu, cadCentroSemCategoria,
   }`,
 )
 
@@ -116,8 +120,9 @@ const CADS = [
   { id: 's2', tipo_id: 'tv', tipo_nome: 'Categoria de venda', tipo_chave: 'categoria_venda', nome: 'Queima de estoque', centro_custo: 'Mala', ativa: false },
 ]
 const CENTROS = [
-  { id: 'r-cel', nome: 'Celular' },
-  { id: 'r-mala', nome: 'Mala' },
+  { id: 'r-cel', nome: 'Celular', aceita_categoria: true },
+  { id: 'r-mala', nome: 'Mala', aceita_categoria: true },
+  { id: 'cc-brinq', nome: 'Brinquedos', aceita_categoria: false },
 ]
 const erro = (status, detail) => Object.assign(new Error(String(status)), { data: { detail } })
 
@@ -246,6 +251,22 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     })
     assert.equal(p.cadErro.value, limite)
     assert.equal(p.cadAberto.value, true)
+  }
+  // M-76: centro novo (Brinquedos) aparece no menu, mas avisa e não vai ao servidor
+  {
+    const { p, calls } = await pagina()
+    p.abrirCadastro()
+    p.cadTipo.value = 'tv'
+    p.cadNome.value = 'Pelúcias'
+    p.cadCentro.value = 'cc-brinq'
+    assert.equal(p.cadCentroSemCategoria.value, true)
+    await p.salvarCadastro()
+    assert.equal(p.cadErro.value, 'Categoria de venda só em Celular, Eletro e Mala por enquanto.')
+    assert.ok(!calls.some((c) => c.method === 'POST'), 'nada vai ao servidor')
+    p.cadCentro.value = 'r-cel'
+    assert.equal(p.cadCentroSemCategoria.value, false)
+    assert.match(tpl, /<p\s+v-if="cadCentroSemCategoria"[\s\S]{0,300}data-aviso="centro-sem-categoria"[\s\S]{0,40}\{\{ MSG_SO_FIXOS \}\}/)
+    assert.match(tpl, /:disabled="cadSalvando \|\| cadCentroSemCategoria" data-acao="salvar-cadastro"/)
   }
   // M-75: lápis numa Categoria de venda — só o nome, pela rota dela; o centro só aparece;
   // a recusa do nome fixo aparece como veio

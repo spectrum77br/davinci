@@ -22,6 +22,11 @@ Cadastros › Segmentos (tabela `segments`, NÃO um cadastro novo), com a raiz c
 custo". Aparecem na mesma lista (GET "") e são incluídos, renomeados e excluídos pelas rotas
 /categorias-venda (só administrador). As regras que seguram as colunas de margem/frete estão em
 services/categorias_venda.py (as mesmas da aba Segmentos).
+
+M-76 (25/11/2026): o menu "Centro de custo" do Novo cadastro de Categoria de venda vem de
+Cadastros › Centro de custo (routers/centros_custo.py); centro novo (sem raiz) aparece no menu,
+mas ainda não recebe categoria de venda ("Categoria de venda só em Celular, Eletro e Mala por
+enquanto.").
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from app.deps.auth import require_active_user, require_admin, require_permission
 from app.models import ProdutoCadastro, ProdutoCadastroTipo, Segment, User
 from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO, NOME_MAX
 from app.services import categorias_venda as cv
+from app.services import centros_custo
 from app.services import produto_cadastros as svc
 
 router = APIRouter(prefix="/api/produto-cadastros", tags=["produto_cadastros"])
@@ -70,12 +76,16 @@ class CadastroOut(BaseModel):
 class CentroCustoOut(BaseModel):
     id: UUID
     nome: str
+    # M-76: só Celular, Eletro e Mala (os centros com raiz em Segmentos) recebem categoria de
+    # venda por enquanto; a tela avisa ao escolher um centro novo.
+    aceita_categoria: bool = True
 
 
 class ListaOut(BaseModel):
     tipos: list[TipoOut]
     cadastros: list[CadastroOut]
-    # M-75: as raízes de Cadastros › Segmentos, para o "Novo cadastro" de Categoria de venda.
+    # O menu do "Novo cadastro" de Categoria de venda: M-75 eram as raízes de Segmentos; desde a
+    # M-76, a lista de Cadastros › Centro de custo (id = centros_custo.id).
     centros_custo: list[CentroCustoOut] = []
 
 
@@ -140,29 +150,23 @@ def _cadastro_out(c: ProdutoCadastro, t: ProdutoCadastroTipo) -> CadastroOut:
     return CadastroOut(id=c.id, tipo_id=t.id, tipo_nome=t.nome, tipo_chave=t.chave, nome=c.nome)
 
 
-def _venda_out(seg: Segment, raiz: Segment) -> CadastroOut:
-    """Categoria de venda (M-75): a linha é o próprio segmento filho (id = segments.id)."""
+def _venda_out(seg: Segment, raiz: Segment, centro_nome: str | None = None) -> CadastroOut:
+    """Categoria de venda (M-75): a linha é o próprio segmento filho (id = segments.id). O Centro
+    de custo é o nome do cadastro de Centro de custo (M-76) ou, na raiz que não é centro (o
+    Catálogo), o nome da raiz."""
     return CadastroOut(
         id=seg.id,
         tipo_id=cv.TIPO_ID,
         tipo_nome=cv.TIPO_NOME,
         tipo_chave=cv.CHAVE,
         nome=seg.name,
-        centro_custo=raiz.name,
+        centro_custo=centro_nome or raiz.name,
         ativa=seg.active,
     )
 
 
-async def _centro(session: AsyncSession, centro_id: UUID) -> Segment:
-    """O centro de custo escolhido no menu: tem de estar na MESMA lista do menu
-    (cv.centros_do_menu — o Catálogo, por exemplo, não está)."""
-    raiz = next((r for r in await cv.centros_do_menu(session) if r.id == centro_id), None)
-    if raiz is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            detail={"code": "centro_nao_encontrado", "mensagem": "Centro de custo não encontrado."},
-        )
-    return raiz
+async def _nome_do_centro(session: AsyncSession, raiz: Segment) -> str:
+    return (await centros_custo.nomes_por_raiz(session)).get(raiz.id, raiz.name)
 
 
 async def _venda(session: AsyncSession, venda_id: UUID) -> tuple[Segment, Segment]:
@@ -334,7 +338,8 @@ async def listar(
     # M-75: Categoria de venda = os segmentos filhos, por centro de custo (Celular, Eletro,
     # Mala e depois o Catálogo) e na ordem das colunas de margem/frete (cv.listar); o sort
     # estável só encaixa o tipo entre os outros.
-    cadastros += [_venda_out(s, raiz) for s, raiz in await cv.listar(session)]
+    nomes = await centros_custo.nomes_por_raiz(session)
+    cadastros += [_venda_out(s, raiz, nomes.get(raiz.id)) for s, raiz in await cv.listar(session)]
     cadastros.sort(key=lambda c: svc.ordem(c.tipo_nome))
     tipos_out = [TipoOut(id=t.id, nome=t.nome, chave=t.chave) for t in tipos]
     tipos_out.append(TipoOut(id=cv.TIPO_ID, nome=cv.TIPO_NOME, chave=cv.CHAVE))
@@ -343,7 +348,8 @@ async def listar(
         tipos=tipos_out,
         cadastros=cadastros,
         centros_custo=[
-            CentroCustoOut(id=r.id, nome=r.name) for r in await cv.centros_do_menu(session)
+            CentroCustoOut(id=c.id, nome=c.nome, aceita_categoria=raiz is not None)
+            for c, raiz in await cv.centros_do_menu(session)
         ],
     )
 
@@ -494,7 +500,7 @@ async def criar_categoria_venda(
     admin: Annotated[User, Depends(require_admin)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CadastroOut:
-    raiz = await _centro(session, body.centro_custo_id)
+    centro, raiz = await cv.centro_para_nova_categoria(session, body.centro_custo_id)
     nome = _nome(body.nome, "cadastro")
     posicao = await cv.conferir_nova(session, raiz, nome)
     seg = Segment(
@@ -505,7 +511,7 @@ async def criar_categoria_venda(
         sort_order=posicao,
         active=True,
     )
-    nome_centro = raiz.name  # o rollback abaixo expira os objetos da sessão
+    nome_centro = centro.nome  # o rollback abaixo expira os objetos da sessão
     session.add(seg)
     try:
         # Na mesma transação: as contas do centro com o slot{N} vazio passam a apontar
@@ -525,7 +531,7 @@ async def criar_categoria_venda(
                 },
             ) from e
         raise
-    return _venda_out(seg, raiz)
+    return _venda_out(seg, raiz, nome_centro)
 
 
 @router.patch("/categorias-venda/{venda_id}", response_model=CadastroOut)
@@ -538,13 +544,14 @@ async def renomear_categoria_venda(
     """Só o nome (o centro de custo e a posição não mudam por aqui)."""
     seg, raiz = await _venda(session, venda_id)
     nome = _nome(body.nome, "cadastro")
+    centro_nome = await _nome_do_centro(session, raiz)
     if nome == seg.name:
-        return _venda_out(seg, raiz)
+        return _venda_out(seg, raiz, centro_nome)
     cv.conferir_troca_de_nome(seg.name, nome)
     await cv.sem_repetir_no_centro(session, raiz, nome, menos=seg.id)
     seg.name = nome
     await session.commit()
-    return _venda_out(seg, raiz)
+    return _venda_out(seg, raiz, centro_nome)
 
 
 @router.get("/categorias-venda/{venda_id}/uso", response_model=UsoOut)

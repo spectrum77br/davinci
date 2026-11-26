@@ -14,6 +14,9 @@
 // centro de custo (até 5), só a última sai e "Apple"/"Queima de estoque" não trocam de nome
 // (o servidor confere e manda a frase). O menu "Centro de custo" do Novo cadastro vem de um
 // lugar só: `centros_custo` da lista (services/categorias_venda.centros_do_menu no servidor).
+// M-76: esse menu é a lista de Cadastros › Centro de custo. Centro novo aparece, mas ainda não
+// recebe categoria de venda: ao escolher, a janela avisa e o Salvar fica travado (o servidor
+// recusa com a mesma frase).
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -32,10 +35,12 @@ type Cadastro = {
   centro_custo?: string | null
   ativa?: boolean
 }
-type Centro = { id: string; nome: string }
+type Centro = { id: string; nome: string; aceita_categoria?: boolean }
 type Uso = { regra: string | null; produtos: number | null; bloqueia: boolean; mensagem: string | null }
 
 const CHAVE_VENDA = 'categoria_venda'
+// A mesma frase do servidor (services/categorias_venda.MSG_SO_FIXOS).
+const MSG_SO_FIXOS = 'Categoria de venda só em Celular, Eletro e Mala por enquanto.'
 const ehVenda = (c: { tipo_chave?: string | null; chave?: string | null } | null | undefined) =>
   !!c && (c.tipo_chave === CHAVE_VENDA || c.chave === CHAVE_VENDA)
 
@@ -140,6 +145,13 @@ const cadSalvando = ref(false)
 
 // O tipo escolhido na janela é Categoria de venda?
 const cadEhVenda = computed(() => ehVenda(tipos.value.find((t) => t.id === cadTipo.value)))
+// M-76: o centro escolhido no Novo cadastro ainda não recebe categoria de venda (centro novo).
+const cadCentroSemCategoria = computed(
+  () =>
+    cadEhVenda.value &&
+    !cadEditando.value &&
+    centros.value.find((c) => c.id === cadCentro.value)?.aceita_categoria === false,
+)
 // Os tipos do menu: Categoria de venda não troca com os outros (é outro dado) — no lápis de
 // uma categoria de venda o menu fica travado; no lápis das outras ela não aparece.
 const tiposDoMenu = computed(() =>
@@ -169,6 +181,10 @@ async function salvarCadastro(confirmar = false) {
   }
   if (cadEhVenda.value && !cadEditando.value && !cadCentro.value) {
     cadErro.value = 'Escolha o centro de custo.'
+    return
+  }
+  if (cadCentroSemCategoria.value) {
+    cadErro.value = MSG_SO_FIXOS
     return
   }
   cadSalvando.value = true
@@ -447,6 +463,13 @@ async function confirmarExclusao() {
             <option v-for="r in centros" :key="r.id" :value="r.id">{{ r.nome }}</option>
           </select>
         </label>
+        <p
+          v-if="cadCentroSemCategoria"
+          class="rounded border border-amber-300 bg-amber-50 dark:bg-amber-900/15 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+          data-aviso="centro-sem-categoria"
+        >
+          {{ MSG_SO_FIXOS }}
+        </p>
         <label class="block text-xs text-muted-foreground">
           Nome
           <input
@@ -468,7 +491,7 @@ async function confirmarExclusao() {
         </div>
         <div v-else class="flex justify-end gap-2">
           <Button size="sm" variant="ghost" @click="fecharCadastro">Cancelar</Button>
-          <Button size="sm" :disabled="cadSalvando" data-acao="salvar-cadastro" @click="salvarCadastro(false)">
+          <Button size="sm" :disabled="cadSalvando || cadCentroSemCategoria" data-acao="salvar-cadastro" @click="salvarCadastro(false)">
             <Loader2 v-if="cadSalvando" class="size-4 mr-1 animate-spin" /> Salvar
           </Button>
         </div>

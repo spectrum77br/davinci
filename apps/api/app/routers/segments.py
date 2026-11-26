@@ -19,7 +19,7 @@ from app.schemas.segments import (
     SegmentTreeNode,
     _slugify,
 )
-from app.services import categorias_venda
+from app.services import categorias_venda, centros_custo
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/segments", tags=["segments"])
@@ -156,6 +156,31 @@ async def patch_segment(
             if new_parent in descendants:
                 raise HTTPException(400, detail={"code": "segment_parent_cycle"})
 
+    # M-76: a raiz de um centro de custo (Cadastros › Centro de custo) não vira filha de outro
+    # segmento; Celular, Eletro e Mala não mudam de nome (as outras telas têm os três escritos
+    # fixos); a raiz de um centro novo troca o nome junto com o do centro.
+    centro = await centros_custo.centro_da_raiz(session, seg.id)
+    if centro is not None:
+        if data.get("parent_id") is not None:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "centro_custo_raiz",
+                    "mensagem": (
+                        f"“{seg.name}” é um centro de custo (Cadastros › Centro de custo) e "
+                        "não vira filho de outro segmento."
+                    ),
+                },
+            )
+        novo_nome = data.get("name")
+        if novo_nome is not None and novo_nome != seg.name:
+            if centro.fixo:
+                raise centros_custo.recusa_fixo_nome()
+            nome = centros_custo.conferir_nome(novo_nome)
+            await centros_custo.sem_repetir(session, nome, menos=centro.id)
+            data["name"] = nome
+            centro.nome = nome
+
     # M-75: "Apple" e "Queima de estoque" são procuradas pelo nome; e desativar
     # ou reativar uma categoria de venda não pode tirar as outras da coluna de
     # margem/frete da aba Contas (services/categorias_venda). A posição e o
@@ -219,6 +244,21 @@ async def delete_segment(
     # para ela, e só a última do centro de custo (as outras não mudam de
     # coluna). Antes vinha um erro genérico do banco quando havia produto.
     # Os vínculos slot1..5 das contas não contam como uso e são limpos junto.
+    # M-76: a raiz de um centro de custo não sai por aqui (Celular, Eletro e Mala nunca saem;
+    # a de um centro novo, só depois que o centro sair de Cadastros › Centro de custo). Sem
+    # isto o banco recusaria (RESTRICT) com um erro genérico.
+    centro = await centros_custo.centro_da_raiz(session, seg.id)
+    if centro is not None:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "centro_custo_raiz",
+                "mensagem": (
+                    f"“{seg.name}” é um centro de custo (Cadastros › Centro de custo) e não "
+                    "sai pela aba Segmentos."
+                ),
+            },
+        )
     raiz = await categorias_venda.raiz_de(session, seg)
     if raiz is not None:
         await categorias_venda.excluir(session, seg, raiz)

@@ -43,9 +43,11 @@ const rotulos = (tabs) => tabs.map((t) => t.label)
   assert.deepEqual(rotulos(nav.TABS_INTEGRACOES), ['Integrações', 'Sincronizações', 'Alertas', 'Histórico'])
   assert.deepEqual(nav.TABS_INTEGRACOES.map((t) => t.resource ?? t.soComChave),
     ['integracoes', 'sincronizacoes', 'alertas', 'historico'], 'mesmas permissões de antes')
-  // M-29 (24/11/2026): a aba Produtos entrou DEPOIS de Integrações.
-  const [integracoes, produtos] = nav.TABS_CADASTROS.slice(-2)
-  assert.equal(integracoes.label, 'Integrações', 'Integrações é a penúltima aba de Cadastros')
+  // M-29 (24/11/2026): a aba Produtos entrou DEPOIS de Integrações; M-76 (25/11/2026): Centro
+  // de custo logo depois de Produtos, com a mesma permissão.
+  const [integracoes, produtos, centro] = nav.TABS_CADASTROS.slice(-3)
+  assert.equal(integracoes.label, 'Integrações', 'Integrações vem antes de Produtos e Centro de custo')
+  assert.deepEqual([centro.label, centro.to, centro.resource], ['Centro de custo', '/cadastro-centro-custo', 'cadastro_produtos'])
   assert.equal(integracoes.abas, nav.TABS_INTEGRACOES)
   assert.deepEqual([produtos.label, produtos.to, produtos.resource], ['Produtos', '/cadastro-produtos', 'cadastro_produtos'])
   assert.deepEqual(rotulos(nav.TABS_CONFIGURACOES), ['Configurações', 'Usuários', 'Faturas'])

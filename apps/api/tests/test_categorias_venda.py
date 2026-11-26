@@ -22,7 +22,14 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.models import PricingAccount, PricingPlatform, PricingProduct, Segment, UserRole
+from app.models import (
+    CentroCusto,
+    PricingAccount,
+    PricingPlatform,
+    PricingProduct,
+    Segment,
+    UserRole,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,13 +40,16 @@ LIMITE_MSG = "Este centro de custo já tem 5 categorias de venda."
 @pytest.fixture
 async def centros(db):
     """Celular (5), Mala (5, a última "Queima de estoque" inativa), Eletro (3: espaço livre) e
-    a raiz antiga Catálogo (1: "Apple", como na produção)."""
+    a raiz antiga Catálogo (1: "Apple", como na produção). M-76: os centros de custo Celular,
+    Eletro e Mala apontando para as raízes, como a 0514 semeia (chaves "cc:<nome>")."""
     cel = Segment(name="Celular", slug="celular", sort_order=0)
     mala = Segment(name="Mala", slug="mala", sort_order=1)
     ele = Segment(name="Eletro", slug="eletro", sort_order=2)
     cat = Segment(name="Catálogo", slug="catalogo", sort_order=3)
     db.add_all([cel, mala, ele, cat])
     await db.flush()
+    ccs = {r.name: CentroCusto(nome=r.name, segment_id=r.id, fixo=True) for r in (cel, ele, mala)}
+    db.add_all(ccs.values())
     filhos: dict[str, Segment] = {}
     for raiz, nomes in (
         (cel, ["Acessórios", "Diversos", "Regular", "Robusto", "Apple"]),
@@ -58,11 +68,22 @@ async def centros(db):
             db.add(s)
             filhos[f"{raiz.name}/{nome}"] = s
     await db.commit()
-    return {"Celular": cel, "Mala": mala, "Eletro": ele, "Catálogo": cat, **filhos}
+    return {
+        "Celular": cel,
+        "Mala": mala,
+        "Eletro": ele,
+        "Catálogo": cat,
+        **filhos,
+        **{f"cc:{n}": c for n, c in ccs.items()},
+    }
 
 
 async def _nova(client, centros, centro: str, nome: str):
-    return await client.post(ROTA, json={"centro_custo_id": str(centros[centro].id), "nome": nome})
+    """Pelo id do centro de custo (M-76); o id da raiz, que a tela da M-75 mandava, também vale
+    (test_menu_aceita_o_id_da_raiz)."""
+    return await client.post(
+        ROTA, json={"centro_custo_id": str(centros[f"cc:{centro}"].id), "nome": nome}
+    )
 
 
 async def _admin(make_user, auth_as):
@@ -143,9 +164,11 @@ async def test_lista_mostra_as_categorias_de_venda(client, make_user, auth_as, c
     apple = next(c for c in corpo["cadastros"] if c["nome"] == "Apple")
     assert apple["id"] == str(centros["Celular/Apple"].id)
     assert apple["tipo_nome"] == "Categoria de venda"
-    # O menu do "Novo cadastro": sem o Catálogo (não é centro de custo).
+    # O menu do "Novo cadastro" (M-76: a lista de Cadastros › Centro de custo): sem o Catálogo
+    # (não é centro de custo).
     assert corpo["centros_custo"] == [
-        {"id": str(centros[n].id), "nome": n} for n in ("Celular", "Eletro", "Mala")
+        {"id": str(centros[f"cc:{n}"].id), "nome": n, "aceita_categoria": True}
+        for n in ("Celular", "Eletro", "Mala")
     ]
 
 
