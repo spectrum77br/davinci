@@ -1,7 +1,5 @@
 'use strict';
 let editingProduct='',productEditTab='characteristics';
-let imageUploadBusy=false,draggedProductImage=null,imageLibraryRequest=0;
-const cleanProductImage=row=>({id:row.id,alt:row.alt||''});
 // The screen state brings products light (only what lists read); the editor asks for the whole
 // product when it opens and keeps it a minute, so the per-minute refresh does not reload it.
 const fullProducts={};let fullProductLoading='';
@@ -19,132 +17,37 @@ function ensureFullProduct(sku){
  }
  return false;
 }
-function readProductImages(){return [...document.querySelectorAll('#product-image-gallery [data-image-info]')].map(el=>({...JSON.parse(el.dataset.imageInfo),alt:el.querySelector('[data-image-alt]').value}));}
-function productImageFigure(image,index){return `<figure data-image-info="${esc(JSON.stringify(image))}" draggable="true"><button type="button" class="image-preview" data-image-view="${esc(image.id)}"><img src="${esc(image.url)}" alt="${esc(image.alt||image.filename)}"></button><figcaption>${index===0?'Imagem principal':'Imagem '+(index+1)}<small>${esc(image.filename)} · ${image.width} × ${image.height}</small></figcaption><label>Descrição da imagem ${index+1}<input data-image-alt value="${esc(image.alt||'')}" maxlength="120"></label><div class="image-controls"><button type="button" class="action" data-image-move="-1" aria-label="Mover imagem ${index+1} para antes" ${index===0?'disabled':''}>←</button><button type="button" class="action" data-image-move="1" aria-label="Mover imagem ${index+1} para depois">→</button><button type="button" class="action" data-image-primary ${index===0?'disabled':''}>Principal</button><button type="button" class="action danger" data-image-remove aria-label="Remover vínculo da imagem ${index+1}">${icon('trash')}</button></div></figure>`;}
-function updateProductImageGallery(images){const gallery=document.getElementById('product-image-gallery');if(gallery)gallery.innerHTML=images.map(productImageFigure).join('');}
-function productImagesEditor(product){const d=product.images||{version:0,rows:[]};return `<div id="product-image-drop" class="product-image-drop">${icon('image')}<p>Arraste arquivos para cá ou, se preferir, anexe as imagens.</p><label>Anexar arquivos<input id="product-image-files" type="file" accept=".jpg,.jpeg,.png,.webp" multiple></label><button type="button" class="secondary" data-image-library>Biblioteca de imagens</button><small>JPG, PNG ou WebP estático · até 3 MB por arquivo</small></div><p class="source-line">Arquivos enviados ficam na biblioteca local. Salvar produto confirma os vínculos e a ordem; a primeira imagem é a principal. Remover um vínculo preserva o arquivo no histórico e na biblioteca.</p><div id="product-image-gallery" class="product-image-gallery">${d.rows.map(productImageFigure).join('')}</div><label>Motivo da alteração das imagens<input name="image_reason" maxlength="500" placeholder="Explique a mudança nas imagens"></label><div class="form-footer"><small>Versão das imagens: ${d.version}.</small><button type="button" class="action" data-product-image-history="${esc(product.sku)}">Histórico das imagens</button></div><div id="product-image-history"></div>`;}
-async function uploadProductImages(files){
- if(imageUploadBusy){message('Aguarde o envio em andamento.',true);return;}
- const gallery=document.getElementById('product-image-gallery');if(!gallery||!files.length)return;imageUploadBusy=true;
- try{for(const file of files){
-  if(file.size>3000000)throw Error('A imagem excede o limite de 3 MB.');
-  if(readProductImages().length>=50)throw Error('O produto já tem cinquenta imagens.');
-  const response=await fetch('/api/erp-local/catalog/images?name='+encodeURIComponent(file.name),{method:'POST',headers:{'X-ERP-Local':'1','Content-Type':file.type||'application/octet-stream'},body:file}),result=await response.json();
-  if(!response.ok)throw Error(result.message||'Não foi possível conferir a imagem.');
-  if(document.getElementById('product-image-gallery')!==gallery)return;
-  const images=readProductImages();if(!images.some(i=>i.id===result.image.id))images.push({...result.image,alt:''});updateProductImageGallery(images);
- }message('Arquivos na biblioteca local. Salve o produto para confirmar os vínculos.');}
- catch(error){message(error.message,true);}finally{imageUploadBusy=false;}
-}
-async function openProductImageLibrary(offset=0){
- let dialog=document.getElementById('product-image-library-dialog');const query=dialog?.querySelector('[name=image_library_query]')?.value||dialog?.dataset.query||'',request=++imageLibraryRequest;
- if(!dialog){dialog=document.createElement('dialog');dialog.id='product-image-library-dialog';dialog.className='product-supplier-dialog image-library-dialog';dialog.setAttribute('aria-label','Biblioteca de imagens');dialog.addEventListener('close',()=>dialog.remove());dialog.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();openProductImageLibrary(0);}});document.getElementById('product-edit-form').append(dialog);if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');}
- dialog.dataset.query=query;dialog.innerHTML='<h2>Biblioteca de imagens</h2><p>Consultando arquivos…</p><button type="button" data-image-library-close>Fechar</button>';
- try{
-  const response=await fetch('/api/erp-local/catalog/images?q='+encodeURIComponent(query)+'&offset='+offset),data=await response.json();if(!response.ok)throw Error(data.message||'Não foi possível conferir a biblioteca.');if(!dialog.isConnected||request!==imageLibraryRequest)return;
-  dialog.innerHTML=`<h2>Biblioteca de imagens</h2><div class="forms"><label>Pesquisar arquivos<input name="image_library_query" maxlength="120" value="${esc(query)}"></label><button type="button" data-image-library-page="0">Pesquisar</button><button type="button" class="secondary" data-image-library-close>Fechar</button></div>${table(['Imagem','Arquivo','Dimensões',''],data.items.map(image=>`<tr><td><img class="image-library-preview" src="${esc(image.url)}" alt="${esc(image.filename)}" loading="lazy"></td><td>${esc(image.filename)}</td><td>${image.width} × ${image.height}</td><td><button type="button" class="action" data-image-attach="${esc(JSON.stringify(image))}">Anexar</button></td></tr>`).join('')||empty(4,'Nenhum arquivo nesta pesquisa.'))}<div class="table-footer"><span>${data.total} arquivos</span><div><button type="button" class="action" data-image-library-page="${Math.max(0,offset-50)}" ${offset===0?'disabled':''}>Anterior</button><button type="button" class="action" data-image-library-page="${offset+50}" ${offset+50>=data.total?'disabled':''}>Próxima</button></div></div>`;
- }catch(error){if(dialog.isConnected&&request===imageLibraryRequest){dialog.remove();message(error.message,true);}}
-}
-document.addEventListener('change',e=>{if(e.target.id==='product-image-files')uploadProductImages([...e.target.files]);});
-document.addEventListener('click',e=>{
- if(e.target.closest('[data-image-library]'))openProductImageLibrary();
- const page=e.target.closest('[data-image-library-page]');if(page)openProductImageLibrary(Number(page.dataset.imageLibraryPage));
- if(e.target.closest('[data-image-library-close]'))document.getElementById('product-image-library-dialog')?.remove();
- const attach=e.target.closest('[data-image-attach]');if(attach){const image=JSON.parse(attach.dataset.imageAttach),images=readProductImages();if(!images.some(i=>i.id===image.id)){if(images.length>=50){message('O produto já tem cinquenta imagens.',true);return;}images.push({...image,alt:''});updateProductImageGallery(images);}document.getElementById('product-image-library-dialog')?.remove();}
- const figure=e.target.closest('#product-image-gallery [data-image-info]');if(!figure)return;
- const images=readProductImages(),index=[...figure.parentElement.children].indexOf(figure);
- if(e.target.closest('[data-image-remove]'))images.splice(index,1);
- else if(e.target.closest('[data-image-primary]'))images.unshift(images.splice(index,1)[0]);
- else if(e.target.closest('[data-image-move]')){const destination=index+Number(e.target.closest('[data-image-move]').dataset.imageMove);if(destination<0||destination>=images.length)return;[images[index],images[destination]]=[images[destination],images[index]];}
- else if(e.target.closest('[data-image-view]')){const image=images[index],dialog=document.createElement('dialog');dialog.className='product-supplier-dialog image-view-dialog';dialog.setAttribute('aria-label','Visualizar imagem');dialog.innerHTML=`<h2>${esc(image.filename)} · ${image.width} × ${image.height}</h2><img src="${esc(image.url)}" alt="${esc(image.alt||image.filename)}"><button type="button" data-image-view-close>Fechar</button>`;dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);dialog.querySelector('[data-image-view-close]').addEventListener('click',()=>dialog.remove());if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');return;}
- else return;updateProductImageGallery(images);
-});
-document.addEventListener('dragstart',e=>{const image=e.target.closest('#product-image-gallery [data-image-info]');if(image){draggedProductImage=image;if(e.dataTransfer)e.dataTransfer.effectAllowed='move';}});
-document.addEventListener('dragend',()=>{draggedProductImage=null;});
-document.addEventListener('dragover',e=>{if(e.target.closest('#product-image-drop')||draggedProductImage&&e.target.closest('#product-image-gallery [data-image-info]'))e.preventDefault();});
-document.addEventListener('drop',e=>{const drop=e.target.closest('#product-image-drop');if(drop){e.preventDefault();uploadProductImages([...e.dataTransfer.files]);return;}const target=e.target.closest('#product-image-gallery [data-image-info]');if(target&&draggedProductImage&&target!==draggedProductImage){e.preventDefault();target.before(draggedProductImage);draggedProductImage=null;updateProductImageGallery(readProductImages());}});
-document.addEventListener('click',async e=>{
- const button=e.target.closest('[data-product-image-history]');if(!button)return;
- try{const response=await fetch('/api/erp-local/products/'+encodeURIComponent(button.dataset.productImageHistory)+'/images/history'),data=await response.json();if(!response.ok)throw Error(data.message||'Não foi possível conferir o histórico.');const target=document.getElementById('product-image-history');if(!target||editingProduct!==data.sku)return;target.innerHTML=table(['Versão','Quando','Motivo','Imagens preservadas'],data.history.map(h=>`<tr><td>${h.version}</td><td>${when(h.created_at)}</td><td>${esc(h.reason)}</td><td>${h.data.map(i=>`<img class="image-library-preview" src="${esc(i.url)}" alt="${esc(i.alt||i.filename)}" title="${esc(i.filename)}" loading="lazy">`).join('')||'Sem imagens'}</td></tr>`).join('')||empty(4,'Nenhuma alteração de imagens registrada.'));}catch(error){message(error.message,true);}
-});
-const productEditFields=['name','unit','price','cost_price','location'];
-const productTaxAmounts=['approximate_tax_percent','icms_st_retention_base','icms_st_retention_value','icms_substitute_value','pis_fixed_value','cofins_fixed_value'];
-const productTaxLabels={origin:'Origem',ncm:'NCM',cest:'CEST',item_type:'Tipo do item',service_code:'Código da lista de serviços',approximate_tax_percent:'% Tributos',product_group:'Grupo de Produtos',icms_st_retention_base:'Valor base ICMS ST - retenção',icms_st_retention_value:'Valor ICMS ST para retenção',icms_substitute_value:'Valor ICMS próprio do substituto',tipi_exception:'Código exceção da TIPI',pis_fixed_value:'Valor PIS fixo',cofins_fixed_value:'Valor COFINS fixo',additional_info:'Informações Adicionais'};
-const productTaxFields=Object.keys(productTaxLabels);
-const productTaxOrigins=['Nacional, exceto códigos 3, 4, 5 e 8','Estrangeira - Importação direta, exceto código 6','Estrangeira - Adquirida no mercado interno, exceto código 7','Nacional, conteúdo de importação superior a 40% e até 70%','Nacional, produção conforme processos produtivos básicos','Nacional, conteúdo de importação até 40%','Estrangeira - Importação direta, sem similar nacional','Estrangeira - Adquirida no mercado interno, sem similar nacional','Nacional, conteúdo de importação superior a 70%'];
-const productTaxTypes={'00':'Mercadoria para Revenda','01':'Matéria-Prima','02':'Embalagem','03':'Produto em Processo','04':'Produto Acabado','05':'Subproduto','06':'Produto Intermediário','07':'Material de Uso e Consumo','08':'Ativo Imobilizado','09':'Serviços','10':'Outros insumos','99':'Outras'};
-function productTaxSignature(data){return JSON.stringify(productTaxFields.map(name=>productTaxAmounts.includes(name)?data[name]===null||data[name]===undefined||data[name]===''?null:String(Number(data[name])):data[name]||''));}
-function productTaxEditor(product){
- const current=product.tax||{version:0,data:{}},d=current.data;
- const field=(name,limit=120)=>`<label>${productTaxLabels[name]}<input name="tax_${name}" value="${esc(d[name]??'')}" ${productTaxAmounts.includes(name)?'type="number" min="0" step="0.0001"'+(name==='approximate_tax_percent'?' max="100"':''):`type="text" maxlength="${limit}"`}></label>`;
- return `<h3>Dados da nota fiscal</h3><p class="source-line">Preencha os dados definidos para o produto. Este cadastro não calcula tributos nem autoriza NF-e; classificação, tabelas vigentes e regras de emissão continuam em conferência.</p><div class="forms"><label>Origem<select name="tax_origin"><option value="">Não informada</option>${productTaxOrigins.map((label,index)=>`<option value="${index}" ${String(index)===d.origin?'selected':''}>${index} - ${esc(label)}</option>`).join('')}</select></label>${field('ncm',10)}${field('cest',9)}<label>Tipo do item<select name="tax_item_type"><option value="">Selecione</option>${Object.entries(productTaxTypes).sort(([a],[b])=>a.localeCompare(b)).map(([value,label])=>`<option value="${value}" ${value===d.item_type?'selected':''}>${value} - ${label}</option>`).join('')}</select></label>${field('approximate_tax_percent')}${field('product_group')}</div><h3>ICMS</h3><div class="forms">${['icms_st_retention_base','icms_st_retention_value','icms_substitute_value'].map(name=>field(name)).join('')}</div><h3>IPI</h3>${field('tipi_exception',3)}<h3>PIS / COFINS</h3><div class="forms">${field('pis_fixed_value')}${field('cofins_fixed_value')}</div><h3>Dados adicionais</h3><label>Informações Adicionais<textarea name="tax_additional_info" maxlength="500" rows="3">${esc(d.additional_info||'')}</textarea></label><label>Motivo da alteração fiscal<input name="tax_reason" maxlength="500" placeholder="Explique a mudança no cadastro fiscal"></label><div class="form-footer"><small>Versão fiscal ${current.version}. Pedidos registrados preservam a versão usada ao salvar.</small><button type="button" class="action" data-product-tax-history="${esc(product.sku)}">Histórico fiscal do produto</button></div><div id="product-tax-history"></div>`;
-}
-function cleanSupplierRow(row){return {contact_id:row.contact_id,description:row.description||'',code:row.code||'',purchase_price:row.purchase_price??null,cost_price:row.cost_price??null,warranty_months:Number(row.warranty_months||0),is_default:row.is_default===true};}
-function productSupplierRows(){return [...document.querySelectorAll('#product-suppliers-body [data-supplier-row]')].map(r=>JSON.parse(r.dataset.supplierRow));}
-function productSupplierRow(row,index){
- const clean=cleanSupplierRow(row),contact=(state.contacts||[]).find(c=>c.id===row.contact_id);
- return `<tr data-supplier-row="${esc(JSON.stringify(clean))}"><td>${esc(contact?.data.name||row.contact?.name||row.contact_id)}</td><td>${esc(clean.description)}</td><td>${esc(clean.code)}</td><td>${clean.cost_price===null?'—':brl(clean.cost_price)}</td><td><input type="radio" name="supplier_default" data-supplier-default="${index}" aria-label="Fornecedor padrão ${index+1}" ${clean.is_default?'checked':''}></td><td><button type="button" class="action" data-supplier-edit="${index}" aria-label="Editar fornecedor ${index+1}">${icon('edit')}</button><button type="button" class="action danger" data-supplier-remove="${index}" aria-label="Remover fornecedor ${index+1}">${icon('trash')}</button></td></tr>`;
-}
-function productSuppliersEditor(product){
- const d=product.suppliers||{version:0,rows:[]};
- return `<div class="table-wrap"><table><thead><tr>${['Fornecedor','Descrição no fornecedor','Código no fornecedor','Preço de custo','Padrão',''].map(h=>'<th>'+h+'</th>').join('')}</tr></thead><tbody id="product-suppliers-body">${d.rows.map(productSupplierRow).join('')}</tbody></table></div><button type="button" class="add-item" data-supplier-add>+ Adicionar fornecedor</button><p class="source-line">Preço de compra, custo com rateio e garantia ficam no vínculo com cada fornecedor. Editar estes valores não lança mercadoria nem recalcula o custo médio físico.</p><label>Motivo da alteração dos fornecedores<input name="supplier_reason" maxlength="500" placeholder="Explique a mudança no vínculo"></label><small>Versão dos fornecedores: ${d.version}. O pedido de compra preserva os códigos e condições usados ao salvar.</small><div class="form-footer"><button type="button" class="action" data-product-supplier-history="${esc(product.sku)}">Histórico dos fornecedores</button></div><div id="product-supplier-history"></div>`;
-}
-function showProductSupplier(index){
- const rows=productSupplierRows(),row=rows[index]||{contact_id:'',description:'',code:'',purchase_price:null,cost_price:null,warranty_months:0,is_default:rows.length===0};
- const contacts=(state.contacts||[]).filter(c=>c.data.roles.includes('supplier')&&c.data.status==='active'||c.id===row.contact_id);
- const dialog=document.createElement('dialog');dialog.id='product-supplier-dialog';dialog.className='product-supplier-dialog';dialog.setAttribute('aria-label',index<0?'Adicionar fornecedor do produto':'Editar fornecedor do produto');dialog.dataset.index=index;
- dialog.innerHTML=`<h2>${index<0?'Adicionar':'Editar'} fornecedor do produto</h2><label>Fornecedor<select name="product_supplier_contact" required><option value="">Selecione o fornecedor</option>${contacts.map(c=>`<option value="${esc(c.id)}" ${c.id===row.contact_id?'selected':''}>${esc(c.data.name)}</option>`).join('')}</select></label><label>Descrição<input name="product_supplier_description" maxlength="120" value="${esc(row.description)}"></label><label>Código<input name="product_supplier_code" maxlength="120" value="${esc(row.code)}"></label><div class="forms">${[['purchase_price','Preço de compra'],['cost_price','Preço de custo']].map(([key,label])=>`<label>${label}<input name="product_supplier_${key}" type="number" min="0" step="0.0001" value="${esc(row[key]??'')}"></label>`).join('')}<label>Garantia (meses)<input name="product_supplier_warranty" type="number" min="0" max="999" step="1" value="${row.warranty_months}" required></label></div><div class="form-footer"><button type="button" class="secondary" data-supplier-dialog-cancel>Cancelar</button><button type="button" data-supplier-dialog-ok>Ok</button></div><p class="source-line">Ok atualiza esta edição. Grave a alteração em Salvar produto.</p>`;
- dialog.addEventListener('close',()=>dialog.remove());
- dialog.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();dialog.querySelector('[data-supplier-dialog-ok]').click();}});
- document.getElementById('product-edit-form').append(dialog);if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');
-}
-function updateProductSupplierTable(rows){document.getElementById('product-suppliers-body').innerHTML=rows.map(productSupplierRow).join('');}
-document.addEventListener('click',e=>{
- const edit=e.target.closest('[data-supplier-edit]'),remove=e.target.closest('[data-supplier-remove]');
- if(edit||e.target.closest('[data-supplier-add]'))showProductSupplier(edit?Number(edit.dataset.supplierEdit):-1);
- if(remove){const rows=productSupplierRows(),index=Number(remove.dataset.supplierRemove);if(rows[index].is_default&&rows.length>1){message('Escolha outro fornecedor padrão antes de remover este.',true);return;}rows.splice(index,1);updateProductSupplierTable(rows);}
- const dialog=document.getElementById('product-supplier-dialog');
- if(e.target.closest('[data-supplier-dialog-cancel]'))dialog?.remove();
- if(e.target.closest('[data-supplier-dialog-ok]')){
-  for(const input of dialog.querySelectorAll('input,select'))if(!input.reportValidity())return;
-  const get=key=>dialog.querySelector(`[name=product_supplier_${key}]`).value,rows=productSupplierRows(),index=Number(dialog.dataset.index),id=get('contact');
-  if(rows.some((r,i)=>i!==index&&r.contact_id===id)){message('O fornecedor já está vinculado ao produto.',true);return;}
-  const row={contact_id:id,description:get('description'),code:get('code'),purchase_price:get('purchase_price')||null,cost_price:get('cost_price')||null,warranty_months:Number(get('warranty')),is_default:index<0?rows.length===0:rows[index].is_default};
-  if(index<0)rows.push(row);else rows[index]=row;updateProductSupplierTable(rows);dialog.remove();
- }
-});
-document.addEventListener('change',e=>{if(e.target.matches('[data-supplier-default]')){const index=Number(e.target.dataset.supplierDefault);updateProductSupplierTable(productSupplierRows().map((r,i)=>({...r,is_default:i===index})));}});
-document.addEventListener('click',async e=>{
- const button=e.target.closest('[data-product-supplier-history]');if(!button)return;
- try{
-  const response=await fetch('/api/erp-local/products/'+encodeURIComponent(button.dataset.productSupplierHistory)+'/suppliers/history'),data=await response.json();
-  if(!response.ok)throw Error(data.message||'Não foi possível conferir o histórico.');
-  const target=document.getElementById('product-supplier-history');if(!target||editingProduct!==data.sku)return;
-  target.innerHTML=table(['Versão','Quando','Motivo','Fornecedores'],data.history.map(h=>`<tr><td>${h.version}</td><td>${when(h.created_at)}</td><td>${esc(h.reason)}</td><td>${h.data.map(r=>esc(r.contact.name)+(r.is_default?' · Padrão':'')+(r.code?' · '+esc(r.code):'')).join('<br>')||'Sem fornecedores'}</td></tr>`).join('')||empty(4,'Nenhuma alteração de fornecedor registrada.'));
- }catch(error){message(error.message,true);}
-});
-document.addEventListener('click',async e=>{
- const button=e.target.closest('[data-product-tax-history]');if(!button)return;
- try{
-  const response=await fetch('/api/erp-local/products/'+encodeURIComponent(button.dataset.productTaxHistory)+'/tax/history'),data=await response.json();
-  if(!response.ok)throw Error(data.message||'Não foi possível conferir o histórico fiscal.');
-  const target=document.getElementById('product-tax-history');if(!target||editingProduct!==data.sku)return;
-  target.innerHTML=table(['Versão','Quando','Motivo','Cadastro preservado'],data.history.map(h=>`<tr><td>${h.version}</td><td>${when(h.created_at)}</td><td>${esc(h.reason)}</td><td><details><summary>NCM ${esc(h.data.ncm||'não informado')} · CEST ${esc(h.data.cest||'não informado')}</summary>${table(['Campo','Valor informado'],productTaxFields.map(name=>`<tr><td>${productTaxLabels[name]}</td><td>${h.data[name]===null||h.data[name]===''?'—':esc(h.data[name])}</td></tr>`).join(''))}</details></td></tr>`).join('')||empty(4,'Nenhuma alteração fiscal registrada.'));
- }catch(error){message(error.message,true);}
-});
 function productStructureOf(product){return product.structure||{version:0,mode:product.kind==='kit'?'virtual':'physical',components:product.components||[],expanded:product.components||[],history:[]};}
 function structureSignature(parts){return JSON.stringify(parts.map(p=>({sku:p.sku,quantity:String(Number(p.quantity))})).sort((a,b)=>a.sku.localeCompare(b.sku)));}
 function productStructureEditor(product){
  const structure=productStructureOf(product),rows=structure.components;
  return `<h3>Estrutura</h3><label>Tipo de estoque<select disabled><option>${product.kind==='kit'?'Virtual · baixa nas peças':'Físico · montagem por ordem de produção'}</option></select></label><p class="source-line">${product.kind==='kit'?'A capacidade é calculada pelas peças compartilhadas.':'Cadastrar a receita não cria produto acabado; a montagem é lançada na ordem de produção.'} Alterar a composição não muda componentes, reservas ou custos congelados em documentos já salvos.</p>${itemsForm(true,false,rows,true)}<label>Motivo da alteração da estrutura<input name="structure_reason" maxlength="500" placeholder="Explique a mudança nos componentes"></label><h3>Peças físicas da composição atual</h3>${table(['Código (SKU)','Quantidade por unidade'],structure.expanded.map(i=>`<tr><td>${esc(i.sku)}</td><td>${qty(i.quantity)}</td></tr>`).join('')||empty(2,'Nenhuma composição cadastrada.'))}<p class="source-line">Versão da estrutura: ${structure.version}. Kits dentro de kits são expandidos sem duplicar peças. Ciclos, itens repetidos ou pendentes impedem o salvamento. O quadro de peças é atualizado após salvar.</p>${structure.history?.length?`<details><summary>Histórico da estrutura (${structure.history.length} registros recentes)</summary>${table(['Versão','Quando','Responsável','Motivo','Componentes'],structure.history.map(h=>`<tr><td>${h.version}</td><td>${when(h.created_at)}</td><td>${esc(h.data.actor||'Base anterior')}</td><td>${esc(h.data.reason||'Composição anterior')}</td><td>${h.data.components.map(i=>`${qty(i.quantity)} × ${esc(i.sku)}`).join('<br>')}</td></tr>`).join(''))}</details>`:''}`;
 }
+// M-70 (26/11/2026): o cadastro limpo. Sem a foto, Formato, Tipo, Preço venda, Unidade e Condição;
+// no alto, o Nome e três linhas de 7 caixas iguais. Cada caixa tem `data-campo`: as dos outros
+// pedidos da série (M-71 a M-74) nascem vazias e cada pedido encaixa a sua. Linha sem campo nenhum
+// não aparece (bling-layout.css). Abas: Características, Estoque e Estrutura (Serviço: só
+// Características). Imagens, Fornecedores, Tributação, Tabela de Preços e Vínculos saíram da tela;
+// os dados continuam guardados e a gravação devolve tudo como veio (productSavePayload).
+const productHeadRows=[
+ ['codigo','situacao','ean','modelo','certificado','numero','validade'],
+ ['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao'],
+ ['comprimento','largura','altura','peso','fotos','embalagem','vazio'],
+];
+function productHead(cells){
+ return productHeadRows.map((row,index)=>`<div class="product-head-row" data-linha="${index+1}">${row.map(campo=>`<div class="product-head-cell" data-campo="${campo}">${cells[campo]||''}</div>`).join('')}</div>`).join('');
+}
 function productDetailsForm(){
  if(!ensureFullProduct(editingProduct))return `<section class="panel"><p class="source-line">Abrindo ${esc(editingProduct)}…</p></section>`;
  const product=state.products.find(p=>p.sku===editingProduct);
  if(!product)return '';
- const d=product.details||{},field=(name,label,value,type='text',limit=120)=>`<label>${label}<input name="${name}" value="${esc(value??'')}" type="${type}" maxlength="${limit}" ${type==='number'?'min="0" step="0.0001"':''}></label>`;
- const service=product.kind==='service',tabs=[['characteristics','Características'],['images','Imagens'],...(service?[]:[['stock','Estoque']]),['suppliers','Fornecedores'],['tax','Tributação'],...(service?[]:[['structure','Estrutura'],['pricetable','Tabela de Preços'],['links','Vínculos']])];if(service&&['stock','structure','pricetable','links'].includes(productEditTab))productEditTab='characteristics';
- return panel(`Produto · ${esc(product.sku)}`,'',`<form id="product-edit-form"${state.consulta?.active?' class="read-only"':''}><div class="form-footer">${state.consulta?.active?'<span class="consulta-note">Somente consulta: o cadastro continua sendo feito no Bling até a troca.</span><button type="button" class="secondary" id="product-edit-cancel">Fechar</button>':'<button type="button" class="secondary" id="product-edit-cancel">Cancelar</button><button>Salvar produto</button>'}</div><div class="product-head">${field('name','Nome *',product.name)}<div class="product-head-body"><div class="product-head-image">${product.images?.rows?.length?`<img src="${esc(product.images.rows[0].url)}" alt="">`:icon('image')}</div><div class="product-head-grid"><label>Código (SKU)<input value="${esc(product.sku)}" disabled>${state.consulta?.active?'':'<button type="button" class="secondary" id="product-rename-open">Trocar código</button>'}</label><label>Formato<select disabled><option>${product.kind==='kit'?'Com composição · estoque virtual':productStructureOf(product).components.length?'Com composição · estoque físico':'Simples (Item único e sem variação)'}</option></select></label><label>Tipo<select name="product_type" ${product.kind==='kit'||productStructureOf(product).components.length?'disabled':''}><option value="product" ${product.kind==='service'?'':'selected'}>Produto</option><option value="service" ${product.kind==='service'?'selected':''}>Serviço</option></select></label><div class="product-status-price"><label class="product-switch">Situação<span><input type="checkbox" name="status" value="active" ${d.status==='inactive'?'':'checked'}><i></i><small data-status-label>${d.status==='inactive'?'Inativo':'Ativado'}</small></span></label>${field('price','Preço venda',product.price,'number')}</div>${field('unit','Unidade',d.unit,'text',6)}<label>Condição<select name="condition">${Object.entries(productConditions).map(([id,t])=>`<option value="${id}" ${(d.condition||'unspecified')===id?'selected':''}>${t}</option>`).join('')}</select></label></div></div></div><div class="reference-tabs" role="tablist" aria-label="Dados do produto">${tabs.map(([id,label])=>`<button type="button" role="tab" data-product-edit-tab="${id}" aria-selected="${productEditTab===id}" class="${productEditTab===id?'active':''}">${label}</button>`).join('')}</div><section data-product-section="characteristics" ${productEditTab==='characteristics'?'':'hidden'}>${productCharacteristics(product)}</section><section data-product-section="images" ${productEditTab==='images'?'':'hidden'}>${productImagesEditor(product)}</section><section data-product-section="stock" ${productEditTab==='stock'?'':'hidden'}><div class="product-grid">${field('stock_min','Mínimo',d.stock_min,'number')}${field('stock_max','Máximo',d.stock_max,'number')}<label>Crossdocking<input name="crossdocking" type="number" min="0" max="9999" step="1" value="${esc(d.crossdocking??'')}"></label>${field('location','Localização',d.location)}</div><p class="source-line">Para gerenciar o estoque acesse o módulo de <button type="button" class="link-action inline" data-stock-product="${esc(product.sku)}">Controle de Estoques</button>. Crossdocking é o prazo adicional, em dias, para despachar o produto.</p><div class="forms">${field('cost_price','Preço de custo do cadastro (R$)',product.cost_price,'number')}</div><p class="source-line">O custo do cadastro não recalcula o custo médio físico. Controle por lote ainda não disponível no núcleo próprio; quando homologado, será ativado produto a produto.</p></section><section data-product-section="suppliers" ${productEditTab==='suppliers'?'':'hidden'}>${productSuppliersEditor(product)}</section><section data-product-section="tax" ${productEditTab==='tax'?'':'hidden'}>${productTaxEditor(product)}</section><section data-product-section="structure" ${productEditTab==='structure'?'':'hidden'}>${productStructureEditor(product)}</section><section data-product-section="pricetable" ${productEditTab==='pricetable'?'':'hidden'}>${productPriceTable(product)}</section><section data-product-section="links" ${productEditTab==='links'?'':'hidden'}><div id="product-links" data-links-sku="${esc(product.sku)}"><p class="empty">Abra esta aba para ver os anúncios ligados a este produto.</p></div></section><div class="form-footer"><span>Pedidos registrados preservam o cadastro e a composição usados na venda.</span>${state.consulta?.active?'':'<button>Salvar alterações do produto</button>'}</div></form>`);
+ const d=product.details||{},consulta=!!state.consulta?.active,field=(name,label,value,type='text',limit=120)=>`<label>${label}<input name="${name}" value="${esc(value??'')}" type="${type}" maxlength="${limit}" ${type==='number'?'min="0" step="0.0001"':''}></label>`;
+ const service=product.kind==='service',tabs=[['characteristics','Características'],...(service?[]:[['stock','Estoque'],['structure','Estrutura']])];if(!tabs.some(([id])=>id===productEditTab))productEditTab='characteristics';
+ const cells={
+  codigo:`<label>Código (SKU)<input value="${esc(product.sku)}" disabled></label>${consulta?'':'<button type="button" class="secondary" id="product-rename-open">Trocar código</button>'}`,
+  situacao:`<label class="product-switch">Situação<span><input type="checkbox" name="status" value="active" ${d.status==='inactive'?'':'checked'}><i></i><small data-status-label>${d.status==='inactive'?'Inativo':'Ativado'}</small></span></label>`,
+ };
+ return panel(`Produto · ${esc(product.sku)}`,'',`<form id="product-edit-form"${consulta?' class="read-only"':''}><div class="form-footer">${consulta?'<span class="consulta-note">Somente consulta: o cadastro continua sendo feito no Bling até a troca.</span><button type="button" class="secondary" id="product-edit-cancel">Fechar</button>':'<button type="button" class="secondary" id="product-edit-cancel">Cancelar</button><button>Salvar produto</button>'}</div><div class="product-head">${field('name','Nome *',product.name)}${productHead(cells)}</div><div class="reference-tabs" role="tablist" aria-label="Dados do produto">${tabs.map(([id,label])=>`<button type="button" role="tab" data-product-edit-tab="${id}" aria-selected="${productEditTab===id}" class="${productEditTab===id?'active':''}">${label}</button>`).join('')}</div><section data-product-section="characteristics" ${productEditTab==='characteristics'?'':'hidden'}>${productCharacteristics(product)}</section><section data-product-section="stock" ${productEditTab==='stock'?'':'hidden'}><div class="product-grid">${field('stock_min','Mínimo',d.stock_min,'number')}${field('stock_max','Máximo',d.stock_max,'number')}<label>Crossdocking<input name="crossdocking" type="number" min="0" max="9999" step="1" value="${esc(d.crossdocking??'')}"></label>${field('location','Localização',d.location)}</div><p class="source-line">Para gerenciar o estoque acesse o módulo de <button type="button" class="link-action inline" data-stock-product="${esc(product.sku)}">Controle de Estoques</button>. Crossdocking é o prazo adicional, em dias, para despachar o produto.</p><div class="forms">${field('cost_price','Preço de custo do cadastro (R$)',product.cost_price,'number')}</div><p class="source-line">O custo do cadastro não recalcula o custo médio físico. Controle por lote ainda não disponível no núcleo próprio; quando homologado, será ativado produto a produto.</p></section><section data-product-section="structure" ${productEditTab==='structure'?'':'hidden'}>${productStructureEditor(product)}</section><div class="form-footer"><span>Pedidos registrados preservam o cadastro e a composição usados na venda.</span>${consulta?'':'<button>Salvar alterações do produto</button>'}</div></form>`);
 }
 document.addEventListener('click',e=>{
  const edit=e.target.closest('[data-edit-product]'),tab=e.target.closest('[data-product-edit-tab]');
@@ -165,37 +68,37 @@ function openProductRename(){
  dialog.innerHTML=`<h2>Trocar código de ${esc(editingProduct)}</h2><p>É o mesmo produto: saldo, histórico, kits que o usam e vínculos passam para o código novo. Pedidos já registrados mantêm o código da venda, e o DaVinci recebe o código novo pelo aviso de produto.</p><label>Código novo<input name="product_rename_to" maxlength="100" required></label><div class="form-footer"><button type="button" class="secondary" data-rename-cancel>Cancelar</button><button type="button" data-rename-confirm>Trocar código</button></div>`;
  form.append(dialog);if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');
 }
+// M-70 (26/11/2026): SALVAR parte do produto como ele foi CARREGADO e troca só o que a tela mostra.
+// O que não aparece mais (unidade, condição, marca, voltagem, GTIN, departamento, pesos e medidas
+// fora da tela, volumes…) volta exatamente com o valor carregado, nas mesmas chaves que a tela
+// sempre mandou. Não vão, como antes, a descrição antiga e o "peso anterior" (o servidor os guarda).
+// Também não vão:
+//  - o preço de venda: o servidor mantém o gravado. Reenviar a cópia da tela desfaria um "Novo
+//    preço" da Configuração em massa, que muda o preço sem mudar a versão do cadastro;
+//  - Tributação (NCM…), Fornecedores e Imagens: têm versão própria e não têm tela aqui;
+//  - Categoria, Tipo e Estrutura: só quando a tela tem o campo e ele mudou.
+const productSaveKeys=['unit','location','status','stock_min','stock_max','crossdocking','brand','production','expiry_date','department','net_weight_kg','gross_weight_kg','items_per_box','volumes','gtin','gtin_tax','external_link','video_url','notes','dimension_unit','width_cm','height_cm','length_cm','free_shipping','condition','voltage','dun','tags','short_description_html','complementary_html'];
+function productSavePayload(product,form){
+ const values=new FormData(form),loaded=product.details||{},data={},has=name=>!!form.querySelector(`[name="${name}"]`);
+ for(const key of productSaveKeys)if(loaded[key]!==undefined)data[key]=loaded[key];
+ data.name=values.get('name');
+ if(has('status'))data.status=values.get('status')?'active':'inactive';
+ for(const name of ['cost_price','location'])if(has(name))data[name]=values.get(name);
+ for(const name of ['stock_min','stock_max','crossdocking'])if(has(name))data[name]=String(values.get(name)??'').trim();
+ Object.assign(data,readProductCharacteristics(form));
+ const payload={sku:product.sku,version:product.details?.version||0,data},structure=productStructureOf(product);
+ if(form.querySelector('[data-product-section=structure]')){
+  const components=[...form.querySelectorAll('[data-product-section=structure] .item-line')].map(r=>({sku:r.querySelector('[name=sku]').value,quantity:r.querySelector('[name=quantity]').value}));
+  if(structureSignature(components)!==structureSignature(structure.components))payload.structure={version:structure.version,components,reason:values.get('structure_reason')};
+ }
+ if(has('product_category')){const categoryId=values.get('product_category')||null;if(categoryId!==(product.category?.id||null))payload.category={version:product.category?.version||0,category_id:categoryId};}
+ if(has('product_type')){const productType=values.get('product_type');if(productType&&productType!==(product.kind==='service'?'service':'product'))payload.type=productType;}
+ return payload;
+}
 document.addEventListener('submit',e=>{
  if(e.target.getAttribute('id')!=='product-edit-form')return;
- e.preventDefault();if(state.consulta?.active){message('Somente consulta: o cadastro continua sendo feito no Bling até a troca.',true);return;}if(document.getElementById('product-supplier-dialog')||document.getElementById('product-image-library-dialog')||document.getElementById('product-rename-dialog')||imageUploadBusy){message('Conclua o envio de imagens ou a edição aberta antes de salvar o produto.',true);return;}const product=state.products.find(p=>p.sku===editingProduct),values=new FormData(e.target),data={};
- for(const name of productEditFields)data[name]=values.get(name);
- data.status=values.get('status')?'active':'inactive';
- for(const name of ['stock_min','stock_max','crossdocking'])data[name]=String(values.get(name)??'').trim();
- try{Object.assign(data,readProductCharacteristics(e.target));}catch(error){message(error.message,true);return;}
- const payload={sku:product.sku,version:product.details?.version||0,data},structure=productStructureOf(product);
- const components=[...e.target.querySelectorAll('[data-product-section=structure] .item-line')].map(r=>({sku:r.querySelector('[name=sku]').value,quantity:r.querySelector('[name=quantity]').value}));
- if(structureSignature(components)!==structureSignature(structure.components))payload.structure={version:structure.version,components,reason:values.get('structure_reason')};
- const rows=productSupplierRows(),original=(product.suppliers?.rows||[]).map(cleanSupplierRow);if(JSON.stringify(rows)!==JSON.stringify(original))payload.suppliers={version:product.suppliers?.version||0,rows,reason:values.get('supplier_reason')||(!product.suppliers?.version?'Cadastro dos fornecedores do produto':'')};
- const taxData=Object.fromEntries(productTaxFields.map(name=>[name,values.get('tax_'+name)||((productTaxAmounts.includes(name)||name==='origin')?null:'')]));if(productTaxSignature(taxData)!==productTaxSignature(product.tax?.data||{}))payload.tax={version:product.tax?.version||0,data:taxData,reason:values.get('tax_reason')||(!product.tax?.version?'Cadastro fiscal do produto':'')};
- const images=readProductImages().map(cleanProductImage);if(JSON.stringify(images)!==JSON.stringify((product.images?.rows||[]).map(cleanProductImage)))payload.images={version:product.images?.version||0,rows:images,reason:values.get('image_reason')||(!product.images?.version?'Cadastro de imagens do produto':'')};
- const categoryId=values.get('product_category')||null;if(categoryId!==(product.category?.id||null))payload.category={version:product.category?.version||0,category_id:categoryId};
- const productType=values.get('product_type');if(productType&&productType!==(product.kind==='service'?'service':'product'))payload.type=productType;
+ e.preventDefault();if(state.consulta?.active){message('Somente consulta: o cadastro continua sendo feito no Bling até a troca.',true);return;}if(document.getElementById('product-rename-dialog')){message('Conclua a edição aberta antes de salvar o produto.',true);return;}
+ const product=state.products.find(p=>p.sku===editingProduct);
+ let payload;try{payload=productSavePayload(product,e.target);}catch(error){message(error.message,true);return;}
  command('product.update',payload);
 });
-
-function productPriceTable(product){
- const t=product.price_table;
- if(!t)return '<p class="empty">Este produto não tem linha na Tabela de Preços do DaVinci.</p>';
- const gtin=(product.details||{}).gtin||'',ean=t.ean||'',differ=ean&&gtin&&ean!==gtin;
- const row=(label,value)=>`<label>${label}<input value="${esc(value??'')}" disabled></label>`;
- const link=(label,url)=>`<label>${label}${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Abrir a pasta</a>`:'<span class="dim">Sem link</span>'}</label>`;
- return `<p class="source-line">Lido da Tabela de Preços do DaVinci (linha ${esc(t.line)} · ${esc(t.line_name||'')}). Enquanto o DaVinci cuida dessa tabela, estes campos são só de consulta aqui.</p><div class="product-grid">${row('Departamento',t.department||'Sem departamento')}${row('EAN na Tabela de Preços',ean)}${row('Certificado',t.certificate)}${row('Número do certificado',t.certificate_number)}${row('Modelo',t.model)}${row('Garantia (meses)',t.warranty_months===null||t.warranty_months===undefined?'':t.warranty_months)}${row('Prioridade de estoque',t.priority?'.'+t.priority:'Sem prioridade')}${link('Fotos do produto',t.photos_url)}${link('Fotos da embalagem',t.packaging_url)}</div>${differ?`<p class="native-origin-note warn">O EAN da Tabela de Preços (${esc(ean)}) é diferente do GTIN do cadastro (${esc(gtin)}).</p>`:''}`;
-}
-async function loadProductLinks(sku){
- const box=document.getElementById('product-links');if(!box)return;box.innerHTML='<p class="empty">Carregando os anúncios…</p>';
- try{const r=await fetch('/api/erp-local/products/'+encodeURIComponent(sku)+'/links'),d=await r.json();if(!r.ok)throw Error(d.message||'Não foi possível ler os anúncios.');
-  const rows=d.rows.map(l=>`<tr><td>${esc(channelNames?.[l.channel]||l.channel||'')}</td><td>${esc(l.store)}${l.archived?' <span class="badge dim">arquivada</span>':''}</td><td>${copyText(l.listing,'anúncio')}${l.variation?`<small>Variação ${esc(l.variation)}</small>`:''}</td><td>${esc(l.listing_sku)}</td><td>${esc(l.title)}</td><td class="num">${l.stock??''}</td><td class="num">${l.price?brl(l.price):''}</td><td>${esc(l.sync)}</td></tr>`).join('');
-  box.innerHTML=rows?table(['Canal','Loja','Anúncio','SKU no anúncio','Título','Estoque','Preço','Última sincronização'],rows):'<p class="empty">Nenhum anúncio ligado a este produto.</p>';
- }catch(error){box.innerHTML=`<p class="empty">${esc(error.message)}</p>`;}
-}
-document.addEventListener('click',e=>{const tab=e.target.closest('[data-product-edit-tab="links"]');if(tab){const box=document.getElementById('product-links');if(box)loadProductLinks(box.dataset.linksSku);}});

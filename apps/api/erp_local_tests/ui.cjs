@@ -345,30 +345,83 @@ test('top menu opens navigation without executing business commands',async()=>{
   dom.window.close();
 });
 
-test('the product shows its Tabela de Preços line, warns on a different EAN and keeps voltage',async()=>{
-  const price_table={line:'dg052,dg053,dg054',line_name:'uranyx A17',department:'Celular',ean:'7908855913175',certificate:'Anatel',certificate_number:'07197-26-18234',model:'A17 Pro Max',warranty_months:12,priority:'sp',photos_url:'https://mega.nz/folder/x',packaging_url:''};
-  const p={sku:'dg053.sp',name:'A17',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',price_table,details:{version:1,unit:'UN',status:'active',gtin:'7908855913168',gtin_tax:'',voltage:'bivolt'}};
-  const {dom,document:d,requests}=await setup({products:[p],cost_changes:[{created_at:'2026-11-17T12:00:00+00:00',sku:'dg053.sp',cost_from:'100',cost_to:'120',quantity:'10',result:'200.00',actor:'ana'}]});
+// M-70 (26/11/2026): o cadastro limpo. Sem a foto, Formato, Tipo, Preço venda, Unidade e Condição;
+// no alto, Nome e três linhas de 7 caixas (cada uma com data-campo para o seu pedido); abas só
+// Características, Estoque e Estrutura; em Características a primeira coisa é o Código DUN.
+const fullDetails={version:4,unit:'UN',gtin:'7908855913168',gtin_tax:'7908855913175',status:'active',description:'Texto antigo',brand:'Uranyx',location:'A1-03',weight_kg:'0.500',height_cm:'5.000',width_cm:'9.000',length_cm:'17.000',condition:'new',production:'third_party',expiry_date:'2027-01-31',free_shipping:true,net_weight_kg:'0.400',gross_weight_kg:'0.450',volumes:2,items_per_box:'10.000',dimension_unit:'mm',department:'adultoU',dun:[{code:'17891234567892',quantity:'12'}],short_description_html:'<p>Curta</p>',complementary_html:'<p>Texto antigo</p>',external_link:'https://exemplo.com/p',video_url:'https://exemplo.com/v',notes:'Nota',tags:['Azul'],stock_min:'1.000',stock_max:'9.000',crossdocking:3,voltage:'bivolt'};
+const fullProduct=(extra={})=>({sku:'dg053.sp',name:'A17 Preto',kind:'simple',components:[],balances:[],price:'199.9000',cost_price:'80.0000',details:{...fullDetails},
+ tax:{version:3,data:{origin:'1',ncm:'85171231',cest:'2106400',item_type:'00'}},suppliers:{version:2,rows:[{contact_id:'S1',description:'Fornecedor',code:'F-1',purchase_price:'70',cost_price:'75',warranty_months:12,is_default:true}]},
+ images:{version:5,rows:[{id:'img-1',url:'/api/erp-local/catalog/images/img-1',filename:'a.png',width:8,height:6,alt:'Frente'}]},category:{version:1,id:'c1',path:[{name:'Malas'}]},
+ structure:{version:0,mode:'physical',components:[],expanded:[]},
+ price_table:{line:'dg052,dg053,dg054',line_name:'uranyx A17',department:'Celular',ean:'7908855913175',certificate:'Anatel',certificate_number:'07197-26-18234',model:'A17 Pro Max',warranty_months:12,priority:'sp',photos_url:'https://mega.nz/folder/x',packaging_url:''},...extra});
+
+test('M-70: the product editor shows only the clean head and the three tabs, without the old fields',async()=>{
+  const {dom,document:d}=await setup({products:[fullProduct()],categories:[{id:'c1',path:'Malas',status:'active'}]});
   dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
   d.querySelector('nav [data-page=products]').click();
   d.querySelector('[data-edit-product]').click();
   const form=d.querySelector('#product-edit-form');
-  assert.equal(form.querySelector('[name=voltage]').value,'bivolt');
-  form.querySelector('[data-product-edit-tab=pricetable]').click();
-  const section=form.querySelector('[data-product-section=pricetable]');
-  assert.equal(section.hidden,false);
-  assert.match(section.textContent,/Lido da Tabela de Preços do DaVinci/);
-  assert.equal([...section.querySelectorAll('input')].map(i=>i.value).join('|'),'Celular|7908855913175|Anatel|07197-26-18234|A17 Pro Max|12|.sp');
-  assert.match(section.textContent,/diferente do GTIN do cadastro/);
-  assert.ok(section.querySelector('a[href="https://mega.nz/folder/x"]'));
-  form.querySelector('[name=voltage]').value='220V';
+  assert.equal(d.getElementById('title').textContent,'A17 Preto');
+  assert.equal(d.body.dataset.productEditor,'true');
+  for(const gone of ['[name=unit]','[name=price]','[name=condition]','[name=product_type]','.product-head-image','.product-head-grid','[name=brand]','[name=voltage]','[name=gtin]','[name=department]','[name=dimension_unit]','[name=net_weight_kg]','[name=volumes]','#product-image-gallery','#product-suppliers-body','[name=tax_ncm]','#product-links'])assert.equal(form.querySelector(gone),null,gone);
+  assert.doesNotMatch(form.textContent,/Formato|Preço venda|Lido da Tabela de Preços/);
+  assert.deepEqual([...form.querySelectorAll('[data-product-edit-tab]')].map(b=>b.textContent),['Características','Estoque','Estrutura']);
+  assert.deepEqual([...form.querySelectorAll('[data-product-section]')].map(s=>s.dataset.productSection),['characteristics','stock','structure']);
+  const rows=[...form.querySelectorAll('.product-head-row')];
+  assert.deepEqual(rows.map(r=>[...r.querySelectorAll(':scope>[data-campo]')].map(c=>c.dataset.campo)),[
+    ['codigo','situacao','ean','modelo','certificado','numero','validade'],
+    ['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao'],
+    ['comprimento','largura','altura','peso','fotos','embalagem','vazio']]);
+  assert.equal(form.querySelector('.product-head>label input[name=name]').value,'A17 Preto');
+  assert.match(form.querySelector('[data-campo=codigo]').textContent,/Código \(SKU\)/);assert.equal(form.querySelector('[data-campo=codigo] input').value,'dg053.sp');
+  assert.equal(form.querySelector('[data-campo=situacao] [name=status]').checked,true);
+  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao'])assert.equal(form.querySelector(`[data-campo=${campo}]`).innerHTML,'',campo);
+  const characteristics=form.querySelector('[data-product-section=characteristics]');
+  assert.equal(characteristics.querySelector('.product-grid'),null);
+  assert.deepEqual([...characteristics.querySelectorAll('.product-fold>summary')].map(s=>s.textContent),['Código DUN','Listas de preço','Descrição curta','Descrição complementar','Link Externo','Vídeo','Observações','Tags']);
+  assert.match(d.querySelector('.rail-info').textContent,/Cadastro do produto/);assert.doesNotMatch(d.querySelector('.rail-info').textContent,/Imagens/);
+  form.querySelector('#product-edit-cancel').click();
+  const service={...fullProduct({sku:'srv.1',name:'Conserto',kind:'service'})};
+  const other=await setup({products:[service]});other.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  other.document.querySelector('nav [data-page=products]').click();other.document.querySelector('[data-edit-product]').click();
+  assert.deepEqual([...other.document.querySelectorAll('[data-product-edit-tab]')].map(b=>b.textContent),['Características']);
+});
+
+// M-70: a tela não mostra mais unidade, condição, marca, GTIN, NCM, fornecedores, imagens, preço…
+// Salvar parte do produto carregado: o que não está na tela volta exatamente como veio, e Fiscal,
+// Fornecedores, Imagens, Tipo e o preço de venda nem vão (o servidor guarda os seus).
+test('M-70: saving from the clean screen sends back every hidden field exactly as it was loaded',async()=>{
+  const product=fullProduct();
+  const {dom,document:d,requests}=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-edit-product]').click();
+  const form=d.querySelector('#product-edit-form');
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
   await new Promise(r=>setImmediate(r));
-  const sent=requests.find(r=>r.kind==='product.update');
-  assert.equal(sent.payload.data.voltage,'220V');
-  d.querySelector('nav [data-page=overview]').click();
-  assert.match(d.body.textContent,/Resultado das mudanças de custo/);
-  assert.ok(d.querySelector('a[href="/api/erp-local/cost-changes.csv"]'));
+  assert.deepEqual(requests.map(r=>r.kind),['product.update']);
+  const sent=requests[0].payload;
+  assert.deepEqual(Object.keys(sent).sort(),['data','sku','version']);
+  assert.equal(sent.sku,'dg053.sp');assert.equal(sent.version,4);
+  const expected={...fullDetails,name:'A17 Preto',cost_price:'80.0000'};
+  for(const k of ['version','description','weight_kg'])delete expected[k];
+  // Só o que a tela devolve como texto (o input não guarda tipos): limites do Estoque.
+  Object.assign(expected,{stock_min:'1.000',stock_max:'9.000',crossdocking:'3'});
+  assert.deepEqual(sent.data,expected);
+  assert.ok(!('price' in sent.data)&&!('description' in sent.data)&&!('weight_kg' in sent.data));
+  // Mudanças na tela vão; o resto continua igual ao carregado.
+  requests.length=0;
+  const again=d.querySelector('#product-edit-form');
+  again.querySelector('[name=notes]').value='Nota nova';
+  const status=again.querySelector('[name=status]');status.checked=false;status.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  assert.equal(again.querySelector('[data-status-label]').textContent,'Inativo');
+  again.querySelector('[name=product_category]').value='';
+  again.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const changed=requests[0].payload;
+  assert.deepEqual(changed.data,{...expected,notes:'Nota nova',status:'inactive'});
+  assert.deepEqual(changed.category,{version:1,category_id:null});
+  assert.ok(!changed.tax&&!changed.suppliers&&!changed.images&&!changed.type&&!changed.structure);
 });
 
 test('products list the store listings with Vincular and Organizar, orders take IMEIs and payables a cost split',async()=>{
@@ -401,13 +454,15 @@ test('product editing sends metadata with the current version and preserves GTIN
   d.querySelector('nav [data-page=products]').click();
   d.querySelector('[data-edit-product]').click();
   const form=d.querySelector('#product-edit-form');
-  form.querySelector('[name=unit]').value='CX';
+  form.querySelector('[name=name]').value='Aparelho novo';
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
   await new Promise(r=>setImmediate(r));
   assert.deepEqual(requests.map(r=>r.kind),['product.update']);
   assert.equal(requests[0].payload.version,7);
   assert.equal(requests[0].payload.data.gtin,'012345678905');
-  assert.equal(requests[0].payload.data.unit,'CX');
+  assert.equal(requests[0].payload.data.unit,'UN');
+  assert.equal(requests[0].payload.data.name,'Aparelho novo');
+  assert.equal('price' in requests[0].payload.data,false);
   dom.window.close();
 });
 
@@ -944,36 +999,8 @@ test('stock allocation opens read-only, keeps quantities commercial and submits 
  assert.equal(d.querySelector('#stock-allocation-form'),null);
 });
 
-test('product supplier dialog stages separate prices before the atomic product save',async()=>{
- const supplier={id:'S1',code:1,data:{name:'Fornecedor <img src=x>',roles:['supplier'],status:'active'}};
- const {dom,document:d,requests}=await setup({contacts:[supplier]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
- d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();d.querySelector('[data-product-edit-tab=suppliers]').click();d.querySelector('[data-supplier-add]').click();
- const dialog=d.querySelector('#product-supplier-dialog');assert.ok(dialog);dialog.querySelector('[name=product_supplier_contact]').value='S1';dialog.querySelector('[name=product_supplier_code]').value='000-ABC';dialog.querySelector('[name=product_supplier_purchase_price]').value='9.125';dialog.querySelector('[name=product_supplier_cost_price]').value='10';dialog.querySelector('[name=product_supplier_warranty]').value='12';dialog.querySelector('[data-supplier-dialog-ok]').click();
- assert.equal(requests.length,0);assert.equal(d.querySelector('#product-supplier-dialog'),null);assert.equal(d.querySelectorAll('#product-suppliers-body tr').length,1);assert.equal(d.querySelector('#product-suppliers-body img'),null);
- d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests.length,1);assert.equal(requests[0].kind,'product.update');assert.equal(requests[0].payload.suppliers.version,0);
- assert.equal(requests[0].payload.suppliers.rows[0].purchase_price,'9.125');assert.equal(requests[0].payload.suppliers.rows[0].cost_price,'10');assert.equal(requests[0].payload.suppliers.rows[0].code,'000-ABC');assert.equal(requests[0].payload.suppliers.rows[0].warranty_months,12);assert.equal(requests[0].payload.suppliers.rows[0].is_default,true);
-});
 
-test('product tax registration preserves text codes, blank origin and an explicit reason without fiscal transmission',async()=>{
- const {dom,document:d,requests}=await setup();dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
- d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();d.querySelector('[data-product-edit-tab=tax]').click();
- assert.equal(d.querySelector('[name=tax_origin]').value,'');assert.deepEqual([...d.querySelector('[name=tax_item_type]').options].slice(1).map(o=>o.value),['00','01','02','03','04','05','06','07','08','09','10','99']);
- d.querySelector('[name=tax_ncm]').value='0000.00.00';d.querySelector('[name=tax_cest]').value='01.002.03';d.querySelector('[name=tax_tipi_exception]').value='001';d.querySelector('[name=tax_reason]').value='Conferência fiscal local';
- d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests.length,1);assert.equal(requests[0].kind,'product.update');assert.equal(requests[0].payload.tax.version,0);assert.equal(requests[0].payload.tax.data.origin,null);assert.equal(requests[0].payload.tax.data.ncm,'0000.00.00');assert.equal(requests[0].payload.tax.data.tipi_exception,'001');assert.equal(requests[0].payload.tax.reason,'Conferência fiscal local');
-});
 
-test('gallery changes stage primary order and captions before one atomic product save',async()=>{
- const images=[{id:'image-a',url:'/api/erp-local/catalog/images/image-a',filename:'first.png',width:8,height:6,alt:'Primeira'},{id:'image-b',url:'/api/erp-local/catalog/images/image-b',filename:'second.png',width:8,height:6,alt:'Segunda'}];
- const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:0},images:{version:4,rows:images}};
- const {dom,document:d,requests}=await setup({products:[product]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
- d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();d.querySelector('[data-product-edit-tab=images]').click();
- const figures=d.querySelectorAll('#product-image-gallery figure');figures[1].querySelector('[data-image-alt]').value='Descrição preservada';figures[1].querySelector('[data-image-primary]').click();
- assert.equal(requests.length,0);assert.equal(JSON.parse(d.querySelector('#product-image-gallery figure').dataset.imageInfo).id,'image-b');
- d.querySelector('[name=image_reason]').value='Conferir nova principal';d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests.length,1);assert.equal(requests[0].kind,'product.update');assert.equal(requests[0].payload.images.version,4);assert.deepEqual(requests[0].payload.images.rows,[{id:'image-b',alt:'Descrição preservada'},{id:'image-a',alt:'Primeira'}]);
-});
 
 test('opening product details replaces the list and cancel restores the current search without a write',async()=>{
  const {dom,document:d,requests}=await setup();dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
@@ -982,22 +1009,18 @@ test('opening product details replaces the list and cancel restores the current 
  d.querySelector('[name=name]').value='Mudança sem salvar';d.querySelector('#product-edit-cancel').click();assert.ok(d.querySelector('.product-list'));assert.equal(d.querySelector('#catalog-search [name=query]').value,'aparelho');assert.equal(requests.length,0);
 });
 
-test('characteristics form sends every observed field in centimeters and keeps unknown values unknown',async()=>{
- const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:2,status:'active',condition:'unspecified',production:'',free_shipping:null,dimension_unit:'cm',width_cm:'30.000',height_cm:null,length_cm:null,weight_kg:'1.500',dun:[],tags:['Azul'],short_description_html:'',complementary_html:'<p>Texto <img src=x onerror=alert(1)></p>'},category:{version:0,id:null,path:[]}};
+test('characteristics form sends DUN, tags, category and clean rich text, and keeps the hidden measures as loaded',async()=>{
+ const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:2,status:'active',condition:'unspecified',production:'',free_shipping:null,dimension_unit:'m',width_cm:'30.000',height_cm:null,length_cm:null,weight_kg:'1.500',dun:[],tags:['Azul'],short_description_html:'',complementary_html:'<p>Texto <img src=x onerror=alert(1)></p>'},category:{version:0,id:null,path:[]}};
  const {dom,document:d,requests}=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
- assert.equal(d.querySelector('[data-rich-body] img'),null);assert.match(d.querySelector('#product-edit-form .source-line').textContent,/Peso anterior/);
- assert.equal(d.querySelector('[name=production] option[value=""]').selected,true);assert.equal(d.querySelector('[name=free_shipping] option[value=""]').selected,true);
- assert.equal(d.querySelector('[name=width_cm]').value,'30');
- const unit=d.querySelector('[name=dimension_unit]');unit.value='m';unit.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(d.querySelector('[name=width_cm]').value,'0.3');
- d.querySelector('[name=height_cm]').value='1.25';
- d.querySelector('[name=condition]').value='new';d.querySelector('[name=production]').value='own';d.querySelector('[name=free_shipping]').value='no';d.querySelector('[name=volumes]').value='2';d.querySelector('[name=product_category]').value='c1';
+ assert.equal(d.querySelector('[data-rich-body] img'),null);assert.doesNotMatch(d.querySelector('#product-edit-form').textContent,/Peso anterior/);
+ d.querySelector('[name=product_category]').value='c1';
  d.querySelector('[name=dun_code]').value='17891234567892';d.querySelector('[name=dun_quantity]').value='12';
  const tag=d.querySelector('[name=product_tag_input]');tag.value='Mala, azul';tag.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
  const sent=requests[0];assert.equal(sent.kind,'product.update');const data=sent.payload.data;
- assert.equal(data.width_cm,'30');assert.equal(data.height_cm,'125');assert.equal(data.length_cm,null);assert.equal(data.dimension_unit,'m');assert.equal('weight_kg' in data,false);
- assert.equal(data.condition,'new');assert.equal(data.production,'own');assert.equal(data.free_shipping,false);assert.equal(data.volumes,'2');
+ assert.equal(data.width_cm,'30.000');assert.equal(data.height_cm,null);assert.equal(data.length_cm,null);assert.equal(data.dimension_unit,'m');assert.equal('weight_kg' in data,false);
+ assert.equal(data.condition,'unspecified');assert.equal(data.production,'');assert.equal(data.free_shipping,null);
  assert.deepEqual(data.dun,[{code:'17891234567892',quantity:'12'}]);assert.deepEqual(data.tags,['Azul','Mala']);
  assert.doesNotMatch(data.complementary_html,/img|onerror/);assert.deepEqual(sent.payload.category,{version:0,category_id:'c1'});
 });
@@ -1018,12 +1041,9 @@ test('half filled DUN never reaches the API and source mode cannot inject script
  assert.equal(requests[0].payload.data.short_description_html,'<p style="text-align: center">Oi</p>Link');
 });
 
-test('decimal shift between measure units is exact and price list shortcut refuses to discard edits',async()=>{
+test('price list shortcut refuses to discard edits',async()=>{
  const {dom,document:d}=await setup();dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
- const unit=d.querySelector('[name=dimension_unit]'),width=d.querySelector('[name=width_cm]'),height=d.querySelector('[name=height_cm]'),to=v=>{unit.value=v;unit.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
- width.value='110';height.value='7';to('m');assert.equal(width.value,'1.1');assert.equal(height.value,'0.07');to('mm');assert.equal(width.value,'1100');assert.equal(height.value,'70');
- width.value='15';to('cm');assert.equal(width.value,'1.5');assert.equal(height.value,'7');
  const name=d.querySelector('[name=name]');name.value='Mudou';name.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
  d.querySelector('[data-product-price-lists]').click();
  assert.ok(d.querySelector('#product-edit-form'));assert.match(d.getElementById('notice').textContent,/Salve ou cancele/);
@@ -1935,16 +1955,15 @@ test('M-40: the bar trash sends only the selected products, after confirmation',
  assert.equal(requests[0].kind,'product.delete');assert.deepEqual(requests[0].payload.items,[{sku:'b.zero',version:0}]);
 });
 
-test('service forms hide stock and physical blocks but keep values, and deleted products stay out',async()=>{
+test('service forms show only Características and keep values, and deleted products stay out',async()=>{
  const {dom,document:d,requests}=await catalogPage();
  d.querySelector('[data-edit-product="d.serv"]').click();
- assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('.product-grid[data-physical-only]').hidden,true);
+ assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('.product-category[data-physical-only]').hidden,true);
  d.querySelector('#product-edit-cancel').click();
  d.querySelector('[data-edit-product="a.ativo"]').click();
- const type=d.querySelector('[name=product_type]');d.querySelector('[data-product-edit-tab=stock]').click();type.value='service';type.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
- assert.equal(d.querySelector('[data-product-edit-tab=stock]').hidden,true);assert.equal(d.querySelector('[data-product-section=stock]').hidden,true);assert.equal(d.querySelector('[data-product-section=characteristics]').hidden,false);
+ assert.equal(d.querySelector('[name=product_type]'),null);
  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests[0].payload.type,'service');assert.equal(requests[0].payload.data.brand,'Sorriso');
+ assert.equal('type' in requests[0].payload,false);assert.equal(requests[0].payload.data.brand,'Sorriso');
  d.querySelector('#product-edit-cancel')?.click();
  // M-30: "Excluídos" saiu da Situação; o excluído nunca aparece na lista.
  assert.equal(d.querySelector('[data-product-select="e.del"]'),null);assert.equal(d.querySelector('[data-product-restore]'),null);
@@ -2604,7 +2623,8 @@ test('a light product from the screen state opens in the editor after asking for
   assert.match(d.querySelector('main').textContent,/Abrindo dg053\.sp/);
   for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
   assert.deepEqual(asked.filter(u=>u.includes('/full')),['/api/erp-local/products/dg053.sp/full']);
-  assert.equal(d.querySelector('#product-edit-form [name=voltage]').value,'bivolt');
+  assert.equal(d.querySelector('#product-edit-form [name=name]').value,'A17');
+  assert.equal(d.querySelector('#product-edit-form [name=voltage]'),null);
   dom.window.close();
 });
 
