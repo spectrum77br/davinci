@@ -223,7 +223,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   marcas: 'Marcas',
   redes_sociais: 'Redes Sociais',
   email_padroes: 'E-mails (padrões)',
-  cadastro_produtos: 'Produtos — categorias e tags de envio (ver; criar, editar e excluir só admin)',
+  cadastro_produtos: 'Produtos — categorias, tags de envio e a aba Centro de custo (ver; criar, editar e excluir só admin)',
   ouvidoria: 'Robôs (Ouvidoria)',
   denuncia: 'Denúncia (Anúncios, Denúncias, Casos)',
   usuarios: 'Usuários',

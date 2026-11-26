@@ -583,6 +583,8 @@ _CLEANUP_TABLES = (
     "valuation_estoque_bling_diario",
     "pricing_products",
     "pricing_accounts",
+    # 0514 (M-76): o centro de custo aponta para a raiz (RESTRICT): sai antes dos segmentos.
+    "centros_custo",
     "segments",
     "audit_dismissed_skus",
     "pricing_push_idempotency",

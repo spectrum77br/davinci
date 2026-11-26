@@ -28,7 +28,7 @@ _MIGRATION = (
     Path(__file__).resolve().parent.parent
     / "alembic"
     / "versions"
-    / "0512_certificacoes_sku_anvisa.py"
+    / "0515_certificacoes_sku_anvisa.py"
 )
 TRAVA = "ck_financeiro_suprimentos_ck_financeiro_suprimentos_certificado"
 CHECK_0083 = (
@@ -102,8 +102,8 @@ async def test_migration_0512_aceita_anvisa_sem_mudar_dados_e_o_downgrade_volta(
 ):
     mod = _carregar()
     assert (mod.revision, mod.down_revision) == (
-        "0512_certificacoes_sku_anvisa",
-        "0511_contas_ml_par_custo_total",
+        "0515_certificacoes_sku_anvisa",
+        "0514_threema_contatos_copia",
     )
     schema_model = Base.metadata.schema
     rascunho = f"{schema_model}_mig0512"

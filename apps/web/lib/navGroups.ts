@@ -125,6 +125,9 @@ export const TABS_CADASTROS: RouteTab[] = [
   // Produtos (M-29, 24/11/2026): a lista oficial de categorias e tags de envio
   // (Tipo | Nome), lida pelos filtros do Produtos 2. Criar/editar/excluir só admin.
   { to: '/cadastro-produtos', label: 'Produtos', resource: 'cadastro_produtos' },
+  // Centro de custo (M-76, 25/11/2026): Celular, Eletro, Mala e os novos — a fonte do menu
+  // "Centro de custo" das Categorias de venda. Vê quem vê Produtos; mexer, só admin.
+  { to: '/cadastro-centro-custo', label: 'Centro de custo', resource: 'cadastro_produtos' },
 ]
 
 export const TABS_NF: RouteTab[] = [

@@ -26,7 +26,7 @@ _MIGRATION = (
     Path(__file__).resolve().parent.parent
     / "alembic"
     / "versions"
-    / "0512_certificacoes_sku_anvisa.py"
+    / "0515_certificacoes_sku_anvisa.py"
 )
 
 
@@ -356,14 +356,14 @@ async def test_conversao_nao_muda_o_certificado_de_ninguem(db: AsyncSession, cap
 
         # O relatório do deploy.
         log = capsys.readouterr().out
-        assert "[0512] famílias inseridas na coluna SKU: 6" in log
-        assert "[0512]   dg111 → USM001" in log
-        assert "[0512] conflitos (família pedida por mais de um; NÃO inserida): 2" in log
-        assert "[0512]   dg900 → USM001, USM003" in log
-        assert "[0512]   uaf001m1 → UAF001-M1, sem certificado" in log
+        assert "[0515] famílias inseridas na coluna SKU: 6" in log
+        assert "[0515]   dg111 → USM001" in log
+        assert "[0515] conflitos (família pedida por mais de um; NÃO inserida): 2" in log
+        assert "[0515]   dg900 → USM001, USM003" in log
+        assert "[0515]   uaf001m1 → UAF001-M1, sem certificado" in log
         assert "receberam certificacao_id (o certificado que já valia): 3" in log
-        assert "[0512]   dg900 (uranyx Z - USM003) → USM003" in log
-        assert "[0512] linhas sem SKU: 2" in log
+        assert "[0515]   dg900 (uranyx Z - USM003) → USM003" in log
+        assert "[0515] linhas sem SKU: 2" in log
         assert "Certificado efetivo de TODAS as linhas conferido: igual ao de antes." in log
 
         # A tabela como o model (PK = SKU; FK em cascata; índice).
@@ -419,7 +419,7 @@ async def test_conversao_nao_muda_o_certificado_de_ninguem(db: AsyncSession, cap
         conn = await db.connection()
         await conn.run_sync(_rodar(mod, "downgrade"))
         await db.commit()
-        assert "copiada para financeiro_suprimento_skus_bak_0512: 6 SKU(s)" in (
+        assert "copiada para financeiro_suprimento_skus_bak_0515: 6 SKU(s)" in (
             capsys.readouterr().out
         )
         assert (
@@ -432,7 +432,7 @@ async def test_conversao_nao_muda_o_certificado_de_ninguem(db: AsyncSession, cap
             (
                 await db.execute(
                     text(
-                        f'SELECT sku FROM "{rascunho}".financeiro_suprimento_skus_bak_0512'
+                        f'SELECT sku FROM "{rascunho}".financeiro_suprimento_skus_bak_0515'
                         " ORDER BY 1"
                     )
                 )

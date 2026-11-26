@@ -58,12 +58,12 @@ DOWNGRADE: volta a trava antiga (mesmo nome). Se houver
 certificação marcada como 'anvisa', PARA com RuntimeError e não muda nada:
 nenhum dado é apagado nem trocado sozinho (troque o Certificado dessas linhas
 na tela antes de voltar). A coluna SKU sai, mas antes é copiada para
-`financeiro_suprimento_skus_bak_0512` (fora do Histórico pelo nome): nada se
+`financeiro_suprimento_skus_bak_0515` (fora do Histórico pelo nome): nada se
 perde. O `certificacao_id` que a conversão gravou fica (era o certificado que
 já valia; com a ligação pelo nome de volta, continua o mesmo).
 
-Revision ID: 0512_certificacoes_sku_anvisa
-Revises: 0511_contas_ml_par_custo_total
+Revision ID: 0515_certificacoes_sku_anvisa
+Revises: 0514_threema_contatos_copia
 """
 
 # ruff: noqa: S608 — SQL montado só com nomes e valores fixos desta migration (schema), sem entrada de fora
@@ -79,8 +79,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0512_certificacoes_sku_anvisa"
-down_revision: str | None = "0511_contas_ml_par_custo_total"
+revision: str = "0515_certificacoes_sku_anvisa"
+down_revision: str | None = "0514_threema_contatos_copia"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -152,7 +152,7 @@ def tirar_anvisa_do_certificado(bind) -> None:
 # ── M-69: coluna SKU ─────────────────────────────────────────────────────────
 
 TABELA_SKUS = "financeiro_suprimento_skus"
-TABELA_SKUS_BAK = "financeiro_suprimento_skus_bak_0512"
+TABELA_SKUS_BAK = "financeiro_suprimento_skus_bak_0515"
 # O nome que a convenção do Base dá à FK (passa de 63 letras: o SQLAlchemy
 # corta e põe o final do hash). Igual ao model, para o create_all e a
 # migration darem o mesmo banco.
@@ -195,7 +195,7 @@ def tirar_tabela_skus(bind) -> None:
         )
     ).rowcount
     bind.execute(sa.text(f"DROP TABLE {SCHEMA}.{TABELA_SKUS}"))
-    print(f"[0512] coluna SKU copiada para {TABELA_SKUS_BAK}: {copiados} SKU(s)")  # noqa: T201 — log do deploy
+    print(f"[0515] coluna SKU copiada para {TABELA_SKUS_BAK}: {copiados} SKU(s)")  # noqa: T201 — log do deploy
 
 
 # ── CÓPIA CONGELADA da ligação de HOJE (services/certificacao_produto.py até a
@@ -402,7 +402,7 @@ def converter_ligacao_pelo_sku(bind) -> dict:
     ]
     if diferentes:
         raise RuntimeError(
-            f"0512: {len(diferentes)} produto(s) mudariam de certificado com a conversão"
+            f"0515: {len(diferentes)} produto(s) mudariam de certificado com a conversão"
             " pelo SKU; nada foi gravado: " + "; ".join(diferentes)
         )
 
@@ -424,23 +424,23 @@ def converter_ligacao_pelo_sku(bind) -> dict:
 
 def relatorio_em_texto(rel: dict) -> str:
     linhas = [
-        f"[0512] conversão da ligação pelo SKU: {rel['produtos']} linhas da Tabela de Preços"
+        f"[0515] conversão da ligação pelo SKU: {rel['produtos']} linhas da Tabela de Preços"
         f" ({rel['com_certificado']} com certificado), {rel['certificados']} certificações."
         " Certificado efetivo de TODAS as linhas conferido: igual ao de antes.",
-        f"[0512] famílias inseridas na coluna SKU: {len(rel['inseridas'])}",
+        f"[0515] famílias inseridas na coluna SKU: {len(rel['inseridas'])}",
     ]
-    linhas += [f"[0512]   {f} → {nome}" for f, nome in rel["inseridas"]]
+    linhas += [f"[0515]   {f} → {nome}" for f, nome in rel["inseridas"]]
     linhas.append(
-        f"[0512] conflitos (família pedida por mais de um; NÃO inserida): {len(rel['conflitos'])}"
+        f"[0515] conflitos (família pedida por mais de um; NÃO inserida): {len(rel['conflitos'])}"
     )
-    linhas += [f"[0512]   {f} → {', '.join(nomes)}" for f, nomes in rel["conflitos"]]
+    linhas += [f"[0515]   {f} → {', '.join(nomes)}" for f, nomes in rel["conflitos"]]
     linhas.append(
-        "[0512] linhas que receberam certificacao_id (o certificado que já valia):"
+        "[0515] linhas que receberam certificacao_id (o certificado que já valia):"
         f" {len(rel['gravadas'])}"
     )
-    linhas += [f"[0512]   {sku} ({nome}) → {cert}" for sku, nome, cert in rel["gravadas"]]
-    linhas.append(f"[0512] linhas sem SKU: {len(rel['sem_sku'])}")
-    linhas += [f"[0512]   {nome} ({pid})" for nome, pid in rel["sem_sku"]]
+    linhas += [f"[0515]   {sku} ({nome}) → {cert}" for sku, nome, cert in rel["gravadas"]]
+    linhas.append(f"[0515] linhas sem SKU: {len(rel['sem_sku'])}")
+    linhas += [f"[0515]   {nome} ({pid})" for nome, pid in rel["sem_sku"]]
     return "\n".join(linhas)
 
 

@@ -8,6 +8,15 @@
 // Regras do servidor (routers/produto_cadastros.py): nome repetido no tipo é
 // recusado; Categoria que ainda tem produto (base do ERP) não sai nem muda de
 // nome; Tag de envio em uso pede confirmação com a contagem.
+// M-75 (Harry 25/11/2026): tipo "Categoria de venda" = os grupos de margem/frete da aba Contas.
+// NÃO é cadastro novo: são os segmentos filhos de Cadastros › Segmentos (o mesmo dado), com a
+// raiz na coluna "Centro de custo". Vão pelas rotas /categorias-venda; a nova entra no fim do
+// centro de custo (até 5), só a última sai e "Apple"/"Queima de estoque" não trocam de nome
+// (o servidor confere e manda a frase). O menu "Centro de custo" do Novo cadastro vem de um
+// lugar só: `centros_custo` da lista (services/categorias_venda.centros_do_menu no servidor).
+// M-76: esse menu é a lista de Cadastros › Centro de custo. Centro novo aparece, mas ainda não
+// recebe categoria de venda: ao escolher, a janela avisa e o Salvar fica travado (o servidor
+// recusa com a mesma frase).
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -17,8 +26,23 @@ definePageMeta({
 })
 
 type Tipo = { id: string; nome: string; chave: string | null }
-type Cadastro = { id: string; tipo_id: string; tipo_nome: string; tipo_chave: string | null; nome: string }
+type Cadastro = {
+  id: string
+  tipo_id: string
+  tipo_nome: string
+  tipo_chave: string | null
+  nome: string
+  centro_custo?: string | null
+  ativa?: boolean
+}
+type Centro = { id: string; nome: string; aceita_categoria?: boolean }
 type Uso = { regra: string | null; produtos: number | null; bloqueia: boolean; mensagem: string | null }
+
+const CHAVE_VENDA = 'categoria_venda'
+// A mesma frase do servidor (services/categorias_venda.MSG_SO_FIXOS).
+const MSG_SO_FIXOS = 'Categoria de venda só em Celular, Eletro e Mala por enquanto.'
+const ehVenda = (c: { tipo_chave?: string | null; chave?: string | null } | null | undefined) =>
+  !!c && (c.tipo_chave === CHAVE_VENDA || c.chave === CHAVE_VENDA)
 
 const { api } = useApi()
 const auth = useAuthStore()
@@ -26,6 +50,7 @@ const isAdmin = computed(() => auth.user?.role === 'admin')
 
 const tipos = ref<Tipo[]>([])
 const cadastros = ref<Cadastro[]>([])
+const centros = ref<Centro[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
@@ -41,9 +66,10 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const r = await api<{ tipos: Tipo[]; cadastros: Cadastro[] }>('/api/produto-cadastros')
+    const r = await api<{ tipos: Tipo[]; cadastros: Cadastro[]; centros_custo?: Centro[] }>('/api/produto-cadastros')
     tipos.value = r.tipos
     cadastros.value = r.cadastros
+    centros.value = r.centros_custo ?? []
   } catch (e: any) {
     error.value = msgErro(e)
   } finally {
@@ -112,15 +138,33 @@ const cadAberto = ref(false)
 const cadEditando = ref<Cadastro | null>(null)
 const cadTipo = ref('')
 const cadNome = ref('')
+const cadCentro = ref('') // Categoria de venda nova: o id do centro de custo escolhido no menu
 const cadErro = ref<string | null>(null)
 const cadAviso = ref<string | null>(null) // tag em uso: confirmar a troca
 const cadSalvando = ref(false)
+
+// O tipo escolhido na janela é Categoria de venda?
+const cadEhVenda = computed(() => ehVenda(tipos.value.find((t) => t.id === cadTipo.value)))
+// M-76: o centro escolhido no Novo cadastro ainda não recebe categoria de venda (centro novo).
+const cadCentroSemCategoria = computed(
+  () =>
+    cadEhVenda.value &&
+    !cadEditando.value &&
+    centros.value.find((c) => c.id === cadCentro.value)?.aceita_categoria === false,
+)
+// Os tipos do menu: Categoria de venda não troca com os outros (é outro dado) — no lápis de
+// uma categoria de venda o menu fica travado; no lápis das outras ela não aparece.
+const tiposDoMenu = computed(() =>
+  cadEditando.value && !ehVenda(cadEditando.value) ? tipos.value.filter((t) => !ehVenda(t)) : tipos.value,
+)
 
 function abrirCadastro(c: Cadastro | null = null) {
   cadAberto.value = true
   cadEditando.value = c
   cadTipo.value = c?.tipo_id ?? tipos.value[0]?.id ?? ''
   cadNome.value = c?.nome ?? ''
+  // No lápis o centro de custo não muda (só aparece); no Novo cadastro a pessoa escolhe.
+  cadCentro.value = ''
   cadErro.value = null
   cadAviso.value = null
 }
@@ -135,10 +179,31 @@ async function salvarCadastro(confirmar = false) {
     cadErro.value = 'Escolha o tipo e digite o nome.'
     return
   }
+  if (cadEhVenda.value && !cadEditando.value && !cadCentro.value) {
+    cadErro.value = 'Escolha o centro de custo.'
+    return
+  }
+  if (cadCentroSemCategoria.value) {
+    cadErro.value = MSG_SO_FIXOS
+    return
+  }
   cadSalvando.value = true
   cadErro.value = null
   try {
-    if (cadEditando.value) {
+    if (cadEhVenda.value) {
+      // M-75: o segmento filho (mesmo dado da aba Segmentos); o lápis só troca o nome.
+      if (cadEditando.value) {
+        await api(`/api/produto-cadastros/categorias-venda/${cadEditando.value.id}`, {
+          method: 'PATCH',
+          body: { nome: cadNome.value },
+        })
+      } else {
+        await api('/api/produto-cadastros/categorias-venda', {
+          method: 'POST',
+          body: { centro_custo_id: cadCentro.value, nome: cadNome.value },
+        })
+      }
+    } else if (cadEditando.value) {
       await api(`/api/produto-cadastros/${cadEditando.value.id}`, {
         method: 'PATCH',
         body: { tipo_id: cadTipo.value, nome: cadNome.value, confirmar },
@@ -166,13 +231,18 @@ const excluirUso = ref<Uso | null>(null)
 const excluirErro = ref<string | null>(null)
 const excluirCarregando = ref(false)
 
+// Categoria de venda (M-75) tem rota própria: a linha é o segmento filho.
+function rotaDe(c: Cadastro): string {
+  return ehVenda(c) ? `/api/produto-cadastros/categorias-venda/${c.id}` : `/api/produto-cadastros/${c.id}`
+}
+
 async function pedirExclusao(c: Cadastro) {
   excluindo.value = c
   excluirUso.value = null
   excluirErro.value = null
   excluirCarregando.value = true
   try {
-    excluirUso.value = await api<Uso>(`/api/produto-cadastros/${c.id}/uso`)
+    excluirUso.value = await api<Uso>(`${rotaDe(c)}/uso`)
   } catch (e: any) {
     excluirErro.value = msgErro(e)
   } finally {
@@ -191,7 +261,9 @@ async function confirmarExclusao() {
   excluirErro.value = null
   try {
     // A pessoa já viu a contagem (tag em uso) nesta janela: vai com confirmar.
-    await api(`/api/produto-cadastros/${excluindo.value.id}?confirmar=true`, { method: 'DELETE' })
+    // Categoria de venda não tem confirmação: em uso, o servidor recusa.
+    const url = ehVenda(excluindo.value) ? rotaDe(excluindo.value) : `${rotaDe(excluindo.value)}?confirmar=true`
+    await api(url, { method: 'DELETE' })
     fecharExclusao()
     await load()
   } catch (e: any) {
@@ -231,21 +303,35 @@ async function confirmarExclusao() {
           <tr>
             <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-48">Tipo</th>
             <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border">Nome</th>
+            <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-32">Centro de custo</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20">Ações</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !cadastros.length">
-            <td colspan="3" class="text-center py-6 text-xs text-muted-foreground">
+            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!cadastros.length">
-            <td colspan="3" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
+            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
           </tr>
           <tr v-for="c in cadastros" :key="c.id" class="h-8 hover:bg-accent/30" :data-cadastro="c.nome">
             <td class="border border-border px-2 py-1 text-xs">{{ c.tipo_nome }}</td>
-            <td class="border border-border px-2 py-1 text-xs font-medium">{{ c.nome }}</td>
+            <td
+              class="border border-border px-2 py-1 text-xs font-medium"
+              :class="{ 'text-muted-foreground': c.ativa === false }"
+            >
+              {{ c.nome }}
+              <span
+                v-if="c.ativa === false"
+                class="ml-1 rounded border border-border px-1 text-[10px] font-normal text-muted-foreground"
+                data-marca="inativa"
+              >inativa</span>
+            </td>
+            <td class="border border-border px-2 py-1 text-xs" :class="{ 'text-muted-foreground': !c.centro_custo }">
+              {{ c.centro_custo || '—' }}
+            </td>
             <td class="border border-border px-1 py-1 text-center">
               <div v-if="isAdmin" class="flex gap-0.5 justify-center">
                 <button
@@ -318,7 +404,8 @@ async function confirmarExclusao() {
             </template>
             <template v-else>
               <span class="flex-1">{{ t.nome }}</span>
-              <button class="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded" title="Renomear" data-acao="renomear-tipo" @click="editarTipo(t)">
+              <!-- Categoria de venda (M-75) não é tipo desta tabela: não renomeia aqui. -->
+              <button v-if="!ehVenda(t)" class="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded" title="Renomear" data-acao="renomear-tipo" @click="editarTipo(t)">
                 <Pencil class="h-3.5 w-3.5" />
               </button>
             </template>
@@ -344,17 +431,52 @@ async function confirmarExclusao() {
         </div>
         <label class="block text-xs text-muted-foreground">
           Tipo
-          <select v-model="cadTipo" class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground" data-campo="cadastro-tipo">
-            <option v-for="t in tipos" :key="t.id" :value="t.id">{{ t.nome }}</option>
+          <select
+            v-model="cadTipo"
+            :disabled="ehVenda(cadEditando)"
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground disabled:opacity-60"
+            data-campo="cadastro-tipo"
+          >
+            <option v-for="t in tiposDoMenu" :key="t.id" :value="t.id">{{ t.nome }}</option>
           </select>
         </label>
+        <!-- Categoria de venda: o centro de custo. No lápis só o nome muda: o centro aparece
+             travado (pode ser um que não está no menu, como o Catálogo). -->
+        <label v-if="cadEhVenda && cadEditando" class="block text-xs text-muted-foreground">
+          Centro de custo
+          <input
+            :value="cadEditando.centro_custo || '—'"
+            type="text"
+            disabled
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground disabled:opacity-60"
+            data-campo="cadastro-centro-fixo"
+          />
+        </label>
+        <label v-else-if="cadEhVenda" class="block text-xs text-muted-foreground">
+          Centro de custo
+          <select
+            v-model="cadCentro"
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+            data-campo="cadastro-centro"
+          >
+            <option value="" disabled>Escolha…</option>
+            <option v-for="r in centros" :key="r.id" :value="r.id">{{ r.nome }}</option>
+          </select>
+        </label>
+        <p
+          v-if="cadCentroSemCategoria"
+          class="rounded border border-amber-300 bg-amber-50 dark:bg-amber-900/15 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+          data-aviso="centro-sem-categoria"
+        >
+          {{ MSG_SO_FIXOS }}
+        </p>
         <label class="block text-xs text-muted-foreground">
           Nome
           <input
             v-model="cadNome"
             type="text"
             maxlength="60"
-            placeholder="ex.: .sp ou Celular"
+            :placeholder="cadEhVenda ? 'ex.: Acessórios' : 'ex.: .sp ou Celular'"
             class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
             data-campo="cadastro-nome"
             @keydown.enter="salvarCadastro(false)"
@@ -369,7 +491,7 @@ async function confirmarExclusao() {
         </div>
         <div v-else class="flex justify-end gap-2">
           <Button size="sm" variant="ghost" @click="fecharCadastro">Cancelar</Button>
-          <Button size="sm" :disabled="cadSalvando" data-acao="salvar-cadastro" @click="salvarCadastro(false)">
+          <Button size="sm" :disabled="cadSalvando || cadCentroSemCategoria" data-acao="salvar-cadastro" @click="salvarCadastro(false)">
             <Loader2 v-if="cadSalvando" class="size-4 mr-1 animate-spin" /> Salvar
           </Button>
         </div>

@@ -53,7 +53,7 @@ _MIGRATION = (
     Path(__file__).resolve().parent.parent
     / "alembic"
     / "versions"
-    / "0513_produto_regras_margem_duimp.py"
+    / "0516_produto_regras_margem_duimp.py"
 )
 
 _DUIMP_REGULAR = "celular importado pela duimp 26BR0003333333-3"
@@ -244,8 +244,8 @@ async def _estrutura(db: AsyncSession, schema: str, tabela: str) -> dict[str, li
 async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db: AsyncSession):
     mod = _carregar()
     assert (mod.revision, mod.down_revision) == (
-        "0513_produto_regras_margem_duimp",
-        "0511_contas_ml_par_custo_total",
+        "0516_produto_regras_margem_duimp",
+        "0515_certificacoes_sku_anvisa",
     )
     seg = await _arvore(db)
     db.add_all(

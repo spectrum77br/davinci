@@ -319,6 +319,7 @@ from app.models.pricing_conferencia import (
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
 from app.models.estoque_entrada import EstoqueEntrada
 from app.models.estoque_transferencia import EstoqueTransferencia, EstoqueTransferenciaLinha
+from app.models.centro_custo import CentroCusto
 from app.models.product import (
     BackgroundJob,
     BackgroundJobDetail,
@@ -583,6 +584,7 @@ __all__ = [
     "ConfiguracaoSegura",
     "OrganizarOculto",
     "OrganizarPrevia",
+    "CentroCusto",
     "ProdutoCadastro",
     "ProdutoCadastroTipo",
     "ProdutoCondicaoEspecial",

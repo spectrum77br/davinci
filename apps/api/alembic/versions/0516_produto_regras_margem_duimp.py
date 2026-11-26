@@ -32,8 +32,8 @@ Conferência na produção ANTES de publicar (só leitura): `.local/conferir_vie
 DOWNGRADE: a view volta ao corpo da 0235 e as duas tabelas saem (o que foi preenchido nelas se
 perde; a view e a Margem voltam a usar só o segmento).
 
-Revision ID: 0513_produto_regras_margem_duimp
-Revises: 0511_contas_ml_par_custo_total
+Revision ID: 0516_produto_regras_margem_duimp
+Revises: 0515_certificacoes_sku_anvisa
 Create Date: 2026-11-26
 """
 
@@ -44,9 +44,9 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0513_produto_regras_margem_duimp"
+revision: str = "0516_produto_regras_margem_duimp"
 # No ramo; na junção o coordenador troca para a migration da frente A.
-down_revision: str | None = "0511_contas_ml_par_custo_total"
+down_revision: str | None = "0515_certificacoes_sku_anvisa"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -298,7 +298,7 @@ _MINIMA_NOVA = "COALESCE(pr.margem_min, leaf.min_margin,"
 
 def select_novo() -> str:
     if _SELECT_ATUAL.count(_MINIMA_ATUAL) != 2:
-        raise RuntimeError("0513: SELECT da 0235 inesperado (esperava 2 mínimas)")
+        raise RuntimeError("0516: SELECT da 0235 inesperado (esperava 2 mínimas)")
     return _SELECT_ATUAL.replace(_MINIMA_ATUAL, _MINIMA_NOVA)
 
 
@@ -325,7 +325,7 @@ def select_conferencia() -> str:
     vazio = "pr_vazia AS (SELECT NULL::text AS sku_base, NULL::numeric(5,4) AS margem_min WHERE false),"
     ctes = _CTES.replace(" WITH order_totals AS (", f" WITH {vazio} order_totals AS (", 1)
     if ctes == _CTES:
-        raise RuntimeError("0513: CTEs da 0235 inesperados")
+        raise RuntimeError("0516: CTEs da 0235 inesperados")
     return ctes + select_novo() + tail_novo("pr_vazia")
 
 
