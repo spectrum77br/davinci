@@ -33,7 +33,7 @@ from app.models import (
 from app.services import threema
 
 _API = Path(__file__).resolve().parent.parent
-_MIGRATION = _API / "alembic" / "versions" / "0513_threema_contatos_copia.py"
+_MIGRATION = _API / "alembic" / "versions" / "0514_threema_contatos_copia.py"
 
 # A linha antiga como estava em produção (Roma) mais os casos de borda.
 LINHA_ANTIGA = (
@@ -168,8 +168,8 @@ async def _linha(db) -> str | None:
 
 def test_0507_le_a_linha_como_o_parse_de_sempre():
     mod = _carregar()
-    assert mod.revision == "0513_threema_contatos_copia"
-    assert mod.down_revision == "0512_threema_cadastro"
+    assert mod.revision == "0514_threema_contatos_copia"
+    assert mod.down_revision == "0513_threema_cadastro"
     assert mod.THREEMA_ID_REGEX == threema._THREEMA_ID.pattern
     antigo = threema.parse_recipient_directory(LINHA_ANTIGA, None)
     # mesma leitura do parse (ID em maiúsculas, nome vazio vira o ID, 1º vence),
