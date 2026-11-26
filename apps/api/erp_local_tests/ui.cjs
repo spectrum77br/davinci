@@ -896,6 +896,35 @@ test('M-73: after the Categoria changes, the rules are read again with the whole
   assert.equal(e.caixa('categoria_venda').textContent,'Regular');assert.equal(e.caixa('categoria_venda').disabled,false);
 });
 
+test('M-73: click-only edits (remove a tag, add or remove a DUN line or a component) also hold the Categoria and Tag de envio swaps, which reload the screen',async()=>{
+  const comPeca=()=>kitUranyx({structure:{version:1,mode:'physical',components:[{sku:'demo.aparelho',quantity:'1'}],expanded:[]}});
+  const casos=[
+    ['tirar tag',d=>d.querySelector('[data-product-tag-remove]').click()],
+    ['tirar DUN',d=>d.querySelector('[data-dun-remove] svg,[data-dun-remove]').dispatchEvent(new d.defaultView.MouseEvent('click',{bubbles:true}))],
+    ['pôr DUN',d=>d.querySelector('[data-dun-add]').click()],
+    ['pôr componente',d=>{d.querySelector('[data-product-edit-tab=structure]').click();d.querySelector('#product-edit-form [data-add-item]').click();}],
+    ['tirar componente',d=>{d.querySelector('[data-product-edit-tab=structure]').click();d.querySelector('#product-edit-form [data-remove-item]').click();}],
+  ];
+  for(const [nome,mexe] of casos){
+    const e=await menusEditor(comPeca(),{previa:()=>{throw new Error('não pode pedir a prévia');}});
+    const form=e.document.querySelector('#product-edit-form');
+    assert.notEqual(form.dataset.dirty,'true',nome);
+    mexe(e.document);
+    assert.equal(form.dataset.dirty,'true',nome);
+    await e.abrir('categoria');await e.marcar('categoria','Celular');
+    assert.equal(e.mine('/api/erp-local/catalog/bulk-category').length,0,nome);
+    assert.equal(e.notice(),'Salve ou cancele o produto antes de trocar a categoria.',nome);
+    await e.abrir('tag_envio');await e.marcar('tag_envio','.sp');
+    assert.equal(e.mine('/api/produtos/trocar-tag').length,0,nome);
+    assert.equal(e.notice(),'Salve ou cancele o produto antes de trocar a tag.',nome);
+  }
+  // As tags que ficaram continuam na tela (nada foi relido por cima).
+  const e=await menusEditor(kitUranyx({details:{...fullDetails,tags:['Azul','Promo']}}));
+  e.document.querySelector('[data-product-tag="Promo"] [data-product-tag-remove]').click();
+  await e.abrir('categoria');await e.marcar('categoria','Celular');
+  assert.deepEqual([...e.document.querySelectorAll('[data-product-tag]')].map(t=>t.dataset.productTag),['Azul']);
+});
+
 test('M-73: Categoria de venda lists the active ones of the line department, asks before changing the line price and uses the Tabela column route',async()=>{
   let recusa=null;
   const e=await menusEditor(kitUranyx(),{patch:()=>recusa});

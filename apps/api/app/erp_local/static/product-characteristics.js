@@ -136,3 +136,9 @@ document.addEventListener('click',async e=>{
 const productSavesApart='[data-p2-regra],[data-p2-menu-box],[data-p2-menu]';
 document.addEventListener('input',e=>{const form=e.target.closest('#product-edit-form');if(form&&!e.target.closest(productSavesApart))form.dataset.dirty='true';});
 document.addEventListener('change',e=>{const form=e.target.closest('#product-edit-form');if(form&&!e.target.closest(productSavesApart))form.dataset.dirty='true';});
+// Edições só de clique (tirar tag, pôr ou tirar DUN, pôr ou tirar componente da Estrutura) não
+// disparam input nem change, e também deixam o cadastro "sujo": a troca de Categoria e de Tag de
+// envio (M-73) relê a tela e as desfaria sem aviso. Na captura, antes de quem tira a linha (depois
+// disso o botão já não está no formulário).
+const productClickEdits='[data-product-tag-remove],[data-dun-add],[data-dun-remove],[data-add-item],[data-remove-item]';
+document.addEventListener('click',e=>{const form=e.target.closest?.('#product-edit-form');if(form&&e.target.closest(productClickEdits))form.dataset.dirty='true';},true);
