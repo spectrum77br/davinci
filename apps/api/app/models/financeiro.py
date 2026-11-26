@@ -108,6 +108,29 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
         return (self.certificado or "").strip().lower() in CERTIFICADOS_SO_MANUAIS
 
 
+class FinanceiroSuprimentoSku(Base):
+    """SKU da certificação (M-69, 26/11/2026, migration 0512): coluna "SKU" da
+    aba Importação › Certificações. É a ligação entre o certificado e os
+    produtos (services/certificacao_produto.py): o produto da Tabela de Preços
+    com esse SKU passa a ter este certificado. Guardado SEM a tag, como a
+    family() do ERP ("dg019.ra" → "dg019"; "uaf001m1.110" → "uaf001m1"). A
+    chave é o próprio SKU: um SKU fica num certificado só. Excluir o
+    certificado apaga os SKUs dele."""
+
+    __tablename__ = "financeiro_suprimento_skus"
+
+    sku: Mapped[str] = mapped_column(Text, primary_key=True)
+    suprimento_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("financeiro_suprimentos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
 class CertificacoesSyncState(Base):
     __tablename__ = "certificacoes_sync_state"
 

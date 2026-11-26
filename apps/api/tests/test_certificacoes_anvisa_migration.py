@@ -112,7 +112,15 @@ async def test_migration_0512_aceita_anvisa_sem_mudar_dados_e_o_downgrade_volta(
     await db.execute(
         text(
             f'CREATE TABLE "{rascunho}".financeiro_suprimentos'
-            f' (LIKE "{schema_model}".financeiro_suprimentos INCLUDING DEFAULTS)'
+            f' (LIKE "{schema_model}".financeiro_suprimentos INCLUDING DEFAULTS INCLUDING INDEXES)'
+        )
+    )
+    # A conversão da M-69 (mesma migration) lê a Tabela de Preços: vazia aqui
+    # (a conversão tem teste próprio, test_certificacao_sku_migration.py).
+    await db.execute(
+        text(
+            f'CREATE TABLE "{rascunho}".pricing_products'
+            f' (LIKE "{schema_model}".pricing_products INCLUDING DEFAULTS)'
         )
     )
     # A trava como a 0083 deixou (na produção, com o nome dobrado pela convenção).

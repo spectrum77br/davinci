@@ -1,4 +1,5 @@
-"""Certificado de cada produto da Tabela de Preços (05/11/2026).
+"""Certificado de cada produto da Tabela de Preços (05/11/2026; pelo SKU desde
+a M-69, 26/11/2026 — veja o fim deste texto).
 
 Eduardo: na aba Produtos, colunas "modelo e número de certificado e prazo",
 "que são as informações que já tem na certificação, é só copiar". Não há
@@ -43,47 +44,110 @@ tabela de preços, e deixe a opção de editar na tabela de preços"):
   pega a garantia dele (`garantia_de_quem_trocou_de_certificado`, revisão de
   06/11/2026). Foi para um certificado sem garantia, ou ficou sem nenhum:
   fica com o prazo que tem.
+
+M-69 (26/11/2026, Harry: "O SKU passa a ser a ligação entre certificado e
+produto"; contrato em relatorios/mudancas_26nov/contrato_M66_M74.md):
+
+* A certificação ganhou a coluna SKU (`financeiro_suprimento_skus`, 0512):
+  vários SKUs por certificado, cada SKU num certificado só, guardado SEM a tag
+  (`familia`: "dg019.ra" → "dg019"; "uaf001m1.110" → "uaf001m1").
+* Certificado efetivo de uma linha da Tabela de Preços (`certificado_efetivo`):
+  1. as famílias da linha (`pricing_products.sku` separado por vírgula, cada
+     código pela família) → os certificados delas na coluna SKU;
+  2. um certificado → é ele;
+  3. mais de um → conflito: não escolhe sozinho; vale o gravado na linha
+     (`certificacao_id`), se houver, e a tela avisa (`conflito`);
+  4. nenhum → o gravado na linha (só sobra para o que a conversão da 0512 não
+     conseguiu dizer pelo SKU).
+* A LIGAÇÃO PELO NOME SAIU do código vivo. A cópia congelada dela, que a
+  conversão da 0512 usou para não mudar o certificado de ninguém, está na
+  própria migration. Por isso a Validade, o Modelo e o Nº de um certificado
+  não mudam mais quem é dono de qual produto: só a coluna SKU, um certificado
+  excluído e o SKU da linha da Tabela de Preços mudam.
+* A coluna Modelo da Tabela de Preços ficou só para leitura (o PATCH de
+  `certificacao_id` por lá é recusado, `MODELO_SO_LEITURA`).
 """
 
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.financeiro import FinanceiroSuprimentos
+from app.models.financeiro import FinanceiroSuprimentos, FinanceiroSuprimentoSku
 from app.models.pricing import PricingProduct
+from app.models.product import Product
 
 if TYPE_CHECKING:
     from app.services.garantia_prazo import Mudanca
 
 logger = structlog.get_logger(__name__)
 
-# Campos do certificado que decidem quem o acha pelo nome (`chaves` e
-# `_melhor`): mudou um deles, o certificado efetivo de algum produto pode mudar.
-CAMPOS_DO_CASAMENTO = frozenset({"modelo", "nome_comercial", "numero", "fim"})
-
-# Modelo achado no MEIO do nome (sem o " - código") precisa ser comprido:
-# "UCW001", "UAF001 M1"; "F109"/"W69" ficam de fora.
-_MIN_MODELO_NO_NOME = 6
+# A frase da coluna Modelo da Tabela de Preços (M-69): ela só mostra o
+# certificado; quem liga é a coluna SKU da Certificações.
+MODELO_SO_LEITURA = "definido em Importação › Certificações"
 
 
-def _norm(texto: str | None) -> str:
-    """Maiúsculas, só letras e números separados por um espaço:
-    "QZ-0180AE2H" → "QZ 0180AE2H"; "UAF001-M1" → "UAF001 M1"."""
-    return " ".join(re.sub(r"[^0-9A-Za-z]+", " ", texto or "").upper().split())
+# ── SKU sem a tag (M-69) ──────────────────────────────────────────────────────
 
 
-def _codigo(texto: str) -> bool:
-    """Palavra com letra E número (USM003, UAT001) — não "25" nem "Pro"."""
-    return bool(re.search(r"[A-Z]", texto)) and bool(re.search(r"[0-9]", texto))
+def familia(codigo: object) -> str:
+    """O SKU sem a tag, igual à family() do ERP (erp_local/price_table.py):
+    corta no "+" e no ".". "dg019.ra" → "dg019"; "dg019.ra+a020.ra" → "dg019";
+    "uaf001m1.110" → "uaf001m1" (a voltagem também sai: o certificado cobre o
+    110 e o 220). É A regra do servidor para o SKU da certificação."""
+    return str(codigo or "").split("+")[0].split(".")[0].strip().lower()
+
+
+def familias_da_linha(sku: str | None) -> list[str]:
+    """As famílias de uma linha da Tabela de Preços ("dg052,dg053,dg054" ou
+    "uaf001m1.110, uaf001m1.220"): separadas por vírgula, cada código pela
+    família, sem repetir, na ordem."""
+    vistas: dict[str, None] = {}
+    for codigo in str(sku or "").split(","):
+        f = familia(codigo)
+        if f:
+            vistas.setdefault(f, None)
+    return list(vistas)
+
+
+_SEPARADORES = re.compile(r"[,;\s]+")
+
+
+def _ordem_natural(sku: str) -> tuple:
+    """"dg017" < "dg101" < "dg1000" (o número pelo valor)."""
+    return tuple(
+        (0, int(p), "") if p.isdigit() else (1, 0, p) for p in re.findall(r"\d+|\D+", sku)
+    )
+
+
+def ordenar_skus(skus: Iterable[str]) -> list[str]:
+    return sorted(set(skus), key=_ordem_natural)
+
+
+def skus_da_entrada(valor: str | Iterable[str] | None) -> list[str]:
+    """O que alguém escreveu na coluna SKU: vírgula, ponto e vírgula, espaço e
+    quebra de linha separam; cada SKU vai pela família (sem a tag); vazios saem
+    e repetidos viram um só. Lista (também aceita) = cada item passa pela mesma
+    regra. Sai em ordem ("dg017, dg018, dg019")."""
+    if valor is None:
+        return []
+    partes = [valor] if isinstance(valor, str) else [str(v) for v in valor if v is not None]
+    out: list[str] = []
+    for parte in partes:
+        out.extend(f for f in (familia(p) for p in _SEPARADORES.split(parte)) if f)
+    return ordenar_skus(out)
+
+
+# ── Certificados ──────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -97,73 +161,54 @@ class Certificacao:
     fim: date | None
     garantia_meses: int | None = None
 
-    def chaves(self) -> set[str]:
-        """Códigos que, no fim do nome do produto, apontam para esta linha."""
-        out: set[str] = set()
-        modelo = _norm(self.modelo)
-        if modelo:
-            out.add(modelo)
-            out.update(p for p in modelo.split() if _codigo(p))
-        comercial = (self.nome_comercial or "").strip()
-        if comercial and "," not in comercial:
-            n = _norm(comercial)
-            if n and _codigo(n.replace(" ", "")):
-                out.add(n)
-        return out
+
+def nome_da_certificacao(c: Certificacao | FinanceiroSuprimentos) -> str:
+    """Como a certificação é chamada nos avisos ("dg019 já está na certificação
+    USM001"): o Modelo, senão o Nome comercial, senão o Número, senão o
+    Produto."""
+    for campo in (c.modelo, c.nome_comercial, c.numero, c.produto):
+        if campo and campo.strip():
+            return campo.strip()
+    return "sem nome"
 
 
-def codigo_do_nome(nome: str | None) -> str | None:
-    """O que vem depois do último " - " quando é uma palavra só."""
-    if not nome or " - " not in nome:
-        return None
-    fim = nome.rsplit(" - ", 1)[1].strip()
-    return fim if fim and " " not in fim else None
+@dataclass
+class Ligacoes:
+    """Tudo o que decide o certificado de um produto, lido de uma vez: as
+    linhas da Certificações e a coluna SKU delas (família → certificado)."""
+
+    certificacoes: list[Certificacao]
+    skus: dict[str, UUID] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.por_id = {c.id: c for c in self.certificacoes}
 
 
-def _melhor(candidatos: list[Certificacao]) -> Certificacao | None:
-    if not candidatos:
-        return None
-    uniq = {c.id: c for c in candidatos}.values()
-
-    def peso(c: Certificacao) -> tuple[bool, date]:
-        return (bool((c.numero or "").strip()), c.fim or date.min)
-
-    ordenados = sorted(uniq, key=peso, reverse=True)
-    if len(ordenados) > 1 and peso(ordenados[0]) == peso(ordenados[1]):
-        return None  # empate: não dá para escolher sozinho
-    return ordenados[0]
-
-
-def certificacao_do_produto(
-    nome: str | None, certificacoes: list[Certificacao]
-) -> Certificacao | None:
-    codigo = codigo_do_nome(nome)
-    if codigo:
-        alvo = _norm(codigo)
-        achou = _melhor([c for c in certificacoes if alvo in c.chaves()])
-        if achou is not None:
-            return achou
-    nome_n = f" {_norm(nome)} "
-    no_meio = [
-        c
-        for c in certificacoes
-        if len(_norm(c.modelo).replace(" ", "")) >= _MIN_MODELO_NO_NOME
-        and _codigo(_norm(c.modelo).replace(" ", ""))
-        and f" {_norm(c.modelo)} " in nome_n
-    ]
-    return _melhor(no_meio)
+def certificados_pelos_skus(sku: str | None, ligacoes: Ligacoes) -> list[Certificacao]:
+    """Os certificados que a coluna SKU dá para as famílias desta linha, sem
+    repetir, na ordem das famílias."""
+    out: dict[UUID, Certificacao] = {}
+    for f in familias_da_linha(sku):
+        cid = ligacoes.skus.get(f)
+        if cid is not None and cid in ligacoes.por_id:
+            out.setdefault(cid, ligacoes.por_id[cid])
+    return list(out.values())
 
 
 def certificado_efetivo(
-    certificacao_id: UUID | None, nome: str | None, certificacoes: list[Certificacao]
-) -> tuple[Certificacao | None, bool]:
-    """O certificado do produto: o gravado na linha (coluna Modelo) ou, sem
-    ele, o achado pelo código no nome. Devolve (certificado, achado pelo nome).
-    É o mesmo que a Tabela de Preços mostra (routers/pricing._product_out)."""
-    if certificacao_id is not None:
-        return next((c for c in certificacoes if c.id == certificacao_id), None), False
-    cert = certificacao_do_produto(nome, certificacoes)
-    return cert, cert is not None
+    certificacao_id: UUID | None, sku: str | None, ligacoes: Ligacoes
+) -> tuple[Certificacao | None, list[Certificacao]]:
+    """O certificado do produto (M-69): o da coluna SKU da Certificações; com
+    dois ou mais (códigos da linha em certificados diferentes) ou nenhum, o
+    gravado na linha. Devolve (certificado, conflito): `conflito` = os
+    certificados da coluna SKU quando são mais de um (a tela avisa; o sistema
+    não escolhe sozinho). É o mesmo que a Tabela de Preços mostra
+    (routers/pricing._product_out)."""
+    achados = certificados_pelos_skus(sku, ligacoes)
+    if len(achados) == 1:
+        return achados[0], []
+    gravado = ligacoes.por_id.get(certificacao_id) if certificacao_id is not None else None
+    return gravado, achados if len(achados) > 1 else []
 
 
 async def carregar_certificacoes(session: AsyncSession) -> list[Certificacao]:
@@ -184,37 +229,164 @@ async def carregar_certificacoes(session: AsyncSession) -> list[Certificacao]:
     return [Certificacao(*r) for r in rows]
 
 
+async def carregar_skus(session: AsyncSession) -> dict[str, UUID]:
+    """A coluna SKU de todas as certificações: família → certificado."""
+    rows = await session.execute(
+        select(FinanceiroSuprimentoSku.sku, FinanceiroSuprimentoSku.suprimento_id)
+    )
+    return dict(rows.all())
+
+
+async def carregar_ligacoes(session: AsyncSession) -> Ligacoes:
+    return Ligacoes(await carregar_certificacoes(session), await carregar_skus(session))
+
+
+async def skus_por_certificado(
+    session: AsyncSession, ids: Iterable[UUID] | None = None
+) -> dict[UUID, list[str]]:
+    """A coluna SKU de cada certificação (em ordem). `ids` = só estas."""
+    stmt = select(FinanceiroSuprimentoSku.suprimento_id, FinanceiroSuprimentoSku.sku)
+    if ids is not None:
+        stmt = stmt.where(FinanceiroSuprimentoSku.suprimento_id.in_(list(ids)))
+    out: dict[UUID, list[str]] = defaultdict(list)
+    for cid, sku in (await session.execute(stmt)).all():
+        out[cid].append(sku)
+    return {cid: ordenar_skus(skus) for cid, skus in out.items()}
+
+
+# ── Coluna SKU: conferência e gravação ───────────────────────────────────────
+
+
+class SkuEmOutroCertificadoError(Exception):
+    """Um SKU pedido já está em outra certificação: nada grava (409)."""
+
+    def __init__(self, mensagem: str) -> None:
+        super().__init__(mensagem)
+        self.mensagem = mensagem
+
+
+async def conferir_skus_livres(
+    session: AsyncSession, certificacao_id: UUID | None, skus: list[str]
+) -> None:
+    """SKU que já está em OUTRA certificação → SkuEmOutroCertificadoError com
+    "dg019 já está na certificação USM001" (um por SKU, separados por "; ")."""
+    if not skus:
+        return
+    stmt = (
+        select(FinanceiroSuprimentoSku.sku, FinanceiroSuprimentos)
+        .join(
+            FinanceiroSuprimentos,
+            FinanceiroSuprimentos.id == FinanceiroSuprimentoSku.suprimento_id,
+        )
+        .where(FinanceiroSuprimentoSku.sku.in_(skus))
+    )
+    if certificacao_id is not None:
+        stmt = stmt.where(FinanceiroSuprimentoSku.suprimento_id != certificacao_id)
+    ocupados = sorted((await session.execute(stmt)).all(), key=lambda r: _ordem_natural(r[0]))
+    if ocupados:
+        raise SkuEmOutroCertificadoError(
+            "; ".join(
+                f"{sku} já está na certificação {nome_da_certificacao(dono)}"
+                for sku, dono in ocupados
+            )
+        )
+
+
+async def gravar_skus(session: AsyncSession, certificacao_id: UUID, skus: list[str]) -> bool:
+    """Deixa a coluna SKU desta certificação exatamente com `skus` (já
+    normalizados e conferidos). Devolve se mudou. NÃO commita."""
+    atuais = set(
+        (
+            await session.execute(
+                select(FinanceiroSuprimentoSku.sku).where(
+                    FinanceiroSuprimentoSku.suprimento_id == certificacao_id
+                )
+            )
+        ).scalars()
+    )
+    novos = set(skus)
+    if atuais == novos:
+        return False
+    if atuais - novos:
+        await session.execute(
+            FinanceiroSuprimentoSku.__table__.delete().where(
+                FinanceiroSuprimentoSku.__table__.c.suprimento_id == certificacao_id,
+                FinanceiroSuprimentoSku.__table__.c.sku.in_(sorted(atuais - novos)),
+            )
+        )
+    for sku in ordenar_skus(novos - atuais):
+        session.add(FinanceiroSuprimentoSku(sku=sku, suprimento_id=certificacao_id))
+    await session.flush()
+    return True
+
+
+def _familia_sql(coluna):
+    """A `familia` em SQL (para `products.sku`)."""
+    return func.lower(func.trim(func.split_part(func.split_part(coluna, "+", 1), ".", 1)))
+
+
+async def skus_sem_produto(session: AsyncSession, skus: list[str]) -> list[str]:
+    """Os SKUs (já sem a tag) que não existem em produto nenhum: nem numa linha
+    da Tabela de Preços (cada código pela família), nem no cadastro de
+    produtos (`products.sku` pela família). Só aviso: grava assim mesmo (o
+    produto pode ser cadastrado depois)."""
+    if not skus:
+        return []
+    conhecidos: set[str] = set()
+    for (sku,) in (await session.execute(select(PricingProduct.sku))).all():
+        conhecidos.update(familias_da_linha(sku))
+    faltam = [s for s in skus if s not in conhecidos]
+    if faltam:
+        fam = _familia_sql(Product.sku)
+        conhecidos.update(
+            (await session.execute(select(fam).where(fam.in_(faltam)).distinct())).scalars()
+        )
+    return [s for s in skus if s not in conhecidos]
+
+
+def aviso_sem_produto(sku: str) -> str:
+    return f"{sku} não existe em nenhum produto"
+
+
+# ── Produtos de um certificado ────────────────────────────────────────────────
+
+
+async def _linhas_e_efetivo(
+    session: AsyncSession, ligacoes: Ligacoes
+) -> list[tuple[UUID, UUID | None]]:
+    """(id da linha, id do certificado efetivo) de toda a Tabela de Preços (de
+    qualquer usuário), lendo só id, SKU e o gravado."""
+    linhas = (
+        await session.execute(
+            select(PricingProduct.id, PricingProduct.sku, PricingProduct.certificacao_id)
+        )
+    ).all()
+    out: list[tuple[UUID, UUID | None]] = []
+    for pid, sku, cid in linhas:
+        cert, _ = certificado_efetivo(cid, sku, ligacoes)
+        out.append((pid, cert.id if cert is not None else None))
+    return out
+
+
 async def produtos_do_certificado(
     session: AsyncSession,
     certificacao_id: UUID,
-    certificacoes: list[Certificacao] | None = None,
+    ligacoes: Ligacoes | None = None,
 ) -> list[PricingProduct]:
     """Todas as linhas da Tabela de Preços (de qualquer usuário) cujo
-    certificado efetivo é este: as que o gravaram na coluna Modelo e as sem
-    vínculo gravado que o acham pelo código no nome."""
-    if certificacoes is None:
-        certificacoes = await carregar_certificacoes(session)
-    # Só id e nome das linhas sem vínculo (são quase todas): a linha inteira
-    # vem depois, só para as que acham este certificado pelo nome.
-    sem_vinculo = (
-        await session.execute(
-            select(PricingProduct.id, PricingProduct.name).where(
-                PricingProduct.certificacao_id.is_(None)
-            )
-        )
-    ).all()
-    pelo_nome = [
-        pid
-        for pid, nome in sem_vinculo
-        if (c := certificacao_do_produto(nome, certificacoes)) is not None
-        and c.id == certificacao_id
-    ]
-    filtro = PricingProduct.certificacao_id == certificacao_id
-    if pelo_nome:
-        filtro = or_(filtro, PricingProduct.id.in_(pelo_nome))
+    certificado efetivo é este (`certificado_efetivo`: pela coluna SKU ou, sem
+    ela ou com conflito, pelo gravado na linha)."""
+    if ligacoes is None:
+        ligacoes = await carregar_ligacoes(session)
+    efetivos = await _linhas_e_efetivo(session, ligacoes)
+    ids = [pid for pid, cid in efetivos if cid == certificacao_id]
+    if not ids:
+        return []
     return list(
         (
-            await session.execute(select(PricingProduct).where(filtro).order_by(PricingProduct.sku))
+            await session.execute(
+                select(PricingProduct).where(PricingProduct.id.in_(ids)).order_by(PricingProduct.sku)
+            )
         ).scalars()
     )
 
@@ -235,7 +407,7 @@ async def passar_garantia_aos_produtos(
     session: AsyncSession,
     certificacao_id: UUID,
     meses: int | None,
-    certificacoes: list[Certificacao] | None = None,
+    ligacoes: Ligacoes | None = None,
 ) -> list[Mudanca]:
     """Põe a Garantia (meses) do certificado em todos os produtos dele
     (`produtos_do_certificado`). Garantia vazia (None) não mexe em ninguém.
@@ -245,7 +417,7 @@ async def passar_garantia_aos_produtos(
 
     if meses is None:
         return []
-    linhas = await produtos_do_certificado(session, certificacao_id, certificacoes)
+    linhas = await produtos_do_certificado(session, certificacao_id, ligacoes)
     return garantia_prazo.trocar_prazo(linhas, meses)
 
 
@@ -254,38 +426,26 @@ Retrato = dict[UUID, UUID | None]
 
 
 async def certificado_de_cada_produto(
-    session: AsyncSession, certificacoes: list[Certificacao] | None = None
+    session: AsyncSession, ligacoes: Ligacoes | None = None
 ) -> Retrato:
     """O certificado efetivo de cada linha da Tabela de Preços (de qualquer
     usuário), numa leitura só: o retrato de antes de uma mudança nos
-    certificados, para `garantia_de_quem_trocou_de_certificado`."""
-    if certificacoes is None:
-        certificacoes = await carregar_certificacoes(session)
-    ids = {c.id for c in certificacoes}
-    linhas = (
-        await session.execute(
-            select(PricingProduct.id, PricingProduct.certificacao_id, PricingProduct.name)
-        )
-    ).all()
-    out: Retrato = {}
-    for pid, cid, nome in linhas:
-        if cid is not None:
-            out[pid] = cid if cid in ids else None
-        else:
-            cert = certificacao_do_produto(nome, certificacoes)
-            out[pid] = cert.id if cert is not None else None
-    return out
+    certificados (coluna SKU, certificado excluído), para
+    `garantia_de_quem_trocou_de_certificado`."""
+    if ligacoes is None:
+        ligacoes = await carregar_ligacoes(session)
+    return dict(await _linhas_e_efetivo(session, ligacoes))
 
 
 async def garantia_de_quem_trocou_de_certificado(
     session: AsyncSession, antes: Retrato
 ) -> list[Mudanca]:
     """Revisão de 06/11/2026: o produto que passou a OUTRO certificado efetivo
-    por uma mudança nos certificados (Fim, Modelo ou Nº editados na
-    Certificações ou a Validade pela Tabela de Preços, certificado novo ou
-    excluído, sincronização oficial) e o novo tem garantia → pega a garantia
-    dele ("ele passa a mudar de acordo com o certificado"). Foi para um
-    certificado sem garantia, ou ficou sem nenhum: fica com o prazo que tem.
+    por uma mudança nos certificados (desde a M-69: a coluna SKU mudou, um
+    certificado novo com SKU, um certificado excluído) e o novo tem garantia →
+    pega a garantia dele ("ele passa a mudar de acordo com o certificado").
+    Foi para um certificado sem garantia, ou ficou sem nenhum: fica com o
+    prazo que tem.
 
     `antes` = `certificado_de_cada_produto` de ANTES da mudança. A linha que
     não estava no retrato (cadastrada no meio) fica de fora: quem cadastrou já
@@ -294,9 +454,11 @@ async def garantia_de_quem_trocou_de_certificado(
     from app.services import garantia_prazo
 
     await session.flush()
-    certs = await carregar_certificacoes(session)
-    depois = await certificado_de_cada_produto(session, certs)
-    garantia = {c.id: c.garantia_meses for c in certs if c.garantia_meses is not None}
+    ligacoes = await carregar_ligacoes(session)
+    depois = await certificado_de_cada_produto(session, ligacoes)
+    garantia = {
+        c.id: c.garantia_meses for c in ligacoes.certificacoes if c.garantia_meses is not None
+    }
     por_certificado: dict[UUID, list[UUID]] = defaultdict(list)
     for pid, cid in depois.items():
         if cid in garantia and pid in antes and antes[pid] != cid:
@@ -323,9 +485,11 @@ async def garantia_de_quem_trocou_de_certificado(
 async def garantia_apos_sincronizacao(session: AsyncSession, antes: Retrato) -> None:
     """A sincronização oficial (Anatel/Inmetro) mudou certificados: o produto
     que passou a outro certificado com garantia pega a garantia dele, em nome
-    do robô (`garantia_de_quem_trocou_de_certificado`). Num savepoint próprio:
-    se falhar, só fica no log — a sincronização dos certificados vale do mesmo
-    jeito. NÃO commita."""
+    do robô (`garantia_de_quem_trocou_de_certificado`). Desde a M-69 a
+    sincronização não liga produto (as linhas novas chegam sem SKU), então
+    isto quase nunca acha ninguém; fica como rede de segurança. Num savepoint
+    próprio: se falhar, só fica no log — a sincronização dos certificados vale
+    do mesmo jeito. NÃO commita."""
     from app.services import garantia_prazo
 
     try:

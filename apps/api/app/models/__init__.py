@@ -139,6 +139,7 @@ from app.models.financeiro import (
     FinanceiroConsorcio,
     FinanceiroSimulacao,
     FinanceiroSuprimentos,
+    FinanceiroSuprimentoSku,
     NCMCache,
 )
 from app.models.flex import (
@@ -477,6 +478,7 @@ __all__ = [
     "FinanceiroConsorcio",
     "FinanceiroSimulacao",
     "FinanceiroSuprimentos",
+    "FinanceiroSuprimentoSku",
     "CertificacoesSyncHistorico",
     "CertificacoesSyncState",
     "ImportCotacaoParams",
