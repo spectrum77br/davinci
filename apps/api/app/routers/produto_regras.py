@@ -17,6 +17,14 @@ São rotas do DaVinci: não passam pela trava do modo Consulta do ERP, então fu
 - POST   /api/produto-regras/{sku}/condicoes: só administrador. Período (data do pedido) e piso.
 - DELETE /api/produto-regras/{sku}/condicoes/{id}: só administrador.
 
+M-73 (26/11/2026): o Centro de custo do produto (`centro_custo_id`, migration 0518) entra no
+mesmo GET/PUT. Vazio = o departamento do produto, calculado e não copiado: o da linha da Tabela de
+Preços; sem linha, o da categoria. Por isso todas as rotas aceitam, no endereço, `linha` (o
+`pricing_id` que o ERP acha para o SKU) e `categoria` (a categoria do produto no ERP): a resposta
+traz o centro herdado e a linha (categoria de venda atual e as opções do menu, que o ERP troca
+pela rota da coluna "Tabela" da Tabela de Preços). O PUT só grava o centro escolhido; a categoria
+de venda e a tag NÃO passam por aqui.
+
 O Histórico registra quem mudou, o antes e o depois pelo gatilho do banco (as duas tabelas são
 de negócio). Os nomes que aparecem lá ficam em historico/nomes.py.
 """
@@ -29,13 +37,13 @@ from typing import Annotated, Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
-from app.models import ProdutoCondicaoEspecial, ProdutoRegra, User, UserRole
+from app.models import CentroCusto, ProdutoCondicaoEspecial, ProdutoRegra, User, UserRole
 from app.schemas.segments import _limpar_duimp_padrao
 from app.services import nf_emissao_gerar as nf
 from app.services import produto_regras as svc
@@ -117,11 +125,42 @@ def _data(v: Any, campo: str) -> date:
         raise _erro("periodo_invalido", f"Informe a data {campo} do período.") from e
 
 
+async def _centro(session: AsyncSession, v: Any) -> UUID | None:
+    """O centro de custo escolhido (id de Cadastros › Centro de custo); vazio = volta ao
+    departamento do produto."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    centro_id = svc.uuid_ou_none(v) if isinstance(v, str) else None
+    if centro_id is None or await session.get(CentroCusto, centro_id) is None:
+        raise _erro(
+            "centro_custo_invalido",
+            "Centro de custo não encontrado: ele pode ter sido excluído em Cadastros › Centro "
+            "de custo. Feche e abra o produto de novo.",
+        )
+    return centro_id
+
+
 def _f(d: Decimal | None) -> float | None:
     return None if d is None else float(d)
 
 
-async def _saida(session: AsyncSession, sku: str, base: str, user: User) -> dict:
+# M-73: o que a tela do ERP sabe do produto e o DaVinci não (o endereço de todas as rotas aceita).
+# A linha vem como texto: um id que não é uuid (cópia antiga do ERP) vale como "sem linha", e o
+# resto da resposta (Margem mín, DUIMP…) não deixa de vir por causa dele.
+Linha = Annotated[
+    str | None, Query(max_length=64, description="pricing_id da linha da Tabela de Preços")
+]
+Categoria = Annotated[str | None, Query(max_length=120, description="categoria do produto")]
+
+
+async def _saida(
+    session: AsyncSession,
+    sku: str,
+    base: str,
+    user: User,
+    linha: str | None = None,
+    categoria: str | None = None,
+) -> dict:
     regra = await session.get(ProdutoRegra, base, populate_existing=True)
     herdada = await svc.margem_herdada(session, sku)
     chave = sku.strip().lower()
@@ -130,6 +169,13 @@ async def _saida(session: AsyncSession, sku: str, base: str, user: User) -> dict
     importacao = await nf._duimp_da_importacao(session, set(pecas))
     hoje = _hoje()
     conds = await svc.condicoes(session, base)
+    a_linha = await svc.linha_da_tabela(session, svc.uuid_ou_none(linha) if linha else None)
+    herdado = await svc.centro_herdado(session, a_linha, categoria)
+    escolhido = (
+        await session.get(CentroCusto, regra.centro_custo_id)
+        if regra is not None and regra.centro_custo_id is not None
+        else None
+    )
     return {
         "sku": sku.strip(),
         "sku_base": base,
@@ -141,6 +187,16 @@ async def _saida(session: AsyncSession, sku: str, base: str, user: User) -> dict
         "duimp_importacao": nf._juntar_duimps(importacao.get(p) for p in pecas),
         "condicoes": [svc.condicao_out(c, hoje) for c in conds],
         "condicao_resumo": svc.resumo_condicao(conds, hoje),
+        # M-73: o centro escolhido (vazio = o herdado, que vem sempre junto, como a margem).
+        "centro_custo_id": str(escolhido.id) if escolhido is not None else None,
+        "centro_custo": escolhido.nome if escolhido is not None else None,
+        "centro_custo_herdado": (
+            {"id": str(herdado.centro.id), "nome": herdado.centro.nome}
+            if herdado.centro is not None
+            else None
+        ),
+        "centro_custo_origem": herdado.origem,
+        "linha": svc.linha_out(a_linha),
         "pode_editar": user.role == UserRole.ADMIN,
     }
 
@@ -150,8 +206,10 @@ async def ler(
     sku: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_active_user)],
+    linha: Linha = None,
+    categoria: Categoria = None,
 ) -> dict:
-    return await _saida(session, sku, await _base(session, sku), user)
+    return await _saida(session, sku, await _base(session, sku), user, linha, categoria)
 
 
 @router.put("/{sku}")
@@ -160,9 +218,11 @@ async def gravar(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_admin)],
     corpo: Annotated[dict[str, Any], Body()],
+    linha: Linha = None,
+    categoria: Categoria = None,
 ) -> dict:
     base = await _base(session, sku)
-    sobra = set(corpo) - {"margem_min", "duimp_padrao"}
+    sobra = set(corpo) - {"margem_min", "duimp_padrao", "centro_custo_id"}
     if sobra:
         raise _erro("campo_desconhecido", f"Campo que não existe aqui: {', '.join(sorted(sobra))}.")
     novos: dict[str, Any] = {}
@@ -170,6 +230,8 @@ async def gravar(
         novos["margem_min"] = _margem(corpo["margem_min"])
     if "duimp_padrao" in corpo:
         novos["duimp_padrao"] = _duimp(corpo["duimp_padrao"])
+    if "centro_custo_id" in corpo:
+        novos["centro_custo_id"] = await _centro(session, corpo["centro_custo_id"])
     regra = await session.get(ProdutoRegra, base)
     if regra is None:
         # Linha nova só com valor de verdade: apagar o que não existe não cria nada.
@@ -184,7 +246,7 @@ async def gravar(
             regra.atualizado_por = user.id
             regra.atualizado_em = func.now()
             await session.commit()
-    return await _saida(session, sku, base, user)
+    return await _saida(session, sku, base, user, linha, categoria)
 
 
 @router.post("/{sku}/condicoes", status_code=status.HTTP_201_CREATED)
@@ -193,6 +255,8 @@ async def criar_condicao(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_admin)],
     corpo: Annotated[dict[str, Any], Body()],
+    linha: Linha = None,
+    categoria: Categoria = None,
 ) -> dict:
     base = await _base(session, sku)
     de = _data(corpo.get("pedido_de"), "inicial")
@@ -209,7 +273,7 @@ async def criar_condicao(
         )
     )
     await session.commit()
-    return await _saida(session, sku, base, user)
+    return await _saida(session, sku, base, user, linha, categoria)
 
 
 @router.delete("/{sku}/condicoes/{condicao_id}", status_code=status.HTTP_204_NO_CONTENT)

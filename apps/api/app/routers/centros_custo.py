@@ -11,8 +11,9 @@ Regras (services/centros_custo.py):
 - nome até 60 letras, sem repetir sem olhar maiúsculas (409 `nome_repetido`);
 - Celular, Eletro e Mala não mudam de nome (400 `centro_fixo_nome`) e não saem (409
   `centro_fixo`, com quantos usam). Centro novo com raiz troca o nome da raiz junto (o slug não);
-- excluir: só sem uso — categorias de venda, contas, lojas e produtos (`uso_do_centro`); com uso,
-  409 `centro_em_uso` dizendo quantos de cada um;
+- excluir: só sem uso — categorias de venda, contas, lojas e produtos (`uso_do_centro`; desde a
+  M-73, também os produtos do Produtos 2 que escolheram o centro); com uso, 409 `centro_em_uso`
+  dizendo quantos de cada um;
 - centro novo nasce SEM raiz: não vira botão em tela nenhuma e ainda não recebe Categoria de
   venda (services/categorias_venda.centro_para_nova_categoria explica o porquê).
 """
@@ -79,6 +80,7 @@ async def uso(
         produtos=u.produtos,
         produtos_tabela=u.produtos_tabela,
         produtos_cadastro=u.produtos_cadastro,
+        produtos_centro=u.produtos_centro,
         bloqueia=code is not None,
         mensagem=mensagem,
     )

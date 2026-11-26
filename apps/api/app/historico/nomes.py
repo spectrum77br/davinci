@@ -597,6 +597,9 @@ CAMPOS: dict[str, str] = {
     "par_id": "Par Clássico + Premium (ML)",
     # M-74 (26/11/2026, migration 0516): regras do produto no Produtos 2.
     "margem_min": "Margem mín (%)",
+    # M-73 (26/11/2026, migration 0518): o Centro de custo escolhido no cadastro do Produtos 2 (a
+    # FK para centros_custo faz o Histórico mostrar o nome do centro, não o id).
+    "centro_custo_id": "Centro de custo",
     "pedido_de": "Condição especial: de (data do pedido)",
     "pedido_ate": "Condição especial: até (data do pedido)",
     "piso": "Condição especial: margem mínima (%)",

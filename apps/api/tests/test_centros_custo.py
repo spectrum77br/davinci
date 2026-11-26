@@ -319,6 +319,7 @@ async def test_excluir_mala_recusa_e_diz_quantos_usam(client, db, make_user, aut
         "produtos": 4,
         "produtos_tabela": 3,
         "produtos_cadastro": 1,
+        "produtos_centro": 0,
         "bloqueia": True,
         "mensagem": esperado,
     }
@@ -476,7 +477,11 @@ async def test_0514_igual_ao_model_semeia_as_tres_raizes_e_desce(db):
     cfg = Config(str(raiz / "alembic.ini"))
     cfg.set_main_option("script_location", str(raiz / "alembic"))
     roteiro = ScriptDirectory.from_config(cfg)
-    assert roteiro.get_heads() == ["0517_centros_custo"], roteiro.get_heads()
+    # A 0518 (M-73, a coluna produto_regras.centro_custo_id) vem logo depois desta; ponta única.
+    assert len(roteiro.get_heads()) == 1, roteiro.get_heads()
+    assert roteiro.get_revision("0518_produto_regras_centro_custo").down_revision == (
+        "0517_centros_custo"
+    )
 
     modelo = Base.metadata.schema
     rascunho = f"{modelo}_m0514"

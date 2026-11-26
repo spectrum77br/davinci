@@ -28,5 +28,7 @@ class UsoCentroOut(BaseModel):
     produtos: int
     produtos_tabela: int
     produtos_cadastro: int
+    # M-73: produtos do Produtos 2 com este centro escolhido (produto_regras.centro_custo_id).
+    produtos_centro: int = 0
     bloqueia: bool
     mensagem: str | None

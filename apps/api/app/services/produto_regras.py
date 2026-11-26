@@ -20,6 +20,9 @@ Tudo o que o resto do sistema precisa saber das tabelas `produto_regras` e
   estoque" para SKU que começa com "z" → 9%.
 * `condicoes` / `resumo_condicao` — a Condição especial do produto para a tela.
 * `duimp_padrao_dos_produtos` — o texto do produto para a nota (nf_emissao_gerar).
+* M-73: `linha_da_tabela` (a linha da Tabela de Preços do produto, a categoria de venda dela e as
+  opções do menu) e `centro_herdado` (o Centro de custo de um produto em branco: o departamento,
+  calculado e não copiado — o da linha; sem linha, o da categoria).
 
 Com as duas tabelas vazias (o dia em que for ao ar) nada daqui muda o que a Margem, o robô que
 segura pedido e a nota já fazem.
@@ -27,6 +30,7 @@ segura pedido e a nota já fazem.
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -37,7 +41,14 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import ProdutoCondicaoEspecial, ProdutoRegra
+from app.models import (
+    CentroCusto,
+    PricingProduct,
+    ProdutoCondicaoEspecial,
+    ProdutoRegra,
+    Segment,
+)
+from app.services import categorias_venda
 from app.services.sku_tag_envio import numeracao_do_sku, tags_de_envio
 
 _SCHEMA = get_settings().database_schema
@@ -252,3 +263,130 @@ def uuid_ou_none(v: object) -> UUID | None:
         return UUID(str(v))
     except (TypeError, ValueError):
         return None
+
+
+# --------------------------------------------------------------- M-73: linha e centro de custo
+
+
+@dataclass(frozen=True)
+class LinhaTabela:
+    """A linha da Tabela de Preços do produto, como o menu "Categoria de venda" precisa.
+
+    `raiz` = o departamento da linha (Celular, Eletro, Mala… ou o Catálogo); `centro` = o
+    Centro de custo dessa raiz (None quando a raiz não é centro, como o Catálogo); `opcoes` = as
+    categorias de venda ATIVAS da raiz, na ordem das colunas de margem/frete."""
+
+    produto: PricingProduct
+    segmento: Segment | None
+    raiz: Segment | None
+    centro: CentroCusto | None
+    opcoes: list[Segment]
+
+
+def codigos_da_linha(sku: str | None) -> list[str]:
+    """ "dg052,dg053, dg054" → ["dg052", "dg053", "dg054"]."""
+    return [c.strip() for c in str(sku or "").split(",") if c.strip()]
+
+
+async def linha_da_tabela(session: AsyncSession, linha_id: UUID | None) -> LinhaTabela | None:
+    """A linha `linha_id` (o `pricing_id` que o ERP acha para o SKU, a mesma linha das Fotos e da
+    Embalagem da M-72), lida AGORA do banco. Não existe mais → None."""
+    if linha_id is None:
+        return None
+    produto = await session.get(PricingProduct, linha_id)
+    if produto is None:
+        return None
+    seg = await session.get(Segment, produto.segment_id) if produto.segment_id else None
+    if seg is not None and seg.parent_id is None:
+        raiz: Segment | None = seg  # linha apontando para a própria raiz (não deveria)
+    else:
+        raiz = await categorias_venda.raiz_de(session, seg) if seg is not None else None
+    centro = None
+    opcoes: list[Segment] = []
+    if raiz is not None:
+        centro = (
+            await session.execute(select(CentroCusto).where(CentroCusto.segment_id == raiz.id))
+        ).scalar_one_or_none()
+        opcoes = [f for f in await categorias_venda.filhas(session, raiz.id) if f.active]
+    return LinhaTabela(produto, seg, raiz, centro, opcoes)
+
+
+def linha_out(linha: LinhaTabela | None) -> dict | None:
+    if linha is None:
+        return None
+    seg, raiz = linha.segmento, linha.raiz
+    folha = seg is not None and raiz is not None and seg.id != raiz.id
+    return {
+        "id": str(linha.produto.id),
+        "nome": linha.produto.name,
+        "codigos": codigos_da_linha(linha.produto.sku),
+        "departamento": raiz.name if raiz is not None else None,
+        "centro_custo_id": str(linha.centro.id) if linha.centro is not None else None,
+        "centro_custo": linha.centro.nome if linha.centro is not None else None,
+        "segment_id": str(seg.id) if seg is not None else None,
+        "categoria_venda": seg.name if folha else None,
+        "categoria_venda_ativa": bool(seg.active) if folha else None,
+        # A posição na raiz (1 a 5): é o que a coluna "Tabela" da Tabela de Preços manda.
+        "product_type": int(seg.sort_order) + 1 if folha else None,
+        "opcoes": [
+            {"segment_id": str(o.id), "nome": o.name, "product_type": int(o.sort_order) + 1}
+            for o in linha.opcoes
+        ],
+    }
+
+
+def _sem_acento(texto: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    )
+
+
+def _chave_nome(texto: str | None) -> str:
+    return " ".join(_sem_acento(str(texto or "")).casefold().split())
+
+
+async def centro_da_categoria(session: AsyncSession, categoria: str | None) -> CentroCusto | None:
+    """O centro de custo de uma CATEGORIA do produto (Cadastros › Produtos): o centro cujo nome é
+    a categoria ou o começo dela ("Celular Kit" → Celular, "Mala" → Mala; "Acessórios" e
+    "Insumos" → nenhum). Lido agora: um centro criado em Cadastros › Centro de custo vale na hora.
+    Se dois servirem, o de nome mais longo."""
+    cat = _chave_nome(categoria)
+    if not cat:
+        return None
+    centros = list((await session.execute(select(CentroCusto))).scalars())
+    achados = [
+        c
+        for c in centros
+        if (nome := _chave_nome(c.nome)) and (cat == nome or cat.startswith(nome + " "))
+    ]
+    return max(achados, key=lambda c: len(_chave_nome(c.nome)), default=None)
+
+
+@dataclass(frozen=True)
+class CentroHerdado:
+    centro: CentroCusto | None
+    origem: str | None
+
+
+async def centro_herdado(
+    session: AsyncSession, linha: LinhaTabela | None, categoria: str | None
+) -> CentroHerdado:
+    """O Centro de custo de um produto que está em branco: o departamento que ele já tem,
+    CALCULADO na hora e nunca copiado para `produto_regras`.
+
+    1. Com linha na Tabela de Preços: o departamento da linha (a raiz da categoria de venda).
+       Raiz que não é centro de custo (o Catálogo) → nenhum.
+    2. Sem linha: o da categoria do produto (`centro_da_categoria`)."""
+    if linha is not None:
+        if linha.centro is not None:
+            return CentroHerdado(linha.centro, "do departamento da linha da Tabela de Preços")
+        if linha.raiz is not None:
+            return CentroHerdado(
+                None,
+                f"a linha da Tabela de Preços é do {linha.raiz.name}, que não é centro de custo",
+            )
+        return CentroHerdado(None, "a linha da Tabela de Preços não tem departamento")
+    centro = await centro_da_categoria(session, categoria)
+    if centro is not None:
+        return CentroHerdado(centro, f"da categoria {str(categoria).strip()}")
+    return CentroHerdado(None, None)

@@ -23,6 +23,7 @@ from app.models import (
     PricingAccount,
     PricingProduct,
     Product,
+    ProdutoRegra,
     Segment,
     StoreInfo,
     User,
@@ -158,10 +159,13 @@ class UsoCentro:
     lojas: int  # lojas com o departamento (services/store_departments)
     produtos_tabela: int  # linhas da Tabela de Preços num segmento do centro
     produtos_cadastro: int  # produtos (cadastro) num segmento do centro
+    # M-73: produtos do Produtos 2 com este centro ESCOLHIDO (produto_regras.centro_custo_id). Os
+    # em branco usam o departamento, calculado, e não entram aqui.
+    produtos_centro: int = 0
 
     @property
     def produtos(self) -> int:
-        return self.produtos_tabela + self.produtos_cadastro
+        return self.produtos_tabela + self.produtos_cadastro + self.produtos_centro
 
     @property
     def total(self) -> int:
@@ -187,6 +191,14 @@ class UsoCentro:
             partes.append(
                 _qtd(self.produtos_cadastro, "produto do cadastro", "produtos do cadastro")
             )
+        if self.produtos_centro:
+            partes.append(
+                _qtd(
+                    self.produtos_centro,
+                    "produto com este centro no Produtos 2",
+                    "produtos com este centro no Produtos 2",
+                )
+            )
         return _lista(partes) if partes else "nada"
 
 
@@ -209,20 +221,28 @@ async def _arvore(session: AsyncSession, raiz_id: UUID) -> tuple[set[UUID], set[
 
 
 async def uso_do_centro(session: AsyncSession, centro: CentroCusto, quem: User) -> UsoCentro:
-    """Quem USA o centro de custo — o ÚNICO lugar que conta (a M-73 completa com os produtos de
-    `produto_regras.centro_custo_id`). Centro sem raiz: nada ainda o usa.
+    """Quem USA o centro de custo — o ÚNICO lugar que conta. Desde a M-73 conta também os produtos
+    do Produtos 2 que ESCOLHERAM o centro (`produto_regras.centro_custo_id`), o que vale até para
+    um centro sem raiz ("Brinquedos"). O resto depende da raiz: centro sem raiz não tem categoria,
+    conta, loja nem linha da Tabela de Preços.
 
     `quem` só passa ao services/store_departments (o mesmo das telas Lojas e Faturamento); o
     router manda o administrador, que vê todas as lojas."""
-    if centro.segment_id is None:
-        return UsoCentro(0, 0, 0, 0, 0)
-    raiz = await session.get(Segment, centro.segment_id)
-    if raiz is None:
-        return UsoCentro(0, 0, 0, 0, 0)
-    diretos, arvore = await _arvore(session, raiz.id)
 
     async def conta(q) -> int:
         return int((await session.execute(q)).scalar_one() or 0)
+
+    produtos_centro = await conta(
+        select(func.count())
+        .select_from(ProdutoRegra)
+        .where(ProdutoRegra.centro_custo_id == centro.id)
+    )
+    if centro.segment_id is None:
+        return UsoCentro(0, 0, 0, 0, 0, produtos_centro)
+    raiz = await session.get(Segment, centro.segment_id)
+    if raiz is None:
+        return UsoCentro(0, 0, 0, 0, 0, produtos_centro)
+    diretos, arvore = await _arvore(session, raiz.id)
 
     lojas = list((await session.execute(select(StoreInfo))).scalars())
     departamentos = await resolve_store_departments(session, quem, lojas)
@@ -238,6 +258,7 @@ async def uso_do_centro(session: AsyncSession, centro: CentroCusto, quem: User) 
         produtos_cadastro=await conta(
             select(func.count(Product.id)).where(Product.segment_id.in_(arvore))
         ),
+        produtos_centro=produtos_centro,
     )
 
 

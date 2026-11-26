@@ -25,6 +25,9 @@ capacidade e voltagem continuam na chave (b001.12 e b001.24 são produtos difere
     condição do produto, as do segmento continuam valendo como hoje
     (routers/margens._MARGEM_DATA_ESPECIAL_SQL). Tabela própria (e não uma coluna nova em
     `segment_special_dates`) para não mexer em nada do que o segmento já faz.
+
+M-73 (26/11/2026, migration 0518): `produto_regras.centro_custo_id`, o Centro de custo do produto
+(Cadastros › Centro de custo). Vazio = o departamento do produto, calculado (não copiado).
 """
 
 from datetime import date, datetime
@@ -78,6 +81,15 @@ class ProdutoRegra(Base):
     )
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    # M-73 (migration 0518): o Centro de custo escolhido para o produto. Vazio = o departamento
+    # do produto, calculado e não copiado (services/produto_regras.centro_herdado). RESTRICT: um
+    # centro que algum produto escolheu não sai (a aba Centro de custo já recusa antes).
+    centro_custo_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("centros_custo.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
 
 
