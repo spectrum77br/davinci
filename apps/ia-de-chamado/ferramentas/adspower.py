@@ -68,6 +68,10 @@ PERFIL_FIXO = {
     ("marquezini", "shopee"): "160",
     # "Loja 206081932" (TikTok) = JLAS — "esse que mandou é o 123 jlas tiktok"
     ("206081932", "tiktok"): "123",
+    # "Loja 206081922" (TikTok) = injox (integração do DaVinci). 26/11 (309043):
+    # sem o nome, a tela tentou o "VR - TikTok" (sem permissão) e o "Uranyx -
+    # Tiktok" (sem internet) — "fixa" o 140 "Injox - Tiktok".
+    ("206081922", "tiktok"): "140",
     # 02/10 (296985): "fica o 110" = "JLAS 2 - ml" (Contabilidade), não o 32
     # "JLAS 2 - Mercado Livre" (Lojas) que o nome escolheria.
     ("jlas 2", "ml"): "110",
