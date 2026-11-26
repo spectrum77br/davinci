@@ -341,3 +341,42 @@ async def test_lock_blocks_same_source_but_not_anatel_and_history_default_is_com
     await db.commit()
     assert previous_style.fonte == "anatel"
     assert previous_style.chave_fonte is None
+
+
+# ── M-68: Anvisa é só manual ───────────────────────────────────────────
+
+
+async def test_anvisa_manual_com_o_mesmo_modelo_nao_e_ligada_pelo_inmetro(db, source):
+    anvisa = FinanceiroSuprimentos(
+        modelo="UAF001-M1", certificado="anvisa", numero="MODERNA-0069/25",
+    )
+    db.add(anvisa)
+    await db.commit()
+    result = await sync.sincronizar_certificacoes(db)
+    assert result["criados"] == 1
+    assert result["conflitos"] == 0
+    assert anvisa.inmetro_chave is None
+    assert anvisa.certificado == "anvisa"
+    assert len(await _rows(db)) == 2
+    assert all(item.suprimento_id != anvisa.id for item in await _history(db))
+
+
+async def test_linha_ligada_que_virou_anvisa_nao_e_mudada_pelo_inmetro(db, source):
+    await sync.sincronizar_certificacoes(db)
+    row = (await _rows(db))[0]
+    row.certificado = "anvisa"
+    row.campos_manuais = ["certificado"]
+    await db.commit()
+    historico = len(await _history(db))
+    antes = deepcopy(sync._snapshot(row))
+    source.return_value = _payload(_record(fim="2033-01-01", situacao_certificado="Suspenso"))
+    result = await sync.sincronizar_certificacoes(db, force=True)
+    assert (result["criados"], result["atualizados"], result["nao_localizados"]) == (0, 0, 0)
+    assert sync._snapshot(row) == antes
+    assert len(await _rows(db)) == 1
+    source.return_value = _payload(_record("UAF002-M1"))
+    result = await sync.sincronizar_certificacoes(db, force=True)
+    assert result["nao_localizados"] == 0
+    assert row.inmetro_encontrado is True
+    assert sync._snapshot(row) == antes
+    assert len(await _history(db)) == historico + 1  # só a criação do UAF002-M1

@@ -178,6 +178,10 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
         key = record["chave"]
         seen.add(key)
         row = linked.get(key)
+        if row is not None and row.so_manual:
+            # Anvisa é só manual (M-68): a linha que alguém marcou como Anvisa
+            # não é mudada pela consulta do Inmetro.
+            continue
         is_new = False
         evento = "atualizacao"
         if row is None:
@@ -214,7 +218,7 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
             result["atualizados"] += 1
 
     for key, row in linked.items():
-        if key in seen:
+        if key in seen or row.so_manual:
             continue
         before = _snapshot(row)
         row.inmetro_encontrado = False

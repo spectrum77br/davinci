@@ -320,8 +320,10 @@ class PricingProductPatch(BaseModel):
     fotos_url: str | None = None
     product_id: UUID | None = None
     prioridade_estoque: str | None = None
-    # Coluna Modelo da aba Produtos: a linha da Certificações escolhida.
-    # null = sem vínculo gravado (volta a valer o código no nome).
+    # Coluna Modelo da aba Produtos: só leitura desde a M-69 (26/11/2026).
+    # Fica aqui só para o PATCH que ainda o mandar receber 400
+    # certificado_pela_certificacoes ("definido em Importação › Certificações")
+    # em vez de ser ignorado calado.
     certificacao_id: UUID | None = None
     # Coluna "Garantia (meses)" (06/11/2026): 0 a 120 (0 = sem garantia);
     # null apaga o prazo. Produto cujo certificado tem garantia: grava no
@@ -340,13 +342,14 @@ class PricingProductPatch(BaseModel):
 
 
 class CertificacaoDoProdutoOut(BaseModel):
-    """A linha da Certificações do produto: a gravada (certificacao_id) ou a
-    achada pelo código no nome (services/certificacao_produto.py). Só saída."""
+    """A linha da Certificações do produto: a da coluna SKU da Certificações
+    ou, sem ela, a gravada (certificacao_id) — M-69,
+    services/certificacao_produto.py. Só saída."""
 
     id: UUID
     produto: str | None = None
     modelo: str | None = None
-    certificado: str | None = None  # anatel / inmetro / isento
+    certificado: str | None = None  # anatel / inmetro / anvisa / isento
     numero: str | None = None
     fim: date | None = None  # validade (coluna Fim da Certificações)
     # Garantia (meses) do certificado (06/11/2026). Com valor, a coluna
@@ -373,11 +376,15 @@ class PricingProductOut(PricingProductBase):
     embalagens_count: int | None = None
     midias_contadas_em: datetime | None = None
     # Colunas Modelo / Nº do certificado / Validade da aba Produtos
-    # (05/11/2026): o certificado gravado (certificacao_id) ou, sem ele, o
-    # achado pelo código no nome (certificacao_pelo_nome=True).
+    # (05/11/2026). Desde a M-69 (26/11/2026): o certificado da coluna SKU da
+    # Certificações; sem ele, o gravado (certificacao_id). A ligação pelo nome
+    # saiu.
     certificacao_id: UUID | None = None
     certificacao: CertificacaoDoProdutoOut | None = None
-    certificacao_pelo_nome: bool = False
+    # Os códigos da linha ("dg052,dg053") caem em certificados DIFERENTES na
+    # coluna SKU: os nomes deles (Modelo, senão Nome comercial, Número,
+    # Produto). O sistema não escolhe sozinho: vale o gravado e a tela avisa.
+    certificacao_conflito: list[str] = Field(default_factory=list)
 
 
 class PricingProductImportItem(BaseModel):

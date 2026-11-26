@@ -63,6 +63,7 @@ def capture():
         "stores": [],
         "priorities": [],
         "pricing": [],
+        "certificate_skus": [],
         "situations": [],
         "coverage": {
             "products_total": 3,
@@ -229,6 +230,41 @@ def test_credentials_or_extra_customer_fields_are_rejected(real):
         data[kind][0][key] = "must never be stored"
         with pytest.raises(ERPError):
             ref.replace(data)
+    assert ref.info()["snapshot"] == before
+
+
+def test_pricing_brings_the_certificate_end_and_the_certificacoes_sku_column(real):
+    """M-71/M-69 (26/11/2026): the pricing line carries its certificate's end date and the copy
+    carries DaVinci's Certificações SKU column, one row per family (id = the SKU)."""
+    erp, ref = real
+    data = capture()
+    line = dict.fromkeys(FIELDS["pricing"])
+    line.update(
+        id="p1", sku="dg017,dg018", certificate="anatel", certificate_valid_until="2028-02-20"
+    )
+    cert = {
+        "id": "dg019",
+        "sku": "dg019",
+        "certificate": "anatel",
+        "certificate_number": "08215-25-18234",
+        "certificate_model": "USM001",
+        "certificate_valid_until": "2028-02-20",
+    }
+    data["pricing"], data["certificate_skus"] = [line], [cert]
+    meta = ref.replace(data)
+    assert meta["counts"]["certificate_skus"] == 1
+    assert ref.all_rows("certificate_skus") == [cert]
+    assert ref.all_rows("pricing")[0]["certificate_valid_until"] == "2028-02-20"
+    # Only the curated fields: an extra one is refused and the previous copy stays.
+    before = ref.info()["snapshot"]
+    data["certificate_skus"] = [{**cert, "pdf_arquivo": "x"}]
+    with pytest.raises(ERPError):
+        ref.replace(data)
+    # The list itself is required (a copy without it is refused, not half-read).
+    data = capture()
+    del data["certificate_skus"]
+    with pytest.raises(ERPError):
+        ref.replace(data)
     assert ref.info()["snapshot"] == before
 
 

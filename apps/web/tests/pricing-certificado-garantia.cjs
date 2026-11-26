@@ -25,7 +25,7 @@ const pega = (nome) => {
   return node.getText(source)
 }
 const nomes = [
-  'certTitulo', 'garantiaDoCertificado', 'garantiaTitulo', 'validadeTitulo', 'lerDataValidade',
+  'MODELO_DEFINIDO_EM', 'certTitulo', 'certModelo', 'certModeloTitulo', 'certConflitoTitulo', 'garantiaDoCertificado', 'garantiaTitulo', 'validadeTitulo', 'lerDataValidade',
   'espelharCertificado', 'GARANTIA_MESES_MAX', 'lerGarantiaMeses', '_patchProduct',
   'VALIDADE_INCOMPLETA', 'dataIncompleta', 'GARANTIA_DO_CERTIFICADO', 'erroDoProduto', 'commitEditProduct',
 ]
@@ -56,7 +56,7 @@ function pagina({ podeEditar = true, linhas = [], resposta } = {}) {
     editInputRef: { value: null },
   }
   const fns = new Function(...Object.keys(env), `${compiled.outputText}
-return { certTitulo, garantiaDoCertificado, garantiaTitulo, validadeTitulo, lerDataValidade, espelharCertificado, _patchProduct, commitEditProduct, erroDoProduto, VALIDADE_INCOMPLETA, GARANTIA_DO_CERTIFICADO }`)(...Object.values(env))
+return { MODELO_DEFINIDO_EM, certModelo, certModeloTitulo, certConflitoTitulo, certTitulo, garantiaDoCertificado, garantiaTitulo, validadeTitulo, lerDataValidade, espelharCertificado, _patchProduct, commitEditProduct, erroDoProduto, VALIDADE_INCOMPLETA, GARANTIA_DO_CERTIFICADO }`)(...Object.values(env))
   return { ...fns, env, chamadas, flashes }
 }
 
@@ -84,8 +84,9 @@ async function run() {
     )
     assert.match(s.garantiaTitulo(produto({ certificacao: cert({ modelo: null }) })), /vem do certificado smartphone 4G:/)
     // Validade: sem certificado não edita; com certificado avisa que vale para todos.
-    assert.match(s.validadeTitulo(produto({ certificacao: null })), /escolha o certificado na coluna Modelo/)
-    assert.match(s.validadeTitulo(produto()), /^Da Certificações: .*Válido até 30\/07\/2028\..* Clique para mudar a data \(o Fim do certificado\): vale para todos os produtos dele\.$/)
+    // M-69: o certificado é definido na coluna SKU da Certificações.
+    assert.equal(s.validadeTitulo(produto({ certificacao: null })), 'Sem certificado: o certificado do produto é definido em Importação › Certificações (coluna SKU).')
+    assert.match(s.validadeTitulo(produto()), /^Da Certificações: .*Válido até 30\/07\/2028\..* Clique para mudar a data \(a Validade do certificado\): vale para todos os produtos dele\.$/)
     const leitor = pagina({ podeEditar: false })
     assert.equal(leitor.validadeTitulo(produto()), leitor.certTitulo(cert()), 'quem só vê não recebe o "clique"')
   }
@@ -232,7 +233,8 @@ async function run() {
     })
     await s3._patchProduct('p1', 'garantia_meses', '')
     assert.equal(s3.env.productsErr.value, s3.GARANTIA_DO_CERTIFICADO)
-    assert.match(s3.erroDoProduto('sem_certificado'), /^Validade: o produto não tem certificado/)
+    assert.match(s3.erroDoProduto('sem_certificado'), /^Validade: o produto não tem certificado — ele é definido em Importação › Certificações/)
+    assert.equal(s3.erroDoProduto('certificado_pela_certificacoes'), 'Modelo: definido em Importação › Certificações')
     assert.equal(s3.erroDoProduto('sku_exists'), 'sku_exists')
     assert.equal(s3.erroDoProduto(undefined), 'save_failed')
   }
@@ -284,7 +286,10 @@ async function run() {
   const iCab = tpl.indexOf('data-col-cert-validade')
   assert.ok(iCab > 0, 'cabeçalho marcado')
   const th = tpl.slice(tpl.lastIndexOf('<th', iCab), tpl.indexOf('</th>', iCab))
-  assert.match(th, /Clique para mudar a data: grava no Fim do certificado e vale para todos os produtos dele\./)
+  // M-68: a coluna Fim da Certificações passou a se chamar Validade.
+  assert.match(th, /coluna Validade da Certificações/)
+  assert.match(th, /Clique para mudar a data: grava na Validade do certificado e vale para todos os produtos dele\./)
+  assert.doesNotMatch(th, /\bFim\b/)
   const corpo = tpl.slice(tpl.indexOf('<!-- data rows -->'))
   const iCel = corpo.indexOf('data-cert-validade\n')
   assert.ok(iCel > 0, 'célula da linha existe')
@@ -302,6 +307,39 @@ async function run() {
   // O tipo do certificado traz a garantia.
   assert.match(setup, /type CertificacaoDoProduto = \{[\s\S]*?garantia_meses\?: number \| null[\s\S]*?\}/)
 
+  // 7b) Modelo (M-69): só leitura, com a dica e o aviso de conflito.
+  {
+    const s = pagina()
+    assert.equal(s.MODELO_DEFINIDO_EM, 'definido em Importação › Certificações')
+    assert.equal(s.certModelo(produto()), 'USM003')
+    assert.equal(s.certModelo(produto({ certificacao: cert({ modelo: null }) })), 'smartphone 4G')
+    assert.equal(s.certModelo(produto({ certificacao: null })), '—')
+    assert.match(s.certModeloTitulo(produto()), /^Modelo definido em Importação › Certificações\. Da Certificações: smartphone 4G · ANATEL\./)
+    assert.equal(s.certModeloTitulo(produto({ certificacao: null })), 'Modelo definido em Importação › Certificações. Este produto não tem certificado.')
+    assert.equal(s.certTitulo(null), 'Sem certificado. O certificado do produto é definido em Importação › Certificações (coluna SKU).')
+    assert.equal(s.certConflitoTitulo(produto()), '', 'sem conflito, sem aviso')
+    assert.equal(s.certConflitoTitulo(produto({ certificacao_conflito: ['USM001'] })), '')
+    assert.equal(
+      s.certConflitoTitulo(produto({ certificacao_conflito: ['USM001', 'USM003'] })),
+      'Os códigos desta linha estão em certificados diferentes: USM001, USM003. Vale o USM003, que já estava gravado. Acerte a coluna SKU em Importação › Certificações.',
+    )
+    assert.match(
+      s.certConflitoTitulo(produto({ certificacao: null, certificacao_conflito: ['USM001', 'USM002'] })),
+      /USM001, USM002\. Nenhum vale até acertar\./,
+    )
+    const iMod = corpo.indexOf('data-cert-modelo\n')
+    assert.ok(iMod > 0, 'célula do Modelo existe')
+    const modelo = corpo.slice(corpo.lastIndexOf('<td', iMod), corpo.indexOf('</td>', iMod))
+    assert.doesNotMatch(modelo, /<select|@change|setCertificacao/, 'sem lista para escolher')
+    assert.match(modelo, /:title="certModeloTitulo\(p\)"/)
+    assert.match(modelo, /\{\{ certModelo\(p\) \}\}/)
+    assert.match(modelo, /v-if="certConflitoTitulo\(p\)"[\s\S]*?:title="certConflitoTitulo\(p\)"[\s\S]*?>conflito<\/span>/)
+    assert.doesNotMatch(setup, /certificacao_pelo_nome|loadCertOpcoes|setCertificacao/)
+    const thMod = tpl.slice(tpl.lastIndexOf('<th', tpl.indexOf('data-col-cert-modelo')), tpl.indexOf('</th>', tpl.indexOf('data-col-cert-modelo')))
+    assert.match(thMod, /definido em Importação › Certificações \(coluna SKU/)
+    assert.doesNotMatch(thMod, /código no fim do nome/)
+  }
+
   // 8) o SFC inteiro compila.
   const script = compileScript(descriptor, { id: 'pricing-tab', inlineTemplate: false })
   const out = compileTemplate({
@@ -309,7 +347,7 @@ async function run() {
     compilerOptions: { isTS: true, bindingMetadata: script.bindings },
   })
   assert.deepEqual(out.errors, [], 'template compila')
-  for (const b of ['validadeTitulo', 'garantiaTitulo']) assert.ok(script.bindings[b], `${b} exposto ao template`)
+  for (const b of ['validadeTitulo', 'garantiaTitulo', 'certModelo', 'certModeloTitulo', 'certConflitoTitulo']) assert.ok(script.bindings[b], `${b} exposto ao template`)
 
   console.log('pricing-certificado-garantia: ok')
 }

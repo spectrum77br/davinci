@@ -22,6 +22,7 @@ LINE = {
     "certificate": "anatel",
     "certificate_number": "07197-26-18234",
     "certificate_model": "A17 Pro Max",
+    "certificate_valid_until": "2028-07-30",
     "updated_at": "2026-11-16T10:00:00+00:00",
 }
 
@@ -63,6 +64,175 @@ def test_a_sku_finds_its_price_table_line_by_family(erp):
     assert price_table.for_sku(lines, "b026.12") is None
     snapshot = {p["sku"]: p for p in erp.snapshot()["products"]}
     assert snapshot["demo.aparelho"]["price_table"] is None
+
+
+def test_the_certificacoes_sku_column_comes_first_then_the_line(erp):
+    """M-69/M-71 (26/11/2026): DaVinci links the certificate to the product by the SKU column of
+    Importação › Certificações (the family, without the tag). The product shows that certificate,
+    its number, model and end date ("Validade", dd/mm/aaaa); a family not in the column keeps the
+    certificate stored on its line. pricing_id is the line's id."""
+    usm001 = {
+        "id": "dg053",
+        "sku": "dg053",
+        "certificate": "anatel",
+        "certificate_number": "08215-25-18234",
+        "certificate_model": "USM001",
+        "certificate_valid_until": "2028-02-20",
+    }
+    reference(erp, pricing=[LINE], certificate_skus=[usm001])
+    with erp.connection() as db:
+        lines = price_table.index(db)
+    assert set(lines.certificates) == {"dg053"}
+    info = price_table.for_sku(lines, "dg053.sp")
+    assert (info["certificate"], info["certificate_number"], info["model"]) == (
+        "Anatel",
+        "08215-25-18234",
+        "USM001",
+    )
+    assert info["certificate_valid_until"] == "20/02/2028"
+    assert info["pricing_id"] == "l1"
+    # Same line, other family (not in the column): the line's own certificate.
+    other = price_table.for_sku(lines, "dg052.ra")
+    assert (other["certificate_number"], other["model"]) == ("07197-26-18234", "A17 Pro Max")
+    assert other["certificate_valid_until"] == "30/07/2028"
+    assert other["pricing_id"] == "l1" and other["ean"] == "7908855913182"
+    # No certificate anywhere: empty, never "SEM GTIN" or None.
+    bare = {
+        "dg053": {
+            **LINE,
+            "certificate": None,
+            "certificate_number": None,
+            "certificate_model": None,
+            "certificate_valid_until": None,
+        }
+    }
+    info = price_table.for_sku(bare, "dg053.sp")
+    assert (info["certificate"], info["certificate_number"], info["certificate_valid_until"]) == (
+        "",
+        "",
+        "",
+    )
+
+
+def test_an_old_copy_without_the_new_fields_still_works(erp):
+    """The ERP may still hold a copy taken before M-71: no certificate_skus, no end date."""
+    old = {k: v for k, v in LINE.items() if k != "certificate_valid_until"}
+    reference(erp, pricing=[old])
+    with erp.connection() as db:
+        lines = price_table.index(db)
+    info = price_table.for_sku(lines, "dg053.sp")
+    assert info["certificate"] == "Anatel" and info["certificate_valid_until"] == ""
+    assert lines.certificates == {}
+    # A plain dict (no SKU column at all) is still accepted.
+    assert price_table.for_sku({"dg053": old}, "dg053.sp")["certificate_valid_until"] == ""
+
+
+def test_voltage_and_size_codes_find_their_own_line_and_the_family_certificate(erp):
+    """Eletro lines list the full code ("uaf001m1.110, uaf001m1.220"; the pot "uaf001m1.2l"):
+    the product finds the line that lists its own code; the certificate of the SKU column goes by
+    the family (uaf001m1), so 110 and 220 share it."""
+    airfryer = {
+        **LINE,
+        "id": "l7",
+        "sku": "uaf001m1.110, uaf001m1.220",
+        "name": "airfryer vidro",
+        "department": "eletro",
+        "ean": "uaf001m1.110: 7908000000110, uaf001m1.220: 79080",
+        "certificate": "inmetro",
+        "certificate_number": "MODERNA-0069/25",
+        "certificate_model": "UAF001",
+        "certificate_valid_until": "2032-04-30",
+    }
+    pote = {
+        **LINE,
+        "id": "l8",
+        "sku": "uaf001m1.2l",
+        "name": "airfryer pote vidro 2,5L",
+        "department": "eletro",
+        "ean": "",
+        "certificate": None,
+        "certificate_number": None,
+        "certificate_model": None,
+        "certificate_valid_until": None,
+    }
+    reference(erp, pricing=[airfryer, pote])
+    with erp.connection() as db:
+        lines = price_table.index(db)
+    a110 = price_table.for_sku(lines, "uaf001m1.110")
+    assert (a110["line"], a110["pricing_id"], a110["ean"]) == (
+        airfryer["sku"],
+        "l7",
+        "7908000000110",
+    )
+    assert (a110["certificate"], a110["model"], a110["certificate_valid_until"]) == (
+        "Inmetro",
+        "UAF001",
+        "30/04/2032",
+    )
+    assert price_table.for_sku(lines, "UAF001M1.220")["pricing_id"] == "l7"
+    assert price_table.for_sku(lines, "uaf001m1.2l")["pricing_id"] == "l8"
+    assert price_table.for_sku(lines, "uaf001m1.2l")["certificate"] == ""
+    # With uaf001m1 in the SKU column, both voltages (and the pot, same family) show it.
+    uaf = {
+        "id": "uaf001m1",
+        "sku": "uaf001m1",
+        "certificate": "inmetro",
+        "certificate_number": "MODERNA-0069/25",
+        "certificate_model": "UAF001-M1",
+        "certificate_valid_until": "2032-04-30",
+    }
+    reference(erp, certificate_skus=[uaf])
+    with erp.connection() as db:
+        lines = price_table.index(db)
+    for sku in ("uaf001m1.110", "uaf001m1.220", "uaf001m1.2l"):
+        assert price_table.for_sku(lines, sku)["model"] == "UAF001-M1", sku
+
+
+def test_the_most_specific_line_wins_for_mala_sizes_and_kits(erp):
+    """Mala lines list the size ("b005.20") and the kit with accessories; each has its own EAN.
+    The product finds its own line (before M-71 it fell back to the "b005" set line and showed
+    that EAN)."""
+    base = {
+        **LINE,
+        "department": "mala",
+        "certificate": None,
+        "certificate_number": None,
+        "certificate_model": None,
+        "certificate_valid_until": None,
+    }
+    conjunto = {**base, "id": "m1", "sku": "b005,b006", "ean": "b005: 7908855912949, b006: 1"}
+    tam20 = {**base, "id": "m2", "sku": "b005.20,b006.20", "ean": "b005.20: 7908855904050"}
+    kit = {
+        **base,
+        "id": "m3",
+        "sku": "b005.20+a075+bp003+a076,b006.20+a075+bp003+a076",
+        "ean": "b005.20+a075+bp003+a076: 7908855907730",
+    }
+    reference(erp, pricing=[conjunto, tam20, kit])
+    with erp.connection() as db:
+        lines = price_table.index(db)
+    assert price_table.for_sku(lines, "b005")["ean"] == "7908855912949"
+    assert price_table.for_sku(lines, "B005.20")["ean"] == "7908855904050"
+    assert price_table.for_sku(lines, "b005.20+a075+bp003+a076")["ean"] == "7908855907730"
+    assert price_table.for_sku(lines, "b005.20+a075+bp003+a076")["pricing_id"] == "m3"
+    # A size without its own line falls back to the family, as before.
+    assert price_table.for_sku(lines, "b005.24")["pricing_id"] == "m1"
+    assert price_table.for_sku(lines, "b005.24")["ean"] == "7908855912949"
+
+
+def test_certificate_name_shows_anvisa_and_isento_like_the_certificacoes_screen():
+    # M-68: Anvisa (só manual) e Isento aparecem com inicial maiúscula, como Anatel e Inmetro.
+    for stored, shown in (
+        ("anatel", "Anatel"),
+        ("inmetro", "Inmetro"),
+        ("anvisa", "Anvisa"),
+        ("isento", "Isento"),
+        (" ANVISA ", "Anvisa"),
+        ("", ""),
+        (None, ""),
+    ):
+        lines = {"dg053": {**LINE, "certificate": stored}}
+        assert price_table.for_sku(lines, "dg053.sp")["certificate"] == shown, stored
 
 
 def test_every_cost_change_keeps_its_result_on_the_stock_at_that_moment(erp):

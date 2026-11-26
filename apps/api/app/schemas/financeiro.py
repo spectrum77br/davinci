@@ -2,8 +2,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.models.financeiro import CERTIFICADOS
+from app.services.certificacao_produto import skus_da_entrada
 
 # ── Consórcio ──────────────────────────────────────────────────────────
 
@@ -71,6 +73,12 @@ class SuprimentosOut(BaseModel):
     # Garantia (meses) do certificado (06/11/2026): vale para todos os
     # produtos da Tabela de Preços dele. None = não define; 0 = sem garantia.
     garantia_meses: int | None = None
+    # Coluna SKU (M-69, 26/11/2026): os SKUs sem a tag ("dg017", "dg018"), em
+    # ordem. É a ligação do certificado com os produtos.
+    skus: list[str] = Field(default_factory=list)
+    # Só na resposta de quem gravou a coluna SKU: SKUs que não existem em
+    # produto nenhum ("dg999 não existe em nenhum produto"). Grava assim mesmo.
+    avisos: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -79,6 +87,8 @@ class SuprimentosPatch(BaseModel):
     produto: str | None = None
     modelo: str | None = None
     nome_comercial: str | None = None
+    # Anatel, Inmetro, Anvisa (M-68, só manual) ou Isento; '' = sem. Grava em
+    # minúsculas (é o que as consultas e a Tabela de Preços comparam).
     certificado: str | None = None
     numero: str | None = None
     valor: Decimal | None = None
@@ -87,6 +97,26 @@ class SuprimentosPatch(BaseModel):
     # 0 a 120 (0 = sem garantia); null = o certificado não define o prazo (os
     # produtos ficam com o que têm).
     garantia_meses: int | None = Field(None, ge=0, le=120)
+    # Coluna SKU (M-69): lista ou texto ("dg017, dg018; dg019.ra"). Vírgula,
+    # ponto e vírgula, espaço e quebra de linha separam; cada SKU é gravado sem
+    # a tag; vazios saem e repetidos viram um só. null ou "" = sem SKU.
+    skus: list[str] | str | None = None
+
+    @field_validator("skus")
+    @classmethod
+    def _skus_sem_tag(cls, valor: list[str] | str | None) -> list[str]:
+        return skus_da_entrada(valor)
+
+    @field_validator("certificado")
+    @classmethod
+    def _certificado_aceito(cls, valor: str | None) -> str | None:
+        # Fora da lista o banco recusaria (trava da 0083/0512) com erro 500.
+        if valor is None:
+            return None
+        limpo = valor.strip().lower()
+        if limpo and limpo not in CERTIFICADOS:
+            raise ValueError("Certificado: use Anatel, Inmetro, Anvisa, Isento ou deixe vazio.")
+        return limpo
 
 
 class CertificacoesFonteStatusOut(BaseModel):

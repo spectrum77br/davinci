@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Suprimentos — certificações (Anatel/Inmetro/isento) com alerta visual
+// Suprimentos — certificações (Anatel/Inmetro/Anvisa/isento) com alerta visual
 // de validade: linha âmbar quando faltam < 30 dias, vermelha quando já
 // venceu. Auto-save inline, mesmo padrão da página Consórcio.
 // Desde 05/11/2026 é componente: aba "Certificações" da Importação (no
@@ -8,8 +8,23 @@
 // `embutido` tira o recuo da página quando vem dentro da Importação.
 // M-67 (25/11/2026): barra com Layout ▾ (mostra/esconde Modelo, Número, Valor
 // e Situação oficial) e Excel (.xlsx), no lugar do "Baixar tabela em PDF".
+// M-66 (26/11/2026): topo limpo, no padrão da Tabela de Preços. Saíram a
+// contagem de itens, a legenda de cores, os blocos Anatel/Inmetro, a frase de
+// edição e os botões Recarregar / Atualizar agora / Atualizar Inmetro: tudo
+// virou o botão azul "Atualizar ▾" com as caixas Anatel e Inmetro. A Anvisa
+// fica fora do menu: não existe consulta de Anvisa no sistema.
+// M-68 (26/11/2026): sai a coluna Início (o dado continua guardado); Fim virou
+// Validade; o Certificado mostra só o nome, centralizado, e abre caixas
+// Inmetro / Anatel / Anvisa / Isento (Anvisa é nova e só manual); a Situação
+// oficial mostra só órgão + situação e abre a janela dos dados da fonte (o
+// "Ver" saiu); os avisos por linha viraram selos laranja curtos.
+// M-69 (26/11/2026): coluna SKU entre Produto e Modelo. É a ligação do
+// certificado com os produtos (Tabela de Preços e Produtos 2): vários SKUs por
+// certificação, sem a tag ("dg019" vale para dg019.ra, dg019.sp…). Salva ao
+// sair do campo; SKU que já está em outra certificação não grava e avisa onde
+// está; SKU que não existe em produto nenhum grava e avisa.
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ChevronDown, Download, ExternalLink, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { ChevronDown, Download, ExternalLink, Loader2, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { createCertificacoesAutosave } from '~/utils/certificacoesAutosave'
 import { gerarXlsx, TIPO_XLSX, type CelulaPlanilha } from '~/lib/planilhaXlsx'
@@ -104,6 +119,8 @@ type Row = {
   // Garantia (meses) do certificado (06/11/2026): vale para todos os produtos
   // dele na Tabela de Preços. null = não define; 0 = sem garantia.
   garantia_meses: number | null
+  // Coluna SKU (M-69): os SKUs sem a tag, em ordem ("dg017", "dg018").
+  skus?: string[]
 }
 
 const rows = ref<Row[]>([])
@@ -124,8 +141,10 @@ const inmetroSyncError = ref<string | null>(null)
 const selectedRow = ref<Row | null>(null)
 const detailsDialog = ref<HTMLDialogElement | null>(null)
 const rowBusy = reactive<Record<string, boolean>>({})
+// Coluna SKU (M-69) gravando nesta linha: o Atualizar e o Excel esperam.
+const skusSalvando = reactive<Record<string, boolean>>({})
 const busy = computed(() => loading.value || exporting.value || adding.value || synchronizing.value || synchronizingInmetro.value)
-const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean))
+const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean) || Object.values(skusSalvando).some(Boolean))
 const canAttach = computed(() => auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.edit))
 const autosave = createCertificacoesAutosave(
   (id, patch) => api(`/api/financeiro/suprimentos/${id}`, { method: 'PATCH', body: patch }),
@@ -135,9 +154,9 @@ onBeforeUnmount(() => { void autosave.flush().catch(() => {}) })
 
 // Layout ▾ (M-67): caixas para mostrar ou esconder colunas da tabela, como o
 // Layout da Tabela de Preços (marcada = aparece; tudo marcado no começo;
-// lembrado neste navegador). Produto, Nome comercial, Certificado, Início,
-// Fim, Garantia e PDF do certificado ficam sempre à mostra. O menu mostra só a
-// caixa e o nome. O Excel leva só as colunas à mostra.
+// lembrado neste navegador). Produto, SKU (M-69), Nome comercial,
+// Certificado, Validade, Garantia e PDF do certificado ficam sempre à mostra.
+// O menu mostra só a caixa e o nome. O Excel leva só as colunas à mostra.
 const COLUNAS_LAYOUT = [
   { chave: 'modelo', rotulo: 'Modelo' },
   { chave: 'numero', rotulo: 'Número' },
@@ -165,7 +184,8 @@ function lerColunasOcultas(texto: string | null): string[] {
 }
 
 // Colunas da tabela (o colspan da linha "Nenhuma certificação"): as 11 menos
-// as escondidas, mais a lixeira de quem pode excluir.
+// as escondidas, mais a lixeira de quem pode excluir (M-68: saiu o Início;
+// M-69: entrou o SKU).
 const totalColunas = computed(() => 11 - colunasOcultas.value.length + (canDelete.value ? 1 : 0))
 
 // Lidas só depois de montar (no servidor não há localStorage).
@@ -188,7 +208,39 @@ onMounted(() => {
   watch(colunasOcultas, (v) => gravarPreferencia(CHAVE_COLUNAS_OCULTAS, v.join(',')))
 })
 
-const CERT_OPTIONS = ['', 'anatel', 'inmetro', 'isento']
+// Certificado (M-68): a célula mostra só o nome; clicar abre as caixas nesta
+// ordem. Uma marcada por vez; desmarcar a marcada deixa vazio. Grava em
+// minúsculas no mesmo campo (as consultas comparam 'anatel'/'inmetro').
+// Anvisa é só manual: não existe consulta de Anvisa.
+const CERT_OPTIONS = [
+  { valor: 'inmetro', rotulo: 'Inmetro' },
+  { valor: 'anatel', rotulo: 'Anatel' },
+  { valor: 'anvisa', rotulo: 'Anvisa' },
+  { valor: 'isento', rotulo: 'Isento' },
+]
+function valorCertificado(row: Row): string {
+  return (row.certificado || '').trim().toLowerCase()
+}
+// O nome na tela: "Inmetro", "Anatel", "Anvisa", "Isento"; vazio = ''.
+function rotuloCertificado(valor: string | null | undefined): string {
+  const v = (valor || '').trim().toLowerCase()
+  if (!v) return ''
+  return CERT_OPTIONS.find((o) => o.valor === v)?.rotulo ?? v.charAt(0).toUpperCase() + v.slice(1)
+}
+// Id da linha com o menu do Certificado aberto (um por vez).
+const menuCertificado = ref<string | null>(null)
+function abrirMenuCertificado(row: Row, aberto: boolean) {
+  if (aberto) menuCertificado.value = row.id
+  else if (menuCertificado.value === row.id) menuCertificado.value = null
+}
+function escolherCertificado(row: Row, valor: string, marcado: boolean) {
+  menuCertificado.value = null
+  const atual = valorCertificado(row)
+  // Desmarcar só vale para a caixa marcada (a do valor atual).
+  const novo = marcado ? valor : atual === valor ? '' : atual
+  if (atual === novo) return
+  scheduleSave(row, 'certificado', novo)
+}
 const ANATEL_SOURCE_URL = 'https://www.anatel.gov.br/dadosabertos/paineis_de_dados/certificacao_de_produtos/produtos_certificados.zip'
 const INMETRO_SOURCE_URL = 'http://www.inmetro.gov.br/prodcert/'
 const OFFICIAL_FIELDS = new Set<keyof Row>(['modelo', 'nome_comercial', 'certificado', 'numero', 'inicio', 'fim'])
@@ -199,7 +251,7 @@ async function loadAnatelStatus() {
     anatelStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/anatel/status')
     statusError.value = null
   } catch {
-    statusError.value = 'Não foi possível consultar a atualização automática da Anatel. Tente recarregar em instantes.'
+    statusError.value = 'Não foi possível consultar a atualização automática da Anatel. Tente atualizar em instantes.'
   }
 }
 
@@ -208,7 +260,7 @@ async function loadInmetroStatus() {
     inmetroStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/inmetro/status')
     inmetroStatusError.value = null
   } catch {
-    inmetroStatusError.value = 'Não foi possível consultar a atualização automática do Inmetro. Tente recarregar em instantes.'
+    inmetroStatusError.value = 'Não foi possível consultar a atualização automática do Inmetro. Tente atualizar em instantes.'
   }
 }
 
@@ -221,19 +273,21 @@ async function reloadData(source?: 'anatel' | 'inmetro') {
   if (result.status === 'fulfilled') {
     rows.value = result.value
   } else {
-    errorText.value = 'Não foi possível recarregar as certificações. Os dados exibidos foram preservados. Tente novamente.'
+    errorText.value = 'Não foi possível reler a lista de certificações. Os dados exibidos foram preservados. Tente novamente.'
   }
 }
 
-async function load() {
+// `limparAviso = false` (M-66): o Atualizar ▾ relê a lista depois das
+// consultas sem apagar o aviso de erro que uma consulta deixou.
+async function load(limparAviso = true) {
   if (busy.value || hasBusyRow.value) return
   loading.value = true
-  errorText.value = null
+  if (limparAviso) errorText.value = null
   try {
     await autosave.flush()
     await reloadData()
   } catch {
-    errorText.value = 'Não foi possível salvar as alterações. Tente recarregar novamente.'
+    errorText.value = 'Não foi possível salvar as alterações. Tente atualizar novamente.'
   } finally {
     loading.value = false
   }
@@ -275,8 +329,50 @@ function salvarGarantia(row: Row, raw: string) {
   scheduleSave(row, 'garantia_meses', n)
 }
 
-async function syncAnatel() {
-  if (!canAttach.value || busy.value || hasBusyRow.value) return
+// ── Coluna SKU (M-69) ──────────────────────────────────────────────────
+// Mostrada como "dg017, dg018, dg019". Salva ao sair do campo (ou Enter),
+// direto, sem esperar o salvamento automático das outras células: a resposta
+// diz o que ficou gravado (sem a tag, sem repetidos, em ordem). SKU que já
+// está em outra certificação: o servidor não grava nada (409) e a célula
+// volta ao que era. SKU que não existe em produto nenhum: grava e avisa.
+const avisoSkus = ref<string | null>(null)
+function textoSkus(row: Row): string {
+  return (row.skus || []).join(', ')
+}
+async function salvarSkus(row: Row, el: HTMLInputElement) {
+  const anterior = textoSkus(row)
+  if (!canEdit.value || busy.value || rowBusy[row.id] || skusSalvando[row.id]) {
+    el.value = anterior
+    return
+  }
+  const texto = el.value
+  if (texto.trim() === anterior) return
+  skusSalvando[row.id] = true
+  try {
+    // As outras edições desta linha vão antes (a ordem fica a da tela).
+    await autosave.flushRow(row.id)
+    const salvo = await api<Row>(`/api/financeiro/suprimentos/${row.id}`, { method: 'PATCH', body: { skus: texto } })
+    row.skus = salvo.skus || []
+    el.value = textoSkus(row)
+    const avisos = (salvo as Row & { avisos?: string[] }).avisos || []
+    avisoSkus.value = avisos.length ? `SKU: ${avisos.join('; ')}. Foi gravado assim mesmo.` : null
+    if (errorText.value?.startsWith('SKU:')) errorText.value = null
+  } catch (e: any) {
+    el.value = anterior
+    const detalhe = e?.data?.detail
+    errorText.value = detalhe?.code === 'sku_em_outro_certificado'
+      ? `SKU: ${detalhe.message}. Nada foi gravado.`
+      : 'SKU: não foi possível salvar. Tente novamente.'
+  } finally {
+    delete skusSalvando[row.id]
+  }
+}
+
+// Devolve false quando não deu para salvar as edições pendentes (o Atualizar ▾
+// para aí, para não reler a lista por cima delas). `recarregar = false`: quem
+// chamou relê a lista inteira no fim (Atualizar ▾).
+async function syncAnatel(recarregar = true): Promise<boolean> {
+  if (!canAttach.value || busy.value || hasBusyRow.value) return false
   synchronizing.value = true
   errorText.value = null
   syncMessage.value = null
@@ -285,16 +381,16 @@ async function syncAnatel() {
       await autosave.flush()
     } catch {
       errorText.value = 'As alterações não foram salvas. Tente atualizar novamente para preservar suas edições.'
-      return
+      return false
     }
     const result = await api<SyncResult>('/api/financeiro/suprimentos/anatel/sincronizar', { method: 'POST' })
     if (result.status === 'ok') {
       syncMessage.value = `Consulta concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
       if (result.nao_localizados) syncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
       if (result.conflitos) syncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
-      await reloadData('anatel')
+      if (recarregar) await reloadData('anatel')
     } else if (result.status === 'busy') {
-      syncMessage.value = 'Uma consulta à Anatel já está em andamento. Recarregue em instantes para ver o resultado.'
+      syncMessage.value = 'Uma consulta à Anatel já está em andamento. Atualize em instantes para ver o resultado.'
       await loadAnatelStatus()
     } else {
       errorText.value = 'Não foi possível concluir a consulta à Anatel. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.'
@@ -306,6 +402,7 @@ async function syncAnatel() {
   } finally {
     synchronizing.value = false
   }
+  return true
 }
 
 function isLinked(row: Row) {
@@ -345,11 +442,22 @@ function fieldSourceTitle(row: Row, field: keyof Row) {
   return ''
 }
 
+// Situação oficial (M-68): só órgão + situação, por exemplo "Anatel ·
+// Homologação Emitida" ou "Inmetro · Ativo". Linha manual (sem ligação com a
+// Anatel ou o Inmetro) fica em branco; linha com o cadastro editado mostra a
+// situação que veio da fonte; fonte sem situação = em branco. Clicar no texto
+// abre a janela dos dados da fonte.
 function officialSituation(row: Row) {
-  if (!isLinked(row)) return 'Manual · sem confirmação automática'
-  if (hasManualOfficialFields(row)) return 'Cadastro editado · consultar fonte'
+  if (!isLinked(row)) return ''
   const situation = row.anatel_numero ? row.anatel_dados?.situacao_requerimento : row.inmetro_dados?.situacao_certificado
-  return `${officialSource(row)} · ${situation || 'Situação não informada na fonte'}`
+  return situation?.trim() ? `${officialSource(row)} · ${situation.trim()}` : ''
+}
+
+// O balão do texto da situação. Cadastro editado à mão: a situação é a da
+// fonte e o texto fica cinza (como hoje), então o balão explica.
+function officialSituationTitle(row: Row) {
+  if (hasManualOfficialFields(row)) return `Cadastro editado à mão: esta é a situação da fonte (${officialSource(row)}). Clique para ver os dados.`
+  return `Clique para ver os dados de ${officialSource(row)}.`
 }
 
 function officialSituationClass(row: Row) {
@@ -366,8 +474,9 @@ function officialSituationClass(row: Row) {
   return 'text-muted-foreground'
 }
 
-async function syncInmetro() {
-  if (!canAttach.value || busy.value || hasBusyRow.value) return
+// Mesmo contrato do syncAnatel (devolve false se as edições não foram salvas).
+async function syncInmetro(recarregar = true): Promise<boolean> {
+  if (!canAttach.value || busy.value || hasBusyRow.value) return false
   synchronizingInmetro.value = true
   inmetroSyncError.value = null
   inmetroSyncMessage.value = null
@@ -376,16 +485,16 @@ async function syncInmetro() {
       await autosave.flush()
     } catch {
       inmetroSyncError.value = 'As alterações não foram salvas. Tente atualizar o Inmetro novamente para preservar suas edições.'
-      return
+      return false
     }
     const result = await api<SyncResult>('/api/financeiro/suprimentos/inmetro/sincronizar', { method: 'POST' })
     if (result.status === 'ok') {
       inmetroSyncMessage.value = `Consulta ao Inmetro concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
       if (result.nao_localizados) inmetroSyncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
       if (result.conflitos) inmetroSyncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
-      await reloadData('inmetro')
+      if (recarregar) await reloadData('inmetro')
     } else if (result.status === 'busy') {
-      inmetroSyncMessage.value = 'Uma consulta ao Inmetro já está em andamento. Recarregue em instantes para ver o resultado.'
+      inmetroSyncMessage.value = 'Uma consulta ao Inmetro já está em andamento. Atualize em instantes para ver o resultado.'
       await loadInmetroStatus()
     } else {
       inmetroSyncError.value = 'Não foi possível concluir a consulta ao Inmetro. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.'
@@ -397,7 +506,64 @@ async function syncInmetro() {
   } finally {
     synchronizingInmetro.value = false
   }
+  return true
 }
+
+// ── Atualizar ▾ (M-66) ─────────────────────────────────────────────────
+// No padrão do Atualizar da Tabela de Preços: o menu tem as caixas Anatel e
+// Inmetro (as duas marcadas toda vez que abre) e o botão azul "Atualizar".
+// Confirmar faz, para cada órgão marcado, o que faziam os antigos "Atualizar
+// agora" (Anatel) e "Atualizar Inmetro" e, no fim, o que fazia o Recarregar:
+// salva as edições pendentes e relê a lista e a situação das duas consultas.
+// Quem só vê não tem o menu: o Atualizar só relê a lista.
+// Anvisa: fica fora até existir uma consulta de Anvisa no sistema.
+const menuAtualizarAberto = ref(false)
+const atualizarAnatel = ref(true)
+const atualizarInmetro = ref(true)
+const atualizandoAlgo = computed(() => loading.value || synchronizing.value || synchronizingInmetro.value)
+const rotuloAtualizar = computed(() =>
+  synchronizing.value ? 'Consultando Anatel...'
+    : synchronizingInmetro.value ? 'Consultando Inmetro...'
+      : loading.value ? 'Atualizando...' : 'Atualizar')
+
+function abrirMenuAtualizar(aberto: boolean) {
+  menuAtualizarAberto.value = aberto
+  if (aberto) {
+    atualizarAnatel.value = true
+    atualizarInmetro.value = true
+  }
+}
+
+async function executarAtualizar() {
+  if (busy.value || hasBusyRow.value) return
+  menuAtualizarAberto.value = false
+  const anatel = canAttach.value && atualizarAnatel.value
+  const inmetro = canAttach.value && atualizarInmetro.value
+  // As mensagens da vez anterior saem; as desta vez ficam até a próxima.
+  errorText.value = null
+  syncMessage.value = null
+  inmetroSyncMessage.value = null
+  inmetroSyncError.value = null
+  if (anatel && !(await syncAnatel(false))) return
+  if (inmetro && !(await syncInmetro(false))) return
+  await load(false)
+}
+
+// Aviso de falha da consulta diária (M-66): uma linha só, abaixo da barra, e
+// só quando a última tentativa falhou ou não deu para ler a situação (some
+// quando a consulta volta a funcionar). É o único aviso de que o robô parou.
+const avisoFalhaConsulta = computed(() => {
+  const orgaos: string[] = []
+  if (!statusError.value && anatelStatus.value?.erro) orgaos.push('à Anatel')
+  if (!inmetroStatusError.value && inmetroStatus.value?.erro) orgaos.push('ao Inmetro')
+  const partes: string[] = []
+  if (orgaos.length) {
+    partes.push(`A última tentativa de consulta ${orgaos.join(' e ')} falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.`)
+  }
+  if (statusError.value) partes.push(statusError.value)
+  if (inmetroStatusError.value) partes.push(inmetroStatusError.value)
+  return partes.join(' ')
+})
 
 function formatTimestamp(value: string | null | undefined) {
   if (!value) return 'Ainda não realizada'
@@ -471,8 +637,11 @@ async function downloadPdf(path: string, filename: string) {
 
 // Excel (M-67, no lugar do "Baixar tabela em PDF"): todas as linhas da lista,
 // na ordem da tela, com as colunas à mostra (Layout), na ordem da tabela.
-// Início e Fim vão como data; Valor e Garantia (meses) como número; vazio fica
-// em branco. "PDF do certificado" leva o nome do arquivo anexado.
+// Validade vai como data; Valor e Garantia (meses) como número; vazio fica em
+// branco. "PDF do certificado" leva o nome do arquivo anexado. M-68: o Início
+// saiu (não está mais na tela), Fim virou Validade e o Certificado sai com o
+// nome da tela ("Anatel"). M-69: o SKU vai logo depois do Produto ("dg017,
+// dg018"), como na tela.
 function linhasExcel(): CelulaPlanilha[][] {
   const numero = (v: unknown): number | '' => {
     if (v == null || v === '') return ''
@@ -480,22 +649,22 @@ function linhasExcel(): CelulaPlanilha[][] {
     return Number.isFinite(n) ? n : ''
   }
   const data = (v: string | null): CelulaPlanilha => (v ? { data: v } : '')
-  const cab: CelulaPlanilha[] = ['Produto']
+  const cab: CelulaPlanilha[] = ['Produto', 'SKU']
   if (mostraColuna('modelo')) cab.push('Modelo')
   cab.push('Nome comercial', 'Certificado')
   if (mostraColuna('numero')) cab.push('Número')
   if (mostraColuna('valor')) cab.push('Valor')
-  cab.push('Início', 'Fim', 'Garantia (meses)')
+  cab.push('Validade', 'Garantia (meses)')
   if (mostraColuna('situacao')) cab.push('Situação oficial')
   cab.push('PDF do certificado')
   const linhas: CelulaPlanilha[][] = [cab]
   for (const row of rows.value) {
-    const l: CelulaPlanilha[] = [row.produto ?? '']
+    const l: CelulaPlanilha[] = [row.produto ?? '', textoSkus(row)]
     if (mostraColuna('modelo')) l.push(row.modelo ?? '')
-    l.push(row.nome_comercial ?? '', row.certificado ?? '')
+    l.push(row.nome_comercial ?? '', rotuloCertificado(row.certificado))
     if (mostraColuna('numero')) l.push(row.numero ?? '')
     if (mostraColuna('valor')) l.push(numero(row.valor))
-    l.push(data(row.inicio), data(row.fim), numero(row.garantia_meses))
+    l.push(data(row.fim), numero(row.garantia_meses))
     if (mostraColuna('situacao')) l.push(officialSituation(row))
     l.push(row.tem_pdf ? (row.pdf_nome || 'Sim') : '')
     linhas.push(l)
@@ -588,120 +757,139 @@ function rowStatusClass(row: Row): string {
   if (d < 30) return 'bg-amber-100/60 dark:bg-amber-900/30'
   return ''
 }
-
-const totalRows = computed(() => rows.value.length)
 </script>
 
 <template>
   <div class="space-y-3" :class="{ 'p-4': !embutido }">
-    <div class="flex flex-wrap items-center gap-3">
-      <div class="flex items-center gap-2">
-        <h1 class="text-xl font-semibold">Certificações</h1>
-        <span class="text-xs text-muted-foreground">{{ totalRows }} {{ totalRows === 1 ? 'item' : 'itens' }}</span>
-      </div>
-      <div class="text-[10px] text-muted-foreground inline-flex items-center gap-3 ml-2">
-        <span class="inline-flex items-center gap-1"><span class="size-2 rounded bg-amber-400"></span> &lt; 30 dias</span>
-        <span class="inline-flex items-center gap-1"><span class="size-2 rounded bg-red-500"></span> vencido</span>
-      </div>
-      <!-- Barra no padrão da Tabela de Preços (M-67): Layout ▾ | Excel | Recarregar. -->
-      <div class="ml-auto flex flex-wrap items-center gap-2">
-        <!-- Layout ▾: mostra/esconde Modelo, Número, Valor e Situação oficial.
-             Só a caixa e o nome; lembrado neste navegador. -->
-        <PopoverRoot>
-          <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-certificacoes" title="Escolher as colunas que a tabela mostra">
-              Layout
-              <ChevronDown class="h-3 w-3 ml-1" />
-            </button>
-          </PopoverTrigger>
-          <PopoverPortal>
-            <PopoverContent
-              side="bottom"
-              align="start"
-              :side-offset="4"
-              :collision-padding="8"
-              data-menu-layout-certificacoes
-              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+    <!-- Barra no padrão da Tabela de Preços (M-66/M-67): título, Layout ▾,
+         Excel, Atualizar ▾ e, à direita, o botão de criar linha. -->
+    <div class="flex flex-wrap items-center gap-2" data-barra-certificacoes>
+      <h1 class="mr-1 text-xl font-semibold">Certificações</h1>
+      <!-- Layout ▾: mostra/esconde Modelo, Número, Valor e Situação oficial.
+           Só a caixa e o nome; lembrado neste navegador. -->
+      <PopoverRoot>
+        <PopoverTrigger as-child>
+          <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-certificacoes" title="Escolher as colunas que a tabela mostra">
+            Layout
+            <ChevronDown class="h-3 w-3 ml-1" />
+          </button>
+        </PopoverTrigger>
+        <PopoverPortal>
+          <PopoverContent
+            side="bottom"
+            align="start"
+            :side-offset="4"
+            :collision-padding="8"
+            data-menu-layout-certificacoes
+            class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+          >
+            <label
+              v-for="c in COLUNAS_LAYOUT"
+              :key="c.chave"
+              class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
             >
-              <label
-                v-for="c in COLUNAS_LAYOUT"
-                :key="c.chave"
-                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              <input
+                type="checkbox"
+                class="size-4"
+                :checked="mostraColuna(c.chave)"
+                :data-campo="`layout-certificacoes-${c.chave}`"
+                @change="alternarColuna(c.chave)"
+              />
+              <span>{{ c.rotulo }}</span>
+            </label>
+          </PopoverContent>
+        </PopoverPortal>
+      </PopoverRoot>
+      <button class="btn btn-sm h-7 py-0" :disabled="busy || hasBusyRow" data-acao="excel-certificacoes" @click="exportTable">
+        <Download class="h-4 w-4 mr-1" /> {{ exporting ? 'Gerando...' : 'Excel' }}
+      </button>
+      <!-- Atualizar ▾ (M-66; no lugar do Recarregar e dos botões das consultas).
+           Toda vez que abre: Anatel e Inmetro marcadas. Anvisa não entra: não
+           existe consulta de Anvisa. Quem só vê: o botão só relê a lista. -->
+      <PopoverRoot v-if="canAttach" :open="menuAtualizarAberto" @update:open="abrirMenuAtualizar">
+        <PopoverTrigger as-child>
+          <button
+            type="button"
+            class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+            data-acao="atualizar"
+            :disabled="busy || hasBusyRow"
+            title="Consultar a Anatel e o Inmetro e reler a lista"
+          >
+            <Loader2 v-if="atualizandoAlgo" class="h-4 w-4 mr-1 animate-spin" />
+            <RefreshCw v-else class="h-4 w-4 mr-1" />
+            {{ rotuloAtualizar }}
+            <ChevronDown class="h-3 w-3 ml-1" />
+          </button>
+        </PopoverTrigger>
+        <PopoverPortal>
+          <PopoverContent
+            side="bottom"
+            align="start"
+            :side-offset="4"
+            :collision-padding="8"
+            data-menu-atualizar
+            class="z-[70] w-56 max-w-[calc(100vw-16px)] rounded-md border bg-background py-1 shadow-lg"
+          >
+            <div class="flex h-[26px] items-center px-3 text-[11px] font-semibold text-muted-foreground">
+              O que consultar
+            </div>
+            <label class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50">
+              <input v-model="atualizarAnatel" type="checkbox" class="size-4 shrink-0" data-campo="atualizar-anatel" />
+              Anatel
+            </label>
+            <label class="flex h-[26px] cursor-pointer items-center gap-2 px-3 text-sm hover:bg-muted/50">
+              <input v-model="atualizarInmetro" type="checkbox" class="size-4 shrink-0" data-campo="atualizar-inmetro" />
+              Inmetro
+            </label>
+            <div class="mt-1 border-t px-3 pb-1 pt-2">
+              <button
+                type="button"
+                class="btn btn-sm h-7 w-full py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+                data-acao="atualizar-executar"
+                :disabled="busy || hasBusyRow"
+                title="Consulta os órgãos marcados e relê a lista"
+                @click="executarAtualizar"
               >
-                <input
-                  type="checkbox"
-                  class="size-4"
-                  :checked="mostraColuna(c.chave)"
-                  :data-campo="`layout-certificacoes-${c.chave}`"
-                  @change="alternarColuna(c.chave)"
-                />
-                <span>{{ c.rotulo }}</span>
-              </label>
-            </PopoverContent>
-          </PopoverPortal>
-        </PopoverRoot>
-        <button class="btn btn-sm h-7 py-0" :disabled="busy || hasBusyRow" data-acao="excel-certificacoes" @click="exportTable">
-          <Download class="h-4 w-4 mr-1" /> {{ exporting ? 'Gerando...' : 'Excel' }}
-        </button>
-        <button
-          class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-          :disabled="busy || hasBusyRow"
-          @click="load"
-        >
-          <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
-          Recarregar
-        </button>
-      </div>
+                <RefreshCw class="h-4 w-4 mr-1" /> Atualizar
+              </button>
+            </div>
+          </PopoverContent>
+        </PopoverPortal>
+      </PopoverRoot>
+      <button
+        v-else
+        type="button"
+        class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
+        data-acao="atualizar"
+        :disabled="busy || hasBusyRow"
+        title="Reler a lista"
+        @click="executarAtualizar"
+      >
+        <Loader2 v-if="atualizandoAlgo" class="h-4 w-4 mr-1 animate-spin" />
+        <RefreshCw v-else class="h-4 w-4 mr-1" />
+        {{ rotuloAtualizar }}
+      </button>
       <button
         v-if="canEdit"
-        class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+        type="button"
+        class="btn btn-sm h-7 py-0 btn-primary ml-auto"
+        data-acao="nova-certificacao"
         :disabled="busy"
         @click="addRow"
       >
-        <Plus class="size-3.5" /> Nova certificação
+        <Plus class="h-4 w-4 mr-1" /> Nova certificação
       </button>
     </div>
 
-    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
-      <div class="space-y-1">
-        <p class="font-medium">Anatel · Makisa Trading LTDA · Atualização diária</p>
-        <p class="text-muted-foreground">
-          Última consulta bem-sucedida: {{ formatTimestamp(anatelStatus?.ultimo_sucesso_em) }}
-          <span v-if="anatelStatus?.source_updated_at"> · Base publicada em {{ formatTimestamp(anatelStatus.source_updated_at) }}</span>
-        </p>
-      </div>
-      <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
-        :disabled="busy || hasBusyRow" @click="syncAnatel">
-        <RefreshCw class="size-3.5" :class="{ 'animate-spin': synchronizing }" />
-        {{ synchronizing ? 'Consultando Anatel...' : 'Atualizar agora' }}
-      </button>
-    </div>
-
-    <p v-if="statusError || anatelStatus?.erro" role="status" class="text-xs text-amber-700 dark:text-amber-400">
-      {{ statusError || 'A última tentativa de consulta à Anatel falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
+    <!-- Uma linha só, e só quando a consulta diária falhou (M-66). -->
+    <p v-if="avisoFalhaConsulta" role="status" class="truncate text-xs text-amber-700 dark:text-amber-400" :title="avisoFalhaConsulta" data-aviso-falha-consulta>
+      {{ avisoFalhaConsulta }}
     </p>
     <p v-if="syncMessage" role="status" class="text-xs text-muted-foreground">{{ syncMessage }}</p>
-
-    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
-      <div class="space-y-1">
-        <p class="font-medium">Inmetro · Makisa Trading LTDA · Atualização diária</p>
-        <p class="text-muted-foreground">Última consulta bem-sucedida: {{ formatTimestamp(inmetroStatus?.ultimo_sucesso_em) }}</p>
-        <p class="text-muted-foreground">Fonte: ProdCert. Os dados oficiais podem ser consultados em “Ver”.</p>
-      </div>
-      <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
-        :disabled="busy || hasBusyRow" @click="syncInmetro">
-        <RefreshCw class="size-3.5" :class="{ 'animate-spin': synchronizingInmetro }" />
-        {{ synchronizingInmetro ? 'Consultando Inmetro...' : 'Atualizar Inmetro' }}
-      </button>
-    </div>
-    <p v-if="inmetroStatusError || inmetroStatus?.erro" role="status" class="text-xs text-amber-700 dark:text-amber-400">
-      {{ inmetroStatusError || 'A última tentativa de consulta ao Inmetro falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
-    </p>
     <p v-if="inmetroSyncMessage" role="status" class="text-xs text-muted-foreground">{{ inmetroSyncMessage }}</p>
+    <p v-if="avisoSkus" role="status" class="text-xs text-amber-700 dark:text-amber-400" data-aviso-skus>{{ avisoSkus }}</p>
     <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
-
-    <p v-if="canEdit" class="text-xs text-muted-foreground">Todos os campos do cadastro podem ser editados. As alterações são salvas automaticamente e preservadas nas próximas consultas. A Garantia (meses) e o Fim valem para todos os produtos do certificado na Tabela de Preços.</p>
 
     <div class="flex justify-end lg:hidden">
       <button class="rounded-lg border px-3 py-2 text-xs" :aria-pressed="mobileTableMode" @click="mobileTableMode = !mobileTableMode">{{ mobileTableMode ? 'Ver cartões' : 'Ver tabela' }}</button>
@@ -710,12 +898,13 @@ const totalRows = computed(() => rows.value.length)
       <article v-for="row in rows" :key="row.id" class="min-w-0 rounded-xl border p-3" :class="rowStatusClass(row)">
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div class="min-w-0"><h2 class="break-words text-sm font-semibold">{{ row.produto || 'Produto não informado' }}</h2><p class="mt-1 break-words text-xs text-muted-foreground">{{ row.modelo || 'Modelo não informado' }}</p></div>
-          <span class="rounded-md bg-muted px-2 py-1 text-xs uppercase">{{ row.certificado || 'Não informado' }}</span>
+          <span class="rounded-md bg-muted px-2 py-1 text-xs">{{ rotuloCertificado(row.certificado) || 'Não informado' }}</span>
         </div>
         <dl class="mt-3 space-y-2 text-xs">
+          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">SKU</dt><dd class="break-words text-right" data-cartao-skus>{{ textoSkus(row) || '—' }}</dd></div>
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Validade</dt><dd class="text-right font-medium">{{ formatDate(row.fim) }}</dd></div>
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Garantia</dt><dd class="text-right">{{ row.garantia_meses == null ? 'Não definida' : row.garantia_meses === 0 ? 'Sem garantia' : `${row.garantia_meses} ${row.garantia_meses === 1 ? 'mês' : 'meses'}` }}</dd></div>
-          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
+          <div v-if="officialSituation(row)" class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
         </dl>
         <p v-if="isMissingSource(row)" class="mt-2 text-xs text-amber-700 dark:text-amber-400">Não localizado na última consulta · dados anteriores</p>
         <details class="mt-3 border-t pt-2 text-xs">
@@ -723,7 +912,6 @@ const totalRows = computed(() => rows.value.length)
           <dl class="space-y-2 pt-2">
             <div><dt class="text-muted-foreground">Nome comercial</dt><dd class="break-words">{{ row.nome_comercial || '—' }}</dd></div>
             <div><dt class="text-muted-foreground">Número</dt><dd class="break-all">{{ row.numero || '—' }}</dd></div>
-            <div><dt class="text-muted-foreground">Início</dt><dd>{{ formatDate(row.inicio) }}</dd></div>
             <div><dt class="text-muted-foreground">Valor</dt><dd>{{ row.valor == null ? '—' : Number(row.valor).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) }}</dd></div>
           </dl>
           <p v-if="officialAlerts(row).length" class="mt-2 text-amber-700 dark:text-amber-400">Confira as observações nos dados oficiais.</p>
@@ -742,13 +930,14 @@ const totalRows = computed(() => rows.value.length)
         <thead>
           <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
             <th class="text-left">Produto</th>
+            <th class="text-left" data-col-skus
+              title="SKUs dos produtos deste certificado, sem a tag (dg019 vale para dg019.ra, dg019.sp…), separados por vírgula. Um SKU fica num certificado só.">SKU</th>
             <th v-if="mostraColuna('modelo')" class="text-left">Modelo</th>
             <th class="text-left">Nome comercial</th>
-            <th class="text-left">Certificado</th>
+            <th class="text-center">Certificado</th>
             <th v-if="mostraColuna('numero')" class="text-left">Número</th>
             <th v-if="mostraColuna('valor')" class="text-right">Valor</th>
-            <th class="text-left">Início</th>
-            <th class="text-left">Fim</th>
+            <th class="text-left">Validade</th>
             <th class="text-right" data-col-garantia-meses
               title="Prazo da garantia, em meses (0 = sem garantia). Mudar aqui muda a Garantia (meses) de todos os produtos deste certificado na Tabela de Preços. Vazio = o certificado não define (cada produto fica com o seu).">Garantia (meses)</th>
             <th v-if="mostraColuna('situacao')" class="text-left">Situação oficial</th>
@@ -769,6 +958,14 @@ const totalRows = computed(() => rows.value.length)
               <input class="cell-input" :value="row.produto ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @input="(e) => scheduleSave(row, 'produto', (e.target as HTMLInputElement).value)" />
             </td>
+            <td class="skus-cell">
+              <!-- SKU (M-69): salva ao sair do campo (ou Enter). -->
+              <input class="cell-input" :value="textoSkus(row)" :disabled="!canEdit || busy || rowBusy[row.id] || skusSalvando[row.id]"
+                placeholder="—" data-cert-skus
+                :title="textoSkus(row) || 'SKUs sem a tag (ex.: dg017, dg018), separados por vírgula'"
+                :aria-label="`SKUs de ${row.produto || 'certificação'}`"
+                @change="(e) => salvarSkus(row, e.target as HTMLInputElement)" />
+            </td>
             <td v-if="mostraColuna('modelo')">
               <input class="cell-input" :value="row.modelo ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 :title="row.modelo || ''"
@@ -779,11 +976,38 @@ const totalRows = computed(() => rows.value.length)
                 :title="row.nome_comercial || ''"
                 @input="(e) => scheduleSave(row, 'nome_comercial', (e.target as HTMLInputElement).value)" />
             </td>
-            <td>
-              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                @change="(e) => scheduleSave(row, 'certificado', (e.target as HTMLSelectElement).value)">
-                <option v-for="o in CERT_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
-              </select>
+            <td class="text-center">
+              <!-- Certificado (M-68): só o nome; clicar abre as caixas (uma por vez). -->
+              <PopoverRoot v-if="canEdit" :open="menuCertificado === row.id" @update:open="(aberto) => abrirMenuCertificado(row, aberto)">
+                <PopoverTrigger as-child>
+                  <button type="button" class="cert-cell" data-cert-certificado :disabled="busy || rowBusy[row.id]"
+                    :aria-label="`Certificado de ${row.produto || 'certificação'}: ${rotuloCertificado(row.certificado) || 'nenhum'}`">
+                    <span v-if="rotuloCertificado(row.certificado)">{{ rotuloCertificado(row.certificado) }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverPortal>
+                  <PopoverContent
+                    side="bottom"
+                    align="center"
+                    :side-offset="2"
+                    :collision-padding="8"
+                    data-menu-certificado
+                    class="z-[70] w-36 rounded-md border bg-background p-1 shadow-lg"
+                  >
+                    <label v-for="o in CERT_OPTIONS" :key="o.valor"
+                      class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/50">
+                      <input type="checkbox" class="size-4" :checked="valorCertificado(row) === o.valor" :data-campo="`certificado-${o.valor}`"
+                        @change="(e) => escolherCertificado(row, o.valor, (e.target as HTMLInputElement).checked)" />
+                      {{ o.rotulo }}
+                    </label>
+                  </PopoverContent>
+                </PopoverPortal>
+              </PopoverRoot>
+              <span v-else class="cert-cell" data-cert-certificado>
+                <span v-if="rotuloCertificado(row.certificado)">{{ rotuloCertificado(row.certificado) }}</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </span>
             </td>
             <td v-if="mostraColuna('numero')">
               <input class="cell-input" :value="row.numero ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
@@ -794,11 +1018,6 @@ const totalRows = computed(() => rows.value.length)
               <input type="number" step="0.01" class="cell-input text-right"
                 :value="row.valor ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @input="(e) => scheduleSave(row, 'valor', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" />
-            </td>
-            <td>
-              <input type="date" class="cell-input" :value="row.inicio ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :title="fieldSourceTitle(row, 'inicio')"
-                @input="(e) => scheduleSave(row, 'inicio', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.fim ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
@@ -813,17 +1032,20 @@ const totalRows = computed(() => rows.value.length)
                 @change="(e) => salvarGarantia(row, (e.target as HTMLInputElement).value)" />
             </td>
             <td v-if="mostraColuna('situacao')" class="official-status-cell">
-              <div class="flex items-center gap-2">
-                <span :class="officialSituationClass(row)">{{ officialSituation(row) }}</span>
-                <button v-if="isLinked(row)" class="shrink-0 text-primary hover:underline" @click="openDetails(row)"
-                  :aria-label="`Ver dados de ${officialSource(row)} de ${row.produto || row.numero}`">Ver</button>
+              <!-- M-68: só órgão + situação; clicar abre os dados da fonte. Os
+                   avisos da linha viraram selos curtos (texto completo no title). -->
+              <div class="flex flex-wrap items-center gap-1.5">
+                <button v-if="officialSituation(row)" type="button" class="situacao-link" :class="officialSituationClass(row)"
+                  data-situacao-oficial :title="officialSituationTitle(row)"
+                  :aria-label="`Ver dados de ${officialSource(row)} de ${row.produto || row.numero}`"
+                  @click="openDetails(row)">{{ officialSituation(row) }}</button>
+                <button v-if="isMissingSource(row)" type="button" class="selo-aviso" data-selo-aviso="nao-localizado"
+                  title="Não localizado na última consulta. Os dados são da consulta anterior."
+                  @click="openDetails(row)">não localizado</button>
+                <button v-else-if="officialAlerts(row).length" type="button" class="selo-aviso" data-selo-aviso="observacoes"
+                  title="Confira as observações da fonte."
+                  @click="openDetails(row)">observações</button>
               </div>
-              <span v-if="isMissingSource(row)" class="block text-[10px] text-amber-700 dark:text-amber-400">
-                Não localizado na última consulta · dados anteriores
-              </span>
-              <span v-else-if="officialAlerts(row).length" class="block text-[10px] text-amber-700 dark:text-amber-400">
-                Confira as observações da fonte em “Ver”
-              </span>
             </td>
             <td>
               <div class="flex items-center gap-2">
@@ -951,10 +1173,59 @@ const totalRows = computed(() => rows.value.length)
 .cell-input:read-only {
   background: transparent;
 }
+/* SKU (M-69): a lista pode ser longa; o title mostra tudo. */
+.grid-table .skus-cell {
+  min-width: 130px;
+  max-width: 220px;
+}
 .grid-table .official-status-cell {
   min-width: 170px;
   max-width: 270px;
   white-space: normal;
+}
+/* Certificado (M-68): só o nome, centralizado; clicar abre as caixas. */
+.cert-cell {
+  display: block;
+  width: 100%;
+  min-height: 18px;
+  padding: 2px 4px;
+  font-size: 11px;
+  text-align: center;
+  color: inherit;
+}
+button.cert-cell {
+  cursor: pointer;
+  background: rgb(254 252 232 / 0.6);
+}
+:global(.dark) button.cert-cell {
+  background: rgb(120 53 15 / 0.15);
+}
+button.cert-cell:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+  background: transparent;
+}
+/* Situação oficial (M-68): o texto abre os dados da fonte. */
+.situacao-link {
+  cursor: pointer;
+  text-align: left;
+}
+.situacao-link:hover {
+  text-decoration: underline;
+}
+.selo-aviso {
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 16px;
+  background: rgb(254 243 199);
+  color: rgb(146 64 14);
+}
+:global(.dark) .selo-aviso {
+  background: rgb(120 53 15 / 0.4);
+  color: rgb(252 211 77);
 }
 .certification-dialog {
   width: min(720px, calc(100vw - 32px));

@@ -322,3 +322,26 @@ async def test_waiting_mutation_rechecks_link_after_concurrent_sync_commits(
             request.cancel()
             await asyncio.gather(request, return_exceptions=True)
         await db.rollback()
+
+
+async def test_certificado_aceita_anvisa_e_grava_em_minusculas(client, make_user, auth_as):
+    """M-68: Anvisa é opção nova (só manual). O valor vai em minúsculas no
+    mesmo campo; vazio = sem certificado; fora da lista = 422 e nada grava."""
+    auth_as(await make_user(role=UserRole.ADMIN))
+    created = await client.post(BASE, json={"produto": "Produto Anvisa", "certificado": "Anvisa"})
+    assert created.status_code == 201
+    assert created.json()["certificado"] == "anvisa"
+    row_id = created.json()["id"]
+    for enviado, gravado in (
+        (" Isento ", "isento"), ("INMETRO", "inmetro"), ("anatel", "anatel"),
+        ("", ""), ("anvisa", "anvisa"), (None, None),
+    ):
+        response = await client.patch(f"{BASE}/{row_id}", json={"certificado": enviado})
+        assert response.status_code == 200, enviado
+        assert response.json()["certificado"] == gravado
+    response = await client.patch(f"{BASE}/{row_id}", json={"certificado": "ANVISA"})
+    assert response.json()["certificado"] == "anvisa"
+    for ruim in ("anvisaa", "outro", "INPI"):
+        response = await client.patch(f"{BASE}/{row_id}", json={"certificado": ruim})
+        assert response.status_code == 422, ruim
+    assert (await client.get(BASE)).json()[0]["certificado"] == "anvisa"

@@ -23,6 +23,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 
@@ -74,9 +75,14 @@ from app.schemas.financeiro import (
 from app.security import senha_extra
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.certificacao_produto import (
-    CAMPOS_DO_CASAMENTO,
     Retrato,
+    SkuEmOutroCertificadoError,
+    aviso_sem_produto,
     certificado_de_cada_produto,
+    conferir_skus_livres,
+    gravar_skus,
+    skus_por_certificado,
+    skus_sem_produto,
 )
 
 logger = structlog.get_logger()
@@ -278,13 +284,25 @@ def _validate_certificacao_pdf(data: bytes) -> None:
         raise HTTPException(400, detail={"code": "invalid_pdf"}) from exc
 
 
+def _suprimento_out(
+    row: FinanceiroSuprimentos, skus: list[str], avisos: list[str] | None = None
+) -> SuprimentosOut:
+    """A linha da Certificações com a coluna SKU (M-69) e, para quem acabou de
+    gravar a coluna, os avisos de SKU que não existe em produto nenhum."""
+    out = SuprimentosOut.model_validate(row, from_attributes=True)
+    out.skus = skus
+    out.avisos = avisos or []
+    return out
+
+
 @router.get("/suprimentos", response_model=list[SuprimentosOut])
 async def list_suprimentos(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
 ) -> list[SuprimentosOut]:
     rows = (await session.execute(_suprimentos_query())).scalars().all()
-    return [SuprimentosOut.model_validate(r, from_attributes=True) for r in rows]
+    skus = await skus_por_certificado(session)
+    return [_suprimento_out(r, skus.get(r.id, [])) for r in rows]
 
 
 @router.get("/suprimentos/pdf")
@@ -327,7 +345,8 @@ async def upload_suprimentos_pdf(
     row.pdf_arquivo = data
     await session.commit()
     await session.refresh(row)
-    return SuprimentosOut.model_validate(row, from_attributes=True)
+    skus = await skus_por_certificado(session, [row.id])
+    return _suprimento_out(row, skus.get(row.id, []))
 
 
 @router.get("/suprimentos/{row_id}/pdf")
@@ -369,12 +388,12 @@ async def _garantia_aos_produtos(
     """Garantia (meses) do certificado (06/11/2026, "em certificações adicione
     o campo garantia, e aí ele passa a mudar de acordo com o certificado"):
 
-    * `passar`: todos os produtos da Tabela de Preços deste certificado (o
-      gravado na coluna Modelo ou, sem ele, o achado pelo código no nome)
-      passam a ter o prazo dele. Vazio (NULL) não mexe nos produtos.
-    * `antes` (o retrato de antes da mudança: Fim, Modelo ou Nº editados,
-      certificado novo ou excluído): o produto que passou a OUTRO certificado
-      com garantia pega a garantia dele.
+    * `passar`: todos os produtos da Tabela de Preços deste certificado (pela
+      coluna SKU ou, sem ela, o gravado na linha — M-69) passam a ter o prazo
+      dele. Vazio (NULL) não mexe nos produtos.
+    * `antes` (o retrato de antes da mudança: coluna SKU editada, certificado
+      novo com SKU ou excluído): o produto que passou a OUTRO certificado com
+      garantia pega a garantia dele.
 
     Pelo mesmo caminho do PATCH do produto (vigência + recálculo das
     garantias). NÃO commita."""
@@ -401,6 +420,39 @@ async def _garantia_aos_produtos(
         )
 
 
+def _erro_sku_em_outro(e: SkuEmOutroCertificadoError) -> HTTPException:
+    return HTTPException(
+        409, detail={"code": "sku_em_outro_certificado", "message": e.mensagem}
+    )
+
+
+async def _gravar_coluna_sku(
+    session: AsyncSession, row: FinanceiroSuprimentos, skus: list[str]
+) -> tuple[bool, list[str]]:
+    """Coluna SKU (M-69): SKU que já está em outra certificação → 409 e nada
+    grava (nem os outros campos da mesma edição); SKU que não existe em
+    produto nenhum grava e volta como aviso. Devolve (mudou, avisos). A PK de
+    `financeiro_suprimento_skus` segura duas edições ao mesmo tempo: a que
+    chega depois também recebe o 409. NÃO commita."""
+    try:
+        await conferir_skus_livres(session, row.id, skus)
+        async with session.begin_nested():
+            mudou = await gravar_skus(session, row.id, skus)
+    except SkuEmOutroCertificadoError as e:
+        raise _erro_sku_em_outro(e) from e
+    except IntegrityError as e:
+        # O savepoint já voltou; a outra edição já gravou: diz onde está.
+        if "pk_financeiro_suprimento_skus" not in str(e.orig):
+            raise
+        try:
+            await conferir_skus_livres(session, row.id, skus)
+        except SkuEmOutroCertificadoError as e2:
+            raise _erro_sku_em_outro(e2) from e
+        raise
+    avisos = [aviso_sem_produto(s) for s in await skus_sem_produto(session, skus)]
+    return mudou, avisos
+
+
 @router.post("/suprimentos", response_model=SuprimentosOut, status_code=status.HTTP_201_CREATED)
 async def create_suprimentos(
     body: SuprimentosPatch,
@@ -408,17 +460,22 @@ async def create_suprimentos(
     user: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
 ) -> SuprimentosOut:
     values = body.model_dump(exclude_unset=True)
-    # O certificado novo pode tirar produtos de outro (achados pelo nome):
-    # o retrato de antes diz quem trocou.
-    antes = await certificado_de_cada_produto(session)
+    skus = values.pop("skus", None) or []
+    # Certificado novo já com SKU tira produtos de outro (ou do gravado na
+    # linha): o retrato de antes diz quem trocou.
+    antes = await certificado_de_cada_produto(session) if skus else None
     row = FinanceiroSuprimentos(**values, campos_manuais=sorted(values) or None)
     session.add(row)
+    await session.flush()
+    avisos: list[str] = []
+    if skus:
+        _, avisos = await _gravar_coluna_sku(session, row, skus)
     await _garantia_aos_produtos(
         session, row, user, passar=row.garantia_meses is not None, antes=antes
     )
     await session.commit()
     await session.refresh(row)
-    return SuprimentosOut.model_validate(row, from_attributes=True)
+    return _suprimento_out(row, skus, avisos)
 
 
 @router.patch("/suprimentos/{row_id}", response_model=SuprimentosOut)
@@ -437,14 +494,25 @@ async def patch_suprimentos(
     if row is None:
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
     values = body.model_dump(exclude_unset=True)
+    pediu_skus = "skus" in values
+    skus = values.pop("skus", None) or []
     changed = {key for key, value in values.items() if getattr(row, key) != value}
-    # Fim, Modelo ou Nº mudando: quem acha o certificado pelo nome pode trocar
-    # de certificado — o retrato de antes diz quem trocou.
-    antes = await certificado_de_cada_produto(session) if changed & CAMPOS_DO_CASAMENTO else None
+    # Coluna SKU (M-69): é ela que liga o certificado aos produtos. Mudou →
+    # produtos podem trocar de certificado; o retrato de antes diz quem.
+    # (Desde a M-69 a Validade, o Modelo e o Nº não mudam mais o dono de
+    # ninguém: a ligação pelo nome saiu.)
+    antes: Retrato | None = None
+    if pediu_skus:
+        atuais = (await skus_por_certificado(session, [row.id])).get(row.id, [])
+        if set(atuais) != set(skus):
+            antes = await certificado_de_cada_produto(session)
     if changed:
         row.campos_manuais = sorted(set(row.campos_manuais or []) | changed)
     for k, v in values.items():
         setattr(row, k, v)
+    avisos: list[str] = []
+    if pediu_skus:
+        _, avisos = await _gravar_coluna_sku(session, row, skus)
     # Garantia enviada (mesmo igual à de antes: refaz o acerto de quem tinha
     # ficado diferente) → vale para todos os produtos do certificado.
     passar = values.get("garantia_meses") is not None
@@ -452,7 +520,8 @@ async def patch_suprimentos(
         await _garantia_aos_produtos(session, row, user, passar=passar, antes=antes)
     await session.commit()
     await session.refresh(row)
-    return SuprimentosOut.model_validate(row, from_attributes=True)
+    atuais = (await skus_por_certificado(session, [row.id])).get(row.id, [])
+    return _suprimento_out(row, atuais, avisos)
 
 
 @router.delete("/suprimentos/{row_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -471,8 +540,10 @@ async def delete_suprimentos(
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
     if row.anatel_numero or row.inmetro_chave:
         raise HTTPException(409, detail={"code": "certificacao_automatica"})
-    # Os produtos deste certificado voltam a ser achados pelo nome e podem
-    # cair noutro certificado, com garantia (o retrato de antes diz quem).
+    # A coluna SKU dele sai junto (ON DELETE CASCADE) e o gravado nos
+    # produtos vira NULL: um produto pode cair noutro certificado (o gravado
+    # na linha, num conflito de SKU), com garantia — o retrato de antes diz
+    # quem.
     antes = await certificado_de_cada_produto(session)
     await session.delete(row)
     await _garantia_aos_produtos(session, row, user, passar=False, antes=antes)

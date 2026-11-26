@@ -89,6 +89,8 @@ FIELDS = {
     # Tabela de Preços → Prioridade: the stock lot DaVinci's robot moves each product to.
     "priorities": {"id", "sku", "priority"},
     # Tabela de Preços, per product line: department, certificate, warranty, EAN, photos.
+    # certificate_valid_until (M-71, 26/11/2026): the certificate's end date (ISO), of the
+    # certificate stored on the line.
     "pricing": {
         "id",
         "sku",
@@ -103,7 +105,19 @@ FIELDS = {
         "certificate",
         "certificate_number",
         "certificate_model",
+        "certificate_valid_until",
         "updated_at",
+    },
+    # Importação › Certificações, column SKU (M-69/M-71, 26/11/2026): one row per SKU without
+    # the tag ("dg019"), with its certificate. It is how DaVinci links a certificate to a
+    # product; price_table.for_sku looks here first. id = the SKU itself (unique).
+    "certificate_skus": {
+        "id",
+        "sku",
+        "certificate",
+        "certificate_number",
+        "certificate_model",
+        "certificate_valid_until",
     },
     # Bling's order situations as DaVinci keeps them, with which ones are active.
     "situations": {"id", "name", "active"},
