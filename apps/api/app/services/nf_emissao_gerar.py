@@ -32,6 +32,7 @@ from app.services import (
 from app.services.marketplaces.bling import BlingClient
 from app.services.nf_emissao import ItemPedido
 from app.services.nf_relatorio import PedidoInfo
+from app.services.produto_regras import duimp_padrao_dos_produtos
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -299,10 +300,12 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     """Mapa SKU (minúsculo) → texto da DUIMP (ou a mensagem do segmento). SKU
     sem nada fica de fora.
 
-    SKU simples: Importação (SKU exato, código-base) e, sem ela, o texto do
-    segmento (0488). Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
+    SKU simples: Importação (SKU exato, código-base), depois a DUIMP padrão do
+    próprio produto (M-74, Produtos 2) e, sem ela, o texto do segmento (0488).
+    Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
     pela mesma ordem — a peça importada leva a DUIMP dela e só a peça sem DUIMP
-    leva o texto do segmento; as partes juntam na ordem das peças (revisão de
+    leva a DUIMP padrão do kit (M-74; sem ela, a da peça) ou o texto do
+    segmento; as partes juntam na ordem das peças (revisão de
     16/11: antes o kit olhava só o código-base da 1ª peça e o resultado mudava
     com a ordem das peças)."""
     skus = {s for s in skus if s}
@@ -320,19 +323,27 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     pecas_de = {k: _pecas_do_sku(k) for k in kits}
     simples = (skus - set(mapa) - kits) | {p for ps in pecas_de.values() for p in ps}
     importacao = await _duimp_da_importacao(session, simples)
-    # 3º passo (16/11/2026): quem continua sem DUIMP leva o texto do segmento.
-    segmento = await _texto_segmento_por_sku(
-        session, {s for s in simples if s not in importacao}
-    )
+    sem_importacao = {s for s in simples if s not in importacao}
+    # 3º passo (M-74, 26/11/2026): a DUIMP padrão do PRÓPRIO produto (Produtos 2, pela numeração
+    # sem a tag). No kit, a do kit vale para as peças sem DUIMP na Importação; sem a do kit, a da
+    # peça. Ninguém preencheu (o dia em que foi ao ar) → {} e nada muda.
+    produto = await duimp_padrao_dos_produtos(session, sem_importacao | set(pecas_de))
+    # 4º passo (16/11/2026): quem continua sem DUIMP leva o texto do segmento.
+    segmento = await _texto_segmento_por_sku(session, sem_importacao)
 
-    def _de(s: str) -> str | None:
-        return importacao.get(s) or segmento.get(s)
+    def _de(s: str, kit: str | None = None) -> str | None:
+        return (
+            importacao.get(s)
+            or (produto.get(kit) if kit else None)
+            or produto.get(s)
+            or segmento.get(s)
+        )
 
     for s in skus - set(mapa) - kits:
         if t := _de(s):
             mapa[s] = t
     for k, pecas in pecas_de.items():
-        if t := _juntar_duimps(_de(p) for p in pecas):
+        if t := _juntar_duimps(_de(p, k) for p in pecas):
             mapa[k] = t
     return mapa
 

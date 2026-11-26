@@ -574,6 +574,9 @@ _CLEANUP_TABLES = (
     # 0503 (M-12): o Ads da conta e do produto (CASCADE na conta e no produto).
     "pricing_ads_produto",
     "pricing_ads_conta",
+    # 0513 (M-74): Margem mín, DUIMP padrão e Condição especial por produto (FK SET NULL → users).
+    "produto_condicoes_especiais",
+    "produto_regras",
     "verificar_margem",
     "valuation",
     "valuation_estoque_bling_diario",

@@ -121,6 +121,8 @@ const MAX_CHIPS = 2
 
 // DUIMP padrão (0488, Eduardo 16/11/2026): vai na nota/etiqueta do produto que
 // não tem DUIMP na Importação. Vazio → herda do pai (mostrado em cinza).
+// M-74 (26/11/2026): o produto pode ter a DUIMP padrão dele (Produtos 2), que vem
+// antes da do segmento.
 const duimpValendo = computed(() => props.node.duimp_padrao || props.duimpHerdada || null)
 </script>
 
@@ -266,7 +268,7 @@ const duimpValendo = computed(() => props.node.duimp_padrao || props.duimpHerdad
         'ring-2 ring-blue-500 ring-inset bg-background': isEditing(node.id, 'duimp_padrao'),
         'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(node.id, 'duimp_padrao'),
       }"
-      :title="duimpValendo ? `Vai na nota quando o produto não tem DUIMP na Importação:\n${duimpValendo}` : (canEdit ? 'Clique para escrever a DUIMP/mensagem do segmento' : undefined)"
+      :title="duimpValendo ? `Vai na nota quando o produto não tem DUIMP na Importação nem DUIMP padrão própria (cadastro do produto no Produtos 2):\n${duimpValendo}` : (canEdit ? 'Clique para escrever a DUIMP/mensagem do segmento' : undefined)"
       @click="!isEditing(node.id, 'duimp_padrao') && emit('start-edit', node, 'duimp_padrao')"
     >
       <input

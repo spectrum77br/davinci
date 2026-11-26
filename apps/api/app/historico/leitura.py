@@ -51,7 +51,11 @@ ITEM_FKS: dict[str, tuple[str, ...]] = {
 }
 
 # Guardados como fração (0,125) e digitados como porcentagem (12,5%).
-PERCENTUAIS = {"commission", "min_margin", *(f"margin{i}" for i in range(1, 6))}
+PERCENTUAIS = {
+    "commission", "min_margin", *(f"margin{i}" for i in range(1, 6)),
+    # M-74: Margem mín e piso da Condição especial do produto (Produtos 2), em fração.
+    "margem_min", "piso",
+}
 DINHEIRO = {
     "price_override", "bling_cost_price", "valorbase", "taxacomissao", "custofrete",
     "reembolso", "prejuizo", "preco_catalogo", "custo_bling", "gasto_dia",

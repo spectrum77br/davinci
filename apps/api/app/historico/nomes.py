@@ -118,6 +118,9 @@ API: dict[str, str] = {
     "/api/stores": "Cadastros › Empresas",
     "/api/segments": "Cadastros › Segmentos",
     "/api/marcas": "Cadastros › Marcas",
+    # M-74 (26/11/2026): chamadas do cadastro do produto do Produtos 2 (a página do ERP, /erp, é
+    # a mesma do Pedidos 2, então o nome vem do endereço da API).
+    "/api/produto-regras": "Produtos 2 › Cadastro do produto",
     "/api/nfse/compras": "Cadastros › Contabilidade › Compra",
     "/api/nfse": "Cadastros › Contabilidade",
     "/api/redes-sociais": "Cadastros › Redes Sociais",
@@ -455,6 +458,10 @@ TABELAS: dict[str, str] = {
     # M-29 (24/11/2026, migration 0508): Cadastros › Produtos.
     "produto_cadastro_tipos": "Tipo (Cadastros › Produtos)",
     "produto_cadastros": "Categoria ou tag (Cadastros › Produtos)",
+    # M-74 (26/11/2026, migration 0513): Margem mín, DUIMP padrão e Condição especial por
+    # produto, no cadastro do Produtos 2. O nome do produto vem da coluna `sku` (= sku_base).
+    "produto_regras": "Regras do produto (Produtos 2)",
+    "produto_condicoes_especiais": "Condição especial (Produtos 2)",
     "garantias": "Garantia",
     "garantia_atendimentos": "Atendimento da garantia",
     "garantia_atendimento_anexos": "Anexo do atendimento da garantia",
@@ -539,6 +546,11 @@ CAMPOS: dict[str, str] = {
     "desconto_pct": "Desconto (%)",
     "custo_total_pct": "Custo total (%)",
     "par_id": "Par Clássico + Premium (ML)",
+    # M-74 (26/11/2026, migration 0513): regras do produto no Produtos 2.
+    "margem_min": "Margem mín (%)",
+    "pedido_de": "Condição especial: de (data do pedido)",
+    "pedido_ate": "Condição especial: até (data do pedido)",
+    "piso": "Condição especial: margem mínima (%)",
     # Ads da aba Contas (M-12, 18/11/2026, migration 0503).
     "ads_geral_ligada": "Ads geral ligado",
     "ads_por_produto_ligada": "Ads por produto ligado",
