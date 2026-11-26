@@ -729,7 +729,18 @@ const kitUranyx=(extra={})=>fullProduct({sku:'dg019.ra+a020.ra',name:'Uranyx F10
 const regrasUranyx=(extra={})=>({...regrasVazias,sku:'dg019.ra+a020.ra',sku_base:'dg019+a020',centro_custo_id:null,centro_custo:null,centro_custo_herdado:{id:'CEL',nome:'Celular'},centro_custo_origem:'do departamento da linha da Tabela de Preços',linha:JSON.parse(JSON.stringify(linhaUranyx)),...extra});
 const categoriasM73=[{id:'c1',name:'Malas',path:'Malas',status:'active'},{id:'c2',name:'Celular Kit',path:'Celular Kit',status:'active'},{id:'c3',name:'Celular',path:'Celular',status:'active'}];
 const m73Paths=['/api/produto-regras/','/api/centros-custo','/api/produto-cadastros/listas','/api/pricing/products/','/api/produtos/trocar-tag','/api/erp-local/catalog/bulk-category'];
-async function menusEditor(product,{rules=regrasUranyx(),status=200,consulta,centros=centrosM73,listas=listasM73,previa,troca,patch,bulk,renomeia=true}={}){
+// O produto como o /api/erp-local/state do servidor manda (api.py, light_product): sem a linha da
+// Tabela de Preços (pricing_id), só o departamento; a categoria só com o id.
+const produtoLeve=p=>{
+  const {details={},tax,structure,price_table,origin,images,category,...rest}=p;
+  const out={...rest,details:Object.fromEntries(['version','status','gtin','tags','brand','stock_min','unit'].filter(k=>![undefined,null,''].includes(details[k])&&!(Array.isArray(details[k])&&!details[k].length)).map(k=>[k,details[k]])),light:true};
+  if(price_table?.department)out.price_table={department:price_table.department};
+  if(category?.id)out.category={id:category.id,version:category.version??0};
+  return out;
+};
+// `leve`: como o servidor de verdade, o /state relido traz o produto leve e o /full, o inteiro; e o
+// DaVinci só acha a linha quando o endereço a leva.
+async function menusEditor(product,{rules=regrasUranyx(),status=200,consulta,centros=centrosM73,listas=listasM73,previa,troca,patch,bulk,renomeia=true,leve=false}={}){
   const products=[product];
   const ctx=await setup({products,categories:categoriasM73,...(consulta?{consulta}:{})});
   const w=ctx.dom.window,calls=[];w.HTMLElement.prototype.scrollIntoView=()=>{};
@@ -738,11 +749,14 @@ async function menusEditor(product,{rules=regrasUranyx(),status=200,consulta,cen
   const box={centros,listas};
   w.fetch=async(url,options={})=>{
     url=String(url);const path=url.split('?')[0],method=options.method||'GET',body=options.body?JSON.parse(options.body):undefined;
+    if(leve&&path==='/api/erp-local/state'){const snap=await (await plain(url,options)).json();return reply(200,{...snap,products:snap.products.map(produtoLeve)});}
+    if(leve&&path==='/api/erp-local/products/'+encodeURIComponent(products[0].sku)+'/full')return reply(200,products[0]);
     if(!m73Paths.some(p=>path.startsWith(p)))return plain(url,options);
     calls.push({url,path,method,body,credentials:options.credentials,headers:options.headers||{}});
     if(path.startsWith('/api/produto-regras/')){
       if(status>=400)return reply(status,{});
       if(method==='PUT'&&'centro_custo_id' in body){const c=box.centros.find(c=>c.id===body.centro_custo_id);data.centro_custo_id=c?c.id:null;data.centro_custo=c?c.nome:null;}
+      if(leve&&!new URLSearchParams(url.split('?')[1]||'').get('linha'))return reply(200,{...data,linha:null,centro_custo_herdado:null,centro_custo_origem:null});
       return reply(200,data);
     }
     if(path==='/api/centros-custo')return reply(200,box.centros);
@@ -857,6 +871,29 @@ test('M-73: Categoria uses the "Alterar categoria" route for this one SKU, also 
   const notes=f.document.querySelector('[name=notes]');notes.value='mexi';notes.dispatchEvent(new f.w.Event('input',{bubbles:true}));
   await f.abrir('categoria');await f.marcar('categoria','Celular');
   assert.equal(f.mine('/api/erp-local/catalog/bulk-category').length,0);assert.equal(f.notice(),'Salve ou cancele o produto antes de trocar a categoria.');
+});
+
+test('M-73: after the Categoria changes, the rules are read again with the whole product (the light screen state has no line), so Categoria de venda and Centro de custo stay right',async()=>{
+  let pula=null;
+  const e=await menusEditor(kitUranyx(),{leve:true,bulk:()=>pula});
+  const regras=()=>e.mine('/api/produto-regras/').map(c=>c.url);
+  assert.equal(e.caixa('categoria_venda').textContent,'Regular');
+  await e.abrir('categoria');await e.marcar('categoria','Celular');await ticks(20);
+  assert.equal(e.mine('/api/erp-local/catalog/bulk-category').length,1);
+  assert.match(e.notice(),/trocada para Celular/);
+  // Nenhuma leitura sem a linha: a de depois da troca já leva a linha e a categoria nova.
+  assert.deepEqual(regras(),['/api/produto-regras/dg019.ra%2Ba020.ra?linha=L19&categoria=Celular+Kit','/api/produto-regras/dg019.ra%2Ba020.ra?linha=L19&categoria=Celular']);
+  assert.equal(e.caixa('categoria').textContent,'Celular');
+  assert.equal(e.caixa('categoria_venda').textContent,'Regular');assert.equal(e.caixa('categoria_venda').disabled,false);
+  assert.doesNotMatch(e.caixa('categoria_venda').title,/Produto sem linha/);
+  assert.equal(e.caixa('centro_custo').textContent,'Celular');assert.match(e.caixa('centro_custo').title,/da linha da Tabela de Preços/);
+  // O ERP pula ("Já está nesta categoria"): o mesmo caminho, a linha continua.
+  pula={status:200,body:{changed:0,skipped:[{sku:'dg019.ra+a020.ra',reason:'Já está nesta categoria'}],message:'Nada alterado'}};
+  await e.abrir('categoria');await e.marcar('categoria','Celular Kit');await ticks(20);
+  assert.match(e.notice(),/Já está nesta categoria/);
+  assert.ok(regras().length>=3);
+  for(const u of regras())assert.match(u,/\?linha=L19&/,u);
+  assert.equal(e.caixa('categoria_venda').textContent,'Regular');assert.equal(e.caixa('categoria_venda').disabled,false);
 });
 
 test('M-73: Categoria de venda lists the active ones of the line department, asks before changing the line price and uses the Tabela column route',async()=>{

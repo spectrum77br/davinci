@@ -440,9 +440,12 @@ async function p2ChooseCategoria(sku,value){
  try{
   const r=await erpPost('/api/erp-local/catalog/bulk-category',{skus:[sku],category:value});
   const pulou=(r.skipped||[])[0];p2Close(false);
-  delete fullProducts[sku];await refresh().catch(()=>{});
+  // As regras são relidas com o produto INTEIRO (a linha da Tabela de Preços e a categoria nova):
+  // o /state traz o produto leve, sem a linha, e reler com ele mostraria "Produto sem linha" e o
+  // centro herdado errado. Quem relê é o render de quando o produto inteiro chegar.
+  delete fullProducts[sku];delete productRulesData[sku];await refresh().catch(()=>{});
   message(pulou?`Categoria de ${sku}: ${pulou.reason}`:`Categoria de ${sku} trocada para ${value}.`);
-  if(editingProduct===sku)loadProductRules(sku,true);
+  if(editingProduct===sku&&!state.products.find(p=>p.sku===sku)?.light)loadProductRules(sku);
  }catch(e){p2Menu.busy=false;refreshProductMenuCells();message(e.message,true);}
 }
 async function p2ChooseVenda(sku,d,value){
