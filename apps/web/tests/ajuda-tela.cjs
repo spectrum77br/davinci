@@ -309,7 +309,7 @@ async function principal() {
       // M-85/M-86 (26/11/2026): a Margem mínima da conta e o Custo total calculado por ela.
       'só o administrador vê e muda', 'diferente da \\"Margem Mín\\" da categoria de venda e da do produto',
       'seguram o pedido na Margem', 'esta define o Custo total', 'arredondado para baixo', 'Frete não entra',
-      'Shopee aguiar', 'Custo total 6%', 'é calculado e não se digita', 'borda vermelha até alguém corrigir',
+      'números de exemplo', 'Custo total 9%', 'é calculado e não se digita', 'borda vermelha até alguém corrigir',
       'baixar Afiliado, Desconto ou Ads um de cada vez', 'o que aumenta a soma continua recusado']) {
       assert.ok(tudoC.includes(trecho), `o texto da aba Contas fala de: ${trecho}`)
     }
