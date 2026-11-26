@@ -6456,7 +6456,7 @@ watch(department, async () => {
                             </div>
                           </div>
                           <div
-                            class="max-h-64 overflow-y-auto px-1 [scrollbar-gutter:stable]"
+                            class="max-h-64 overflow-y-auto px-1 pb-1 [scrollbar-gutter:stable]"
                             :class="{ 'opacity-60': !c.ads_por_produto_ligada }"
                             data-lista-ads-produto
                           >
@@ -6509,11 +6509,7 @@ watch(department, async () => {
                               {{ buscaAdsProduto.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.' }}
                             </p>
                           </div>
-                          <div class="mt-1 border-t px-1 pt-1 text-muted-foreground">
-                            {{ podeEditarAds
-                              ? 'Grava ao sair do campo, com Enter ou ao fechar. Fora do cálculo de preço.'
-                              : 'Só quem edita Contas altera o Ads.' }}
-                          </div>
+                          <!-- M-62: sem a frase do rodapé (nem a linha dela); a lista vai até o fim. -->
                         </template>
                       </PopoverContent>
                     </PopoverPortal>

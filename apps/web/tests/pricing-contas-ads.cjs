@@ -243,7 +243,8 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     ':data-ads-produto="p.id"',
     ':disabled="!podeEditarAds"',
     '@change="gravarCampoAds"',
-    'Grava ao sair do campo, com Enter ou ao fechar. Fora do cálculo de preço.',
+    // M-62: a lista vai até o fim da janela, com respiro embaixo igual ao das laterais.
+    'class="max-h-64 overflow-y-auto px-1 pb-1 [scrollbar-gutter:stable]"',
     // M-56: aviso junto do campo.
     '{{ erroAdsDaLinhaGeral(acc.id) }}',
     "erroAdsEm(acc.id, 'geral:ads_por_produto_ligada')",
@@ -256,6 +257,8 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   for (const fora of [
     'ROAS {{', '<ChevronDown', 'Ads — ', '% gasto real', 'ROAS real', 'c.real.', 'Vale para todos os produtos sem % próprio',
     'Últimos 7 dias', 'O produto com % próprio usa o dele', 'Gasto por dia R$', 'text-sm',
+    // M-62: a frase do rodapé e a linha dela.
+    'Grava ao sair do campo', 'Fora do cálculo de preço', 'Só quem edita Contas altera o Ads', 'mt-1 border-t px-1 pt-1',
   ]) assert.ok(!celula.includes(fora), `célula Ads sem ${fora}`)
   // M-57: de cima para baixo — título, cabeçalho, Geral (mesma grade), Por
   // produto, busca e lista; todos na mesma grade e com a mesma faixa da barra
