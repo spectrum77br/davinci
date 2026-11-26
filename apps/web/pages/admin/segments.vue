@@ -455,7 +455,7 @@ async function removeSpecial(sd: SpecialDate) {
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Peso <span class="text-muted-foreground font-normal">(kg)</span></th>
             <th
               class="text-left px-3 py-2 font-medium border-b border-border w-64"
-              title="Vai na nota e na etiqueta (nota cheia) quando o produto não tem DUIMP na Importação. Subsegmento vazio usa o do segmento de cima. Até 75 letras (o que cabe na linha da etiqueta)."
+              title="Vai na nota e na etiqueta (nota cheia) quando o produto não tem DUIMP na Importação nem DUIMP padrão própria (cadastro do produto no Produtos 2). Subsegmento vazio usa o do segmento de cima. Até 75 letras (o que cabe na linha da etiqueta)."
             >DUIMP / mensagem <span class="text-muted-foreground font-normal">(sem DUIMP)</span></th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-20">Ativo</th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-32">Ações</th>

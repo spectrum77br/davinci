@@ -42,6 +42,11 @@ const pagina = sfc('pages/admin/segments.vue')
     tpl.replace(/\s+/g, ' ').includes('Se o produto tiver Condição especial própria (Produtos 2) no dia do pedido, vale só a dele.'),
     'ajuda da Condição Especial cita a do produto',
   )
+  // M-74: a dica do cabeçalho "DUIMP / mensagem" diz que a DUIMP padrão do produto vem antes.
+  {
+    const th = tpl.slice(tpl.lastIndexOf('<th', tpl.indexOf('DUIMP / mensagem')), tpl.indexOf('DUIMP / mensagem'))
+    assert.match(th, /title="Vai na nota e na etiqueta \(nota cheia\) quando o produto não tem DUIMP na Importação nem DUIMP padrão própria \(cadastro do produto no Produtos 2\)\./, 'dica do cabeçalho com a ordem nova')
+  }
   for (const m of tpl.matchAll(/colspan="(\d+)"/g)) assert.equal(m[1], String(ths), 'colspan acompanha o cabeçalho')
   // linha "adicionar raiz": uma <td> por coluna
   const addRaiz = tpl.slice(tpl.indexOf('<!-- add new root -->'))
