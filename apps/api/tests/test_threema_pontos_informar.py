@@ -392,7 +392,7 @@ async def test_botao_ninguem_valido_registra_acende_o_sino_e_recusa(
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "sem_destinatarios"
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,
@@ -412,7 +412,7 @@ async def test_amazon_prazos_ninguem_valido_registra_acende_o_sino_e_nao_carimba
     assert _Fake.envios == []
     await db.refresh(row)
     assert row.aviso_previsao_correios_at is None and row.aviso_prazo_amazon_3d_at is None
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.contexto) == (False, "sem_destinatario_valido", "logistica")
     # a rodada da tarde registra de novo (1 por rodada), mas o sino do dia é um só
@@ -438,7 +438,7 @@ async def test_prazo_resposta_ninguem_valido_registra_acende_o_sino_e_nao_carimb
     assert (resumo["sem_destinatarios"], resumo["enviados"]) == (1, 0)
     assert _Fake.envios == []
     assert await _carimbo(db, caso) is None
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.via, linha.contexto) == (
         False,

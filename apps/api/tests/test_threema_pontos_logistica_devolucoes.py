@@ -403,7 +403,7 @@ async def test_ninguem_valido_nao_manda_acende_o_sino_e_registra(db, monkeypatch
     await semeado(db, chave, sumido)
     await PONTOS[chave](db, monkeypatch)
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,
@@ -447,9 +447,11 @@ async def test_vigia_automacao_desligado_descarta_e_o_sino_da_automacao_sai(db, 
     assert _Fake.envios == []
     await db.commit()
     alertas = (await db.execute(select(Alert))).scalars().all()
-    assert [a.user_id for a in alertas if (a.dedupe_key or "").startswith("logistica_vigia:")] == [
-        admin.id
-    ], "o sino da automação parada não depende do Threema"
+    assert [
+        (a.user_id, a.escopo)
+        for a in alertas
+        if (a.dedupe_key or "").startswith("logistica_vigia:")
+    ] == [(None, "adm")], "o sino da automação parada não depende do Threema"
     assert await _registro(db, chave) == []
     await _ligar(db, chave, None)
     await _vigia_automacao(db, monkeypatch)

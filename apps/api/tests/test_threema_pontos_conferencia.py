@@ -275,7 +275,7 @@ async def test_ninguem_valido_registra_sino_e_nao_carimba(db):
     assert r == {"enviado": False, "motivo": "ninguém válido para receber"}
     assert _Fake.envios == []
     assert await _carimbo(db, ex) is None
-    assert [a.user_id for a in await _sinos(db, SHOPEE)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, SHOPEE)] == [(None, "adm")]
     (linha,) = await _registro(db, SHOPEE)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,
@@ -515,7 +515,7 @@ async def test_ligada_com_a_lista_vazia_acende_o_sino_em_vez_de_calar(db, monkey
     log. Depois da semente (o mesmo "ninguém"), o aviso que não está saindo
     aparece: registro `ok=false` e sino — a rodada fica sem carimbo para sair
     assim que alguém for posto no grupo."""
-    c = await montar(db, monkeypatch, variante="vazias")
+    await montar(db, monkeypatch, variante="vazias")
     monkeypatch.setattr(get_settings(), "conferencia_shopee_threema", True)
     await threema_envios.semear(db, fatia="F2", chaves=MINHAS, aplicar=True)
     await db.commit()
@@ -525,7 +525,7 @@ async def test_ligada_com_a_lista_vazia_acende_o_sino_em_vez_de_calar(db, monkey
     r = await ta.enviar_pendente(db, ex, AGORA)
     assert r == {"enviado": False, "motivo": "ninguém válido para receber"}
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, SHOPEE)] == [c.usuarios["londres"].id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, SHOPEE)] == [(None, "adm")]
     assert await _carimbo(db, ex) is None
 
 
@@ -545,4 +545,4 @@ async def test_quem_foi_suspenso_depois_da_semente_para_de_receber(db, monkeypat
     assert r == {"enviado": False, "motivo": "ninguém válido para receber"}
     assert _Fake.envios == []
     assert ID["harry"] in (await threema_envios.legado(SHOPEE, session=db)).ids
-    assert [a.user_id for a in await _sinos(db, SHOPEE)] == [c.usuarios["londres"].id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, SHOPEE)] == [(None, "adm")]

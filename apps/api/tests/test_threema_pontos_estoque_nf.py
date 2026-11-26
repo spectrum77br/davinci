@@ -287,7 +287,7 @@ async def test_ninguem_valido_nao_manda_acende_o_sino_e_registra(db, monkeypatch
     await semeado(db, chave, sumido)
     await PONTOS[chave](db, monkeypatch)
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,

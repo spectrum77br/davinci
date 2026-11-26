@@ -272,7 +272,7 @@ async def test_ia_parada_ninguem_valido_registra_e_acende_o_sino(db, client, cid
     aviso = await _analise(client, cid, "login")
     assert aviso.startswith("aviso não saiu: ninguém válido recebe este aviso")
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, IA_PARADA)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, IA_PARADA)] == [(None, "adm")]
     (linha,) = await _registro(db, IA_PARADA)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,
@@ -333,7 +333,7 @@ async def test_juridico_ninguem_valido_registra_acende_o_sino_e_recusa(
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "sem_destinatarios"
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, JURIDICO)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, JURIDICO)] == [(None, "adm")]
     (linha,) = await _registro(db, JURIDICO)
     assert (linha.ok, linha.erro, linha.via, linha.contexto) == (
         False,
@@ -393,8 +393,7 @@ async def test_relatorio_desligado_nao_carimba_e_o_dia_se_perde(db):
 
 @pytest.mark.usefixtures("limpar_ouvidoria")
 async def test_relatorio_ninguem_valido_registra_sino_e_rodada_com_falha(db):
-    admin, joana, sumido = await _pessoas(db)
-    admin_id = admin.id  # a rodada com falha faz rollback (expira os objetos)
+    _admin, joana, sumido = await _pessoas(db)
     await _modo_relatorio(db, "ligado")
     await _linha_informar(db, "denuncia_relatorio", "TSTZ0009")
     await semeado(db, RELATORIO, sumido)
@@ -403,7 +402,7 @@ async def test_relatorio_ninguem_valido_registra_sino_e_rodada_com_falha(db):
     assert r == {"enviado": False, "motivo": "ninguém válido para receber"}
     assert _Fake.envios == []
     assert (await db.get(DenunciaRelatorio, ONTEM)).threema_enviado_em is None
-    assert [a.user_id for a in await _sinos(db, RELATORIO)] == [admin_id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, RELATORIO)] == [(None, "adm")]
     (linha,) = await _registro(db, RELATORIO)
     assert (linha.ok, linha.erro, linha.via, linha.contexto) == (
         False,
@@ -492,7 +491,7 @@ async def test_robo_ninguem_valido_nao_gasta_as_marcas(db, redis_fake):
     r = await denuncia_robo_aviso.rodar(db, AGORA)
     assert r == {"avisadas": 0, "erro": "ninguém válido para receber"}
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, ROBO)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, ROBO)] == [(None, "adm")]
     (linha,) = await _registro(db, ROBO)
     assert (linha.ok, linha.erro, linha.via, linha.contexto) == (
         False,
@@ -786,4 +785,4 @@ async def test_quem_foi_suspenso_depois_da_semente_para_de_receber(
     assert r == {"avisadas": 0, "erro": "ninguém válido para receber"}
     assert _Fake.envios == []
     assert ID["cairo_sa"] in (await threema_envios.legado(ROBO, session=db)).ids
-    assert [a.user_id for a in await _sinos(db, ROBO)] == [c.usuarios["londres"].id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, ROBO)] == [(None, "adm")]

@@ -448,7 +448,7 @@ async def test_ninguem_valido_no_hold_e_na_reavaliacao_registra_e_acende_o_sino(
         assert [(x.ok, x.erro, x.via, x.contexto) for x in linhas] == [
             (False, "sem_destinatario_valido", "cadastro", "margem")
         ] * avisos, chave
-        assert [a.user_id for a in await _sinos(db, chave)] == [admin.id], chave
+        assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")], chave
     # o hold segue: o pedido foi reprovado no Bling
     assert (await _snapshot(db, "291670"))["situacao"] == "83955"
     # acertada a lista, o aviso do pedido seguinte sai
@@ -470,7 +470,9 @@ async def test_margem_alta_sem_ninguem_valido_nao_grava_a_auditoria(db):
     assert await _audits(db, "501") == [] and await _audits(db, "502") == []
     (linha,) = await _registro(db, K.MARGEM_MARGEM_ALTA)
     assert (linha.ok, linha.erro, linha.via) == (False, "sem_destinatario_valido", "cadastro")
-    assert [a.user_id for a in await _sinos(db, K.MARGEM_MARGEM_ALTA)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, K.MARGEM_MARGEM_ALTA)] == [
+        (None, "adm")
+    ]
     await semeado(db, K.MARGEM_MARGEM_ALTA, joana)
     threema_envios.limpar_cache()
     res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
@@ -486,7 +488,9 @@ async def test_resumo_sem_ninguem_valido_registra_e_nao_carimba(db):
     assert _Fake.envios == []
     (linha,) = await _registro(db, K.OUVIDORIA_VIGIA_MARGEM)
     assert (linha.ok, linha.erro, linha.contexto) == (False, "sem_destinatario_valido", "margem")
-    assert [a.user_id for a in await _sinos(db, K.OUVIDORIA_VIGIA_MARGEM)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, K.OUVIDORIA_VIGIA_MARGEM)] == [
+        (None, "adm")
+    ]
     (o,) = await _ocorrencias(db)
     assert o.avisada_em is None
 
@@ -501,7 +505,7 @@ async def test_botao_sem_ninguem_valido_registra_e_responde_422(db, client, auth
     assert _Fake.envios == []
     (linha,) = await _registro(db, K.MARGEM_INFORMAR)
     assert (linha.ok, linha.erro) == (False, "sem_destinatario_valido")
-    assert [a.user_id for a in await _sinos(db, K.MARGEM_INFORMAR)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, K.MARGEM_INFORMAR)] == [(None, "adm")]
 
 
 # ─────────────────────────────────── depende de: o modo do robô

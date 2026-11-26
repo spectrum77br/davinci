@@ -255,7 +255,7 @@ async def test_ninguem_valido_nao_manda_acende_o_sino_e_registra(db, monkeypatch
     await semeado(db, chave, sumido)
     await PONTOS[chave](db, monkeypatch, make_user)
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,
@@ -277,7 +277,9 @@ async def test_soma_familia_ninguem_valido_vira_recipients_vazio_no_resumo(
     assert resumo["atrasados"] == 1 and resumo["aviso"] == "recipients_vazio"
     assert "avisados" not in resumo
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)] == [
+        (None, "adm")
+    ]
     # a rodada das 16:20 registra de novo, mas o sino do dia é um só
     await _soma_familia(db, monkeypatch, make_user)
     assert len(await _registro(db, K.PRODUTOS_VIGIA_SOMA_FAMILIA)) == 2

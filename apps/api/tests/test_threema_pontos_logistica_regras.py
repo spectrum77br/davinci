@@ -373,7 +373,7 @@ async def test_motor_ninguem_valido_registra_uma_vez_por_hora_sem_carimbo(db, re
     (reg,) = await _registro(db, CHAVE)
     assert not reg.ok and reg.erro == "sem_destinatario_valido"
     assert reg.escopo == str(regra.id) and reg.contexto == "logistica"
-    assert [a.user_id for a in await _sinos(db, CHAVE)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, CHAVE)] == [(None, "adm")]
     assert not await _carimbo(db, linha)
     # vencida a marca da hora, a tentativa seguinte volta ao registro
     redis_fake.d.clear()
@@ -431,7 +431,7 @@ async def test_botoes_ninguem_valido_registram_acendem_o_sino_e_recusam(
     regs = await _registro(db, CHAVE)
     assert len(regs) == 2 and not any(x.ok for x in regs)
     assert {x.escopo for x in regs} == {str(regra.id)}
-    assert [a.user_id for a in await _sinos(db, CHAVE)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, CHAVE)] == [(None, "adm")]
     assert not await _carimbo(db, linha)
 
 

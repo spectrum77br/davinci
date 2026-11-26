@@ -284,7 +284,7 @@ async def test_ninguem_valido_registra_acende_o_sino_e_nao_carimba(db):
     r = await ouvidoria.avisar_pendentes(db, robo)
     assert r == {"avisadas": 0, "motivo": "ninguem_valido"}
     assert _Fake.envios == []
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     (linha,) = await _registro(db, chave)
     assert (linha.ok, linha.erro, linha.via, linha.destinatario_id, linha.contexto) == (
         False,
@@ -321,7 +321,7 @@ async def test_ninguem_valido_chega_ao_registro_uma_vez_por_hora(db, redis_fake)
         assert r == {"avisadas": 0, "motivo": "ninguem_valido"}
     assert _Fake.envios == []
     assert len(await _registro(db, chave)) == 1
-    assert [a.user_id for a in await _sinos(db, chave)] == [admin.id]
+    assert [(a.user_id, a.escopo) for a in await _sinos(db, chave)] == [(None, "adm")]
     assert set(redis_fake.d) == {f"{ouvidoria.AVISO_NINGUEM_PREFIXO}{chave}"}
     (o,) = await _ocorrencias(db, robo)
     assert o.avisada_em is None
@@ -771,4 +771,4 @@ async def test_quem_foi_suspenso_depois_da_semente_para_de_receber(db, monkeypat
     leg = await threema_envios.legado(K.OUVIDORIA_VIGIA_INGEST_BLING, session=db)
     assert ID["cairo_sa"] in leg.ids
     sinos = await _sinos(db, K.OUVIDORIA_VIGIA_INGEST_BLING)
-    assert [a.user_id for a in sinos] == [c.usuarios["londres"].id]
+    assert [(a.user_id, a.escopo) for a in sinos] == [(None, "adm")]
