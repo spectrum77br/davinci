@@ -37,7 +37,7 @@ const exportsForTest = `return {
   GARANTIA_MESES_MAX, lerGarantiaMeses, salvarGarantia,
   COLUNAS_LAYOUT, CHAVE_COLUNAS_OCULTAS, colunasOcultas, mostraColuna, alternarColuna, lerColunasOcultas,
   totalColunas, linhasExcel,
-  skusSalvando, avisoSkus, textoSkus, salvarSkus
+  skusSalvando, avisoSkus, textoSkus, salvarSkus, linhaOcupada, esperarSkus
 }`
 
 // `opcoes.localStorage`: o armazenamento falso do navegador (Layout, M-67).

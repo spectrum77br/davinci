@@ -8,7 +8,7 @@
 // Usa o page()/render() de certificacoes-anatel.cjs (o <script setup> de
 // verdade com api falsa).
 const assert = require('node:assert/strict')
-const { page, row, render, settle } = require('./certificacoes-anatel.cjs')
+const { page, row, status, render, settle } = require('./certificacoes-anatel.cjs')
 
 const semComentarios = (html) => html.replace(/<!--[\s\S]*?-->/g, '')
 const campo = (valor) => ({ value: valor })
@@ -145,6 +145,90 @@ async function run() {
     assert.deepEqual(current.skus, ['dg017'])
     const [celula] = celulasSku(semComentarios(await render(s)))
     assert.match(celula, /disabled/)
+  }
+
+  // ---------- digitou o SKU e clicou direto no Excel (revisão de 26/11): o
+  // botão não trava por causa do SKU, o clique espera ele gravar e baixa
+  {
+    const { state: s, calls, planilhas } = page()
+    const current = row({ skus: ['dg017'] })
+    s.rows.value = [current]
+    const salvando = s.salvarSkus(current, campo('dg017, dg018'))
+    await settle()
+    const botao = (html, acao) => html.match(new RegExp(`<button[^>]*data-acao="${acao}"[^>]*>`))[0]
+    const html = semComentarios(await render(s))
+    assert.doesNotMatch(botao(html, 'excel-certificacoes'), /disabled/, 'o clique no Excel chega')
+    assert.doesNotMatch(botao(html, 'atualizar'), /disabled/, 'o clique no Atualizar chega')
+    const baixando = s.exportTable()
+    await settle()
+    assert.equal(planilhas.length, 0, 'espera o SKU gravar')
+    assert.equal(calls.length, 1)
+    calls[0].resolve({ ...current, skus: ['dg017', 'dg018'], avisos: [] })
+    assert.equal(await salvando, true)
+    await baixando
+    assert.equal(planilhas.length, 1, 'o mesmo clique baixa')
+    assert.deepEqual(planilhas[0].linhas[1].slice(0, 2), ['Telefone', 'dg017, dg018'], 'com o SKU gravado')
+    assert.equal(s.errorText.value, null)
+    assert.equal(s.exporting.value, false)
+  }
+
+  // ---------- o SKU não gravou (409): o Excel não baixa e o aviso do SKU fica
+  {
+    const { state: s, calls, planilhas } = page()
+    const current = row({ id: 'usm002', skus: ['dg046'] })
+    s.rows.value = [current]
+    const salvando = s.salvarSkus(current, campo('dg046, dg019'))
+    await settle()
+    const baixando = s.exportTable()
+    await settle()
+    const erro = new Error('409')
+    erro.data = { detail: { code: 'sku_em_outro_certificado', message: 'dg019 já está na certificação USM001' } }
+    calls[0].reject(erro)
+    assert.equal(await salvando, false)
+    await baixando
+    assert.equal(planilhas.length, 0)
+    assert.equal(s.errorText.value, 'SKU: dg019 já está na certificação USM001. Nada foi gravado.')
+    assert.equal(s.exporting.value, false)
+  }
+
+  // ---------- digitou o SKU e clicou direto no Atualizar: consulta depois que gravou
+  {
+    const { state: s, calls } = page()
+    const current = row()
+    s.rows.value = [current]
+    s.abrirMenuAtualizar(true)
+    s.atualizarInmetro.value = false
+    const salvando = s.salvarSkus(current, campo('dg050'))
+    await settle()
+    const atualizando = s.executarAtualizar()
+    assert.equal(s.menuAtualizarAberto.value, false)
+    await settle()
+    assert.equal(calls.length, 1, 'nenhuma consulta antes de o SKU gravar')
+    calls[0].resolve({ ...current, skus: ['dg050'], avisos: [] })
+    await salvando
+    await settle()
+    assert.equal(calls[1].url, '/api/financeiro/suprimentos/anatel/sincronizar')
+    calls[1].resolve({ status: 'ok', criados: 0, atualizados: 0, nao_localizados: 0, conflitos: 0 })
+    await settle()
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([row({ skus: ['dg050'] })])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await atualizando
+    assert.deepEqual(s.rows.value[0].skus, ['dg050'])
+    assert.match(s.syncMessage.value, /Consulta concluída/)
+    // O SKU não gravou: não consulta nem relê, e o aviso do SKU fica.
+    const outra = page()
+    const r2 = row()
+    outra.state.rows.value = [r2]
+    outra.state.abrirMenuAtualizar(true)
+    const salvando2 = outra.state.salvarSkus(r2, campo('dg051'))
+    await settle()
+    const atualizando2 = outra.state.executarAtualizar()
+    outra.calls[0].reject(new Error('rede'))
+    await salvando2
+    await atualizando2
+    assert.equal(outra.calls.length, 1, 'nada de consulta')
+    assert.equal(outra.state.errorText.value, 'SKU: não foi possível salvar. Tente novamente.')
   }
 
   // ---------- Excel: SKU depois do Produto, como na tela

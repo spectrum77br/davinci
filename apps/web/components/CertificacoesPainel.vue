@@ -141,10 +141,16 @@ const inmetroSyncError = ref<string | null>(null)
 const selectedRow = ref<Row | null>(null)
 const detailsDialog = ref<HTMLDialogElement | null>(null)
 const rowBusy = reactive<Record<string, boolean>>({})
-// Coluna SKU (M-69) gravando nesta linha: o Atualizar e o Excel esperam.
+// Coluna SKU (M-69) gravando nesta linha. O Atualizar e o Excel esperam a
+// gravação terminar (skusEmVoo) em vez de perder o clique: quem digita o SKU
+// e clica direto no Excel sai do campo (grava) e o mesmo clique baixa.
 const skusSalvando = reactive<Record<string, boolean>>({})
+// A gravação de cada linha: resolve true quando gravou, false quando não.
+const skusEmVoo = new Map<string, Promise<boolean>>()
 const busy = computed(() => loading.value || exporting.value || adding.value || synchronizing.value || synchronizingInmetro.value)
-const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean) || Object.values(skusSalvando).some(Boolean))
+// PDF anexando/baixando ou linha excluindo: aí os botões da barra travam.
+const linhaOcupada = computed(() => Object.values(rowBusy).some(Boolean))
+const hasBusyRow = computed(() => linhaOcupada.value || Object.values(skusSalvando).some(Boolean))
 const canAttach = computed(() => auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.edit))
 const autosave = createCertificacoesAutosave(
   (id, patch) => api(`/api/financeiro/suprimentos/${id}`, { method: 'PATCH', body: patch }),
@@ -339,15 +345,20 @@ const avisoSkus = ref<string | null>(null)
 function textoSkus(row: Row): string {
   return (row.skus || []).join(', ')
 }
-async function salvarSkus(row: Row, el: HTMLInputElement) {
+function salvarSkus(row: Row, el: HTMLInputElement): Promise<boolean> {
   const anterior = textoSkus(row)
   if (!canEdit.value || busy.value || rowBusy[row.id] || skusSalvando[row.id]) {
     el.value = anterior
-    return
+    return Promise.resolve(false)
   }
   const texto = el.value
-  if (texto.trim() === anterior) return
+  if (texto.trim() === anterior) return Promise.resolve(true)
   skusSalvando[row.id] = true
+  const gravando = gravarSkus(row, el, anterior, texto)
+  skusEmVoo.set(row.id, gravando)
+  return gravando
+}
+async function gravarSkus(row: Row, el: HTMLInputElement, anterior: string, texto: string): Promise<boolean> {
   try {
     // As outras edições desta linha vão antes (a ordem fica a da tela).
     await autosave.flushRow(row.id)
@@ -357,15 +368,27 @@ async function salvarSkus(row: Row, el: HTMLInputElement) {
     const avisos = (salvo as Row & { avisos?: string[] }).avisos || []
     avisoSkus.value = avisos.length ? `SKU: ${avisos.join('; ')}. Foi gravado assim mesmo.` : null
     if (errorText.value?.startsWith('SKU:')) errorText.value = null
+    return true
   } catch (e: any) {
     el.value = anterior
     const detalhe = e?.data?.detail
     errorText.value = detalhe?.code === 'sku_em_outro_certificado'
       ? `SKU: ${detalhe.message}. Nada foi gravado.`
       : 'SKU: não foi possível salvar. Tente novamente.'
+    return false
   } finally {
     delete skusSalvando[row.id]
+    skusEmVoo.delete(row.id)
   }
+}
+// O Atualizar e o Excel esperam os SKUs que estão gravando. false = algum não
+// gravou: quem chamou para aí, e o aviso do SKU fica na tela.
+async function esperarSkus(): Promise<boolean> {
+  let gravou = true
+  while (skusEmVoo.size) {
+    for (const ok of await Promise.all([...skusEmVoo.values()])) gravou = gravou && ok
+  }
+  return gravou
 }
 
 // Devolve false quando não deu para salvar as edições pendentes (o Atualizar ▾
@@ -535,8 +558,11 @@ function abrirMenuAtualizar(aberto: boolean) {
 }
 
 async function executarAtualizar() {
-  if (busy.value || hasBusyRow.value) return
+  if (busy.value || linhaOcupada.value) return
   menuAtualizarAberto.value = false
+  // O SKU que acabou de ser digitado grava antes; se não gravou, para aqui.
+  if (skusEmVoo.size && !(await esperarSkus())) return
+  if (busy.value || hasBusyRow.value) return
   const anatel = canAttach.value && atualizarAnatel.value
   const inmetro = canAttach.value && atualizarInmetro.value
   // As mensagens da vez anterior saem; as desta vez ficam até a próxima.
@@ -678,11 +704,14 @@ function hojeIso(): string {
 }
 
 // Antes de baixar, salva as edições pendentes (a planilha sai com o que está na tela).
+// O SKU que acabou de ser digitado também: o clique espera ele gravar; se não
+// gravou (ex.: já está em outra certificação), não baixa e o aviso do SKU fica.
 async function exportTable() {
-  if (busy.value || hasBusyRow.value) return
+  if (busy.value || linhaOcupada.value) return
   exporting.value = true
   errorText.value = null
   try {
+    if (skusEmVoo.size && !(await esperarSkus())) return
     try {
       await autosave.flush()
     } catch {
@@ -800,7 +829,7 @@ function rowStatusClass(row: Row): string {
           </PopoverContent>
         </PopoverPortal>
       </PopoverRoot>
-      <button class="btn btn-sm h-7 py-0" :disabled="busy || hasBusyRow" data-acao="excel-certificacoes" @click="exportTable">
+      <button class="btn btn-sm h-7 py-0" :disabled="busy || linhaOcupada" data-acao="excel-certificacoes" @click="exportTable">
         <Download class="h-4 w-4 mr-1" /> {{ exporting ? 'Gerando...' : 'Excel' }}
       </button>
       <!-- Atualizar ▾ (M-66; no lugar do Recarregar e dos botões das consultas).
@@ -812,7 +841,7 @@ function rowStatusClass(row: Row): string {
             type="button"
             class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
             data-acao="atualizar"
-            :disabled="busy || hasBusyRow"
+            :disabled="busy || linhaOcupada"
             title="Consultar a Anatel e o Inmetro e reler a lista"
           >
             <Loader2 v-if="atualizandoAlgo" class="h-4 w-4 mr-1 animate-spin" />
@@ -846,7 +875,7 @@ function rowStatusClass(row: Row): string {
                 type="button"
                 class="btn btn-sm h-7 w-full py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
                 data-acao="atualizar-executar"
-                :disabled="busy || hasBusyRow"
+                :disabled="busy || linhaOcupada"
                 title="Consulta os órgãos marcados e relê a lista"
                 @click="executarAtualizar"
               >
@@ -861,7 +890,7 @@ function rowStatusClass(row: Row): string {
         type="button"
         class="btn btn-sm h-7 py-0 bg-blue-600 text-white hover:bg-blue-700 hover:text-white"
         data-acao="atualizar"
-        :disabled="busy || hasBusyRow"
+        :disabled="busy || linhaOcupada"
         title="Reler a lista"
         @click="executarAtualizar"
       >
