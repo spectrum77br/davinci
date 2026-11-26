@@ -701,10 +701,23 @@ async def test_put_recusa_valor_fora_da_regra(client, auth_as, cenario, db: Asyn
     assert await db.get(ProdutoRegra, "dg019") is None
 
 
-async def test_quem_nao_e_admin_ve_travado_e_recebe_403(client, auth_as, cenario, db):
+async def test_quem_nao_e_admin_ve_travado_e_recebe_403(client, auth_as, cenario, db, make_user):
+    # Sem permissão nenhuma (ex.: o operador do portal): nem lê. A resposta traz a margem e a
+    # DUIMP do segmento, as condições e a linha da Tabela de Preços (revisão de 26/11).
     auth_as(cenario.vendedor)
     r = await _get(client, "dg019.ra")
+    assert r.status_code == 403
+    assert r.json()["detail"] == {
+        "code": "forbidden",
+        "resource": "tabela_precos_produtos",
+        "action": "view",
+    }
+    # Quem vê a Tabela de Preços › Produtos lê, travado; gravar continua só do administrador.
+    leitor = await make_user(permissions={"tabela_precos_produtos": {"view": True, "edit": True}})
+    auth_as(leitor)
+    r = await _get(client, "dg019.ra")
     assert r.status_code == 200 and r.json()["pode_editar"] is False
+    assert r.json()["margem_min_herdada"] == 0.18
     assert (await _put(client, "dg019.ra", margem_min=0.1)).status_code == 403
     hoje = _hoje().isoformat()
     corpo = {"pedido_de": hoje, "pedido_ate": hoje}

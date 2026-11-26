@@ -59,7 +59,9 @@ async def cena(db: AsyncSession, make_user):
     provar que inativa não é opção), Eletro e o Catálogo antigo; os três centros fixos e um novo
     sem raiz ("Brinquedos"); a lista de tags da 0508; duas linhas da Tabela de Preços."""
     admin = await make_user(role=UserRole.ADMIN)
-    vendedor = await make_user()
+    # Quem vê a Tabela de Preços › Produtos lê as regras do produto, travado (o GET pede essa
+    # permissão desde a revisão de 26/11).
+    vendedor = await make_user(permissions={"tabela_precos_produtos": {"view": True}})
     tipo = ProdutoCadastroTipo(nome="Tag de envio", chave=CHAVE_TAG_ENVIO)
     db.add(tipo)
     await db.flush()

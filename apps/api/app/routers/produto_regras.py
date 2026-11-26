@@ -10,7 +10,10 @@ Quem chama é a tela do ERP (Produtos 2), com o login da pessoa (`credentials: '
 São rotas do DaVinci: não passam pela trava do modo Consulta do ERP, então funcionam nele.
 
 - GET  /api/produto-regras/{sku}: o que está gravado, o que o produto herda quando em branco e
-  `pode_editar` (só administrador). Qualquer pessoa logada lê (o ERP já é só de administrador).
+  `pode_editar` (só administrador). Lê quem vê a Tabela de Preços › Produtos
+  (`tabela_precos_produtos` view, como a rota de Fotos/Embalagem do mesmo cadastro): a resposta traz
+  a margem mínima e a DUIMP do segmento, as condições especiais e a linha da Tabela de Preços, e a
+  API é chamada direto, fora do /erp (revisão de 26/11: antes bastava estar logado).
 - PUT  /api/produto-regras/{sku}: só administrador. Grava só os campos enviados; vazio (null ou
   "") volta a herdar. Margem em FRAÇÃO (0,12 = 12%), de 0 a 1; DUIMP com as regras do segmento
   (até 75 letras, sem "|").
@@ -42,7 +45,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_active_user, require_admin
+from app.deps.auth import require_admin, require_permission
 from app.models import CentroCusto, ProdutoCondicaoEspecial, ProdutoRegra, User, UserRole
 from app.schemas.segments import _limpar_duimp_padrao
 from app.services import nf_emissao_gerar as nf
@@ -205,7 +208,7 @@ async def _saida(
 async def ler(
     sku: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_active_user)],
+    user: Annotated[User, Depends(require_permission("tabela_precos_produtos", "view"))],
     linha: Linha = None,
     categoria: Categoria = None,
 ) -> dict:
