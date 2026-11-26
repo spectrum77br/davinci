@@ -60,16 +60,19 @@ _TEMU_PLATAFORMAS = logistica_rules._TEMU_PLATAFORMAS
 API_PEDIDO = "bg.order.detail.v2.get"
 API_RASTREIO = "temu.track.trackinginfo.get"
 
-# Duas chamadas por linha; a Temu não publica limite pro vendedor local —
-# rajada pequena.
-_CONCURRENCY = 3
+# Uma linha por vez, com pausa: na 1ª rodada em produção (26/11 11:05) 3 em
+# paralelo levaram "Temu 4000004: too frequent requests" depois de 14 linhas — e
+# a mesma integração manda o estoque da Barbosa (Marketing). A Temu não publica
+# o limite do vendedor local.
+_CONCURRENCY = 1
+PAUSA_ENTRE_LINHAS = 0.6  # s
 # O motor de 5 min passa as pendentes do painel toda rodada. O rastreio da
 # Anjun/J&T anda poucas vezes por dia: reler a mesma linha antes disto só gasta
 # chamada. Linha nunca lida (status vazio) lê na hora.
 RELER_APOS = timedelta(minutes=30)
 # Teto de linhas por rodada do motor (as menos recém-lidas primeiro): com a
 # Temu lenta (20 s por chamada) a rodada não pode passar dos 900 s do job.
-TETO_POR_RODADA = 60
+TETO_POR_RODADA = 30  # 30 × (2–3 chamadas + pausa) cabe no teto de 120 s do motor
 # Linha "viva" (ainda pode mudar) que o motor relê mesmo escondida por regra.
 JANELA_VIVA = timedelta(days=60)
 _TEMU_ORDER_FIM = frozenset({"RECEIPTED", "CANCELED"})
@@ -538,6 +541,7 @@ async def enrich_recent(
             interrompida = 1
             logger.warning("logistica_temu_rodada_interrompida", lidas=updated, falhas=failed)
             break
+        await asyncio.sleep(PAUSA_ENTRE_LINHAS)
     summary = _resumo(len(rows), updated, skipped, failed, max(recentes, 0))
     summary["adiadas"] = adiadas
     summary["interrompida"] = interrompida

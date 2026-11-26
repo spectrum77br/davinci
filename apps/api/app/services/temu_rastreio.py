@@ -506,12 +506,15 @@ async def _coletas_pela_api(
     restantes: list[BlingOrder] = []
     clientes: dict[str, Any] = {}
     quebradas: set[str] = set()
-    for o in cands:
+    for i, o in enumerate(cands):
         loja = str(o.loja or "")
         integ = por_loja.get(loja)
         if integ is None or loja in quebradas:
             restantes.append(o)
             continue
+        if i:
+            # Mesmo ritmo do `logistica_temu` (limite "too frequent requests").
+            await asyncio.sleep(logistica_temu.PAUSA_ENTRE_LINHAS)
         try:
             if loja not in clientes:
                 clientes[loja] = TemuClient(decrypt_json(integ.credentials))
