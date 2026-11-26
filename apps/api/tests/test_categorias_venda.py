@@ -139,37 +139,59 @@ async def test_lista_mostra_as_categorias_de_venda(client, make_user, auth_as, c
     assert r.status_code == 200, r.text
     corpo = r.json()
     vendas = [
-        (c["centro_custo"], c["nome"], c["ativa"])
+        (c["tabela"], c["centro_custo"], c["nome"], c["ativa"])
         for c in corpo["cadastros"]
         if c["tipo_chave"] == "categoria_venda"
     ]
+    # M-89: a Tabela é a da aba Contas do centro; as do Catálogo (raiz que não é centro de
+    # custo) não aparecem mais aqui.
     assert vendas == [
-        ("Celular", "Acessórios", True),
-        ("Celular", "Diversos", True),
-        ("Celular", "Regular", True),
-        ("Celular", "Robusto", True),
-        ("Celular", "Apple", True),
-        ("Eletro", "1", True),
-        ("Eletro", "2", True),
-        ("Eletro", "3", True),
-        ("Mala", "Acessórios", True),
-        ("Mala", '12"', True),
-        ("Mala", '18" e 20"', True),
-        ("Mala", '24" acima', True),
-        ("Mala", "Queima de estoque", False),
-        # A raiz antiga Catálogo vem depois de Celular, Eletro e Mala (ordem da M-23).
-        ("Catálogo", "Apple", True),
+        ("Contas Celular", "Celular", "Acessórios", True),
+        ("Contas Celular", "Celular", "Diversos", True),
+        ("Contas Celular", "Celular", "Regular", True),
+        ("Contas Celular", "Celular", "Robusto", True),
+        ("Contas Celular", "Celular", "Apple", True),
+        ("Contas Eletro", "Eletro", "1", True),
+        ("Contas Eletro", "Eletro", "2", True),
+        ("Contas Eletro", "Eletro", "3", True),
+        ("Contas Mala", "Mala", "Acessórios", True),
+        ("Contas Mala", "Mala", '12"', True),
+        ("Contas Mala", "Mala", '18" e 20"', True),
+        ("Contas Mala", "Mala", '24" acima', True),
+        ("Contas Mala", "Mala", "Queima de estoque", False),
     ]
     # A linha é o próprio segmento (mesmo id da aba Segmentos).
     apple = next(c for c in corpo["cadastros"] if c["nome"] == "Apple")
     assert apple["id"] == str(centros["Celular/Apple"].id)
     assert apple["tipo_nome"] == "Categoria de venda"
+    assert not any(c["id"] == str(centros["Catálogo/Apple"].id) for c in corpo["cadastros"])
     # O menu do "Novo cadastro" (M-76: a lista de Cadastros › Centro de custo): sem o Catálogo
-    # (não é centro de custo).
+    # (não é centro de custo). M-89: com a tabela de Contas de cada centro.
     assert corpo["centros_custo"] == [
-        {"id": str(centros[f"cc:{n}"].id), "nome": n, "aceita_categoria": True}
+        {
+            "id": str(centros[f"cc:{n}"].id),
+            "nome": n,
+            "aceita_categoria": True,
+            "tabela": f"Contas {n}",
+        }
         for n in ("Celular", "Eletro", "Mala")
     ]
+    # M-89: Tipo de conta (tabela Lojas) = os três centros de custo, no fim da lista.
+    assert [
+        (c["tabela"], c["tipo_nome"], c["nome"], c["id"]) for c in corpo["cadastros"][-3:]
+    ] == [
+        ("Lojas", "Tipo de conta", n, str(centros[f"cc:{n}"].id))
+        for n in ("Celular", "Eletro", "Mala")
+    ]
+    assert corpo["tipos"][-1]["nome"] == "Tipo de conta"
+
+
+async def test_catalogo_continua_na_aba_segmentos(client, make_user, auth_as, centros):
+    """M-89: a categoria do Catálogo sai da lista de Cadastros › Produtos, mas nada é apagado."""
+    await _admin(make_user, auth_as)
+    segs = {s["id"] for s in (await client.get("/api/segments")).json()}
+    assert str(centros["Catálogo/Apple"].id) in segs
+    assert str(centros["Catálogo"].id) in segs
 
 
 # ================================================================ incluir
@@ -183,6 +205,7 @@ async def test_nova_entra_no_fim_e_aparece_na_aba_segmentos(
     assert r.status_code == 201, r.text
     nova = r.json()
     assert (nova["nome"], nova["centro_custo"], nova["ativa"]) == ("Novo 4", "Eletro", True)
+    assert nova["tabela"] == "Contas Eletro"  # M-89
     assert await _filhos(db, centros["Eletro"]) == [
         ("1", 0, True),
         ("2", 1, True),

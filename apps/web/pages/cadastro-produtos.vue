@@ -16,9 +16,16 @@
 // lugar só: `centros_custo` da lista (services/categorias_venda.centros_do_menu no servidor).
 // M-76: esse menu é a lista de Cadastros › Centro de custo. Centro novo aparece, mas ainda não
 // recebe categoria de venda: ao escolher, a janela avisa e o Salvar fica travado (o servidor
-// recusa com a mesma frase).
+// recusa com a mesma frase). Desde a M-89 o menu "Centro de custo" virou o menu "Tabela" (só os
+// centros com tabela na aba Contas), e o centro novo nem aparece.
 // M-84 (Harry 26/11/2026): a coluna "Centro de custo" saiu da tabela (fica Tipo | Nome | Ações);
 // o centro continua nos dados, no Novo cadastro, no lápis e nos avisos.
+// M-89 (Harry 26/11/2026): coluna "Tabela" antes de Tipo (Tabela | Tipo | Nome | Ações), vinda
+// do servidor: Categoria e Tag de envio → "Produtos 2"; Categoria de venda → "Contas Celular",
+// "Contas Eletro" ou "Contas Mala" (as do Catálogo não aparecem mais aqui); tipo novo
+// "Tipo de conta" (tabela "Lojas": Celular, Eletro, Mala) só para ver — sem lápis nem lixeira.
+// No Novo cadastro a pessoa escolhe primeiro a Tabela; o Tipo depende dela e, nas tabelas de
+// Contas, a tabela é o centro de custo da Categoria de venda. No lápis a Tabela só aparece.
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -27,7 +34,7 @@ definePageMeta({
   permission: { resource: 'cadastro_produtos', action: 'view' },
 })
 
-type Tipo = { id: string; nome: string; chave: string | null }
+type Tipo = { id: string; nome: string; chave: string | null; tabela?: string | null }
 type Cadastro = {
   id: string
   tipo_id: string
@@ -36,15 +43,21 @@ type Cadastro = {
   nome: string
   centro_custo?: string | null
   ativa?: boolean
+  tabela?: string | null
 }
-type Centro = { id: string; nome: string; aceita_categoria?: boolean }
+type Centro = { id: string; nome: string; aceita_categoria?: boolean; tabela?: string | null }
 type Uso = { regra: string | null; produtos: number | null; bloqueia: boolean; mensagem: string | null }
+// Uma opção do menu "Tabela" do Novo cadastro; `centro` = o centro de custo (tabelas de Contas).
+type Tabela = { id: string; nome: string; centro: string | null }
 
 const CHAVE_VENDA = 'categoria_venda'
-// A mesma frase do servidor (services/categorias_venda.MSG_SO_FIXOS).
-const MSG_SO_FIXOS = 'Categoria de venda só em Celular, Eletro e Mala por enquanto.'
+const CHAVE_TIPO_CONTA = 'tipo_conta'
+const TABELA_PRODUTOS2 = 'Produtos 2'
 const ehVenda = (c: { tipo_chave?: string | null; chave?: string | null } | null | undefined) =>
   !!c && (c.tipo_chave === CHAVE_VENDA || c.chave === CHAVE_VENDA)
+// M-89: Tipo de conta (Celular, Eletro, Mala da tabela Lojas) é só para ver.
+const ehTipoConta = (c: { tipo_chave?: string | null; chave?: string | null } | null | undefined) =>
+  !!c && (c.tipo_chave === CHAVE_TIPO_CONTA || c.chave === CHAVE_TIPO_CONTA)
 
 const { api } = useApi()
 const auth = useAuthStore()
@@ -138,35 +151,50 @@ async function salvarTipo(t: Tipo) {
 // ---------------------------------------------------------------- + Novo cadastro / lápis
 const cadAberto = ref(false)
 const cadEditando = ref<Cadastro | null>(null)
+const cadTabela = ref(TABELA_PRODUTOS2) // M-89: o id da opção do menu "Tabela"
 const cadTipo = ref('')
 const cadNome = ref('')
-const cadCentro = ref('') // Categoria de venda nova: o id do centro de custo escolhido no menu
 const cadErro = ref<string | null>(null)
 const cadAviso = ref<string | null>(null) // tag em uso: confirmar a troca
 const cadSalvando = ref(false)
 
+// M-89: o menu "Tabela" do Novo cadastro — Produtos 2 e as tabelas de Contas (um centro de custo
+// com raiz cada: Contas Celular, Contas Eletro, Contas Mala). Centro novo, sem raiz, não tem
+// tabela na aba Contas e não entra.
+const tabelasDoMenu = computed<Tabela[]>(() => [
+  { id: TABELA_PRODUTOS2, nome: TABELA_PRODUTOS2, centro: null },
+  ...centros.value
+    .filter((c) => c.aceita_categoria !== false)
+    .map((c) => ({ id: c.id, nome: c.tabela || `Contas ${c.nome}`, centro: c.id })),
+])
+// Categoria de venda nova: o centro de custo é o da tabela escolhida.
+const cadCentro = computed(() => tabelasDoMenu.value.find((t) => t.id === cadTabela.value)?.centro ?? '')
+// Os tipos de cada tabela: Produtos 2 → os da lista (Categoria, Tag de envio…); Contas → só a
+// Categoria de venda. Tipo de conta (Lojas) é só para ver: não entra em menu nenhum.
+function tiposDaTabela(contas: boolean): Tipo[] {
+  return tipos.value.filter((t) => !ehTipoConta(t) && (contas ? ehVenda(t) : !ehVenda(t)))
+}
 // O tipo escolhido na janela é Categoria de venda?
 const cadEhVenda = computed(() => ehVenda(tipos.value.find((t) => t.id === cadTipo.value)))
-// M-76: o centro escolhido no Novo cadastro ainda não recebe categoria de venda (centro novo).
-const cadCentroSemCategoria = computed(
-  () =>
-    cadEhVenda.value &&
-    !cadEditando.value &&
-    centros.value.find((c) => c.id === cadCentro.value)?.aceita_categoria === false,
-)
 // Os tipos do menu: Categoria de venda não troca com os outros (é outro dado) — no lápis de
 // uma categoria de venda o menu fica travado; no lápis das outras ela não aparece.
 const tiposDoMenu = computed(() =>
-  cadEditando.value && !ehVenda(cadEditando.value) ? tipos.value.filter((t) => !ehVenda(t)) : tipos.value,
+  cadEditando.value ? tiposDaTabela(ehVenda(cadEditando.value)) : tiposDaTabela(!!cadCentro.value),
 )
 
+// Trocou a Tabela no Novo cadastro: o Tipo volta para o primeiro daquela tabela.
+function trocarTabela() {
+  cadTipo.value = tiposDaTabela(!!cadCentro.value)[0]?.id ?? ''
+}
+
 function abrirCadastro(c: Cadastro | null = null) {
+  if (c && ehTipoConta(c)) return // só para ver
   cadAberto.value = true
   cadEditando.value = c
-  cadTipo.value = c?.tipo_id ?? tipos.value[0]?.id ?? ''
+  // No lápis a Tabela não muda (só aparece); no Novo cadastro começa no Produtos 2.
+  cadTabela.value = TABELA_PRODUTOS2
+  cadTipo.value = c?.tipo_id ?? tiposDaTabela(false)[0]?.id ?? ''
   cadNome.value = c?.nome ?? ''
-  // No lápis o centro de custo não muda (só aparece); no Novo cadastro a pessoa escolhe.
-  cadCentro.value = ''
   cadErro.value = null
   cadAviso.value = null
 }
@@ -182,11 +210,7 @@ async function salvarCadastro(confirmar = false) {
     return
   }
   if (cadEhVenda.value && !cadEditando.value && !cadCentro.value) {
-    cadErro.value = 'Escolha o centro de custo.'
-    return
-  }
-  if (cadCentroSemCategoria.value) {
-    cadErro.value = MSG_SO_FIXOS
+    cadErro.value = 'Escolha a tabela.'
     return
   }
   cadSalvando.value = true
@@ -233,12 +257,16 @@ const excluirUso = ref<Uso | null>(null)
 const excluirErro = ref<string | null>(null)
 const excluirCarregando = ref(false)
 
+// M-89: Tipo de conta não tem lápis nem lixeira (na coluna Ações aparece "—").
+const podeMexer = (c: Cadastro) => !ehTipoConta(c)
+
 // Categoria de venda (M-75) tem rota própria: a linha é o segmento filho.
 function rotaDe(c: Cadastro): string {
   return ehVenda(c) ? `/api/produto-cadastros/categorias-venda/${c.id}` : `/api/produto-cadastros/${c.id}`
 }
 
 async function pedirExclusao(c: Cadastro) {
+  if (!podeMexer(c)) return
   excluindo.value = c
   excluirUso.value = null
   excluirErro.value = null
@@ -303,6 +331,7 @@ async function confirmarExclusao() {
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
           <tr>
+            <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-36">Tabela</th>
             <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-48">Tipo</th>
             <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border">Nome</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20">Ações</th>
@@ -310,14 +339,15 @@ async function confirmarExclusao() {
         </thead>
         <tbody>
           <tr v-if="loading && !cadastros.length">
-            <td colspan="3" class="text-center py-6 text-xs text-muted-foreground">
+            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!cadastros.length">
-            <td colspan="3" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
+            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
           </tr>
           <tr v-for="c in cadastros" :key="c.id" class="h-8 hover:bg-accent/30" :data-cadastro="c.nome">
+            <td class="border border-border px-2 py-1 text-xs">{{ c.tabela || '—' }}</td>
             <td class="border border-border px-2 py-1 text-xs">{{ c.tipo_nome }}</td>
             <td
               class="border border-border px-2 py-1 text-xs font-medium"
@@ -331,7 +361,9 @@ async function confirmarExclusao() {
               >inativa</span>
             </td>
             <td class="border border-border px-1 py-1 text-center">
-              <div v-if="isAdmin" class="flex gap-0.5 justify-center">
+              <!-- M-89: Tipo de conta é só para ver. -->
+              <span v-if="!podeMexer(c)" class="text-xs text-muted-foreground" data-marca="so-ver">—</span>
+              <div v-else-if="isAdmin" class="flex gap-0.5 justify-center">
                 <button
                   class="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded"
                   title="Editar"
@@ -402,8 +434,9 @@ async function confirmarExclusao() {
             </template>
             <template v-else>
               <span class="flex-1">{{ t.nome }}</span>
-              <!-- Categoria de venda (M-75) não é tipo desta tabela: não renomeia aqui. -->
-              <button v-if="!ehVenda(t)" class="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded" title="Renomear" data-acao="renomear-tipo" @click="editarTipo(t)">
+              <!-- Categoria de venda (M-75) e Tipo de conta (M-89) não são tipos desta tabela:
+                   não renomeiam aqui. -->
+              <button v-if="!ehVenda(t) && !ehTipoConta(t)" class="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded" title="Renomear" data-acao="renomear-tipo" @click="editarTipo(t)">
                 <Pencil class="h-3.5 w-3.5" />
               </button>
             </template>
@@ -412,7 +445,7 @@ async function confirmarExclusao() {
       </div>
     </div>
 
-    <!-- + Novo cadastro e lápis: Tipo (lista dos tipos) e Nome. -->
+    <!-- + Novo cadastro e lápis: Tabela (M-89), Tipo (os tipos da tabela) e Nome. -->
     <div
       v-if="cadAberto"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -427,6 +460,29 @@ async function confirmarExclusao() {
         <div v-if="cadErro" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-center gap-2">
           <AlertCircle class="h-3.5 w-3.5 shrink-0" /> {{ cadErro }}
         </div>
+        <!-- M-89: primeiro a Tabela. No lápis ela só aparece (travada); no Novo cadastro a
+             escolha define os tipos e, nas tabelas de Contas, o centro de custo. -->
+        <label v-if="cadEditando" class="block text-xs text-muted-foreground">
+          Tabela
+          <input
+            :value="cadEditando.tabela || '—'"
+            type="text"
+            disabled
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground disabled:opacity-60"
+            data-campo="cadastro-tabela-fixa"
+          />
+        </label>
+        <label v-else class="block text-xs text-muted-foreground">
+          Tabela
+          <select
+            v-model="cadTabela"
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+            data-campo="cadastro-tabela"
+            @change="trocarTabela"
+          >
+            <option v-for="r in tabelasDoMenu" :key="r.id" :value="r.id">{{ r.nome }}</option>
+          </select>
+        </label>
         <label class="block text-xs text-muted-foreground">
           Tipo
           <select
@@ -438,36 +494,6 @@ async function confirmarExclusao() {
             <option v-for="t in tiposDoMenu" :key="t.id" :value="t.id">{{ t.nome }}</option>
           </select>
         </label>
-        <!-- Categoria de venda: o centro de custo. No lápis só o nome muda: o centro aparece
-             travado (pode ser um que não está no menu, como o Catálogo). -->
-        <label v-if="cadEhVenda && cadEditando" class="block text-xs text-muted-foreground">
-          Centro de custo
-          <input
-            :value="cadEditando.centro_custo || '—'"
-            type="text"
-            disabled
-            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground disabled:opacity-60"
-            data-campo="cadastro-centro-fixo"
-          />
-        </label>
-        <label v-else-if="cadEhVenda" class="block text-xs text-muted-foreground">
-          Centro de custo
-          <select
-            v-model="cadCentro"
-            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
-            data-campo="cadastro-centro"
-          >
-            <option value="" disabled>Escolha…</option>
-            <option v-for="r in centros" :key="r.id" :value="r.id">{{ r.nome }}</option>
-          </select>
-        </label>
-        <p
-          v-if="cadCentroSemCategoria"
-          class="rounded border border-amber-300 bg-amber-50 dark:bg-amber-900/15 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
-          data-aviso="centro-sem-categoria"
-        >
-          {{ MSG_SO_FIXOS }}
-        </p>
         <label class="block text-xs text-muted-foreground">
           Nome
           <input
@@ -489,7 +515,7 @@ async function confirmarExclusao() {
         </div>
         <div v-else class="flex justify-end gap-2">
           <Button size="sm" variant="ghost" @click="fecharCadastro">Cancelar</Button>
-          <Button size="sm" :disabled="cadSalvando || cadCentroSemCategoria" data-acao="salvar-cadastro" @click="salvarCadastro(false)">
+          <Button size="sm" :disabled="cadSalvando" data-acao="salvar-cadastro" @click="salvarCadastro(false)">
             <Loader2 v-if="cadSalvando" class="size-4 mr-1 animate-spin" /> Salvar
           </Button>
         </div>

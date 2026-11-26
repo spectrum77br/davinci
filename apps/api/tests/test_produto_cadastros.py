@@ -112,12 +112,16 @@ async def test_lista_em_ordem_de_tipo_e_nome(client, make_user, auth_as, base):
         ("Tag de envio", ".sp"),
     ]
     # M-75: "Categoria de venda" (os segmentos filhos) entre Categoria e Tag de envio.
-    assert [(t["nome"], t["chave"]) for t in corpo["tipos"]] == [
-        ("Categoria", "categoria"),
-        ("Categoria de venda", "categoria_venda"),
-        ("Tag de envio", "tag_envio"),
+    # M-89: a coluna Tabela e o "Tipo de conta" (tabela Lojas) no fim.
+    assert [(t["nome"], t["chave"], t["tabela"]) for t in corpo["tipos"]] == [
+        ("Categoria", "categoria", "Produtos 2"),
+        ("Categoria de venda", "categoria_venda", "Contas"),
+        ("Tag de envio", "tag_envio", "Produtos 2"),
+        ("Tipo de conta", "tipo_conta", "Lojas"),
     ]
     assert all(c["centro_custo"] is None and c["ativa"] is True for c in corpo["cadastros"])
+    # M-89: Categoria e Tag de envio são do Produtos 2.
+    assert {c["tabela"] for c in corpo["cadastros"]} == {"Produtos 2"}
     assert corpo["centros_custo"] == []
 
 
@@ -197,6 +201,9 @@ async def test_cria_tipo_e_cadastro_e_recusa_nome_repetido(client, make_user, au
     assert r.status_code == 409 and r.json()["detail"]["code"] == "tipo_repetido"
     # M-75: "Categoria de venda" já existe (é o tipo dos segmentos filhos).
     r = await client.post("/api/produto-cadastros/tipos", json={"nome": "categoria de VENDA"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "tipo_repetido"
+    # M-89: "Tipo de conta" também já existe (os centros de custo da tabela Lojas).
+    r = await client.post("/api/produto-cadastros/tipos", json={"nome": "tipo de CONTA"})
     assert r.status_code == 409 and r.json()["detail"]["code"] == "tipo_repetido"
 
     r = await client.post(
@@ -304,6 +311,7 @@ async def test_renomear_o_tipo_categoria_mantem_a_regra(client, make_user, auth_
         "id": str(base["categoria"]),
         "nome": "Categorias",
         "chave": "categoria",
+        "tabela": "Produtos 2",
     }
     r = await client.patch(
         f"/api/produto-cadastros/tipos/{base['categoria']}", json={"nome": "tag DE envio"}

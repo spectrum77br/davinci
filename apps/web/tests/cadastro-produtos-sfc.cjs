@@ -18,6 +18,10 @@
 //    centro novo (aceita_categoria false) avisa e trava o Salvar.
 //  - M-84: a coluna "Centro de custo" saiu da tabela (Tipo | Nome | Ações); o centro segue no
 //    Novo cadastro e no lápis da Categoria de venda.
+//  - M-89: coluna "Tabela" antes de Tipo (Tabela | Tipo | Nome | Ações); "Tipo de conta" (Lojas)
+//    só para ver ("—" em Ações, fora dos menus, sem renomear); o Novo cadastro escolhe primeiro a
+//    Tabela (Produtos 2 → Categoria/Tag de envio; Contas … → Categoria de venda, com o centro da
+//    tabela; centro sem raiz fora do menu); no lápis a Tabela só aparece.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -72,28 +76,32 @@ const script = descriptor.scriptSetup.content
   assert.match(acoes, /<Button v-if="isAdmin" size="sm" data-acao="novo-cadastro"/, 'Novo cadastro azul (variante padrão) e só admin')
   assert.match(acoes, /<Button v-if="isAdmin" size="sm" variant="outline" data-acao="novo-tipo"/)
   const ths = [...tpl.matchAll(/<th\b[^>]*>([^<]*)<\/th>/g)]
-  // M-84: a coluna "Centro de custo" saiu (Tipo | Nome | Ações).
-  assert.deepEqual(ths.map((m) => m[1]), ['Tipo', 'Nome', 'Ações'])
+  // M-84: a coluna "Centro de custo" saiu. M-89: "Tabela" antes de Tipo.
+  assert.deepEqual(ths.map((m) => m[1]), ['Tabela', 'Tipo', 'Nome', 'Ações'])
   for (const m of ths) assert.match(m[0], /text-\[11px\] font-semibold leading-\[14px\]/, 'cabeçalho 11px semibold')
   const linha = tpl.slice(tpl.indexOf('<tr v-for="c in cadastros"'), tpl.indexOf('</tr>', tpl.indexOf('<tr v-for="c in cadastros"')))
   assert.match(linha, /class="h-8 /, 'linhas da mesma altura')
-  assert.equal((linha.match(/class="border border-border [^"]*text-xs/g) || []).length, 2, 'Tipo e Nome em text-xs com borda')
-  assert.match(linha, /<div v-if="isAdmin"[\s\S]*<Pencil[\s\S]*<Trash2/, 'lápis e lixeira, só admin')
-  for (const m of tpl.matchAll(/colspan="(\d+)"/g)) assert.equal(m[1], '3')
+  assert.equal((linha.match(/class="border border-border [^"]*text-xs/g) || []).length, 3, 'Tabela, Tipo e Nome em text-xs com borda')
+  assert.match(linha, /<div v-else-if="isAdmin"[\s\S]*<Pencil[\s\S]*<Trash2/, 'lápis e lixeira, só admin')
+  // M-89: Tipo de conta só para ver — "—" no lugar do lápis e da lixeira
+  assert.match(linha, /<span v-if="!podeMexer\(c\)"[^>]*data-marca="so-ver">—<\/span>\s*<div v-else-if="isAdmin"/)
+  for (const m of tpl.matchAll(/colspan="(\d+)"/g)) assert.equal(m[1], '4')
   // M-84: nenhuma célula do centro de custo na linha; a marca "inativa" com o nome em cinza segue
   assert.doesNotMatch(linha, /c\.centro_custo/, 'sem a célula do centro de custo')
   assert.match(linha, /:class="\{ 'text-muted-foreground': c\.ativa === false \}"[\s\S]*v-if="c\.ativa === false"[\s\S]*>inativa<\/span>/)
-  const ordemCols = ['{{ c.tipo_nome }}', '{{ c.nome }}', '<Pencil'].map((t) => linha.indexOf(t))
-  assert.ok(ordemCols.every((i, k) => i > 0 && (k === 0 || i > ordemCols[k - 1])), 'Tipo | Nome | Ações')
-  // Novo cadastro de Categoria de venda pede o centro de custo (menu); no lápis o centro aparece
-  // travado (texto, pode ser o Catálogo, que não está no menu) e o tipo também fica travado
-  assert.match(tpl, /<label v-if="cadEhVenda && cadEditando"[\s\S]{0,120}Centro de custo[\s\S]{0,120}:value="cadEditando\.centro_custo \|\| '—'"[\s\S]{0,60}disabled[\s\S]{0,200}data-campo="cadastro-centro-fixo"/)
-  assert.match(tpl, /<label v-else-if="cadEhVenda"[\s\S]{0,120}Centro de custo[\s\S]{0,60}<select[\s\S]{0,40}v-model="cadCentro"[\s\S]{0,200}data-campo="cadastro-centro"[\s\S]{0,120}v-for="r in centros"/)
+  const ordemCols = ["{{ c.tabela || '—' }}", '{{ c.tipo_nome }}', '{{ c.nome }}', '<Pencil'].map((t) => linha.indexOf(t))
+  assert.ok(ordemCols.every((i, k) => i > 0 && (k === 0 || i > ordemCols[k - 1])), 'Tabela | Tipo | Nome | Ações')
+  // M-89: Novo cadastro escolhe a Tabela (menu, antes do Tipo); no lápis a Tabela aparece travada
+  // e, na Categoria de venda, o tipo também fica travado
+  assert.match(tpl, /<label v-if="cadEditando"[\s\S]{0,120}Tabela[\s\S]{0,120}:value="cadEditando\.tabela \|\| '—'"[\s\S]{0,60}disabled[\s\S]{0,200}data-campo="cadastro-tabela-fixa"/)
+  assert.match(tpl, /<label v-else[\s\S]{0,120}Tabela[\s\S]{0,60}<select[\s\S]{0,40}v-model="cadTabela"[\s\S]{0,200}data-campo="cadastro-tabela"\s+@change="trocarTabela"[\s\S]{0,60}v-for="r in tabelasDoMenu"/)
+  assert.ok(tpl.indexOf('data-campo="cadastro-tabela"') < tpl.indexOf('data-campo="cadastro-tipo"'), 'Tabela antes do Tipo')
+  assert.doesNotMatch(tpl, /data-campo="cadastro-centro/, 'o menu Centro de custo virou o menu Tabela')
   assert.match(tpl, /:placeholder="cadEhVenda \? 'ex\.: Acessórios' : 'ex\.: \.sp ou Celular'"/)
   assert.match(tpl, /:disabled="ehVenda\(cadEditando\)"/)
   assert.match(tpl, /v-for="t in tiposDoMenu"/)
-  // O tipo Categoria de venda não é renomeado na janela de tipos
-  assert.match(tpl, /<button v-if="!ehVenda\(t\)"[^>]*data-acao="renomear-tipo"/)
+  // Os tipos Categoria de venda e Tipo de conta não são renomeados na janela de tipos
+  assert.match(tpl, /<button v-if="!ehVenda\(t\) && !ehTipoConta\(t\)"[^>]*data-acao="renomear-tipo"/)
 }
 
 // ---------------------------------------------------------------- script setup com api falso
@@ -106,25 +114,28 @@ const factory = new AsyncFunction(
     tipoAberto, tipoNome, tipoErro, abrirTipo, criarTipo, editarTipo, tipoEditNome, salvarTipo,
     cadAberto, cadTipo, cadNome, cadErro, cadAviso, abrirCadastro, salvarCadastro,
     excluindo, excluirUso, excluirErro, pedirExclusao, confirmarExclusao,
-    centros, cadCentro, cadEhVenda, tiposDoMenu, cadCentroSemCategoria,
+    centros, cadCentro, cadEhVenda, tiposDoMenu,
+    cadTabela, tabelasDoMenu, trocarTabela, podeMexer, cadEditando,
   }`,
 )
 
 const TIPOS = [
-  { id: 't1', nome: 'Categoria', chave: 'categoria' },
-  { id: 'tv', nome: 'Categoria de venda', chave: 'categoria_venda' },
-  { id: 't2', nome: 'Tag de envio', chave: 'tag_envio' },
+  { id: 't1', nome: 'Categoria', chave: 'categoria', tabela: 'Produtos 2' },
+  { id: 'tv', nome: 'Categoria de venda', chave: 'categoria_venda', tabela: 'Contas' },
+  { id: 't2', nome: 'Tag de envio', chave: 'tag_envio', tabela: 'Produtos 2' },
+  { id: 'tc', nome: 'Tipo de conta', chave: 'tipo_conta', tabela: 'Lojas' },
 ]
 const CADS = [
-  { id: 'c1', tipo_id: 't1', tipo_nome: 'Categoria', tipo_chave: 'categoria', nome: 'Celular' },
-  { id: 'c2', tipo_id: 't2', tipo_nome: 'Tag de envio', tipo_chave: 'tag_envio', nome: '.sp' },
-  { id: 's1', tipo_id: 'tv', tipo_nome: 'Categoria de venda', tipo_chave: 'categoria_venda', nome: 'Apple', centro_custo: 'Celular', ativa: true },
-  { id: 's2', tipo_id: 'tv', tipo_nome: 'Categoria de venda', tipo_chave: 'categoria_venda', nome: 'Queima de estoque', centro_custo: 'Mala', ativa: false },
+  { id: 'c1', tipo_id: 't1', tipo_nome: 'Categoria', tipo_chave: 'categoria', nome: 'Celular', tabela: 'Produtos 2' },
+  { id: 'c2', tipo_id: 't2', tipo_nome: 'Tag de envio', tipo_chave: 'tag_envio', nome: '.sp', tabela: 'Produtos 2' },
+  { id: 's1', tipo_id: 'tv', tipo_nome: 'Categoria de venda', tipo_chave: 'categoria_venda', nome: 'Apple', centro_custo: 'Celular', ativa: true, tabela: 'Contas Celular' },
+  { id: 's2', tipo_id: 'tv', tipo_nome: 'Categoria de venda', tipo_chave: 'categoria_venda', nome: 'Queima de estoque', centro_custo: 'Mala', ativa: false, tabela: 'Contas Mala' },
+  { id: 'r-cel', tipo_id: 'tc', tipo_nome: 'Tipo de conta', tipo_chave: 'tipo_conta', nome: 'Celular', tabela: 'Lojas' },
 ]
 const CENTROS = [
-  { id: 'r-cel', nome: 'Celular', aceita_categoria: true },
-  { id: 'r-mala', nome: 'Mala', aceita_categoria: true },
-  { id: 'cc-brinq', nome: 'Brinquedos', aceita_categoria: false },
+  { id: 'r-cel', nome: 'Celular', aceita_categoria: true, tabela: 'Contas Celular' },
+  { id: 'r-mala', nome: 'Mala', aceita_categoria: true, tabela: 'Contas Mala' },
+  { id: 'cc-brinq', nome: 'Brinquedos', aceita_categoria: false, tabela: null },
 ]
 const erro = (status, detail) => Object.assign(new Error(String(status)), { data: { detail } })
 
@@ -147,7 +158,7 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
   // carrega a tabela; só admin mexe
   {
     const { p } = await pagina()
-    assert.equal(p.cadastros.value.length, 4)
+    assert.equal(p.cadastros.value.length, 5)
     assert.deepEqual(p.centros.value, CENTROS)
     assert.equal(p.isAdmin.value, true)
     const { p: q } = await pagina({ role: 'user' })
@@ -230,21 +241,26 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.deepEqual(calls.filter((c) => c.method === 'DELETE').map((c) => c.url), ['/api/produto-cadastros/c2?confirmar=true'])
     assert.equal(p.excluindo.value, null)
   }
-  // M-75: Novo cadastro de Categoria de venda — pede o centro de custo; vai para /categorias-venda;
-  // o limite de 5 mostra a frase do servidor
+  // M-75 + M-89: Novo cadastro de Categoria de venda — a Tabela "Contas Mala" escolhe o tipo e o
+  // centro de custo; vai para /categorias-venda; o limite de 5 mostra a frase do servidor
   {
     const limite = 'Este centro de custo já tem 5 categorias de venda.'
     const { p, calls } = await pagina({
       respostas: { 'POST /api/produto-cadastros/categorias-venda': erro(409, { code: 'categoria_venda_limite', mensagem: limite }) },
     })
     p.abrirCadastro()
+    assert.equal(p.cadTabela.value, 'Produtos 2', 'começa na tabela Produtos 2')
+    // Categoria de venda sem tabela de Contas: nada vai ao servidor
     p.cadTipo.value = 'tv'
-    assert.equal(p.cadEhVenda.value, true)
     p.cadNome.value = 'Mochilas'
     await p.salvarCadastro()
-    assert.equal(p.cadErro.value, 'Escolha o centro de custo.')
-    assert.ok(!calls.some((c) => c.method === 'POST'), 'sem centro de custo nada vai ao servidor')
-    p.cadCentro.value = 'r-mala'
+    assert.equal(p.cadErro.value, 'Escolha a tabela.')
+    assert.ok(!calls.some((c) => c.method === 'POST'), 'sem tabela nada vai ao servidor')
+    p.cadTabela.value = 'r-mala'
+    p.trocarTabela()
+    assert.equal(p.cadTipo.value, 'tv', 'Contas … → Categoria de venda')
+    assert.equal(p.cadEhVenda.value, true)
+    assert.equal(p.cadCentro.value, 'r-mala', 'a tabela define o centro de custo')
     await p.salvarCadastro()
     assert.deepEqual(calls.at(-1), {
       url: '/api/produto-cadastros/categorias-venda',
@@ -253,22 +269,21 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     })
     assert.equal(p.cadErro.value, limite)
     assert.equal(p.cadAberto.value, true)
+    // Voltar para Produtos 2 volta o Tipo para Categoria
+    p.cadTabela.value = 'Produtos 2'
+    p.trocarTabela()
+    assert.equal(p.cadTipo.value, 't1')
+    assert.equal(p.cadCentro.value, '')
   }
-  // M-76: centro novo (Brinquedos) aparece no menu, mas avisa e não vai ao servidor
+  // M-89: o menu Tabela — Produtos 2 e as tabelas de Contas; o centro novo (Brinquedos, sem
+  // raiz) não tem tabela na aba Contas e não aparece
   {
-    const { p, calls } = await pagina()
+    const { p } = await pagina()
     p.abrirCadastro()
-    p.cadTipo.value = 'tv'
-    p.cadNome.value = 'Pelúcias'
-    p.cadCentro.value = 'cc-brinq'
-    assert.equal(p.cadCentroSemCategoria.value, true)
-    await p.salvarCadastro()
-    assert.equal(p.cadErro.value, 'Categoria de venda só em Celular, Eletro e Mala por enquanto.')
-    assert.ok(!calls.some((c) => c.method === 'POST'), 'nada vai ao servidor')
-    p.cadCentro.value = 'r-cel'
-    assert.equal(p.cadCentroSemCategoria.value, false)
-    assert.match(tpl, /<p\s+v-if="cadCentroSemCategoria"[\s\S]{0,300}data-aviso="centro-sem-categoria"[\s\S]{0,40}\{\{ MSG_SO_FIXOS \}\}/)
-    assert.match(tpl, /:disabled="cadSalvando \|\| cadCentroSemCategoria" data-acao="salvar-cadastro"/)
+    assert.deepEqual(
+      p.tabelasDoMenu.value.map((t) => [t.id, t.nome]),
+      [['Produtos 2', 'Produtos 2'], ['r-cel', 'Contas Celular'], ['r-mala', 'Contas Mala']],
+    )
   }
   // M-75: lápis numa Categoria de venda — só o nome, pela rota dela; o centro só aparece;
   // a recusa do nome fixo aparece como veio
@@ -285,13 +300,33 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.deepEqual(calls.at(-1), { url: '/api/produto-cadastros/categorias-venda/s1', method: 'PATCH', body: { nome: 'iPhone' } })
     assert.equal(p.cadErro.value, fixo)
   }
-  // M-75: no lápis de uma Categoria comum, o menu de tipo não oferece Categoria de venda
+  // M-75: no lápis de uma Categoria comum, o menu de tipo não oferece Categoria de venda.
+  // M-89: o Tipo depende da Tabela (Produtos 2 → Categoria, Tag de envio; Contas … → Categoria
+  // de venda) e Tipo de conta não entra em menu nenhum
   {
     const { p } = await pagina()
     p.abrirCadastro(CADS[0])
     assert.deepEqual(p.tiposDoMenu.value.map((t) => t.id), ['t1', 't2'])
+    p.abrirCadastro(CADS[2])
+    assert.deepEqual(p.tiposDoMenu.value.map((t) => t.id), ['tv'])
     p.abrirCadastro()
-    assert.deepEqual(p.tiposDoMenu.value.map((t) => t.id), ['t1', 'tv', 't2'])
+    assert.deepEqual(p.tiposDoMenu.value.map((t) => t.id), ['t1', 't2'])
+    p.cadTabela.value = 'r-cel'
+    p.trocarTabela()
+    assert.deepEqual(p.tiposDoMenu.value.map((t) => t.id), ['tv'])
+  }
+  // M-89: Tipo de conta (Lojas) é só para ver — sem lápis nem lixeira
+  {
+    const { p, calls } = await pagina()
+    const conta = CADS[4]
+    assert.equal(p.podeMexer(conta), false)
+    assert.equal(p.podeMexer(CADS[0]), true)
+    assert.equal(p.podeMexer(CADS[2]), true)
+    p.abrirCadastro(conta)
+    assert.equal(p.cadAberto.value, false, 'o lápis não abre')
+    await p.pedirExclusao(conta)
+    assert.equal(p.excluindo.value, null, 'a lixeira não abre')
+    assert.ok(!calls.some((c) => c.url.includes('/uso')), 'nada vai ao servidor')
   }
   // M-75: lixeira de Categoria de venda — uso pela rota dela; em uso não tem Excluir;
   // livre, exclui sem confirmar=true

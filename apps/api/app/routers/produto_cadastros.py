@@ -27,6 +27,15 @@ M-76 (25/11/2026): o menu "Centro de custo" do Novo cadastro de Categoria de ven
 Cadastros › Centro de custo (routers/centros_custo.py); centro novo (sem raiz) aparece no menu,
 mas ainda não recebe categoria de venda ("Categoria de venda só em Celular, Eletro e Mala por
 enquanto.").
+
+M-89 (26/11/2026): coluna "Tabela" — a tabela do sistema que cada cadastro alimenta:
+- Categoria e Tag de envio (e os tipos criados na tela, que ficam na mesma lista) → "Produtos 2";
+- Categoria de venda → "Contas Celular" / "Contas Eletro" / "Contas Mala" (as três tabelas da aba
+  Contas, pelo centro de custo). As do Catálogo (raiz que não é centro de custo) saem desta lista:
+  o catálogo é uma opção dentro das três tabelas. Nada é apagado — seguem em Cadastros ›
+  Segmentos e em todo cálculo que as lê;
+- tipo novo "Tipo de conta" (tabela "Lojas"): os centros de custo com raiz (Celular, Eletro,
+  Mala), no fim da lista. Só para ver: não tem rota de criar, editar nem excluir.
 """
 
 from __future__ import annotations
@@ -42,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, is_unique_violation
 from app.deps.auth import require_active_user, require_admin, require_permission
-from app.models import ProdutoCadastro, ProdutoCadastroTipo, Segment, User
+from app.models import CentroCusto, ProdutoCadastro, ProdutoCadastroTipo, Segment, User
 from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO, NOME_MAX
 from app.services import categorias_venda as cv
 from app.services import centros_custo
@@ -53,6 +62,16 @@ router = APIRouter(prefix="/api/produto-cadastros", tags=["produto_cadastros"])
 
 _view = require_permission("cadastro_produtos", "view")
 
+# M-89: os nomes da coluna "Tabela".
+TABELA_PRODUTOS2 = "Produtos 2"
+TABELA_CONTAS = "Contas"  # o tipo Categoria de venda; cada linha diz qual: "Contas Celular"…
+TABELA_LOJAS = "Lojas"
+
+
+def tabela_contas(centro_nome: str) -> str:
+    """A tabela da aba Contas de um centro de custo: "Contas Celular", "Contas Eletro"…"""
+    return f"{TABELA_CONTAS} {centro_nome}"
+
 
 # ---------------------------------------------------------------- formatos
 
@@ -61,6 +80,8 @@ class TipoOut(BaseModel):
     id: UUID
     nome: str
     chave: str | None
+    # M-89: a tabela do tipo ("Produtos 2", "Contas" ou "Lojas").
+    tabela: str | None = TABELA_PRODUTOS2
 
 
 class CadastroOut(BaseModel):
@@ -72,6 +93,8 @@ class CadastroOut(BaseModel):
     # M-75: só nas linhas de Categoria de venda (nas outras: None / True).
     centro_custo: str | None = None
     ativa: bool = True
+    # M-89: a coluna "Tabela".
+    tabela: str | None = TABELA_PRODUTOS2
 
 
 class CentroCustoOut(BaseModel):
@@ -80,6 +103,9 @@ class CentroCustoOut(BaseModel):
     # M-76: só Celular, Eletro e Mala (os centros com raiz em Segmentos) recebem categoria de
     # venda por enquanto; a tela avisa ao escolher um centro novo.
     aceita_categoria: bool = True
+    # M-89: a tabela do "Novo cadastro" ("Contas Celular"…); None no centro sem raiz, que não tem
+    # tabela na aba Contas.
+    tabela: str | None = None
 
 
 class ListaOut(BaseModel):
@@ -154,7 +180,8 @@ def _cadastro_out(c: ProdutoCadastro, t: ProdutoCadastroTipo) -> CadastroOut:
 def _venda_out(seg: Segment, raiz: Segment, centro_nome: str | None = None) -> CadastroOut:
     """Categoria de venda (M-75): a linha é o próprio segmento filho (id = segments.id). O Centro
     de custo é o nome do cadastro de Centro de custo (M-76) ou, na raiz que não é centro (o
-    Catálogo), o nome da raiz."""
+    Catálogo), o nome da raiz. M-89: a Tabela é a do centro na aba Contas ("Contas Celular");
+    a raiz que não é centro (o Catálogo) não tem tabela (None)."""
     return CadastroOut(
         id=seg.id,
         tipo_id=cv.TIPO_ID,
@@ -163,11 +190,25 @@ def _venda_out(seg: Segment, raiz: Segment, centro_nome: str | None = None) -> C
         nome=seg.name,
         centro_custo=centro_nome or raiz.name,
         ativa=seg.active,
+        tabela=tabela_contas(centro_nome) if centro_nome else None,
     )
 
 
-async def _nome_do_centro(session: AsyncSession, raiz: Segment) -> str:
-    return (await centros_custo.nomes_por_raiz(session)).get(raiz.id, raiz.name)
+def _tipo_conta_out(centro: CentroCusto) -> CadastroOut:
+    """Tipo de conta (M-89): a linha é o próprio centro de custo (id = centros_custo.id)."""
+    return CadastroOut(
+        id=centro.id,
+        tipo_id=centros_custo.TIPO_CONTA_ID,
+        tipo_nome=centros_custo.TIPO_CONTA_NOME,
+        tipo_chave=centros_custo.CHAVE_TIPO_CONTA,
+        nome=centro.nome,
+        tabela=TABELA_LOJAS,
+    )
+
+
+async def _nome_do_centro(session: AsyncSession, raiz: Segment) -> str | None:
+    """O nome do centro de custo da raiz; None na raiz que não é centro (o Catálogo)."""
+    return (await centros_custo.nomes_por_raiz(session)).get(raiz.id)
 
 
 async def _venda(session: AsyncSession, venda_id: UUID) -> tuple[Segment, Segment]:
@@ -205,11 +246,13 @@ async def _cadastro(session: AsyncSession, cadastro_id: UUID) -> ProdutoCadastro
 
 
 async def _sem_repetir_tipo(session: AsyncSession, nome: str, menos: UUID | None = None) -> None:
-    if svc.igual(nome, cv.TIPO_NOME):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"code": "tipo_repetido", "mensagem": f"Já existe o tipo “{cv.TIPO_NOME}”."},
-        )
+    # Os tipos de id fixo (sem linha em produto_cadastro_tipos) também são nomes ocupados.
+    for fixo in (cv.TIPO_NOME, centros_custo.TIPO_CONTA_NOME):
+        if svc.igual(nome, fixo):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={"code": "tipo_repetido", "mensagem": f"Já existe o tipo “{fixo}”."},
+            )
     q = select(ProdutoCadastroTipo.id).where(func.lower(ProdutoCadastroTipo.nome) == nome.lower())
     if menos is not None:
         q = q.where(ProdutoCadastroTipo.id != menos)
@@ -337,20 +380,43 @@ async def listar(
     ]
     cadastros.sort(key=lambda c: (svc.ordem(c.tipo_nome), svc.ordem(c.nome)))
     # M-75: Categoria de venda = os segmentos filhos, por centro de custo (Celular, Eletro,
-    # Mala e depois o Catálogo) e na ordem das colunas de margem/frete (cv.listar); o sort
-    # estável só encaixa o tipo entre os outros.
+    # Mala) e na ordem das colunas de margem/frete (cv.listar); o sort estável só encaixa o tipo
+    # entre os outros. M-89: só as das três tabelas de Contas (raiz ligada a um centro de
+    # custo); as do Catálogo não aparecem aqui (continuam em Cadastros › Segmentos).
     nomes = await centros_custo.nomes_por_raiz(session)
-    cadastros += [_venda_out(s, raiz, nomes.get(raiz.id)) for s, raiz in await cv.listar(session)]
+    cadastros += [
+        _venda_out(s, raiz, nomes[raiz.id])
+        for s, raiz in await cv.listar(session)
+        if raiz.id in nomes
+    ]
     cadastros.sort(key=lambda c: svc.ordem(c.tipo_nome))
+    # M-89: Tipo de conta (tabela Lojas) = os centros de custo com raiz, no fim da lista.
+    centros = await cv.centros_do_menu(session)
+    cadastros += [_tipo_conta_out(c) for c, raiz in centros if raiz is not None]
     tipos_out = [TipoOut(id=t.id, nome=t.nome, chave=t.chave) for t in tipos]
-    tipos_out.append(TipoOut(id=cv.TIPO_ID, nome=cv.TIPO_NOME, chave=cv.CHAVE))
+    tipos_out.append(
+        TipoOut(id=cv.TIPO_ID, nome=cv.TIPO_NOME, chave=cv.CHAVE, tabela=TABELA_CONTAS)
+    )
     tipos_out.sort(key=lambda t: svc.ordem(t.nome))
+    tipos_out.append(
+        TipoOut(
+            id=centros_custo.TIPO_CONTA_ID,
+            nome=centros_custo.TIPO_CONTA_NOME,
+            chave=centros_custo.CHAVE_TIPO_CONTA,
+            tabela=TABELA_LOJAS,
+        )
+    )
     return ListaOut(
         tipos=tipos_out,
         cadastros=cadastros,
         centros_custo=[
-            CentroCustoOut(id=c.id, nome=c.nome, aceita_categoria=raiz is not None)
-            for c, raiz in await cv.centros_do_menu(session)
+            CentroCustoOut(
+                id=c.id,
+                nome=c.nome,
+                aceita_categoria=raiz is not None,
+                tabela=tabela_contas(c.nome) if raiz is not None else None,
+            )
+            for c, raiz in centros
         ],
     )
 

@@ -37,6 +37,14 @@ MSG_FIXO_NOME = (
     "Celular, Eletro e Mala não mudam de nome: o sistema procura esses nomes em outras telas."
 )
 
+# M-89 (Harry 26/11/2026): o tipo "Tipo de conta" da tela Cadastros › Produtos (tabela "Lojas").
+# NÃO é lista nova: as linhas são os centros de custo com raiz em Segmentos (Celular, Eletro,
+# Mala), de onde sai a coluna "Tipo" da tela Lojas. Não tem linha em produto_cadastro_tipos: id
+# fixo só para a tela, como o tipo "Categoria de venda". Só para ver (sem lápis nem lixeira).
+TIPO_CONTA_ID = UUID("3b8e2f64-89a1-4c7d-a2e5-1f0c4b9d7a89")
+TIPO_CONTA_NOME = "Tipo de conta"
+CHAVE_TIPO_CONTA = "tipo_conta"
+
 
 def _recusa(st: int, code: str, mensagem: str, **extra: object) -> HTTPException:
     return HTTPException(st, detail={"code": code, "mensagem": mensagem, **extra})
