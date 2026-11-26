@@ -332,6 +332,26 @@ assert.match(barra, /\{\{ rotuloNomesContas \}\}/)
 assert.match(barra, /data-menu-contas[\s\S]*?v-model="buscaNomesContas"[\s\S]*?Marcar todas[\s\S]*?Limpar[\s\S]*?v-for="o in opcoesNomesContasBuscadas"[\s\S]*?type="checkbox"[\s\S]*?:checked="!contasNomesDesmarcados\.includes\(o\.valor\)"[\s\S]*?alternarNaLista\(contasNomesDesmarcados, o\.valor\)/)
 // Layout ▾.
 assert.match(barra, /data-menu-layout-contas[\s\S]*?v-for="c in opcoesLayoutContas"[\s\S]*?type="checkbox"[\s\S]*?:checked="mostraColunaConta\(c\.chave\)"[\s\S]*?alternarNaLista\(colunasOcultasContas, c\.chave\)/)
+// M-61: o Layout (Contas e Tabela) só com a caixa e o nome; sem descrição nem rodapé.
+{
+  const menuLayout = (marca) => {
+    const i = tpl.search(marca)
+    assert.ok(i >= 0, `menu ${marca} existe`)
+    return tpl.slice(i, tpl.indexOf('</PopoverContent>', i)).replace(/<!--[\s\S]*?-->/g, '')
+  }
+  const menuContas = menuLayout(/data-menu-layout-contas\b/)
+  const menuTabela = menuLayout(/data-menu-layout\s/)
+  for (const m of [menuContas, menuTabela]) {
+    assert.doesNotMatch(m, /Fica lembrado|O Excel leva|Esc ou clicar fora|border-t|text-\[11px\]/, 'sem descrição nem rodapé')
+    assert.doesNotMatch(m, /items-start|mt-0\.5/, 'caixa centralizada na altura do nome')
+    assert.match(m, /<label[^>]*class="flex cursor-pointer items-center gap-2 /)
+    assert.match(m, /class="z-\[70\] w-64 /, 'a largura do menu não muda')
+  }
+  assert.match(menuContas, /type="checkbox"[\s\S]*?\/>\s*<span>\{\{ c\.rotulo \}\}<\/span>\s*<\/label>/)
+  assert.match(menuTabela, /data-campo="layout-kit" \/>\s*<span>Kit<\/span>\s*<\/label>/)
+  assert.match(menuTabela, /data-campo="layout-estoque" \/>\s*<span>Estoque<\/span>\s*<\/label>/)
+  assert.ok(P.COLUNAS_LAYOUT_CONTAS.every((c) => !('dica' in c)), 'as opções do Layout de Contas não têm mais descrição')
+}
 // Excel: o mesmo botão da Tabela (ícone de download).
 assert.match(barra, /<button class="btn btn-sm h-7 py-0" :disabled="!accountsFiltered\.length" data-acao="excel-contas" @click="exportarExcelContas">\s*<Download class="h-4 w-4 mr-1" \/> Excel\s*<\/button>/)
 

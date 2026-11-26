@@ -110,7 +110,7 @@ const AJUDA_TABELA = {
       itens: [
         { termo: 'Buscar', texto: 'procura o produto por SKU ou nome.' },
         { termo: 'Plataforma e Contas', texto: 'escolhem quais colunas aparecem.' },
-        { termo: 'Layout', texto: 'mostra ou esconde as colunas de Kit e de Estoque.' },
+        { termo: 'Layout', texto: 'mostra ou esconde as colunas de Kit e de Estoque; fica lembrado neste navegador.' },
         { termo: 'Excel', texto: 'baixa todas as colunas e contas (só a busca filtra).' },
         { termo: 'Atualizar', texto: 'planilha, conferir ou atualizar anúncio — Geral ou Por conta.' },
         { termo: 'Reposição (ADM)', texto: 'dias de reposição; muda também a tela Importação.' },
@@ -166,7 +166,7 @@ const AJUDA_CONTAS = {
       itens: [
         { termo: 'Buscar', texto: 'procura a conta pelo nome, plataforma ou e-mail.' },
         { termo: 'Plataforma e Contas', texto: 'escolhem quais linhas aparecem.' },
-        { termo: 'Layout', texto: 'mostra ou esconde Catálogo ML, Equipe, Kit, Comissão e Obs.' },
+        { termo: 'Layout', texto: 'mostra ou esconde Catálogo ML, Equipe, Kit, Comissão e Obs; fica lembrado neste navegador.' },
         { termo: 'Equipes', texto: 'mostra só as contas das equipes marcadas (ou "Sem equipe").' },
         { termo: 'Excel', texto: 'baixa as contas que estão na tela (busca e filtros), só com as colunas à mostra.' },
         { termo: 'Vincular Integrações', texto: 'liga as contas sem integração à conexão do marketplace; não troca vínculo que já existe.' },
@@ -902,12 +902,13 @@ const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).le
 // colunas, como o Layout da Tabela de Preços (marcada = aparece; lembrado
 // neste navegador). Kit e Comissão só entram na lista de quem já vê essas
 // colunas (ADM, M-10). Desconto e Custo total (M-55/M-56) ficam sempre à mostra.
+// O menu mostra só a caixa e o nome (M-61); a explicação fica na Ajuda.
 const COLUNAS_LAYOUT_CONTAS = [
-  { chave: 'catalogo', rotulo: 'Catálogo ML', dica: 'coluna Catálogo ML (Ativo/Inativo)', soAdmin: false },
-  { chave: 'equipe', rotulo: 'Equipe', dica: 'número da equipe que vê a conta', soAdmin: false },
-  { chave: 'kit', rotulo: 'Kit', dica: 'kit da conta', soAdmin: true },
-  { chave: 'comissao', rotulo: 'Comissão', dica: 'comissão da plataforma (ML: Clássico · Premium)', soAdmin: true },
-  { chave: 'obs', rotulo: 'Obs', dica: 'observação da conta', soAdmin: false },
+  { chave: 'catalogo', rotulo: 'Catálogo ML', soAdmin: false },
+  { chave: 'equipe', rotulo: 'Equipe', soAdmin: false },
+  { chave: 'kit', rotulo: 'Kit', soAdmin: true },
+  { chave: 'comissao', rotulo: 'Comissão', soAdmin: true },
+  { chave: 'obs', rotulo: 'Obs', soAdmin: false },
 ]
 const CHAVE_COLUNAS_OCULTAS_CONTAS = 'precos.contas.colunasOcultas'
 // Guarda as DESMARCADAS: vazio = tudo à mostra (o começo).
@@ -5634,26 +5635,21 @@ watch(department, async () => {
               data-menu-layout-contas
               class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
             >
+              <!-- Só a caixa e o nome (M-61): a explicação fica na Ajuda ("?"). -->
               <label
                 v-for="c in opcoesLayoutContas"
                 :key="c.chave"
-                class="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
               >
                 <input
                   type="checkbox"
-                  class="size-4 mt-0.5"
+                  class="size-4"
                   :checked="mostraColunaConta(c.chave)"
                   :data-campo="`layout-contas-${c.chave}`"
                   @change="colunasOcultasContas = alternarNaLista(colunasOcultasContas, c.chave)"
                 />
-                <span>
-                  {{ c.rotulo }}
-                  <span class="block text-[11px] text-muted-foreground">{{ c.dica }}</span>
-                </span>
+                <span>{{ c.rotulo }}</span>
               </label>
-              <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
-                Fica lembrado neste navegador. O Excel leva só as colunas à mostra. Esc ou clicar fora fecha.
-              </div>
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
@@ -7586,26 +7582,18 @@ watch(department, async () => {
               data-menu-layout
               class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
             >
+              <!-- Só a caixa e o nome (M-61): a explicação fica na Ajuda ("?"). -->
               <label
                 v-if="department === 'celular'"
-                class="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
               >
-                <input v-model="mostrarKits" type="checkbox" class="size-4 mt-0.5" data-campo="layout-kit" />
-                <span>
-                  Kit
-                  <span class="block text-[11px] text-muted-foreground">custo de cada kit (kit 1 a kit 8)</span>
-                </span>
+                <input v-model="mostrarKits" type="checkbox" class="size-4" data-campo="layout-kit" />
+                <span>Kit</span>
               </label>
-              <label class="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50">
-                <input v-model="mostrarEstoque" type="checkbox" class="size-4 mt-0.5" data-campo="layout-estoque" />
-                <span>
-                  Estoque
-                  <span class="block text-[11px] text-muted-foreground">colunas Estoque, 7d, 30d e Reposição</span>
-                </span>
+              <label class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50">
+                <input v-model="mostrarEstoque" type="checkbox" class="size-4" data-campo="layout-estoque" />
+                <span>Estoque</span>
               </label>
-              <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
-                Fica lembrado neste navegador. O Excel leva tudo. Esc ou clicar fora fecha.
-              </div>
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>

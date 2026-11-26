@@ -280,7 +280,7 @@ async function principal() {
     for (const trecho of ['custo do kit', 'aba Produtos', 'aba Contas', 'conta sem integração', 'sem anúncio vinculado',
       'anúncio pausado/encerrado', 'último envio com erro', 'fora da margem', 'ML, Shopee, Amazon, TikTok', 'Não grava nada',
       'só a busca filtra', 'Geral ou Por conta', 'muda também a tela Importação', 'Atualizar › Conferir', 'Atualizar anúncio',
-      'permissão de editar a Tabela de Preços']) {
+      'permissão de editar a Tabela de Preços', 'fica lembrado neste navegador']) {
       assert.ok(tudo.includes(trecho), `o texto fala de: ${trecho}`)
     }
     // M-59: a ajuda da aba Contas, no mesmo formato.
@@ -304,7 +304,8 @@ async function principal() {
     const tudoC = JSON.stringify(CONTAS)
     for (const trecho of ['vale para Clássico e Premium', 'só nas contas do Mercado Livre', 'Sem equipe',
       'nome, plataforma ou e-mail', 'busca e filtros', 'só com as colunas à mostra', 'não troca vínculo que já existe',
-      'já nasce com Clássico e Premium', 'Atualizar › Conferir', 'não mudam o preço da Tabela', 'permissão de editar Contas']) {
+      'já nasce com Clássico e Premium', 'Atualizar › Conferir', 'não mudam o preço da Tabela', 'permissão de editar Contas',
+      'fica lembrado neste navegador']) {
       assert.ok(tudoC.includes(trecho), `o texto da aba Contas fala de: ${trecho}`)
     }
     // O SFC inteiro continua compilando.
