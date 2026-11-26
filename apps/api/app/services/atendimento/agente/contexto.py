@@ -210,6 +210,12 @@ ACOES_QUE_O_BANCO_NAO_SOLTA = frozenset(
         constantes.ACAO_INSTRUCAO,
         constantes.ACAO_ENVIAR_ARQUIVO_NF,
         constantes.ACAO_ALTERAR_ENDERECO,
+        # 26/11/2026 (Minas, 1b4zeizvpk; o Eduardo: "faça isso"): o combinado FORA da plataforma
+        # (o reembolso por Pix que o atendente prometeu) é da pessoa que combinou. A conferência
+        # com o banco lê só o turno, não a conversa: o "serve" trocou o rascunho certo do agente
+        # (que pediu pessoa) pela resposta de outra loja ("o reembolso é feito pela plataforma") e
+        # contradisse o atendente duas vezes. Em 7 dias, só esses 2 envios saíram assim.
+        constantes.ACAO_APROVAR_FORA_DA_PLATAFORMA,
     }
 )
 ACOES_QUE_O_BANCO_SOLTA = frozenset(constantes.ACOES_PESSOA) - ACOES_QUE_O_BANCO_NAO_SOLTA

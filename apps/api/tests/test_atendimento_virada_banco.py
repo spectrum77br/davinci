@@ -163,6 +163,9 @@ async def test_o_banco_nao_solta_instrucao_nf_nem_endereco_nem_fora_da_virada():
         constantes.ACAO_INSTRUCAO,
         constantes.ACAO_ENVIAR_ARQUIVO_NF,
         constantes.ACAO_ALTERAR_ENDERECO,
+        # 26/11/2026 (Minas): o combinado por fora (o Pix do atendente) fica com a pessoa — o
+        # "serve" do banco trocava o rascunho certo por "o reembolso é feito pela plataforma".
+        constantes.ACAO_APROVAR_FORA_DA_PLATAFORMA,
     ):
         cliente = _Cliente("mesma")
         ctx = _ctx()
