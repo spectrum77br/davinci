@@ -16,6 +16,12 @@ Quem recebe é o cadastro `logistica_amazon_auto` do modal Informar da aba
 Amazon (threema_informar_config) — mesmo mecanismo do aviso automático da
 Margem. O botão também manda, sob demanda, a lista dos pedidos de Envio
 próprio em trânsito (`linhas_informar`, contexto `logistica_amazon`).
+
+Temu (26/11/2026): a mesma regra vale lá — passado o prazo de entrega a Temu
+reembolsa o cliente sem devolução (306833: prazo 17/11, reembolso 18/11, pacote
+parado na Anjun desde 07/11). O `logistica_temu` grava a data na mesma coluna
+(`prazo_entrega_amazon`) e o robô avisa as mesmas pessoas, com o texto da
+Temu. A lista do botão Informar da aba Amazon continua só Amazon.
 """
 
 from __future__ import annotations
@@ -70,26 +76,56 @@ def _fmt_dt(dt: datetime | None) -> str:
     return dt.astimezone(SAO_PAULO).strftime("%d/%m %H:%M")
 
 
+# Temu: entregue (todos os pacotes) ou cancelado. "Entregue em parte" segue
+# avisando — o pacote que falta pode estourar o prazo.
+_TEMU_ORDER_FIM = frozenset({"CANCELED", "RECEIPTED"})
+# Temu já tratada por gente: reembolsada/extraviada vai pra Aguardando
+# Devolução ou Problemas no Bling (306833) — o "VENCEU" ali só atrapalha.
+_TEMU_SITUACOES_TRATADAS = frozenset({"aguardando devolução", "problemas"})
+# "VENCEU" velho não ajuda: a Temu reembolsa logo depois do prazo. Na 1ª rodada
+# depois de ligar, prazo vencido há mais que isto não avisa (revisão 26/11).
+TEMU_VENCIDO_ATE_DIAS = 3
+
+
+def eh_temu(row: Logistica) -> bool:
+    return (row.plataforma or "").strip().lower() in logistica_rules._TEMU_PLATAFORMAS
+
+
 def em_transito(row: Logistica) -> bool:
-    """Pedido de Envio próprio que ainda não foi entregue nem encerrado."""
-    if (row.amazon_canal or "") != logistica_amazon_canal.CANAL_PROPRIO:
+    """Pedido ainda não entregue nem encerrado: Amazon de Envio próprio, ou
+    Temu que a Temu não deu como cancelado/entregue."""
+    if eh_temu(row):
+        ordem = str((row.meli_status or {}).get("order_status") or "").strip().upper()
+        if ordem in _TEMU_ORDER_FIM:
+            return False
+        if (row.status_bling or "").strip().lower() in _TEMU_SITUACOES_TRATADAS:
+            return False
+    elif (row.amazon_canal or "") != logistica_amazon_canal.CANAL_PROPRIO:
         return False
     if row.entregue_em is not None:
         return False
     return (row.status_bling or "").strip().lower() not in SITUACOES_ENCERRADAS
 
 
-async def pedidos_em_transito(session: AsyncSession) -> list[Logistica]:
-    """Linhas Amazon de Envio próprio em trânsito na janela, data máxima da
-    Amazon mais próxima primeiro (sem data por último)."""
+async def pedidos_em_transito(
+    session: AsyncSession, *, temu: bool = False
+) -> list[Logistica]:
+    """Linhas Amazon de Envio próprio em trânsito na janela (e, com `temu`, as
+    da Temu), data máxima mais próxima primeiro (sem data por último)."""
     corte = date.today() - timedelta(days=JANELA_DIAS)
+    plataforma = func.lower(func.trim(Logistica.plataforma))
+    amazon_proprio = (plataforma.in_(tuple(logistica_rules._AMAZON_PLATAFORMAS))) & (
+        Logistica.amazon_canal == logistica_amazon_canal.CANAL_PROPRIO
+    )
+    quem = (
+        or_(amazon_proprio, plataforma.in_(tuple(logistica_rules._TEMU_PLATAFORMAS)))
+        if temu
+        else amazon_proprio
+    )
     rows = (
         await session.execute(
             select(Logistica).where(
-                func.lower(func.trim(Logistica.plataforma)).in_(
-                    tuple(logistica_rules._AMAZON_PLATAFORMAS)
-                ),
-                Logistica.amazon_canal == logistica_amazon_canal.CANAL_PROPRIO,
+                quem,
                 Logistica.entregue_em.is_(None),
                 or_(Logistica.data.is_(None), Logistica.data >= corte),
             )
@@ -153,7 +189,8 @@ def avisos_devidos(row: Logistica, hoje: date | None = None) -> list[str]:
     prazo = row.prazo_entrega_amazon
     if prazo is not None:
         if prazo < hoje:
-            if row.aviso_prazo_amazon_vencido_at is None:
+            velho = eh_temu(row) and prazo < hoje - timedelta(days=TEMU_VENCIDO_ATE_DIAS)
+            if row.aviso_prazo_amazon_vencido_at is None and not velho:
                 out.append(TIPO_PRAZO_VENCIDO)
         elif (
             prazo - timedelta(days=DIAS_ANTES_PRAZO) <= hoje
@@ -161,6 +198,42 @@ def avisos_devidos(row: Logistica, hoje: date | None = None) -> list[str]:
         ):
             out.append(TIPO_PRAZO_3D)
     return out
+
+
+def _cabecalho_temu(tipo: str, row: Logistica, hoje: date) -> str:
+    if tipo == TIPO_PRAZO_VENCIDO:
+        return "🚨 DaVinci — Temu: prazo de entrega da Temu VENCEU sem entrega"
+    d = (row.prazo_entrega_amazon - hoje).days if row.prazo_entrega_amazon else DIAS_ANTES_PRAZO
+    if d <= 0:
+        return "🚨 DaVinci — Temu: prazo de entrega da Temu vence HOJE"
+    return f"⚠️ DaVinci — Temu: faltam {d} dia(s) para o prazo de entrega da Temu"
+
+
+def mensagem_aviso_temu(row: Logistica, tipo: str, hoje: date | None = None) -> str:
+    hoje = hoje or hoje_brt()
+    rastreio = (row.rastreio or "").strip() or "sem rastreio"
+    posicao = (row.localizacao or "").strip() or "sem evento de rastreio ainda"
+    if row.localizacao_at:
+        posicao += f" ({_fmt_dt(row.localizacao_at)})"
+    linhas = [
+        _cabecalho_temu(tipo, row, hoje),
+        f"Pedido {row.pedido_bling or '?'} ({row.conta or '?'}) · "
+        f"Temu {row.pedido_marketplace or '?'}",
+        f"Rastreio: {rastreio}",
+        f"Última posição: {posicao}",
+        f"Entregar até (Temu): {_fmt(row.prazo_entrega_amazon)} · ainda não entregue",
+    ]
+    if tipo == TIPO_PRAZO_VENCIDO:
+        linhas.append(
+            "A Temu reembolsa o cliente sem devolução logo depois do prazo. Cobre a "
+            "transportadora e, se a Temu reembolsar, abra a reclamação (resgate) na tela."
+        )
+    else:
+        linhas.append(
+            "Passado o prazo a Temu reembolsa o cliente sem devolução. Cobre a "
+            "transportadora agora."
+        )
+    return "\n".join(linhas)
 
 
 def _cabecalho(tipo: str, row: Logistica, hoje: date) -> str:
@@ -179,6 +252,8 @@ def _cabecalho(tipo: str, row: Logistica, hoje: date) -> str:
 
 def mensagem_aviso(row: Logistica, tipo: str, hoje: date | None = None) -> str:
     hoje = hoje or hoje_brt()
+    if eh_temu(row):
+        return mensagem_aviso_temu(row, tipo, hoje)
     cliente = " · ".join(
         p for p in ((row.cliente_nome or "").strip(), (row.localizacao or "").strip()) if p
     )
@@ -232,7 +307,7 @@ async def run(
     cadastrado, os avisos pendentes saem na rodada seguinte)."""
     hoje = hoje or hoje_brt()
     resumo = {"pedidos": 0, "avisos": 0, "enviados": 0, "falhas": 0, "sem_destinatarios": 0}
-    rows = await pedidos_em_transito(session)
+    rows = await pedidos_em_transito(session, temu=True)
     resumo["pedidos"] = len(rows)
     pendentes = [(r, t) for r in rows for t in avisos_devidos(r, hoje)]
     resumo["avisos"] = len(pendentes)

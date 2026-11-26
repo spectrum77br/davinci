@@ -53,6 +53,8 @@ const PLATAFORMA_TABS = [
   { key: 'shopee', label: 'Shopee' },
   { key: 'amazon', label: 'Amazon' },
   { key: 'tiktok', label: 'TikTok' },
+  // 26/11/2026: só a Temu Barbosa (a única com a Open API ligada) entra.
+  { key: 'temu', label: 'Temu' },
   { key: 'flex', label: 'Flex' },
 ] as const
 type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
@@ -492,6 +494,9 @@ function escondido(c: Logistica): boolean {
 }
 // Aba Amazon (DBA e Envio próprio juntos): coluna Envio e as colunas do Envio próprio.
 const ehAmazonTab = computed(() => tab.value === 'amazon')
+// Temu (26/11/2026): mesma "data máxima de entrega" da Amazon — passou, a Temu
+// reembolsa o cliente (306833). Coluna própria "Entregar até" na aba.
+const ehTemuTab = computed(() => tab.value === 'temu')
 // Aba Flex: a coluna "Tracken" (a transportadora do Flex, 13/11/2026).
 const ehFlexTab = computed(() => tab.value === 'flex')
 type TrackenEvento = { em: string | null; descricao: string | null; observacao: string | null }
@@ -858,7 +863,7 @@ function abrirRaio(c: Logistica) {
 }
 // Botão "Atualizar status" do Raio-X: o mesmo de antes, da plataforma da linha.
 function podeAtualizarStatus(c: Logistica): boolean {
-  return canEdit.value && !!c.pedido_marketplace && (isMl(c) || isShopee(c) || isTiktok(c) || isAmazon(c))
+  return canEdit.value && !!c.pedido_marketplace && (isMl(c) || isShopee(c) || isTiktok(c) || isAmazon(c) || isTemu(c))
 }
 // 17/11/2026 (Vinicius, pedido 305553): o ⟳ também fica na coluna Status da
 // tabela, sem abrir o Raio-X. Avisa o resultado — sem o aviso, status que não
@@ -872,7 +877,9 @@ async function atualizarStatusPlataforma(c: Logistica) {
         ? atualizarTiktok
         : isAmazon(c)
           ? atualizarAmazon
-          : null
+          : isTemu(c)
+            ? atualizarTemu
+            : null
   if (!consultar || refreshingMeli.value.has(c.id)) return
   const antes = assinatura(c)
   if (!(await consultar(c))) {
@@ -1650,6 +1657,10 @@ function isAmazon(c: Logistica): boolean {
   return (c.plataforma || '').trim().toLowerCase() === 'amazon'
 }
 
+function isTemu(c: Logistica): boolean {
+  return (c.plataforma || '').trim().toLowerCase() === 'temu'
+}
+
 // Envio próprio ainda SEM o código dos Correios: a etiqueta sai no Bling
 // (Melhor Envio) e o motor só relê cada linha de hora em hora, então logo
 // depois de etiquetar a Localização mostra só a cidade de destino que a
@@ -1877,6 +1888,26 @@ async function suspenderEntrega(c: Logistica) {
     const s = new Set(suspendendo.value)
     s.delete(c.id)
     suspendendo.value = s
+  }
+}
+
+// Puxa o pedido Temu (status, prazo de entrega e rastreio) pela Open API.
+async function atualizarTemu(c: Logistica) {
+  refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-temu`, {
+      method: 'POST',
+    })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
+    return true
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro ao consultar a Temu'
+    return false
+  } finally {
+    const s = new Set(refreshingMeli.value)
+    s.delete(c.id)
+    refreshingMeli.value = s
   }
 }
 
@@ -3494,6 +3525,7 @@ async function aplicarStatusBling(c: Logistica) {
                 <col v-if="ehFlexTab" class="w-[150px]">
                 <col class="w-[130px]"><col :class="ehAmazonTab ? 'w-[200px]' : 'w-[250px]'"><col :class="ehAmazonTab ? 'w-[140px]' : 'w-[190px]'"><col v-if="!ehFlexTab">
                 <template v-if="ehAmazonTab"><col class="w-[80px]"><col class="w-[92px]"></template>
+                <col v-if="ehTemuTab" class="w-[92px]">
                 <col :class="ehAmazonTab ? 'w-[100px]' : 'w-[104px]'">
                 <col v-if="ehFlexTab">
                 <col :class="ehAmazonTab ? 'w-[110px]' : 'w-[120px]'"><col :class="ehAmazonTab ? 'w-[80px]' : 'w-[84px]'">
@@ -3502,7 +3534,7 @@ async function aplicarStatusBling(c: Logistica) {
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 7 : ehFlexTab ? 7 : 6">Pedido</th>
-                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : ehFlexTab ? 1 : 2">Plataforma</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : ehFlexTab ? 1 : ehTemuTab ? 3 : 2">Plataforma</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
                   <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Transportadora</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 3 : 2">Caso</th>
@@ -3522,6 +3554,7 @@ async function aplicarStatusBling(c: Logistica) {
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão</th>
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até</th>
                   </template>
+                  <th v-if="ehTemuTab" class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Temu — depois dela a Temu reembolsa o cliente">Entregar até</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Status Bling</th>
                   <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="O que a transportadora do Flex (TRACKen) diz do pacote — lido de 30 em 30 min no rastreio dela">Tracken</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Chamado</th>
@@ -3531,7 +3564,7 @@ async function aplicarStatusBling(c: Logistica) {
               </thead>
               <tbody>
                 <tr v-if="loading && !rows.length">
-                  <td :colspan="(ehAmazonTab ? 15 : 11) + (ehFlexTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 15 : 11) + (ehFlexTab ? 1 : 0) + (ehTemuTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
                     <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
                   </td>
                 </tr>
@@ -3655,6 +3688,14 @@ async function aplicarStatusBling(c: Logistica) {
                       <span v-else class="text-muted-foreground">—</span>
                     </td>
                   </template>
+                  <td v-if="ehTemuTab" class="px-1.5 py-1.5 text-center text-[11px]">
+                    <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400" :title="`Entrega registrada em ${fmtDataHora(c.entregue_em)}`">entregue {{ fmtQuando(c.entregue_em) }}</span>
+                    <template v-else-if="c.prazo_entrega_amazon">
+                      <div :class="prazoVencido(c) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(c.prazo_entrega_amazon).slice(0, 5) }}</div>
+                      <div class="text-[10px]" :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'">{{ prazoResumo(c) }}</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center dark:border-l-slate-600">
                     <span v-if="c.status_bling" class="inline-block w-[92px] truncate rounded py-0.5 text-[11px] font-semibold" :class="corStatusBling(c.status_bling)" :title="c.status_bling">{{ c.status_bling }}</span>
                     <span v-else class="text-muted-foreground">—</span>
@@ -3739,7 +3780,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
-                  <td :colspan="(ehAmazonTab ? 15 : 11) + (ehFlexTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 15 : 11) + (ehFlexTab ? 1 : 0) + (ehTemuTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
                     {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
                   </td>
                 </tr>

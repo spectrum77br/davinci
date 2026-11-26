@@ -434,6 +434,175 @@ async def _candidatos(session: AsyncSession, plat: Plataforma = TEMU) -> list[Bl
     return [o for o in rows if _RE_PO_TEMU.fullmatch(o.numeroloja or "")]
 
 
+# ── Coleta pela Open API da Temu (26/11/2026) ──────────────────────────────
+# Loja Temu com a API ligada (a Barbosa): a prova da coleta é o rastreio da
+# própria Temu (`logistica_temu.coleta_pela_api`, lista POSITIVA de status),
+# com as mesmas travas do `_aplicar`. O 17track fica pras lojas sem API e de
+# reserva: API que falha (fora do ar, token vencido) manda o pedido pro 17track
+# nesta rodada.
+ORIGEM_HORA_API = "temu_api_coleta"
+_API_TETO_PEDIDO = 45  # s por pedido (detalhe + rastreio de cada pacote)
+
+
+async def integracoes_temu_por_loja(session: AsyncSession) -> dict[str, Any]:
+    """{id da loja no Bling (texto, como `bling_orders.loja`): Integração} das
+    lojas Temu com a Open API ativa — pela loja ligada à integração
+    (`stores.integration_id`) ou pela integração ligada à loja
+    (`integrations.store_id`)."""
+    from sqlalchemy import or_
+
+    from app.models import Integration, IntegrationPlatform
+    from app.models.company import Store
+
+    integs = (
+        await session.execute(
+            select(Integration).where(
+                Integration.platform == IntegrationPlatform.TEMU,
+                Integration.archived_at.is_(None),
+                # A Conciliação tem "âncoras" Temu (status "ancora", arquivadas).
+                Integration.status == "active",
+            )
+        )
+    ).scalars().all()
+    if not integs:
+        return {}
+    por_id = {i.id: i for i in integs}
+    por_loja_db = {i.store_id: i for i in integs if i.store_id is not None}
+    lojas = (
+        await session.execute(
+            select(Store.id, Store.integration_id, Store.bling_store_id).where(
+                or_(Store.integration_id.in_(list(por_id)), Store.id.in_(list(por_loja_db))),
+                Store.bling_store_id.isnot(None),
+            )
+        )
+    ).all()
+    saida: dict[str, Any] = {}
+    for sid, iid, bling_id in lojas:
+        integ = por_id.get(iid) or por_loja_db.get(sid)
+        if integ is not None:
+            saida[str(bling_id)] = integ
+    return saida
+
+
+async def lojas_temu_com_api(session: AsyncSession) -> set[str]:
+    return set(await integracoes_temu_por_loja(session))
+
+
+async def _coletas_pela_api(
+    session: AsyncSession, cands: list[BlingOrder]
+) -> tuple[list[tuple[BlingOrder, datetime]], list[BlingOrder], dict[str, int]]:
+    """(coletados pela API, candidatos que seguem pro 17track, contadores).
+    Pedido que a API diz que ainda não saiu NÃO vai pro 17track (a API manda).
+    A 1ª falha da API numa loja manda o resto dela pro 17track nesta rodada."""
+    from app.security.cipher import decrypt_json
+    from app.services import logistica_temu
+    from app.services.marketplaces.temu import TemuClient, TemuErro
+
+    cont = {"api_coletados": 0, "api_ainda_nao_saiu": 0, "api_falhou": 0}
+    por_loja = await integracoes_temu_por_loja(session)
+    if not por_loja:
+        return [], list(cands), cont
+    coletados: list[tuple[BlingOrder, datetime]] = []
+    restantes: list[BlingOrder] = []
+    clientes: dict[str, Any] = {}
+    quebradas: set[str] = set()
+    for o in cands:
+        loja = str(o.loja or "")
+        integ = por_loja.get(loja)
+        if integ is None or loja in quebradas:
+            restantes.append(o)
+            continue
+        try:
+            if loja not in clientes:
+                clientes[loja] = TemuClient(decrypt_json(integ.credentials))
+            estado, hora = await asyncio.wait_for(
+                logistica_temu.coleta_pela_api(clientes[loja], str(o.numeroloja)),
+                timeout=_API_TETO_PEDIDO,
+            )
+        except (TemuErro, TimeoutError, httpx.HTTPError, ValueError) as e:
+            quebradas.add(loja)
+            cont["api_falhou"] += 1
+            logger.warning(
+                "temu_rastreio_api_falhou",
+                loja=loja,
+                pedido=o.numero,
+                erro=type(e).__name__,
+                detalhe=str(e)[:200],
+            )
+            restantes.append(o)
+            continue
+        if estado == logistica_temu.COLETA_SAIU and hora is not None:
+            coletados.append((o, hora))
+            cont["api_coletados"] += 1
+        elif estado == logistica_temu.COLETA_NAO_SAIU:
+            cont["api_ainda_nao_saiu"] += 1
+        else:
+            restantes.append(o)
+    return coletados, restantes, cont
+
+
+async def _coletas_pelo_17track(
+    linhas: dict[str, dict[str, Any]],
+    pedido_do_codigo: dict[str, BlingOrder],
+    agora: datetime,
+    plat: Plataforma,
+    resumo: dict[str, int],
+) -> dict[str, datetime]:
+    """{código: hora da coleta} pelo 17track (leitura grátis, cadastro dos
+    novos e consulta paga na hora). Track17Error sobe."""
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        lidos, nao_registrados = await _ler(c, list(linhas.values()))
+        anotados = await _ler_consultas(list(linhas), plat.chave_consulta)
+        novos = [linhas[n] for n in nao_registrados if n in linhas]
+        if novos:
+            aceitos = await _registrar(c, novos)
+            resumo["registrados"] = len(aceitos)
+            for codigo in aceitos:
+                pagas = ((anotados or {}).get(codigo) or {}).get("n", 0)
+                await _anotar_consulta(codigo, pagas, agora, plat.chave_consulta)
+        coletados = {n: h for n, ti in lidos.items() if n in linhas and (h := _coletado_em(ti))}
+        # Sem Redis não há contador nem teto: não paga nada nesta rodada.
+        pagaveis = lidos if anotados is not None else {}
+        anotados = anotados or {}
+        for codigo, ti in pagaveis.items():
+            if (
+                codigo not in linhas
+                or codigo in coletados
+                or linhas[codigo]["carrier"] not in plat.pagas
+                or _motivo_sem_consulta(agora, anotados.get(codigo), _sync_17track(ti))
+            ):
+                continue
+            pagas = (anotados.get(codigo) or {}).get("n", 0) + 1
+            # Anota antes de chamar: consulta que falhou também conta no teto.
+            await _anotar_consulta(codigo, pagas, agora, plat.chave_consulta)
+            if resumo["consultas_pagas"]:
+                await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
+            resumo["consultas_pagas"] += 1
+            pedido = pedido_do_codigo[codigo].numero
+            try:
+                novo = await _consultar_na_hora(c, linhas[codigo])
+            except logistica_track.Track17Error as e:
+                logger.warning(
+                    f"{plat.nome}_rastreio_consulta_falhou",
+                    pedido=pedido,
+                    n=pagas,
+                    err=str(e)[:200],
+                )
+                resumo["erros"] += 1
+                continue
+            hora = _coletado_em(novo or {})
+            logger.info(
+                f"{plat.nome}_rastreio_consulta_paga",
+                pedido=pedido,
+                n=pagas,
+                status=((novo or {}).get("latest_status") or {}).get("status"),
+                coletado=hora is not None,
+            )
+            if hora is not None:
+                coletados[codigo] = hora
+    return coletados
+
+
 async def _ler(
     c: httpx.AsyncClient, linhas: list[dict[str, Any]]
 ) -> tuple[dict[str, dict], list[str]]:
@@ -495,6 +664,8 @@ async def _aplicar(
     cand: BlingOrder,
     coletado_em: datetime,
     plat: Plataforma = TEMU,
+    *,
+    origem_hora: str | None = None,
 ) -> str:
     """Pedido coletado/postado → 15 no Bling e no DaVinci. Mesmas travas da
     Magalu (`magalu_shipment_sync.apply_magalu_shipment`): trava do ingest,
@@ -597,7 +768,7 @@ async def _aplicar(
         sku=rows[0].item_codigo,
         valor_antigo=None,
         valor_novo=coletado_em.isoformat(),
-        origem=plat.origem_hora,
+        origem=origem_hora or plat.origem_hora,
         mudado_por=None,
     )
     return "confirmado"
@@ -646,6 +817,13 @@ async def rodada(plat: Plataforma = TEMU) -> dict[str, int]:
             return resumo
         cands = await _candidatos(session, plat)
         resumo["candidatos"] = len(cands)
+        # 26/11/2026: loja Temu com a Open API (a Barbosa) — a coleta vem do
+        # rastreio da própria Temu; o 17track fica pras outras e de reserva
+        # (API fora do ar / token vencido).
+        coletados_api: list[tuple[BlingOrder, datetime]] = []
+        if plat.plataforma_loja is None:
+            coletados_api, cands, cont_api = await _coletas_pela_api(session, cands)
+            resumo.update(cont_api)
         agora = _agora()
         etiqueta_em = dict(
             (
@@ -670,67 +848,27 @@ async def rodada(plat: Plataforma = TEMU) -> dict[str, int]:
                 continue
             linhas[linha["number"]] = linha
             pedido_do_codigo[linha["number"]] = o
-        if not linhas:
+        if not linhas and not coletados_api:
             return resumo
-        try:
-            async with httpx.AsyncClient(timeout=40.0) as c:
-                lidos, nao_registrados = await _ler(c, list(linhas.values()))
-                anotados = await _ler_consultas(list(linhas), plat.chave_consulta)
-                novos = [linhas[n] for n in nao_registrados if n in linhas]
-                if novos:
-                    aceitos = await _registrar(c, novos)
-                    resumo["registrados"] = len(aceitos)
-                    for codigo in aceitos:
-                        pagas = ((anotados or {}).get(codigo) or {}).get("n", 0)
-                        await _anotar_consulta(codigo, pagas, agora, plat.chave_consulta)
-                coletados = {
-                    n: h for n, ti in lidos.items() if n in linhas and (h := _coletado_em(ti))
-                }
-                # Sem Redis não há contador nem teto: não paga nada nesta rodada.
-                pagaveis = lidos if anotados is not None else {}
-                anotados = anotados or {}
-                for codigo, ti in pagaveis.items():
-                    if (
-                        codigo not in linhas
-                        or codigo in coletados
-                        or linhas[codigo]["carrier"] not in plat.pagas
-                        or _motivo_sem_consulta(agora, anotados.get(codigo), _sync_17track(ti))
-                    ):
-                        continue
-                    pagas = (anotados.get(codigo) or {}).get("n", 0) + 1
-                    # Anota antes de chamar: consulta que falhou também conta no teto.
-                    await _anotar_consulta(codigo, pagas, agora, plat.chave_consulta)
-                    if resumo["consultas_pagas"]:
-                        await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
-                    resumo["consultas_pagas"] += 1
-                    pedido = pedido_do_codigo[codigo].numero
-                    try:
-                        novo = await _consultar_na_hora(c, linhas[codigo])
-                    except logistica_track.Track17Error as e:
-                        logger.warning(
-                            f"{plat.nome}_rastreio_consulta_falhou",
-                            pedido=pedido,
-                            n=pagas,
-                            err=str(e)[:200],
-                        )
-                        resumo["erros"] += 1
-                        continue
-                    hora = _coletado_em(novo or {})
-                    logger.info(
-                        f"{plat.nome}_rastreio_consulta_paga",
-                        pedido=pedido,
-                        n=pagas,
-                        status=((novo or {}).get("latest_status") or {}).get("status"),
-                        coletado=hora is not None,
-                    )
-                    if hora is not None:
-                        coletados[codigo] = hora
-        except logistica_track.Track17Error as e:
-            logger.warning(f"{plat.nome}_rastreio_17track_falhou", err=str(e)[:200])
-            resumo["erros"] += 1
-            return resumo
-        resumo["ainda_nao_saiu"] = len(linhas) - len(coletados)
-        if not coletados:
+        coletados: dict[str, datetime] = {}
+        if linhas:
+            try:
+                coletados = await _coletas_pelo_17track(
+                    linhas, pedido_do_codigo, agora, plat, resumo
+                )
+            except logistica_track.Track17Error as e:
+                logger.warning(f"{plat.nome}_rastreio_17track_falhou", err=str(e)[:200])
+                resumo["erros"] += 1
+                if not coletados_api:
+                    return resumo
+                coletados = {}
+        resumo["ainda_nao_saiu"] = (
+            len(linhas) - len(coletados) + resumo.get("api_ainda_nao_saiu", 0)
+        )
+        aplicar_lista = [
+            (pedido_do_codigo[codigo], hora, plat.origem_hora) for codigo, hora in coletados.items()
+        ] + [(o, hora, ORIGEM_HORA_API) for o, hora in coletados_api]
+        if not aplicar_lista:
             return resumo
         integracao = await _get_bling_integration(session)
         if integracao is None:
@@ -740,11 +878,10 @@ async def rodada(plat: Plataforma = TEMU) -> dict[str, int]:
         # Igual à Magalu: savepoint por pedido não pode travar a linha da
         # integração (a rotação de token grava numa transação própria).
         bling = await _build_bling_client(session, integracao, persist_in_session=False)
-        for codigo, hora in coletados.items():
-            o = pedido_do_codigo[codigo]
+        for o, hora, origem_hora in aplicar_lista:
             try:
                 async with session.begin_nested():
-                    motivo = await _aplicar(session, bling, o, hora, plat)
+                    motivo = await _aplicar(session, bling, o, hora, plat, origem_hora=origem_hora)
             except Exception as exc:  # noqa: BLE001 — um pedido não derruba os outros
                 resumo["erros"] += 1
                 logger.warning(

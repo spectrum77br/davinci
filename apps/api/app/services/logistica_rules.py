@@ -294,6 +294,113 @@ _ML_PLATAFORMAS = {"mercado livre", "mercadolivre", "ml"}
 _SHOPEE_PLATAFORMAS = {"shopee"}
 _TIKTOK_PLATAFORMAS = {"tiktok", "tik tok", "tiktok shop"}
 _AMAZON_PLATAFORMAS = {"amazon"}
+_TEMU_PLATAFORMAS = {"temu"}
+
+
+# --- Temu -----------------------------------------------------------------
+# Piloto da Barbosa (26/11/2026, Open API do app "Stock Sync Hub"): o
+# `logistica_temu` grava no `meli_status`
+#   - `order_status`: o `parentOrderStatus` do pedido (bg.order.detail.v2.get)
+#     traduzido pra palavra (TEMU_ORDER_STATUS);
+#   - `logistics_status`: o `logisticsStatus` do ÚLTIMO evento do rastreio
+#     (temu.track.trackinginfo.get), normalizado pra MAIÚSCULAS_COM_TRAÇO.
+# A assinatura junta os dois ("Enviado | Em trânsito") — é o texto que se
+# cadastra na aba Status. Caso de pós-venda (devolução/só reembolso) entra na
+# etapa das Devoluções.
+TEMU_ORDER_STATUS: dict[int, str] = {
+    1: "PENDING",
+    2: "UN_SHIPPING",
+    3: "CANCELED",
+    4: "SHIPPED",
+    5: "RECEIPTED",
+    41: "PARTIALLY_SHIPPED",
+    51: "PARTIALLY_RECEIPTED",
+}
+TEMU_ORDER_LABELS_PT: dict[str, str] = {
+    "PENDING": "Pendente",
+    "UN_SHIPPING": "Aguardando envio",
+    "CANCELED": "Cancelado",
+    "SHIPPED": "Enviado",
+    "RECEIPTED": "Entregue",
+    "PARTIALLY_SHIPPED": "Enviado em parte",
+    "PARTIALLY_RECEIPTED": "Entregue em parte",
+}
+# `logisticsStatus` do rastreio da Temu (vistos na sonda de 26/11: os três
+# primeiros; os demais são o vocabulário padrão de rastreio). Status que não
+# está aqui aparece como veio — nunca some da assinatura.
+TEMU_LOGISTICS_LABELS_PT: dict[str, str] = {
+    "LAST_MILE_CARRIER_PICKED_UP": "Coletado",
+    "IN_TRANSIT": "Em trânsito",
+    "ARRIVED_AT_POST_OFFICE": "Chegou ao ponto de entrega",
+    "OUT_FOR_DELIVERY": "Saiu para entrega",
+    "AVAILABLE_FOR_PICKUP": "Aguardando retirada",
+    "DELIVERED": "Entregue",
+    "DELIVERY_FAILED": "Falha na entrega",
+    "FAILED_ATTEMPT": "Falha na entrega",
+    "EXCEPTION": "Problema no envio",
+    "RETURNING": "Voltando ao vendedor",
+    "RETURN_TO_SENDER": "Voltando ao vendedor",
+    "RETURNED": "Devolvido ao vendedor",
+    "RETURNED_TO_SENDER": "Devolvido ao vendedor",
+    "LOST": "Extraviado",
+}
+_TEMU_LOGISTICS_ENTREGUE = frozenset({"DELIVERED"})
+_TEMU_LOGISTICS_FALHOU = frozenset(
+    {
+        "DELIVERY_FAILED", "FAILED_ATTEMPT", "EXCEPTION", "RETURNING", "RETURN_TO_SENDER",
+        "RETURNED", "RETURNED_TO_SENDER", "LOST",
+    }
+)
+# Status do rastreio que PROVAM que a transportadora já pegou o pacote. Lista
+# POSITIVA de propósito (revisão de 26/11, a lição dos 335 falsos "enviado" do
+# ML — `_ML_CONFIRMED_SHIPPED_SUBSTATUS`): status desconhecido ("Shipping label
+# created", "Awaiting pickup"…) NÃO conta como saída.
+TEMU_LOGISTICS_COLETADO = frozenset(
+    {
+        "LAST_MILE_CARRIER_PICKED_UP", "IN_TRANSIT", "ARRIVED_AT_POST_OFFICE",
+        "OUT_FOR_DELIVERY", "AVAILABLE_FOR_PICKUP", "DELIVERED",
+    }
+    | _TEMU_LOGISTICS_FALHOU
+)
+# Ordem de avanço do pacote, pra escolher o pacote MENOS adiantado de um pedido
+# com vários (o status da linha é o dele). Falha vem antes de tudo: é o que
+# precisa de gente.
+TEMU_LOGISTICS_ORDEM: dict[str, int] = {
+    **dict.fromkeys(_TEMU_LOGISTICS_FALHOU, -1),
+    "LAST_MILE_CARRIER_PICKED_UP": 1,
+    "IN_TRANSIT": 2,
+    "ARRIVED_AT_POST_OFFICE": 3,
+    "OUT_FOR_DELIVERY": 4,
+    "AVAILABLE_FOR_PICKUP": 4,
+    "DELIVERED": 9,
+}
+
+
+def temu_status_logistico(texto: str | None) -> str:
+    """"Last Mile Carrier Picked up" → "LAST_MILE_CARRIER_PICKED_UP"."""
+    return "_".join((texto or "").replace("-", " ").upper().split())
+
+
+def temu_saiu(status: dict[str, str] | None) -> bool:
+    """A transportadora já pegou o pacote? Um status do rastreio que prova a
+    coleta (TEMU_LOGISTICS_COLETADO), ou o pedido já entregue."""
+    m = status or {}
+    log = str(m.get("logistics_status") or "").strip().upper()
+    if log in TEMU_LOGISTICS_COLETADO:
+        return True
+    return str(m.get("order_status") or "").strip().upper() in {"RECEIPTED", "PARTIALLY_RECEIPTED"}
+
+
+def assinatura_temu(status: dict[str, str] | None) -> str:
+    """Assinatura em PT da Temu = status do pedido + status do envio (último
+    evento do rastreio), juntados por " | " (omite os ausentes)."""
+    m = status or {}
+    partes = [
+        _amz_label(TEMU_ORDER_LABELS_PT, m.get("order_status")),
+        _amz_label(TEMU_LOGISTICS_LABELS_PT, m.get("logistics_status")),
+    ]
+    return " | ".join(p for p in partes if p)
+
 
 
 # Situações da returns API em que o caso de devolução está ENCERRADO (desistido
@@ -820,6 +927,16 @@ def situacao_da_ida(plataforma: str | None, status: dict[str, str] | None) -> st
         if sh in _ML_IDA_A_CAMINHO:
             return IDA_A_CAMINHO
         return None
+    if p in _TEMU_PLATAFORMAS:
+        log = str(m.get("logistics_status") or "").strip().upper()
+        ordem = str(m.get("order_status") or "").strip().upper()
+        if log in _TEMU_LOGISTICS_ENTREGUE or ordem in {"RECEIPTED", "PARTIALLY_RECEIPTED"}:
+            return IDA_ENTREGUE
+        if log in _TEMU_LOGISTICS_FALHOU:
+            return IDA_FALHOU
+        if log in TEMU_LOGISTICS_COLETADO:
+            return IDA_A_CAMINHO
+        return None
     return None
 
 
@@ -946,6 +1063,10 @@ _SINAL_DEVOLUCAO = {
         "order_status": {"CANCELED", "CANCELLED"},
         "return_status": None,  # devolução do cliente (relatório, 02/10)
     },
+    "temu": {
+        "order_status": {"CANCELED"},
+        "logistics_status": _TEMU_LOGISTICS_FALHOU,
+    },
 }
 
 
@@ -967,6 +1088,8 @@ def data_entrada_devolucao_estimada(
         key = "tiktok"
     elif p in _AMAZON_PLATAFORMAS:
         key = "amazon"
+    elif p in _TEMU_PLATAFORMAS:
+        key = "temu"
     else:
         return None
     ms = meli_status or {}
@@ -1164,6 +1287,17 @@ _CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dic
             "return_status": AMAZON_DEVOLUCAO_LABELS_PT,
         },
     ),
+    "temu": (
+        ["order_status", "logistics_status"],
+        {
+            "order_status": "Status do pedido",
+            "logistics_status": "Status do envio",
+        },
+        {
+            "order_status": TEMU_ORDER_LABELS_PT,
+            "logistics_status": TEMU_LOGISTICS_LABELS_PT,
+        },
+    ),
 }
 
 
@@ -1177,6 +1311,8 @@ def _config_campos(
         return _CAMPOS_POR_PLATAFORMA["tiktok"]
     if p in _AMAZON_PLATAFORMAS:
         return _CAMPOS_POR_PLATAFORMA["amazon"]
+    if p in _TEMU_PLATAFORMAS:
+        return _CAMPOS_POR_PLATAFORMA["temu"]
     return FIELD_ORDER, FIELD_LABELS, VALUE_LABELS_PT
 
 
@@ -1222,6 +1358,8 @@ def assinatura_para(plataforma: str | None, status: dict[str, str] | None) -> st
         return assinatura_tiktok(status)
     if p in _AMAZON_PLATAFORMAS:
         return assinatura_amazon(status)
+    if p in _TEMU_PLATAFORMAS:
+        return assinatura_temu(status)
     return assinatura_pt(status)
 
 

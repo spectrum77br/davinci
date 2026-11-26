@@ -3030,6 +3030,14 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         lembretes = await chamados_devolucao_sync.lembrar_recursos(s)
     logger.info("chamados_recurso_lembrete_done", **lembretes)
+    # 26/11/2026: chamado Temu (sem API de reclamação) — a IA de Chamado confere
+    # na tela uma vez por dia (`lembrar_temu`).
+    try:
+        async with session_scope() as s:
+            temu = await chamados_devolucao_sync.lembrar_temu(s)
+        logger.info("chamados_temu_lembrete_done", **temu)
+    except Exception as e:  # noqa: BLE001 — não pode parar a varredura das presas
+        logger.warning("chamados_temu_lembrete_falhou", err=str(e)[:300])
     # 17/11/2026 (298756/304961): chamado de devolução da Amazon parado só com o
     # aviso "abrir SAFE-T na mão" — a IA de Chamado ganha a instrução de abrir.
     try:

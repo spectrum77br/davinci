@@ -125,6 +125,7 @@ from app.services import (
     logistica_rules,
     logistica_shopee,
     logistica_suspensao_me,
+    logistica_temu,
     logistica_tiktok,
     logistica_track,
     logistica_track_sync,
@@ -161,6 +162,7 @@ _PLATAFORMA_LABELS = {
     "amazon": "Amazon",
     "tiktok": "TikTok",
     "magalu": "Magalu",
+    "temu": "Temu",
 }
 
 
@@ -1766,6 +1768,47 @@ async def atualizar_amazon(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_amazon_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
         raise HTTPException(502, detail={"code": "logistica_amazon_erro"}) from e
+    try:
+        await logistica_bling.sync_status_bling_row(session, c)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
+    await session.commit()
+    await session.refresh(c)
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
+    )
+
+
+@router.post(
+    "/{logistica_id}/atualizar-temu",
+    response_model=LogisticaOut,
+    dependencies=_DA_EQUIPE,
+)
+async def atualizar_temu(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Puxa o pedido Temu (status, prazo de entrega e rastreio) pela Open API e
+    grava em `meli_status`. Só vale pra loja Temu com a API ligada (26/11/2026:
+    a Barbosa)."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        await logistica_temu.enrich_row(session, c)
+    except logistica_temu.TemuEnrichError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_temu_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "logistica_temu_erro"}) from e
     try:
         await logistica_bling.sync_status_bling_row(session, c)
     except Exception as e:  # noqa: BLE001

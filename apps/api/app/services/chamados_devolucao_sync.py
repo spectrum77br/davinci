@@ -1299,6 +1299,8 @@ async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = No
                 Chamado.resolvido.is_(False),
                 chamados_svc.ultima_analise_espera_sql(),
                 _fora_do_fixo(hoje),
+                # Temu tem o lembrete diário dela (`lembrar_temu`).
+                _plataforma_chamado().notin_(PLATAFORMAS_TEMU),
             )
         )
     ).scalars().all()
@@ -1341,6 +1343,95 @@ async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = No
         logger.info("chamado_recurso_lembrete", chamado_id=str(ch.id), pedido=ch.pedido_bling)
     await session.commit()
     return {"seguindo": len(chs), "lembrados": lembrados}
+
+
+# 26/11/2026 (Vinicius): a Temu não tem API de reclamação — o resgate e o
+# pós-venda só se veem no Seller Center, e ela não avisa o DaVinci quando
+# decide (306833: resgate aberto pela tela, "Resgates em andamento"). Todo
+# chamado Temu aberto ganha uma instrução do sistema pra IA de Chamado conferir
+# na tela — "a cada 1 dia" (ele; o lembrete geral é de 2 dias). Não empilha:
+# instrução ainda não lida segura a próxima; análise que pediu gente/respondeu/
+# resolveu também (só volta quando a IA disser "aguardar"). Fixo com data no
+# futuro e "encerrar" ficam de fora, como no lembrete geral.
+LEMBRETE_TEMU = timedelta(days=1)
+LEMBRETE_TEMU_PREFIXO = "Lembrete automático (Temu)"
+PLATAFORMAS_TEMU = ("temu",)
+
+
+def _plataforma_chamado():
+    return func.lower(func.trim(func.coalesce(Chamado.plataforma, "")))
+
+
+def lembrete_temu_txt(ch: Chamado) -> str:
+    link = (ch.chamado_url or "").strip()
+    onde = (
+        f"Abra o caso no perfil da loja ({link})"
+        if link.startswith("https://")
+        else "Abra a loja no perfil dela, em Gerenciar devoluções, buscando o nº do pedido"
+    )
+    return (
+        f"{LEMBRETE_TEMU_PREFIXO}: a Temu não avisa o DaVinci quando decide. {onde}, "
+        "veja o status do caso (resgate/reclamação e pós-venda) e registre: aprovado ou "
+        "valor devolvido → resolver com o valor; ainda em análise → aguardar, dizendo o "
+        "que a tela mostra; negado, pedindo prova ou a Temu pediu login → humano."
+    )
+
+
+async def lembrar_temu(session: AsyncSession, *, agora: datetime | None = None) -> dict:
+    """Uma instrução do sistema por dia em cada chamado Temu aberto (ver acima).
+    Commita."""
+    ref = agora or datetime.now(UTC)
+    hoje = ref.astimezone(chamados_svc.SAO_PAULO).date()
+    chs = (
+        await session.execute(
+            select(Chamado).where(
+                Chamado.resolvido.is_(False),
+                _plataforma_chamado().in_(PLATAFORMAS_TEMU),
+                _fora_do_fixo(hoje),
+            )
+        )
+    ).scalars().all()
+    lembrados = 0
+    for ch in chs:
+        ultima_analise = (
+            await session.execute(
+                select(ChamadoMensagem)
+                .where(ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "analise")
+                .order_by(ChamadoMensagem.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        ultima_instrucao = (
+            await session.execute(
+                select(func.max(ChamadoMensagem.created_at)).where(
+                    ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "instrucao"
+                )
+            )
+        ).scalar_one_or_none()
+        analise_em = ultima_analise.created_at if ultima_analise is not None else None
+        if ultima_instrucao is not None and (analise_em is None or ultima_instrucao > analise_em):
+            continue  # a IA ainda não leu a instrução que já está lá
+        if ultima_analise is not None and not (ultima_analise.texto or "").rstrip().endswith(
+            chamados_svc.ACAO_ESPERAR_TXT
+        ):
+            continue  # a IA pediu gente (ou respondeu/resolveu): é a vez da pessoa
+        base = max(x for x in (analise_em, ultima_instrucao, ch.created_at) if x is not None)
+        if ref - base < LEMBRETE_TEMU:
+            continue
+        session.add(
+            chamados_svc.nova_mensagem(
+                ch,
+                texto=lembrete_temu_txt(ch),
+                tipo="instrucao",
+                direcao="sistema",
+                autor_nome=chamados_svc.AUTOR_SISTEMA,
+                status="registrada",
+            )
+        )
+        lembrados += 1
+        logger.info("chamado_temu_lembrete", chamado_id=str(ch.id), pedido=ch.pedido_bling)
+    await session.commit()
+    return {"abertos": len(chs), "lembrados": lembrados}
 
 
 # 17/11/2026 (Vinicius, 298756/304961): o chamado de devolução da Amazon nasce só

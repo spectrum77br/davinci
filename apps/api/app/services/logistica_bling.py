@@ -56,6 +56,12 @@ _ML_PLATAFORMAS = logistica_rules._ML_PLATAFORMAS
 _SHOPEE_PLATAFORMAS = logistica_rules._SHOPEE_PLATAFORMAS
 _TIKTOK_PLATAFORMAS = logistica_rules._TIKTOK_PLATAFORMAS
 _AMAZON_PLATAFORMAS = logistica_rules._AMAZON_PLATAFORMAS
+_TEMU_PLATAFORMAS = logistica_rules._TEMU_PLATAFORMAS
+# Plataformas com Status Plataforma enriquecido (alvo dos executores da aba Status).
+_PLATAFORMAS_COM_STATUS = (
+    _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+    | _TEMU_PLATAFORMAS
+)
 
 # Campos calculados/read-only do GET que o Bling recomputa ou rejeita no PUT.
 _COMPUTED_DROP = ("totalProdutos", "total", "taxas", "tributacao")
@@ -283,7 +289,7 @@ async def escrever_mensagem_bling_em_lote(
     stmt = select(Logistica)
     if ids is not None:
         stmt = stmt.where(Logistica.id.in_(list(ids)))
-    alvo = _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+    alvo = _PLATAFORMAS_COM_STATUS
     pendentes: list[tuple[UUID, UUID]] = []
     for r in (await session.execute(stmt)).scalars().all():
         if (r.plataforma or "").strip().lower() not in alvo:
@@ -661,6 +667,10 @@ def pacote_ainda_com_o_vendedor(
     if p in _TIKTOK_PLATAFORMAS:
         ordem = str(m.get("order_status") or "").strip().upper()
         return bool(ordem) and ordem not in _TIKTOK_SHIPPED
+    if p in _TEMU_PLATAFORMAS:
+        # Na Temu o pedido vira "Enviado" na compra da etiqueta; quem prova a
+        # saída é o rastreio (primeiro evento depois da pré-coleta).
+        return bool(m) and not logistica_rules.temu_saiu(m)
     if p in _ML_PLATAFORMAS:
         ship = str(m.get("ship_status") or "").strip().lower()
         sub = str(m.get("ship_substatus") or "").strip().lower()
@@ -767,7 +777,7 @@ async def aplicar_status_em_lote(
     # assinatura_para). Linhas sem enrich caem na guarda de "sem regra" logo
     # abaixo e são ignoradas.
     alvo = (
-        _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+        _PLATAFORMAS_COM_STATUS
     )
     # Só os IDs (valores planos): `session.rollback()` numa falha expira TODAS
     # as instâncias ORM da sessão, e tocar atributo expirado fora do greenlet
@@ -848,7 +858,7 @@ async def enviar_threema_em_lote(
     stmt = select(Logistica)
     if ids is not None:
         stmt = stmt.where(Logistica.id.in_(list(ids)))
-    alvo = _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+    alvo = _PLATAFORMAS_COM_STATUS
     rows = [
         r
         for r in (await session.execute(stmt)).scalars().all()

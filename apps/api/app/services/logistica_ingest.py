@@ -24,6 +24,7 @@ Status (que dependem da situação atual) julgavam um estado velho (caso real:
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -45,6 +46,7 @@ from app.services import (
     logistica_meli,
     logistica_rules,
     logistica_shopee,
+    logistica_temu,
     logistica_tiktok,
     logistica_track,
     logistica_track_sync,
@@ -63,7 +65,12 @@ _PLATAFORMA_LABELS = {
     "shopee": "Shopee",
     "amazon": "Amazon",
     "tiktok": "TikTok",
+    # 26/11/2026: só as lojas Temu com a Open API ligada (`so_contas`).
+    "temu": "Temu",
 }
+
+# Plataformas da Logística, na ordem em que o motor as lê.
+PLATAFORMAS = ("ml", "shopee", "tiktok", "amazon", "temu")
 
 # Mesmo mapeamento do backfill: plataforma/conta via store_info (o `loja` do
 # pedido é o bling_store_id), status_bling via situacao_bling. meli_status fica
@@ -99,6 +106,9 @@ _INSERT_SQL = text(
       -- sem este filtro a linha ia e voltava a cada rodada). Entregue ENTRA —
       -- fica no painel os 90 dias da janela de reclamação e aí o cleanup tira.
       AND (sb.nome IS NULL OR sb.nome NOT IN ('Cancelado', 'Resolvido', 'Perdimento'))
+      -- Temu (26/11/2026): só as contas com a Open API (as outras não têm de
+      -- onde tirar o Status Plataforma e ficariam vermelhas pra sempre).
+      AND (:so_contas = false OR lower(trim(si.account_name)) = ANY(:contas))
       AND NOT EXISTS (
           SELECT 1 FROM "{_SCHEMA}".logistica l WHERE l.pedido_bling = bo.numero
       )
@@ -467,6 +477,11 @@ async def _inserir(
     """O INSERT de uma plataforma, sob a trava (ver `_TRAVA_INSERT_SQL`).
     Devolve os ids das linhas que entraram."""
     label = _PLATAFORMA_LABELS[platform]
+    contas: list[str] = []
+    if platform == "temu":
+        contas = await logistica_temu.contas_com_api(session)
+        if not contas:
+            return []
     await session.execute(_TRAVA_INSERT_SQL)
     res = await session.execute(
         _INSERT_SQL,
@@ -475,6 +490,8 @@ async def _inserir(
             "label": label,
             "dias": dias,
             "so_problemas": so_problemas,
+            "so_contas": platform == "temu",
+            "contas": contas,
         },
     )
     ids = list(res.scalars().all())
@@ -492,10 +509,10 @@ async def _inserir(
 async def inserir_pedidos_novos(
     session: AsyncSession, *, dias: int = NOVOS_DIAS_MOTOR
 ) -> list[UUID]:
-    """Pedidos novos das 4 plataformas (janela curta) pro motor de 5 min.
+    """Pedidos novos das plataformas (janela curta) pro motor de 5 min.
     Devolve os ids que entraram — o motor os enriquece na mesma rodada."""
     ids: list[UUID] = []
-    for platform in ("ml", "shopee", "tiktok", "amazon"):
+    for platform in PLATAFORMAS:
         ids += await _inserir(session, platform, dias)
     return ids
 
@@ -563,7 +580,7 @@ async def run_ingest_marketplaces_daily(
     out: dict[str, int] = {"status_refresh": len(await refresh_status_bling(session))}
     out["cleanup"] = await cleanup_finalizados(session)
     out["cleanup_excluidos"] = await cleanup_excluidos(session)
-    for platform in ("shopee", "tiktok", "amazon"):
+    for platform in ("shopee", "tiktok", "amazon", "temu"):
         out[platform] = await _ingest_platform(session, platform, dias)
         out[f"{platform}_problemas"] = await _ingest_platform(
             session, platform, problemas_dias, so_problemas=True
@@ -578,8 +595,10 @@ async def run_ingest_marketplaces_daily(
         session, limit=enrich_limit, only_empty=True
     )
     bling_amz = await _amazon_bling_best_effort(session)
+    enr_temu = await _temu_best_effort(session, limit=enrich_limit, only_empty=True)
     return {
         **out,
+        **{f"temu_enrich_{k}": v for k, v in enr_temu.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
@@ -601,6 +620,28 @@ async def _amazon_bling_best_effort(session: AsyncSession) -> dict[str, int]:
         return {"falhou": 1}
 
 
+# Teto de tempo da leitura da Temu dentro do motor (job de 900 s): a Temu lenta
+# (20 s por chamada) não pode deixar as outras plataformas sem executores.
+TEMU_TETO_SEGUNDOS = 120
+
+
+async def _temu_best_effort(session: AsyncSession, **kw) -> dict[str, int]:
+    """Temu pela Open API (26/11/2026): roda junto do motor, mas a Temu fora do
+    ar, lenta ou com o token vencido não pode derrubá-lo nem segurá-lo. O
+    `enrich_recent` grava por lote, então o corte por tempo não perde o lido."""
+    try:
+        return await asyncio.wait_for(
+            logistica_temu.enrich_recent(session, **kw), timeout=TEMU_TETO_SEGUNDOS
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_temu_falhou", err=str(e)[:200])
+        try:
+            await session.rollback()
+        except Exception as e2:  # noqa: BLE001
+            logger.warning("logistica_temu_rollback_falhou", err=str(e2)[:120])
+        return {"falhou": 1}
+
+
 async def _ids_pendentes(
     session: AsyncSession, *, extras: Collection[UUID] = ()
 ) -> dict[str, list[UUID]]:
@@ -619,6 +660,7 @@ async def _ids_pendentes(
         "shopee": logistica_rules._SHOPEE_PLATAFORMAS,
         "tiktok": logistica_rules._TIKTOK_PLATAFORMAS,
         "amazon": logistica_rules._AMAZON_PLATAFORMAS,
+        "temu": logistica_rules._TEMU_PLATAFORMAS,
     }
     pend: dict[str, list[UUID]] = {k: [] for k in por_chave}
     for r in linhas:
@@ -627,6 +669,12 @@ async def _ids_pendentes(
         if chave is None:
             continue
         if r.id in forcadas:
+            pend[chave].append(r.id)
+            continue
+        # Temu viva (não entregue/cancelada): continua sendo lida mesmo
+        # escondida por regra — a Temu não tem sweep de pós-venda, e sem isto a
+        # entrega nunca chegava (revisão de 26/11). O RELER_APOS segura o custo.
+        if chave == "temu" and logistica_temu.temu_viva(r):
             pend[chave].append(r.id)
             continue
         # Pacote voltando (ML): continua "vivo" mesmo escondido/resolvido — o
@@ -681,6 +729,7 @@ async def _enriquecer_e_aplicar(
     # Amazon × Bling: serviço (DBA × Envio próprio), rastreio dos Correios,
     # previsão de entrega e contato — o que a SP-API não dá (projeto Amazon).
     bling_amz = await _amazon_bling_best_effort(session)
+    enr_temu = await _temu_best_effort(session, ids=alvo.get("temu", []), only_empty=False)
     ids_alvo = [i for ids in alvo.values() for i in ids]
     # Executores da aba Status (Eduardo 07/09: "não está abrindo chamado
     # automático e nem mandando a mensagem no Threema"): abrir chamado (ML pela
@@ -700,6 +749,7 @@ async def _enriquecer_e_aplicar(
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
         **{f"amazon_bling_{k}": v for k, v in bling_amz.items()},
+        **{f"temu_enrich_{k}": v for k, v in enr_temu.items()},
         **{f"chamado_{k}": v for k, v in chamados.items()},
         **{f"chamado_robo_{k}": v for k, v in chamados_robo.items()},
         **{f"threema_{k}": v for k, v in threema_lote.items()},

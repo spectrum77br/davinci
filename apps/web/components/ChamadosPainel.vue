@@ -392,8 +392,11 @@ const visiveis = computed(() => {
 })
 
 // ----------------------------------------------------------------- abas de plataforma
-const NOME_ABA: Record<string, string> = { 'mercado livre': 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok', amazon: 'Amazon', 'melhor envio': 'Melhor Envio' }
-const ORDEM_ABA = ['mercado livre', 'shopee', 'tiktok', 'amazon', 'melhor envio']
+// Temu (26/11/2026): sem API de reclamação — o chamado é registrado à mão (Novo
+// chamado, pelo nº do pedido) e a equipe acompanha a "Resgates em andamento" no
+// Seller Center. A aba aparece sozinha quando houver o primeiro chamado Temu.
+const NOME_ABA: Record<string, string> = { 'mercado livre': 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok', amazon: 'Amazon', temu: 'Temu', 'melhor envio': 'Melhor Envio' }
+const ORDEM_ABA = ['mercado livre', 'shopee', 'tiktok', 'amazon', 'temu', 'melhor envio']
 const plataformaAbas = computed(() => {
   const totais = plataformaTotais.value
   const posicao = (p: string) => { const i = ORDEM_ABA.indexOf(p); return i < 0 ? ORDEM_ABA.length : i }
@@ -614,7 +617,7 @@ function atualizarDias() {
 
 // Botão Conciliação do histórico (05/11): a Conciliação acha o pedido em todas as lojas
 // da aba e vai pra loja dele — o nome da loja no chamado não é o mesmo de lá.
-const ABA_CONCILIACAO: Record<string, string> = { 'mercado livre': 'ml', shopee: 'shopee', tiktok: 'tiktok', amazon: 'amazon' }
+const ABA_CONCILIACAO: Record<string, string> = { 'mercado livre': 'ml', shopee: 'shopee', tiktok: 'tiktok', amazon: 'amazon', temu: 'temu' }
 function linkConciliacao(row: ChamadoRow) {
   const aba = ABA_CONCILIACAO[nomePlataforma(row.plataforma)]
   if (!aba || !row.pedido_bling || !canConciliacao.value) return null
@@ -1969,6 +1972,7 @@ const PLATAFORMA_NA: Record<string, string> = {
   shopee: 'na Shopee',
   tiktok: 'na TikTok',
   amazon: 'na Amazon',
+  temu: 'na Temu',
   'melhor envio': 'no Melhor Envio',
 }
 function plataformaNa(p: string | null | undefined): string {
