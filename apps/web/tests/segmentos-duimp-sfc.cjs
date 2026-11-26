@@ -29,6 +29,17 @@ function sfc(rel) {
   return descriptor
 }
 
+// ---------------------------------------------------------------- Margem (M-74)
+// O selo "especial" acende também pela Condição especial do PRODUTO (Produtos 2, vale primeiro):
+// a dica não pode mandar procurar só em Cadastros → Segmentos.
+{
+  const margem = sfc('components/MargemPainel.vue').template.content
+  const selo = margem.slice(margem.lastIndexOf('<span', margem.indexOf('>especial</span>')), margem.indexOf('>especial</span>'))
+  assert.match(selo, /v-if="r\.data_especial"/)
+  assert.doesNotMatch(selo, /Condição Especial do segmento ativa/)
+  assert.match(selo, /A do produto \(cadastro do produto no Produtos 2\) vale primeiro; sem ela, a do segmento \(Cadastros → Segmentos\)/)
+}
+
 // ---------------------------------------------------------------- página
 const pagina = sfc('pages/admin/segments.vue')
 {

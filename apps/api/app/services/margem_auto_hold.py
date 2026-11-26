@@ -1239,7 +1239,7 @@ async def reavaliar_reprovados(
                 continue
 
             motivo = (
-                "margem passou a atender a Condição Especial do segmento"
+                "margem passou a atender a Condição Especial (do produto ou do segmento)"
                 if r["condicao_especial"]
                 else "margem passou a atender o mínimo"
             )

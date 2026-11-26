@@ -262,7 +262,7 @@ async def test_libera_reprovado_cuja_margem_passou_pela_condicao_especial(
         "DaVinci — Margem: pedido liberado automaticamente",
         "Pedido 297400 — shopee Shopee ATV",
         "Produto: Hotwav A17 Pro Max 12.64 - Laranja + Fone",
-        "Motivo: margem passou a atender a Condição Especial do segmento",
+        "Motivo: margem passou a atender a Condição Especial (do produto ou do segmento)",
         "Margem: 17,1% (mínimo 18%)",
         "Lucro: R$ 85,57",
     ]
