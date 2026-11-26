@@ -5,7 +5,8 @@ Pedido do dono: a coluna Ads (texto livre "2% - 50 ROAS") vira o botão
 a conta pode gastar em Ads, o ROAS mínimo (100 ÷ %, calculado na tela, não
 gravado) e o gasto por dia em R$; "% gasto real" e "ROAS real" da conta nos
 últimos 7 dias; e [x] Por produto (um % e um gasto por dia para cada produto
-do departamento; % vazio = usa a Geral). Nada disso entra no cálculo de preço.
+do departamento). Nada disso entra no cálculo de preço. Desde a M-78 as duas
+caixas são um ou outro (ver abaixo).
 
 O real vem do módulo Marketing SÓ LENDO (`marketing_accounts` e
 `marketing_metrics`; nenhuma coleta nova): a conta da Tabela casa com a conta
@@ -26,8 +27,17 @@ não tem Ads próprio); grava quem edita Contas.
                                                             "gasto_dia"?, "ads_por_produto_ligada"?}
   PUT /api/pricing/ads/{account_id}/produto/{product_id}  {"pode_gastar_pct"?, "gasto_dia"?}
 
-Campo ausente não muda; % e gasto null apagam (o produto sem % nem gasto volta
-para a Geral).
+Campo ausente não muda; % e gasto null apagam (o produto sem % nem gasto fica
+sem linha).
+
+M-78 (26/11/2026): "Geral" e "Produto" (o antigo "Por produto") são UM OU
+OUTRO. Ligar uma caixa desliga a outra; desligar não liga a outra (as duas
+desligadas = conta sem Ads); as duas `true` no mesmo PUT = 422
+`ads_um_ou_outro`. Com "Geral" vale o % Geral para todos; com "Produto", só o
+% próprio de cada produto (sem % próprio = sem Ads; não usa mais o Geral).
+Trocar não apaga nada: os valores da outra ficam gravados. Sem linha, ou com as
+duas ligadas no banco (antes da M-78), a conta lê como "Geral"
+(`caixas_ads`); o PUT de caixa grava sempre as duas, já no um ou outro.
 
 M-53 (25/11/2026): conta ML do par (Clássico + Premium, mesmo `par_id`) grava o
 mesmo na irmã, nas duas rotas. M-56: Afiliado % + Desconto % + Ads % da conta
@@ -74,7 +84,7 @@ from app.routers.pricing import (
 from app.schemas.pricing import duas_casas
 from app.services.marketing.horarios_contas import chave_nome
 from app.services.pricing.anuncios import CANAL_CATALOGO
-from app.services.pricing.custo_total import estado_ads, produtos_do_departamento
+from app.services.pricing.custo_total import caixas_ads, estado_ads, produtos_do_departamento
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
@@ -221,11 +231,12 @@ async def _contas_out(
     saida: dict[str, AdsContaOut] = {}
     for c in contas:
         g = gerais.get(c.id)
+        geral_ligada, por_produto_ligada = caixas_ads(g)
         saida[str(c.id)] = AdsContaOut(
-            ads_geral_ligada=g.ads_geral_ligada if g else True,
+            ads_geral_ligada=geral_ligada,
             pode_gastar_pct=g.pode_gastar_pct if g else None,
             gasto_dia=g.gasto_dia if g else None,
-            ads_por_produto_ligada=g.ads_por_produto_ligada if g else True,
+            ads_por_produto_ligada=por_produto_ligada,
             produtos=produtos[c.id],
             real=real[c.id],
         )
@@ -282,13 +293,22 @@ async def gravar_ads_da_conta(
     user: Annotated[User, Depends(require_permission("tabela_precos_contas", "edit"))],
 ) -> AdsContaOut:
     """A Geral e as duas caixas. Campo ausente não muda; caixa null não muda;
-    % e gasto null apagam."""
+    % e gasto null apagam. As caixas são um ou outro (M-78, ver o topo)."""
     acc, department = await _conta_da_aba(session, user, account_id)
     mudancas = {
         campo: valor
         for campo, valor in body.model_dump(exclude_unset=True).items()
         if valor is not None or campo in ("pode_gastar_pct", "gasto_dia")
     }
+    if mudancas.get("ads_geral_ligada") and mudancas.get("ads_por_produto_ligada"):
+        raise HTTPException(422, detail={"code": "ads_um_ou_outro"})
+    if mudancas.keys() & {"ads_geral_ligada", "ads_por_produto_ligada"}:
+        # As duas caixas vão juntas, já no um ou outro (a linha sem as duas
+        # gravadas leria o padrão do banco, as duas ligadas). O par do ML grava
+        # o mesmo nas duas contas.
+        caixas = (await estado_ads(session, acc.id)).com_geral(mudancas)
+        mudancas["ads_geral_ligada"] = caixas.geral_ligada
+        mudancas["ads_por_produto_ligada"] = caixas.por_produto_ligada
     if mudancas:
         irma = await _irma_de(session, acc)
         contas = [acc] if irma is None else [acc, irma]
@@ -321,7 +341,7 @@ async def _gravar_produto_na_conta(
     session: AsyncSession, user: User, account_id: UUID, product_id: UUID, mudancas: dict
 ) -> None:
     """Aplica as mudanças no % / gasto próprios do produto numa conta (sem
-    commit). Sem % e sem gasto, a linha sai e o produto volta para a Geral."""
+    commit). Sem % e sem gasto, a linha sai."""
     linha = await session.get(PricingAdsProduto, (account_id, product_id))
     valores = {
         "pode_gastar_pct": linha.pode_gastar_pct if linha else None,
@@ -356,8 +376,8 @@ async def gravar_ads_do_produto(
     user: Annotated[User, Depends(require_permission("tabela_precos_contas", "edit"))],
 ) -> AdsContaOut:
     """O % e o gasto por dia de um produto do departamento da conta. Sem % e
-    sem gasto, a linha sai e o produto volta para a Geral. Responde o Ads da
-    conta inteira."""
+    sem gasto, a linha sai. Grava com qualquer caixa marcada (só vale com
+    "Produto"). Responde o Ads da conta inteira."""
     acc, department = await _conta_da_aba(session, user, account_id)
     prod = await session.get(PricingProduct, product_id)
     folha = await session.get(Segment, prod.segment_id) if prod is not None else None

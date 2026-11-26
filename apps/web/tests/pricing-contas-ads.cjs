@@ -3,8 +3,11 @@
 // produto. M-55 (25/11/2026): a célula vira a caixinha com o % Geral (sem
 // "ROAS", sem seta). M-57: janela "Amazon kfa" com o cabeçalho logo abaixo do
 // título, a linha Geral na mesma grade dos produtos e sem os quadros de gasto
-// real. M-56: Custo total estourado mostra o aviso junto do campo. Executa as
-// funções reais da página e confere o template.
+// real. M-56: Custo total estourado mostra o aviso junto do campo. M-78
+// (26/11/2026): as caixas Geral e Produto ficam lado a lado logo abaixo do
+// título e são UM OU OUTRO; Geral mostra só "Todos os produtos", Produto só a
+// busca e a lista (sem herdar o % Geral). Executa as funções reais da página e
+// confere o template.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -53,11 +56,12 @@ const flash = (id, campo) => piscadas.push(`${id}:${campo}`)
 const erroAds = { value: null }
 const f = new Function('ads', 'podeEditarAds', 'buscaAdsProduto', 'seqAdsConta', 'toast', 'api', 'flash', 'erroAds', js([
   constante('ADS_PADRAO'), constante('fmtPct'),
-  funcao('parseDec'), funcao('lerPct'), funcao('adsDa'), funcao('pctGeralAds'), funcao('pctDoProdutoAds'),
+  funcao('parseDec'), funcao('lerPct'), funcao('adsDa'), funcao('pctGeralAds'), funcao('modoAds'), funcao('pctDoProdutoAds'),
+  funcao('trocarModoAds'), funcao('tituloBotaoAds'),
   funcao('roasMinimo'), funcao('fmtRoas'), funcao('fmtGasto'), funcao('lerGasto'), funcao('produtosDoAds'),
-  funcao('textoErroAds'), funcao('erroCustoTotalDe'), funcao('chaveAds'), funcao('erroAdsEm'), funcao('erroAdsDaLinhaGeral'),
-  funcao('linhaAdsNaTela'), funcao('gravarAds'), funcao('gravarCampoAds'),
-  'return { ADS_PADRAO, adsDa, pctGeralAds, pctDoProdutoAds, roasMinimo, fmtRoas, fmtGasto, lerGasto, produtosDoAds, gravarAds, gravarCampoAds, chaveAds, erroAdsEm, erroAdsDaLinhaGeral }',
+  funcao('textoErroAds'), funcao('erroCustoTotalDe'), funcao('chaveAds'), funcao('erroAdsEm'), funcao('erroAdsDoModo'),
+  funcao('erroAdsDaLinhaGeral'), funcao('linhaAdsNaTela'), funcao('gravarAds'), funcao('gravarCampoAds'),
+  'return { ADS_PADRAO, adsDa, pctGeralAds, modoAds, pctDoProdutoAds, trocarModoAds, tituloBotaoAds, roasMinimo, fmtRoas, fmtGasto, lerGasto, produtosDoAds, gravarAds, gravarCampoAds, chaveAds, erroAdsEm, erroAdsDoModo, erroAdsDaLinhaGeral }',
 ].join('\n')))(ads, podeEditarAds, buscaAdsProduto, seqAdsConta, toast, api, flash, erroAds)
 
 assert.equal(f.roasMinimo(2), 50)
@@ -81,13 +85,22 @@ const conta = {
   pode_gastar_pct: 2,
   produtos: { p1: { pode_gastar_pct: 5, gasto_dia: null }, p2: { pode_gastar_pct: null, gasto_dia: 30 } },
 }
+// M-78: conta sem nada gravado = Geral marcado, Produto desmarcado.
+assert.deepEqual([f.ADS_PADRAO.ads_geral_ligada, f.ADS_PADRAO.ads_por_produto_ligada], [true, false])
+assert.equal(f.modoAds(conta), 'geral')
 assert.equal(f.pctGeralAds(conta), 2)
 assert.equal(f.pctGeralAds({ ...conta, ads_geral_ligada: false }), null, 'Geral desmarcada: sem %')
-assert.equal(f.pctDoProdutoAds(conta, 'p1'), 5, 'o produto usa o dele')
-assert.equal(f.pctDoProdutoAds(conta, 'p2'), 2, '% vazio usa a Geral')
-assert.equal(f.pctDoProdutoAds(conta, 'p3'), 2)
-assert.equal(f.pctDoProdutoAds({ ...conta, ads_por_produto_ligada: false }, 'p1'), 2, 'Por produto desmarcado: todos usam a Geral')
-assert.equal(f.pctDoProdutoAds({ ...conta, ads_geral_ligada: false }, 'p3'), null)
+assert.equal(f.pctDoProdutoAds(conta, 'p1'), null, 'com Geral o % do produto não vale')
+const soProduto = { ...conta, ads_geral_ligada: false, ads_por_produto_ligada: true }
+assert.equal(f.modoAds(soProduto), 'produto')
+assert.equal(f.pctDoProdutoAds(soProduto, 'p1'), 5, 'o produto usa o dele')
+assert.equal(f.pctDoProdutoAds(soProduto, 'p2'), null, '% vazio: sem Ads (não herda o Geral)')
+assert.equal(f.pctDoProdutoAds(soProduto, 'p3'), null)
+assert.equal(f.modoAds({ ...conta, ads_geral_ligada: false }), null, 'as duas desmarcadas: sem Ads')
+assert.equal(f.modoAds({ ...conta, ads_por_produto_ligada: true }), 'geral', 'as duas marcadas: vale a Geral')
+assert.match(f.tituloBotaoAds(soProduto), /^Ads por produto/)
+assert.match(f.tituloBotaoAds(conta), /^Ads da conta: % Geral/)
+assert.match(f.tituloBotaoAds({ ...conta, ads_geral_ligada: false }), /^Conta sem Ads/)
 console.log('pricing contas ads: contas ok')
 
 // ---------- 2) lista do Por produto: busca por SKU ou nome, com valor próprio primeiro
@@ -146,13 +159,36 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   f.gravarCampoAds(campo('', { adsConta: 'c1', adsCampo: 'pode_gastar_pct', adsProduto: 'p1' }))
   await new Promise((r) => setTimeout(r, 0))
   assert.deepEqual(pedidos.pop(), ['/api/pricing/ads/c1/produto/p1', 'PUT', { pode_gastar_pct: null }])
-  assert.equal(ads.value.contas.c1.produtos.p1, undefined, 'sem valor: volta para a Geral')
+  assert.equal(ads.value.contas.c1.produtos.p1, undefined, 'sem valor: a linha sai')
 
   // Caixa: recusa do servidor volta ao que estava, com aviso.
   resposta = Object.assign(new Error('x'), { status: 403 })
   await f.gravarAds('c1', { ads_geral_ligada: false })
   assert.equal(ads.value.contas.c1.ads_geral_ligada, true)
   assert.match(avisos.pop(), /^Não salvou o Ads \| Só quem edita Contas/)
+
+  // M-78: um ou outro. Marcar Produto desmarca Geral (as duas vão juntas).
+  const tique = () => new Promise((r) => setTimeout(r, 0))
+  resposta = { ...ads.value.contas.c1, ads_geral_ligada: false, ads_por_produto_ligada: true }
+  f.trocarModoAds('c1', 'produto')
+  assert.equal(f.modoAds(ads.value.contas.c1), 'produto', 'já na tela')
+  await tique()
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/ads/c1', 'PUT', { ads_por_produto_ligada: true, ads_geral_ligada: false }])
+  // Clicar na marcada desmarca: as duas desmarcadas.
+  resposta = { ...ads.value.contas.c1, ads_por_produto_ligada: false }
+  f.trocarModoAds('c1', 'produto')
+  await tique()
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/ads/c1', 'PUT', { ads_por_produto_ligada: false }])
+  assert.equal(f.modoAds(ads.value.contas.c1), null)
+  // Marcar Geral desmarca Produto; nada foi apagado.
+  resposta = { ...ads.value.contas.c1, ads_geral_ligada: true }
+  f.trocarModoAds('c1', 'geral')
+  await tique()
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/ads/c1', 'PUT', { ads_geral_ligada: true, ads_por_produto_ligada: false }])
+  assert.equal(f.modoAds(ads.value.contas.c1), 'geral')
+  assert.equal(ads.value.contas.c1.pode_gastar_pct, 3, 'o % Geral continua gravado')
+  assert.deepEqual(ads.value.contas.c1.produtos.p3, { pode_gastar_pct: null, gasto_dia: 12.5 }, 'o do produto também')
+  assert.equal(avisos.length, 0)
 
   // M-56: Custo total estourado — volta ao salvo e o aviso do servidor fica
   // junto do campo (na janela aberta, sem aviso solto).
@@ -161,8 +197,9 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     status: 422, data: { detail: { code: 'custo_total_estourado', mensagem: MSG } },
   })
   const nPedidos = pedidos.length
-  // A janela aberta da c1 com a linha Geral e as dos produtos que a busca mostra.
-  const linhasNaJanela = new Set(['[data-ads-geral]', '[data-ads-produto-linha="p2"]'])
+  // A janela aberta da c1 com a linha das caixas, a linha Geral e as dos
+  // produtos que a busca mostra.
+  const linhasNaJanela = new Set(['[data-ads-modo]', '[data-ads-geral]', '[data-ads-produto-linha="p2"]'])
   const painelC1 = { querySelector: (sel) => (linhasNaJanela.has(sel) ? {} : null) }
   globalThis.document = { querySelector: (sel) => (sel === '[data-ads-painel="c1"]' ? painelC1 : null) }
   resposta = estouro()
@@ -173,14 +210,20 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   assert.deepEqual(erroAds.value, { accId: 'c1', chave: 'geral:pode_gastar_pct', mensagem: MSG })
   assert.equal(f.erroAdsEm('c1', 'geral:pode_gastar_pct'), MSG)
   assert.equal(f.erroAdsDaLinhaGeral('c1'), MSG, 'aviso na linha Geral')
+  assert.equal(f.erroAdsDoModo('c1'), null, 'não vai para a linha das caixas')
   assert.equal(f.erroAdsEm('c2', 'geral:pode_gastar_pct'), null, 'só na conta recusada')
   assert.equal(avisos.length, 0, 'janela aberta: o aviso fica na janela')
   assert.deepEqual(pedidos.at(-1), ['/api/pricing/ads/c1', 'PUT', { pode_gastar_pct: 10 }])
-  // Religar a caixa Por produto que estoura: o aviso fica embaixo dela.
+  // Trocar para Produto que estoura: nada muda e o aviso fica embaixo da
+  // linha das caixas.
   resposta = estouro()
-  await f.gravarAds('c1', { ads_por_produto_ligada: true })
-  assert.equal(erroAds.value.chave, 'geral:ads_por_produto_ligada')
+  f.trocarModoAds('c1', 'produto')
+  await tique()
+  assert.equal(erroAds.value.chave, 'geral:ads_por_produto_ligada,ads_geral_ligada')
+  assert.equal(f.erroAdsDoModo('c1'), MSG)
   assert.equal(f.erroAdsDaLinhaGeral('c1'), null, 'não repete na linha Geral')
+  assert.equal(f.modoAds(ads.value.contas.c1), 'geral', 'recusado: continua em Geral')
+  assert.equal(avisos.length, 0, 'janela aberta: o aviso fica na janela')
   // Produto: a chave diz o produto e o campo.
   resposta = estouro()
   await f.gravarAds('c1', { pode_gastar_pct: 30 }, 'p2')
@@ -238,8 +281,22 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     'data-campo="ads-por-produto-ligada"',
     'data-campo="ads-busca-produto"',
     'v-for="p in produtosDoAds(c)"',
-    ":placeholder=\"pctGeralAds(c) == null ? '—' : fmtPct(pctGeralAds(c)!)\"",
+    // M-78: produto sem % próprio fica sem Ads ("—"), não mostra o Geral.
+    'placeholder="—"',
     'fmtRoas(roasMinimo(pctDoProdutoAds(c, p.id)))',
+    // M-78: as caixas são um ou outro; cada modo mostra só a parte dele.
+    'data-ads-modo',
+    'class="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-1 pb-1.5"',
+    ":checked=\"modoAds(c) === 'geral'\"",
+    ":checked=\"modoAds(c) === 'produto'\"",
+    "@change=\"trocarModoAds(acc.id, 'geral')\"",
+    "@change=\"trocarModoAds(acc.id, 'produto')\"",
+    "v-if=\"modoAds(c) === 'geral'\"",
+    "<template v-else-if=\"modoAds(c) === 'produto'\">",
+    '<span class="truncate">Todos os produtos</span>',
+    'data-ads-cabecalho-produto',
+    // M-78: a ajuda do botão diz "Ads por produto" quando a conta está em Produto.
+    ":title=\"adsErro ? 'O Ads não carregou — recarregue a página.' : tituloBotaoAds(adsDa(acc.id))\"",
     ':data-ads-produto="p.id"',
     ':disabled="!podeEditarAds"',
     '@change="gravarCampoAds"',
@@ -247,7 +304,7 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     'class="max-h-64 overflow-y-auto px-1 pb-1 [scrollbar-gutter:stable]"',
     // M-56: aviso junto do campo.
     '{{ erroAdsDaLinhaGeral(acc.id) }}',
-    "erroAdsEm(acc.id, 'geral:ads_por_produto_ligada')",
+    '{{ erroAdsDoModo(acc.id) }}',
     "erroAdsEm(acc.id, `produto:${p.id}:`, true)",
   ]) assert.ok(celula.includes(trecho), `célula Ads tem ${trecho}`)
   for (const cab of ['<span>Produto</span>', 'Pode gastar (%)', 'ROAS mínimo</span>', 'Gasto por dia (R$)']) {
@@ -259,18 +316,46 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     'Últimos 7 dias', 'O produto com % próprio usa o dele', 'Gasto por dia R$', 'text-sm',
     // M-62: a frase do rodapé e a linha dela.
     'Grava ao sair do campo', 'Fora do cálculo de preço', 'Só quem edita Contas altera o Ads', 'mt-1 border-t px-1 pt-1',
+    // M-78: o nome antigo, a lista apagada com Produto desmarcado e o Geral
+    // como sugestão no % do produto.
+    'Por produto', "'opacity-60': !c.ads_por_produto_ligada", 'pctGeralAds(c)',
+    'clique para ver o gasto por dia e o % por produto',
   ]) assert.ok(!celula.includes(fora), `célula Ads sem ${fora}`)
-  // M-57: de cima para baixo — título, cabeçalho, Geral (mesma grade), Por
-  // produto, busca e lista; todos na mesma grade e com a mesma faixa da barra
-  // de rolagem.
-  const ordem = ['data-ads-titulo', 'data-ads-cabecalho', 'data-ads-geral', 'data-campo="ads-por-produto-ligada"',
-    'data-campo="ads-busca-produto"', 'data-lista-ads-produto'].map((t) => celula.indexOf(t))
+  // M-78: de cima para baixo — título, a linha das caixas (Geral e Produto
+  // lado a lado), o bloco Geral (cabeçalho + "Todos os produtos") e o bloco
+  // Produto (busca, cabeçalho e lista); todos na mesma grade e com a mesma
+  // faixa da barra de rolagem.
+  const ordem = ['data-ads-titulo', 'data-ads-modo', 'data-campo="ads-geral-ligada"', 'data-campo="ads-por-produto-ligada"',
+    'data-ads-cabecalho', 'data-ads-geral', 'data-campo="ads-busca-produto"', 'data-ads-cabecalho-produto',
+    'data-lista-ads-produto'].map((t) => celula.indexOf(t))
   assert.ok(ordem.every((i, k) => i > 0 && (k === 0 || i > ordem[k - 1])), `ordem da janela: ${ordem}`)
-  assert.equal((celula.match(/grid-cols-\[minmax\(0,1fr\)_5rem_4rem_6rem\]/g) || []).length, 3, 'cabeçalho, Geral e produtos na mesma grade')
-  assert.equal((celula.match(/\[scrollbar-gutter:stable\]/g) || []).length, 2, 'cabeçalho/Geral e lista com a mesma faixa da barra')
-  const geral = celula.slice(celula.indexOf('data-ads-geral'), celula.indexOf('data-campo="ads-por-produto-ligada"'))
-  for (const t of ['data-campo="ads-geral-ligada"', 'data-campo="ads-pct"', 'data-ads-roas-minimo', 'data-campo="ads-gasto-dia"']) {
-    assert.ok(geral.includes(t), `linha Geral tem ${t}`)
+  assert.equal((celula.match(/grid-cols-\[minmax\(0,1fr\)_5rem_4rem_6rem\]/g) || []).length, 4,
+    'cabeçalho e linha do Geral, cabeçalho e linhas do Produto na mesma grade')
+  assert.equal((celula.match(/\[scrollbar-gutter:stable\]/g) || []).length, 3, 'Geral, cabeçalho do Produto e lista com a mesma faixa da barra')
+  // A linha das caixas só tem as duas caixas (os campos ficam nos blocos).
+  const modo = celula.slice(celula.indexOf('data-ads-modo'), celula.indexOf('data-ads-cabecalho'))
+  for (const t of ['data-campo="ads-geral-ligada"', 'Geral', 'data-campo="ads-por-produto-ligada"', 'Produto']) {
+    assert.ok(modo.includes(t), `linha das caixas tem ${t}`)
+  }
+  for (const t of ['data-campo="ads-pct"', 'data-campo="ads-busca-produto"', 'data-lista-ads-produto']) {
+    assert.ok(!modo.includes(t), `linha das caixas sem ${t}`)
+  }
+  // Bloco Geral: "Todos os produtos" com o %, o ROAS mínimo e o gasto por dia; sem busca nem lista.
+  const geral = celula.slice(celula.indexOf("v-if=\"modoAds(c) === 'geral'\""), celula.indexOf("v-else-if=\"modoAds(c) === 'produto'\""))
+  for (const t of ['data-ads-cabecalho', 'Todos os produtos', 'data-campo="ads-pct"', 'data-ads-roas-minimo', 'data-campo="ads-gasto-dia"']) {
+    assert.ok(geral.includes(t), `bloco Geral tem ${t}`)
+  }
+  assert.ok(!geral.includes('<span>Produto</span>'), 'cabeçalho do Geral sem a coluna Produto')
+  for (const t of ['data-campo="ads-busca-produto"', 'data-lista-ads-produto', 'data-campo="ads-geral-ligada"']) {
+    assert.ok(!geral.includes(t), `bloco Geral sem ${t}`)
+  }
+  // Bloco Produto: busca, cabeçalho com Produto e a lista; sem os campos do Geral.
+  const produto = celula.slice(celula.indexOf("v-else-if=\"modoAds(c) === 'produto'\""))
+  for (const t of ['data-campo="ads-busca-produto"', '<span>Produto</span>', 'data-lista-ads-produto']) {
+    assert.ok(produto.includes(t), `bloco Produto tem ${t}`)
+  }
+  for (const t of ['data-campo="ads-pct"', 'data-campo="ads-gasto-dia"', 'data-ads-geral']) {
+    assert.ok(!produto.includes(t), `bloco Produto sem ${t}`)
   }
   // 12px, campos de 24px, caixas de 14px, busca de 24px.
   assert.ok(!/class="[^"]*\bh-7\b/.test(celula), 'sem campos de 28px')

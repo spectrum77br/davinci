@@ -60,7 +60,8 @@ PADRAO = {
     "ads_geral_ligada": True,
     "pode_gastar_pct": None,
     "gasto_dia": None,
-    "ads_por_produto_ligada": True,
+    # M-78: Geral OU Produto; conta sem nada gravado = "Geral".
+    "ads_por_produto_ligada": False,
     "produtos": {},
     "real": SEM_REAL,
 }
@@ -186,17 +187,34 @@ async def test_put_da_geral_campo_ausente_nao_muda_e_null_apaga(
     assert r.json() == {**PADRAO, "pode_gastar_pct": 2.0, "gasto_dia": 50.5}
     r = await _geral(client, cenario.londres, ads_geral_ligada=False)
     assert (r.json()["pode_gastar_pct"], r.json()["ads_geral_ligada"]) == (2.0, False)
+    assert r.json()["ads_por_produto_ligada"] is False, "desligar a Geral não liga Produto"
     # Caixa null não muda; % null apaga; o gasto fica.
     r = await _geral(client, cenario.londres, ads_por_produto_ligada=None, pode_gastar_pct=None)
     assert r.status_code == 200, r.text
     corpo = r.json()
-    assert (corpo["pode_gastar_pct"], corpo["gasto_dia"], corpo["ads_por_produto_ligada"]) == (
-        None,
-        50.5,
-        True,
-    )
-    r = await _geral(client, cenario.londres, pode_gastar_pct=0, ads_por_produto_ligada=False)
-    assert (r.json()["pode_gastar_pct"], r.json()["ads_por_produto_ligada"]) == (0.0, False)
+    assert (
+        corpo["pode_gastar_pct"],
+        corpo["gasto_dia"],
+        corpo["ads_geral_ligada"],
+        corpo["ads_por_produto_ligada"],
+    ) == (None, 50.5, False, False)
+    # M-78: um ou outro — ligar uma desliga a outra; nada é apagado.
+    r = await _geral(client, cenario.londres, pode_gastar_pct=0, ads_por_produto_ligada=True)
+    assert (
+        r.json()["pode_gastar_pct"],
+        r.json()["gasto_dia"],
+        r.json()["ads_geral_ligada"],
+        r.json()["ads_por_produto_ligada"],
+    ) == (0.0, 50.5, False, True)
+    r = await _geral(client, cenario.londres, ads_geral_ligada=True)
+    assert (r.json()["ads_geral_ligada"], r.json()["ads_por_produto_ligada"]) == (True, False)
+    r = await _geral(client, cenario.londres, ads_por_produto_ligada=True)
+    assert (r.json()["ads_geral_ligada"], r.json()["ads_por_produto_ligada"]) == (False, True)
+    # As duas de uma vez: recusado, nada muda.
+    r = await _geral(client, cenario.londres, ads_geral_ligada=True, ads_por_produto_ligada=True)
+    assert (r.status_code, r.json()["detail"]) == (422, {"code": "ads_um_ou_outro"})
+    r = await _geral(client, cenario.londres, ads_por_produto_ligada=False)
+    assert (r.json()["ads_geral_ligada"], r.json()["ads_por_produto_ligada"]) == (False, False)
 
     linha = (
         await db.execute(select(PricingAdsConta).execution_options(populate_existing=True))
@@ -259,6 +277,45 @@ async def test_put_do_produto_grava_e_sem_valor_volta_para_a_geral(
     assert r.status_code == 404
     r = await _produto(client, cenario.londres, cenario.cel_a, pode_gastar_pct=100.5)
     assert r.status_code == 422
+
+
+async def test_conta_com_as_duas_caixas_de_antes_le_como_geral_sem_apagar_nada(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cenario
+):
+    """M-78: a linha gravada antes, com Geral e Por produto ligadas, vale como
+    "Geral"; o % próprio do produto fica gravado e volta a valer em "Produto"."""
+    db.add(
+        PricingAdsConta(
+            pricing_account_id=cenario.londres.id,
+            ads_geral_ligada=True,
+            pode_gastar_pct=Decimal("2"),
+            ads_por_produto_ligada=True,
+        )
+    )
+    db.add(
+        PricingAdsProduto(
+            pricing_account_id=cenario.londres.id,
+            pricing_product_id=cenario.cel_a.id,
+            pode_gastar_pct=Decimal("5"),
+        )
+    )
+    await db.commit()
+    auth_as(cenario.admin)
+    a = str(cenario.cel_a.id)
+    londres = (await _ver(client)).json()["contas"][str(cenario.londres.id)]
+    assert (londres["ads_geral_ligada"], londres["ads_por_produto_ligada"]) == (True, False)
+    assert londres["pode_gastar_pct"] == 2.0
+    assert londres["produtos"] == {a: {"pode_gastar_pct": 5.0, "gasto_dia": None}}
+    # Trocar para "Produto" grava as duas caixas e não apaga a Geral.
+    r = await _geral(client, cenario.londres, ads_por_produto_ligada=True)
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert (corpo["ads_geral_ligada"], corpo["ads_por_produto_ligada"]) == (False, True)
+    assert (corpo["pode_gastar_pct"], corpo["produtos"][a]["pode_gastar_pct"]) == (2.0, 5.0)
+    linha = (
+        await db.execute(select(PricingAdsConta).execution_options(populate_existing=True))
+    ).scalar_one()
+    assert (linha.ads_geral_ligada, linha.ads_por_produto_ligada) == (False, True)
 
 
 async def test_quem_so_ve_contas_ve_sem_alterar_e_a_cerca_de_equipe_vale(

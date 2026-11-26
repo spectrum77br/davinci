@@ -19,10 +19,11 @@ from app.models.base import Base
 
 
 class PricingAdsConta(Base):
-    """A Geral de Ads de uma conta. Sem linha = as duas caixas ligadas, sem %
-    e sem gasto. `ads_geral_ligada` desligada: produto sem % próprio fica sem
-    % (—); `ads_por_produto_ligada` desligada: os % próprios ficam gravados,
-    mas todos usam a Geral."""
+    """A Geral de Ads de uma conta. M-78: as duas caixas são um ou outro
+    (`app/services/pricing/custo_total.caixas_ads`): sem linha, ou com as duas
+    ligadas (antes da M-78), vale "Geral". Com "Geral" todos usam o % Geral;
+    com "Produto" só vale o % próprio (produto sem % fica sem Ads, —); a outra
+    caixa desligada deixa os valores dela gravados, sem valer."""
 
     __tablename__ = "pricing_ads_conta"
     __table_args__ = (
@@ -57,7 +58,7 @@ class PricingAdsConta(Base):
 
 class PricingAdsProduto(Base):
     """O % e o gasto por dia próprios de um produto (linha da Tabela) numa
-    conta. Sem linha = usa a Geral da conta."""
+    conta. Sem linha = sem valor próprio (com "Produto" marcado, sem Ads)."""
 
     __tablename__ = "pricing_ads_produto"
     __table_args__ = (

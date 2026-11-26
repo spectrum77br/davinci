@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -595,17 +596,44 @@ async def test_mensagem_e_numeros_em_pt_br():
     # Igual ao teto passa; sem teto passa.
     assert estouro(Decimal("4"), None, Decimal("6"), Decimal("10")) is None
     assert estouro(Decimal("99"), Decimal("99"), Decimal("99"), None) is None
-    # Ads da soma: o maior % que pode valer.
-    produto = uuid.uuid4()
+    # Ads da soma: o maior % que pode valer (M-78: Geral OU Produto).
+    produto, outro = uuid.uuid4(), uuid.uuid4()
     assert EstadoAds().maximo() == Decimal("0")
-    assert EstadoAds(geral_pct=Decimal("5"), produtos={produto: Decimal("8")}).maximo() == 8
+    # As duas ligadas (dado de antes da M-78): vale só a Geral.
+    assert (
+        EstadoAds(
+            geral_pct=Decimal("5"), por_produto_ligada=True, produtos={produto: Decimal("8")}
+        ).maximo()
+        == 5
+    )
     assert (
         EstadoAds(
             geral_pct=Decimal("5"), por_produto_ligada=False, produtos={produto: Decimal("8")}
         ).maximo()
         == 5
     )
+    # Só "Produto": o maior % próprio; a Geral não vale (nem para quem não tem %).
+    so_produto = EstadoAds(
+        geral_ligada=False,
+        geral_pct=Decimal("9"),
+        por_produto_ligada=True,
+        produtos={produto: Decimal("4"), outro: None},
+    )
+    assert so_produto.maximo() == 4
+    assert replace(so_produto, produtos={}).maximo() == 0
     assert EstadoAds(geral_ligada=False, geral_pct=Decimal("5")).maximo() == 0
+    # Ligar uma caixa desliga a outra; desligar não liga a outra.
+    assert so_produto.com_geral({"ads_geral_ligada": True}).maximo() == 9
+    trocado = so_produto.com_geral({"ads_geral_ligada": True})
+    assert (trocado.geral_ligada, trocado.por_produto_ligada) == (True, False)
+    volta = trocado.com_geral({"ads_por_produto_ligada": True})
+    assert (volta.geral_ligada, volta.por_produto_ligada) == (False, True)
+    nenhuma = volta.com_geral({"ads_por_produto_ligada": False})
+    assert (nenhuma.geral_ligada, nenhuma.por_produto_ligada, nenhuma.maximo()) == (
+        False,
+        False,
+        0,
+    )
 
 
 async def test_custo_total_aceita_e_recusa_sem_gravar(
@@ -661,30 +689,36 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
     # Só o gasto por dia não mexe na soma.
     assert (await client.put(ads, json={"gasto_dia": 30})).status_code == 200
 
-    # Ads de produto: 6 cabe (a Geral é 6), 6,5 não.
+    # M-78: Geral OU Produto. Com "Geral" marcado (o padrão) o % do produto
+    # fica gravado mas não vale: 9 é aceito.
     produto = f"{ads}/produto/{cena.produto.id}"
-    assert (await client.put(produto, json={"pode_gastar_pct": 6})).status_code == 200
-    r = await client.put(produto, json={"pode_gastar_pct": 6.5})
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"]["mensagem"] == (
-        "Afiliado 3,5% + Desconto 0% + Ads 6,5% = 10%. Passa do Custo total (9,5%). Não gravado."
-    )
-
-    # Religar uma caixa que faz voltar a valer um % que estoura: recusado.
-    assert (await client.put(ads, json={"ads_por_produto_ligada": False})).status_code == 200
-    assert (await client.put(ads, json={"pode_gastar_pct": 3})).status_code == 200
     r = await client.put(produto, json={"pode_gastar_pct": 9})
-    assert r.status_code == 200, r.text  # Por produto desligada: o 9 não vale
+    assert r.status_code == 200, r.text
+    assert (r.json()["ads_geral_ligada"], r.json()["ads_por_produto_ligada"]) == (True, False)
+    # Trocar para "Produto" faz valer o 9: recusado, nada muda.
     r = await client.put(ads, json={"ads_por_produto_ligada": True})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
         "Afiliado 3,5% + Desconto 0% + Ads 9% = 12,5%. Passa do Custo total (9,5%). Não gravado."
     )
-    # Desligar a Geral com o % que estoura e religar: recusado também.
+    # Com 6 no produto a troca cabe; a Geral fica desmarcada e o % dela gravado.
+    assert (await client.put(produto, json={"pode_gastar_pct": 6})).status_code == 200
+    r = await client.put(ads, json={"ads_por_produto_ligada": True})
+    assert r.status_code == 200, r.text
+    assert (r.json()["ads_geral_ligada"], r.json()["pode_gastar_pct"]) == (False, 6.0)
+    assert r.json()["ads_por_produto_ligada"] is True
+    # Em "Produto" vale o % próprio: 6,5 não cabe.
+    r = await client.put(produto, json={"pode_gastar_pct": 6.5})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 3,5% + Desconto 0% + Ads 6,5% = 10%. Passa do Custo total (9,5%). Não gravado."
+    )
+    # Em "Produto" a Geral não vale; produto sem % próprio = sem Ads (0).
+    assert (await client.put(ads, json={"pode_gastar_pct": 3})).status_code == 200
     assert (await client.put(produto, json={"pode_gastar_pct": None})).status_code == 200
-    assert (await client.put(ads, json={"ads_geral_ligada": False})).status_code == 200
     r = await client.patch(url, json={"desconto_pct": 6})
-    assert r.status_code == 200, r.text  # Geral desligada: Ads 0
+    assert r.status_code == 200, r.text
+    # Voltar para "Geral" faz valer o 3: recusado.
     r = await client.put(ads, json={"ads_geral_ligada": True})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"] == (
@@ -697,7 +731,7 @@ async def test_custo_total_aceita_e_recusa_sem_gravar(
             await db.execute(select(PricingAdsConta).execution_options(populate_existing=True))
         ).scalars()
     }
-    assert gerais[par[CLASSICO].id] == gerais[par[PREMIUM].id] == (False, Decimal("3.00"), False)
+    assert gerais[par[CLASSICO].id] == gerais[par[PREMIUM].id] == (False, Decimal("3.00"), True)
 
     # Conta nova também não nasce acima do teto.
     r = await client.post(
@@ -821,6 +855,8 @@ async def test_ads_de_produto_fora_do_departamento_nao_conta_no_custo_total(
     corpo = await _criar_ml(client)
     url = f"/api/pricing/accounts/{corpo['id']}"
     ads = f"/api/pricing/ads/{corpo['id']}"
+    # M-78: o % do produto só vale com "Produto" marcado.
+    assert (await client.put(ads, json={"ads_por_produto_ligada": True})).status_code == 200
     r = await client.put(f"{ads}/produto/{cena.produto.id}", json={"pode_gastar_pct": 8})
     assert r.status_code == 200, r.text
     r = await client.patch(url, json={"custo_total_pct": 5})
@@ -879,7 +915,9 @@ async def test_custo_total_confere_o_valor_com_as_2_casas_do_banco(
     r = await client.patch(url, json={"custo_total_pct": 9.984})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["mensagem"].endswith("Passa do Custo total (9,98%). Não gravado.")
-    # Ads de produto: 3,334 vira 3,33 e cabe; 3,335 vira 3,34 e não.
+    # Ads de produto (com "Produto" marcado, M-78): 3,334 vira 3,33 e cabe;
+    # 3,335 vira 3,34 e não.
+    assert (await client.put(ads, json={"ads_por_produto_ligada": True})).status_code == 200
     produto = f"{ads}/produto/{cena.produto.id}"
     assert (await client.put(produto, json={"pode_gastar_pct": 3.334})).status_code == 200
     r = await client.put(produto, json={"pode_gastar_pct": 3.335})

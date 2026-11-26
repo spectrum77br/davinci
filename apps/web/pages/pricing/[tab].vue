@@ -157,7 +157,7 @@ const AJUDA_CONTAS = {
         { termo: 'Comissão (ADM)', texto: '% da plataforma. No ML aparece Clássico · Premium; clique para mudar.' },
         { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) por tipo de produto; são eles que formam o preço.' },
         { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
-        { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela para ver o % por produto e o gasto por dia.' },
+        { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado.' },
         { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem.' },
       ],
     },
@@ -1605,6 +1605,12 @@ function desfazerAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
 // continuam no Marketing, fora da janela. Grava no servidor ao sair do campo,
 // com Enter ou ao fechar; quem não edita Contas só vê. Fora do cálculo de
 // preço. O texto antigo (`ads`) fica no banco.
+// M-78 (26/11/2026): logo abaixo do título, a linha [x] Geral [x] Produto (o
+// antigo "Por produto"), UM OU OUTRO (marcar uma desmarca a outra; clicar na
+// marcada desmarca = conta sem Ads). Geral: só a linha "Todos os produtos"
+// com o % Geral, o ROAS mínimo e o gasto por dia. Produto: só a busca e a
+// lista; produto sem % próprio fica sem Ads ("—"), não usa mais o Geral.
+// Trocar não apaga nada. Conta sem nada gravado = Geral.
 type AdsValores = { pode_gastar_pct: number | null; gasto_dia: number | null }
 type AdsConta = AdsValores & {
   ads_geral_ligada: boolean
@@ -1623,7 +1629,7 @@ const ADS_PADRAO: AdsConta = {
   ads_geral_ligada: true,
   pode_gastar_pct: null,
   gasto_dia: null,
-  ads_por_produto_ligada: true,
+  ads_por_produto_ligada: false,
   produtos: {},
   real: { pct_gasto: null, roas: null },
 }
@@ -1658,10 +1664,39 @@ function pctGeralAds(c: AdsConta): number | null {
   return c.ads_geral_ligada ? c.pode_gastar_pct : null
 }
 
-// O % do produto: o próprio (com Por produto ligada) ou a Geral.
+// Qual das duas vale (M-78: um ou outro; o servidor já manda só uma, a Geral
+// ganha se vierem as duas). null = conta sem Ads.
+function modoAds(c: AdsConta): 'geral' | 'produto' | null {
+  if (c.ads_geral_ligada) return 'geral'
+  return c.ads_por_produto_ligada ? 'produto' : null
+}
+
+// O % do produto: só o próprio, com "Produto" marcado; sem ele, sem Ads.
 function pctDoProdutoAds(c: AdsConta, prodId: string): number | null {
-  const proprio = c.ads_por_produto_ligada ? c.produtos[prodId]?.pode_gastar_pct : null
-  return proprio ?? pctGeralAds(c)
+  return modoAds(c) === 'produto' ? (c.produtos[prodId]?.pode_gastar_pct ?? null) : null
+}
+
+// Clique numa das caixas: marcar uma desmarca a outra; clicar na marcada
+// desmarca (as duas desmarcadas = conta sem Ads). Nada é apagado.
+function trocarModoAds(accId: string, modo: 'geral' | 'produto') {
+  const atual = modoAds(adsDa(accId))
+  const mudanca: Partial<AdsConta> =
+    atual === modo
+      ? modo === 'geral'
+        ? { ads_geral_ligada: false }
+        : { ads_por_produto_ligada: false }
+      : modo === 'geral'
+        ? { ads_geral_ligada: true, ads_por_produto_ligada: false }
+        : { ads_por_produto_ligada: true, ads_geral_ligada: false }
+  void gravarAds(accId, mudanca)
+}
+
+// Ajuda do botão da caixinha de Ads na tabela de Contas.
+function tituloBotaoAds(c: AdsConta): string {
+  const modo = modoAds(c)
+  if (modo === 'produto') return 'Ads por produto — clique para ver o % e o gasto por dia de cada produto'
+  if (modo === 'geral') return 'Ads da conta: % Geral — clique para ver o gasto por dia ou trocar para Produto'
+  return 'Conta sem Ads — clique para escolher Geral ou Produto'
 }
 
 // ROAS mínimo = 100 ÷ % (2% → 50); sem % ou com 0% não há ("—").
@@ -1688,7 +1723,7 @@ function lerGasto(texto: string): number | null | undefined {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined
 }
 
-// Lista do Por produto: os produtos do departamento (busca por SKU ou nome),
+// Lista do Produto: os produtos do departamento (busca por SKU ou nome),
 // primeiro os que têm valor próprio, como na Margem.
 function produtosDoAds(c: AdsConta) {
   const q = buscaAdsProduto.value.trim().toLowerCase()
@@ -1721,18 +1756,24 @@ function erroAdsEm(accId: string, chave: string, comeco = false): string | null 
   return (comeco ? e.chave.startsWith(chave) : e.chave === chave) ? e.mensagem : null
 }
 
-// O aviso da linha Geral (% , gasto por dia ou a caixa Geral) — a caixa "Por
-// produto" tem o aviso dela, embaixo dela.
-function erroAdsDaLinhaGeral(accId: string): string | null {
-  return erroAdsEm(accId, 'geral:ads_por_produto_ligada') ? null : erroAdsEm(accId, 'geral:', true)
+// O aviso da troca Geral / Produto (M-78): fica embaixo da linha das caixas.
+function erroAdsDoModo(accId: string): string | null {
+  return erroAdsEm(accId, 'geral:ads_', true)
 }
 
-// A linha do Ads (a do produto ou a Geral) está na janela aberta desta conta?
-function linhaAdsNaTela(accId: string, prodId?: string): boolean {
+// O aviso da linha "Todos os produtos" (% ou gasto por dia da Geral).
+function erroAdsDaLinhaGeral(accId: string): string | null {
+  return erroAdsDoModo(accId) ? null : erroAdsEm(accId, 'geral:', true)
+}
+
+// A linha do Ads (a do produto, a da Geral ou a das caixas) está na janela
+// aberta desta conta?
+function linhaAdsNaTela(accId: string, prodId?: string, modo = false): boolean {
   if (typeof document === 'undefined') return false
   const painel = document.querySelector(`[data-ads-painel="${accId}"]`)
   if (!painel) return false
-  return !!painel.querySelector(prodId ? `[data-ads-produto-linha="${prodId}"]` : '[data-ads-geral]')
+  const seletor = prodId ? `[data-ads-produto-linha="${prodId}"]` : modo ? '[data-ads-modo]' : '[data-ads-geral]'
+  return !!painel.querySelector(seletor)
 }
 
 async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: string) {
@@ -1767,7 +1808,8 @@ async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: str
       // O aviso junto do campo só basta se a linha recusada está na janela
       // aberta. Janela fechada (gravou ao fechar) ou produto escondido pela
       // busca: vai também no aviso solto.
-      if (!linhaAdsNaTela(accId, prodId)) toast.error('Não salvou o Ads', estouro)
+      const ehModo = 'ads_geral_ligada' in mudanca || 'ads_por_produto_ligada' in mudanca
+      if (!linhaAdsNaTela(accId, prodId, ehModo)) toast.error('Não salvou o Ads', estouro)
     } else {
       toast.error('Não salvou o Ads', textoErroAds(e))
     }
@@ -6327,7 +6369,7 @@ watch(department, async () => {
                         class="flex w-full items-center justify-center gap-0.5"
                         data-acao="ads"
                         :data-ads-botao="acc.id"
-                        :title="adsErro ? 'O Ads não carregou — recarregue a página.' : 'Ads da conta: % Geral — clique para ver o gasto por dia e o % por produto'"
+                        :title="adsErro ? 'O Ads não carregou — recarregue a página.' : tituloBotaoAds(adsDa(acc.id))"
                       >
                         <span
                           class="inline-flex h-6 w-[34px] items-center justify-center rounded border bg-background text-xs hover:bg-muted"
@@ -6346,9 +6388,11 @@ watch(department, async () => {
                         :data-ads-painel="acc.id"
                         class="z-[70] w-[30rem] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 text-xs shadow-lg"
                       >
-                        <!-- M-57: título = plataforma + conta (12px, negrito); logo
-                             abaixo, o cabeçalho das colunas e a linha Geral na mesma
-                             grade dos produtos. Cabeçalho, Geral e lista reservam a
+                        <!-- M-57: título = plataforma + conta (12px, negrito). M-78:
+                             logo abaixo, a linha das caixas Geral | Produto (um ou
+                             outro) com um traço fino embaixo; com Geral, o cabeçalho e
+                             a linha "Todos os produtos"; com Produto, a busca, o
+                             cabeçalho e a lista. Cabeçalho, Geral e lista reservam a
                              mesma faixa da barra de rolagem (scrollbar-gutter), para as
                              colunas baterem. -->
                         <div class="px-1 pb-1 text-xs font-bold" data-ads-titulo>{{ tituloConta(acc) }}</div>
@@ -6357,12 +6401,53 @@ watch(department, async () => {
                         </div>
                         <!-- `c` = o Ads desta conta (alias para o template; nada até carregar). -->
                         <template v-for="c in ads ? [adsDa(acc.id)] : []" :key="acc.id">
-                          <div class="overflow-hidden px-1 [scrollbar-gutter:stable]">
+                          <!-- M-78: Geral e Produto lado a lado. Os próximos itens desta
+                               janela (coluna/filtro "Categoria de venda", filtro "Ads")
+                               entram nesta mesma linha, depois de Produto. -->
+                          <div
+                            class="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-1 pb-1.5"
+                            data-ads-modo
+                          >
+                            <label class="flex cursor-pointer items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                class="size-3.5"
+                                :class="{ 'ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:ads_geral_ligada', true) }"
+                                data-campo="ads-geral-ligada"
+                                :checked="modoAds(c) === 'geral'"
+                                :disabled="!podeEditarAds"
+                                @change="trocarModoAds(acc.id, 'geral')"
+                              />
+                              Geral
+                            </label>
+                            <label class="flex cursor-pointer items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                class="size-3.5"
+                                :class="{ 'ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:ads_por_produto_ligada', true) }"
+                                data-campo="ads-por-produto-ligada"
+                                :checked="modoAds(c) === 'produto'"
+                                :disabled="!podeEditarAds"
+                                @change="trocarModoAds(acc.id, 'produto')"
+                              />
+                              Produto
+                            </label>
+                          </div>
+                          <p
+                            v-if="erroAdsDoModo(acc.id)"
+                            class="px-1 pt-1 text-[11px] leading-snug text-destructive"
+                            role="alert"
+                            data-aviso-custo-total
+                          >{{ erroAdsDoModo(acc.id) }}</p>
+                          <div
+                            v-if="modoAds(c) === 'geral'"
+                            class="overflow-hidden px-1 pt-1 [scrollbar-gutter:stable]"
+                          >
                             <div
                               class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
                               data-ads-cabecalho
                             >
-                              <span>Produto</span>
+                              <span></span>
                               <span class="text-right">Pode gastar (%)</span>
                               <span class="text-right">ROAS mínimo</span>
                               <span class="text-right">Gasto por dia (R$)</span>
@@ -6371,18 +6456,7 @@ watch(department, async () => {
                               class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
                               data-ads-geral
                             >
-                              <label class="flex cursor-pointer items-center gap-1.5">
-                                <input
-                                  type="checkbox"
-                                  class="size-3.5"
-                                  :class="{ 'ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:ads_geral_ligada') }"
-                                  data-campo="ads-geral-ligada"
-                                  :checked="c.ads_geral_ligada"
-                                  :disabled="!podeEditarAds"
-                                  @change="gravarAds(acc.id, { ads_geral_ligada: !c.ads_geral_ligada })"
-                                />
-                                Geral
-                              </label>
+                              <span class="truncate">Todos os produtos</span>
                               <span class="inline-flex items-center justify-end gap-0.5">
                                 <input
                                   type="text"
@@ -6421,25 +6495,8 @@ watch(department, async () => {
                               data-aviso-custo-total
                             >{{ erroAdsDaLinhaGeral(acc.id) }}</p>
                           </div>
-                          <label class="mt-1 flex cursor-pointer items-center gap-1.5 border-t px-1 pb-1 pt-1.5">
-                            <input
-                              type="checkbox"
-                              class="size-3.5"
-                              :class="{ 'ring-1 ring-destructive': erroAdsEm(acc.id, 'geral:ads_por_produto_ligada') }"
-                              data-campo="ads-por-produto-ligada"
-                              :checked="c.ads_por_produto_ligada"
-                              :disabled="!podeEditarAds"
-                              @change="gravarAds(acc.id, { ads_por_produto_ligada: !c.ads_por_produto_ligada })"
-                            />
-                            Por produto
-                          </label>
-                          <p
-                            v-if="erroAdsEm(acc.id, 'geral:ads_por_produto_ligada')"
-                            class="px-1 pb-1 text-[11px] leading-snug text-destructive"
-                            role="alert"
-                            data-aviso-custo-total
-                          >{{ erroAdsEm(acc.id, 'geral:ads_por_produto_ligada') }}</p>
-                          <div class="px-1 pb-1">
+                          <template v-else-if="modoAds(c) === 'produto'">
+                          <div class="px-1 pb-1 pt-1">
                             <div class="relative">
                               <Search class="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
                               <input
@@ -6450,9 +6507,19 @@ watch(department, async () => {
                               />
                             </div>
                           </div>
+                          <div class="overflow-hidden px-1 [scrollbar-gutter:stable]">
+                            <div
+                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
+                              data-ads-cabecalho-produto
+                            >
+                              <span>Produto</span>
+                              <span class="text-right">Pode gastar (%)</span>
+                              <span class="text-right">ROAS mínimo</span>
+                              <span class="text-right">Gasto por dia (R$)</span>
+                            </div>
+                          </div>
                           <div
                             class="max-h-64 overflow-y-auto px-1 pb-1 [scrollbar-gutter:stable]"
-                            :class="{ 'opacity-60': !c.ads_por_produto_ligada }"
                             data-lista-ads-produto
                           >
                             <template v-for="p in produtosDoAds(c)" :key="p.id">
@@ -6467,7 +6534,7 @@ watch(department, async () => {
                                     inputmode="decimal"
                                     class="h-6 w-12 border rounded px-1 text-right text-xs bg-background disabled:opacity-60"
                                     :class="{ 'border-destructive ring-1 ring-destructive': erroAdsEm(acc.id, `produto:${p.id}:pode_gastar_pct`) }"
-                                    :placeholder="pctGeralAds(c) == null ? '—' : fmtPct(pctGeralAds(c)!)"
+                                    placeholder="—"
                                     :value="c.produtos[p.id]?.pode_gastar_pct == null ? '' : fmtPct(c.produtos[p.id].pode_gastar_pct!)"
                                     :data-ads-conta="acc.id"
                                     data-ads-campo="pode_gastar_pct"
@@ -6504,6 +6571,7 @@ watch(department, async () => {
                               {{ buscaAdsProduto.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.' }}
                             </p>
                           </div>
+                          </template>
                           <!-- M-62: sem a frase do rodapé (nem a linha dela); a lista vai até o fim. -->
                         </template>
                       </PopoverContent>

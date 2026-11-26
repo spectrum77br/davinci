@@ -7,10 +7,14 @@ no cálculo do preço.
 
 O Ads da soma é o MAIOR % que pode valer para algum produto da conta:
 - o % Geral, se a caixa "Geral" está ligada e o % não é nulo;
-- cada % próprio de produto, se a caixa "Por produto" está ligada e o % não é
+- cada % próprio de produto, se a caixa "Produto" está ligada e o % não é
   nulo.
-Sem nenhum, 0. (Sem linha em `pricing_ads_conta` = as duas caixas ligadas e
-sem % Geral, como no resto do Ads.)
+Sem nenhum, 0.
+
+M-78 (26/11/2026): "Geral" e "Produto" são UM OU OUTRO (`caixas_ads`). Sem
+linha em `pricing_ads_conta`, ou com as duas ligadas (o que vinha de antes da
+M-78), vale "Geral"; os % próprios ficam gravados, mas não valem. Nada é
+reescrito no banco: a regra é aplicada na leitura.
 
 Só contam os produtos que a janela de Ads mostra (os do departamento da conta,
 `produtos_do_departamento`, a mesma condição do GET /api/pricing/ads): linha de
@@ -37,33 +41,53 @@ from app.models import PricingAccount, PricingAdsConta, PricingAdsProduto, Prici
 ZERO = Decimal("0")
 
 
+def caixas_ads(geral: PricingAdsConta | None) -> tuple[bool, bool]:
+    """(Geral, Produto) que valem para a conta (M-78: um ou outro). Sem linha
+    ou com as duas ligadas = só "Geral"."""
+    if geral is None or geral.ads_geral_ligada:
+        return True, False
+    return False, geral.ads_por_produto_ligada
+
+
 @dataclass(frozen=True)
 class EstadoAds:
     """O Ads de uma conta, como está gravado (ou como ficaria)."""
 
     geral_ligada: bool = True
     geral_pct: Decimal | None = None
-    por_produto_ligada: bool = True
+    por_produto_ligada: bool = False
     # {pricing_product_id: % próprio (None = sem %)}
     produtos: dict[UUID, Decimal | None] = field(default_factory=dict)
 
     def maximo(self) -> Decimal:
-        candidatos: list[Decimal] = []
-        if self.geral_ligada and self.geral_pct is not None:
-            candidatos.append(self.geral_pct)
+        """Um ou outro (M-78): com "Geral", o % Geral; com "Produto", o maior
+        % próprio (produto sem % não tem Ads); com nenhuma, 0."""
+        if self.geral_ligada:
+            return self.geral_pct if self.geral_pct is not None else ZERO
         if self.por_produto_ligada:
-            candidatos.extend(p for p in self.produtos.values() if p is not None)
-        return max(candidatos, default=ZERO)
+            return max((p for p in self.produtos.values() if p is not None), default=ZERO)
+        return ZERO
 
     def com_geral(self, mudancas: dict) -> EstadoAds:
-        """O estado depois do PUT da Geral (campo ausente não muda)."""
+        """O estado depois do PUT da Geral (campo ausente não muda). Ligar uma
+        caixa desliga a outra; desligar não mexe na outra."""
         novo = self
         if mudancas.get("ads_geral_ligada") is not None:
-            novo = replace(novo, geral_ligada=mudancas["ads_geral_ligada"])
+            ligada = mudancas["ads_geral_ligada"]
+            novo = replace(
+                novo,
+                geral_ligada=ligada,
+                por_produto_ligada=False if ligada else novo.por_produto_ligada,
+            )
         if "pode_gastar_pct" in mudancas:
             novo = replace(novo, geral_pct=mudancas["pode_gastar_pct"])
         if mudancas.get("ads_por_produto_ligada") is not None:
-            novo = replace(novo, por_produto_ligada=mudancas["ads_por_produto_ligada"])
+            ligada = mudancas["ads_por_produto_ligada"]
+            novo = replace(
+                novo,
+                por_produto_ligada=ligada,
+                geral_ligada=False if ligada else novo.geral_ligada,
+            )
         return novo
 
     def com_produto(self, produto_id: UUID, pct: Decimal | None) -> EstadoAds:
@@ -110,12 +134,11 @@ async def estado_ads(session: AsyncSession, account_id: UUID) -> EstadoAds:
             )
         ).scalars()
     }
-    if geral is None:
-        return EstadoAds(produtos=produtos)
+    geral_ligada, por_produto_ligada = caixas_ads(geral)
     return EstadoAds(
-        geral_ligada=geral.ads_geral_ligada,
-        geral_pct=geral.pode_gastar_pct,
-        por_produto_ligada=geral.ads_por_produto_ligada,
+        geral_ligada=geral_ligada,
+        geral_pct=geral.pode_gastar_pct if geral is not None else None,
+        por_produto_ligada=por_produto_ligada,
         produtos=produtos,
     )
 
