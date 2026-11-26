@@ -196,6 +196,51 @@ def test_an_account_stopped_for_its_token_reads_again_once_davinci_renews_it(erp
     assert service_loop.revive_renewed(erp) == []
 
 
+def test_a_store_in_review_is_linked_once_davinci_names_its_bling_store(erp):
+    base = {
+        "status": "active",
+        "archived_at": None,
+        "bling_loja_id": None,
+        "credentials_present": True,
+        "token_expires_at": None,
+        "last_test_at": None,
+        "last_test_ok": None,
+    }
+    with erp.connection() as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS reference_rows (kind TEXT, id TEXT, data TEXT NOT NULL,"
+            " search TEXT NOT NULL, PRIMARY KEY(kind,id))"
+        )
+        # 26/11/2026: Shopee Lucas MEI (Bling's settings for 206064401 are on file) and Atlas ML
+        # (its Bling store 206365164 came after the settings were read).
+        for store, platform, name in (("lucas", "shopee", "Lucas MEI"), ("atlas", "ml", "atlas")):
+            db.execute(
+                "INSERT INTO reference_rows VALUES ('integrations',?,?,'')",
+                (store, json.dumps({"id": store, "platform": platform, "name": name, **base})),
+            )
+    assert sorted(service_loop.adopt_new_stores(erp)) == ["ml:atlas", "shopee:Lucas MEI"]
+    assert service_loop.link_reviewed_stores(erp) == []  # DaVinci names no Bling store yet
+    with erp.connection() as db:
+        for store, bling in (("lucas", "206064401"), ("atlas", "206365164")):
+            row = {"id": "s-" + store, "integration_id": store, "bling_store_id": bling}
+            db.execute(
+                "INSERT INTO reference_rows VALUES ('stores',?,?,'')", (row["id"], json.dumps(row))
+            )
+    assert service_loop.link_reviewed_stores(erp) == ["shopee:Lucas MEI"]
+    with erp.connection() as db:
+        status = dict(
+            db.execute(
+                "SELECT store,status FROM store_policies WHERE store IN ('lucas','atlas')"
+            ).fetchall()
+        )
+        data = json.loads(
+            db.execute("SELECT data FROM store_policies WHERE store='lucas'").fetchone()[0]
+        )
+    assert status == {"lucas": "shadow", "atlas": "identity_review"}
+    assert data["candidate_bling_ids"] == ["206064401"] and data["name"] == "Lucas MEI"
+    assert service_loop.link_reviewed_stores(erp) == []
+
+
 def test_a_store_davinci_connects_later_starts_being_read(erp):
     with erp.connection() as db:
         db.execute(

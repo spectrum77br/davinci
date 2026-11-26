@@ -197,6 +197,54 @@ def prepare(erp, reference):
         return {**result, "replayed": False}
 
 
+def promote(erp, reference):
+    """A store adopted from DaVinci waits for its identity (adopt_new_stores). It is linked, as
+    prepare links it, as soon as the store register in DaVinci names its Bling store and Bling's
+    settings for that store are on file (store_profiles.json). Stores are only ever linked here:
+    turning one off, or rebuilding the whole register, stays with prepare."""
+    with erp.connection() as db:
+        waiting = {
+            (r[0], r[1])
+            for r in db.execute(
+                "SELECT channel,store FROM store_policies WHERE status='identity_review'"
+            )
+        }
+        proof = db.execute("SELECT data FROM integration_bindings_meta WHERE id=1").fetchone()
+    if not waiting:
+        return []
+    policies, _ = build(reference, json.loads(proof[0])["bindings"] if proof else ())
+    ready = [
+        p for p in policies if p["status"] == "shadow" and (p["channel"], p["store"]) in waiting
+    ]
+    if not ready:
+        return []
+    linked = [f"{p['channel']}:{p['data']['name']}" for p in ready]
+    digest = hashlib.sha256(dumps([linked, erp.now()]).encode()).hexdigest()
+    with erp.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        for p in ready:
+            db.execute(
+                "UPDATE store_policies SET status='shadow',data=?,updated_at=? "
+                "WHERE channel=? AND store=? AND status='identity_review'",
+                (dumps(p["data"]), erp.now(), p["channel"], p["store"]),
+            )
+        db.execute(
+            "INSERT INTO events(operation_key,fingerprint,kind,actor,payload,result,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "policies-link-" + digest,
+                digest,
+                "channels.policies.link",
+                "cadastro de lojas do DaVinci",
+                "{}",
+                dumps({"linked": linked, "external_writes": False}),
+                erp.now(),
+            ),
+        )
+        db.commit()
+    return linked
+
+
 def record_bindings(erp, read):
     """Import only the fixed metadata projection produced by a read-only server query."""
     fields = {"version", "source", "read_only", "captured_at", "bindings"}

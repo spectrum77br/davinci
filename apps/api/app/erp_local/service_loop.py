@@ -91,6 +91,19 @@ def adopt_new_stores(erp):
     return adopted
 
 
+def link_reviewed_stores(erp):
+    """Stores waiting for their identity get linked to their Bling store once DaVinci's store
+    register names it (integration_registry.promote)."""
+    from app.erp_local.integration_registry import promote
+    from app.erp_local.reference import ReferenceStore
+
+    try:
+        return promote(erp, ReferenceStore(erp))
+    except (ERPError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
+        log.warning("lojas a ligar não conferidas: %s", type(error).__name__)
+        return []
+
+
 COPY_LABELS = {"temu": "Temu", "ml": "ML"}
 
 
@@ -408,6 +421,9 @@ def main():
         adopted = adopt_new_stores(erp) + adopt_bling_copy_stores(erp)
         if adopted:
             log.info("lojas novas do DaVinci passam a ser lidas %s", adopted)
+        linked = link_reviewed_stores(erp)
+        if linked:
+            log.info("lojas ligadas à loja do Bling %s", linked)
         log.info("avisos ao DaVinci %s", deliver_notices(erp))
         revived = revive_renewed(erp)
         if revived:
