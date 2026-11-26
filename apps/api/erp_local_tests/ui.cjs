@@ -447,6 +447,39 @@ test('products list the store listings with Vincular and Organizar, orders take 
   assert.deepEqual(sent.payload,{id:'O1',sku:'demo.aparelho',units:[['490154203237518'],['356938035643809']]});
 });
 
+// M-71 (26/11/2026): EAN, Modelo, Certificado, Número e Validade no alto, só para leitura, lidos da
+// Tabela de Preços (price_table.for_sku). Sem dado = caixa vazia, sem "SEM GTIN"; a cópia antiga
+// (sem a Validade e sem pricing_id) não quebra a tela; nada disso vai na gravação.
+test('M-71: the first row reads EAN, model and certificate from the Tabela de Preços and never writes them',async()=>{
+  const open=async product=>{
+    const ctx=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});
+    ctx.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+    ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+    return ctx;
+  };
+  const row=d=>[...d.querySelectorAll('.product-head-row[data-linha="1"]>[data-campo]')];
+  const values=d=>row(d).slice(2).map(c=>c.querySelector('input').value);
+  const fresh=fullProduct();fresh.price_table={...fresh.price_table,certificate_valid_until:'20/02/2028',pricing_id:'7b0c2c1e-8f0e-4c55-9a51-2f0b8a3c1d10'};
+  const {dom,document:d,requests}=await open(fresh);
+  assert.deepEqual(row(d).map(c=>c.querySelector('label').firstChild.textContent),['Código (SKU)','Situação','EAN','Modelo','Certificado','Número','Validade']);
+  assert.deepEqual(values(d),['7908855913175','A17 Pro Max','Anatel','07197-26-18234','20/02/2028']);
+  for(const input of row(d).slice(2).map(c=>c.querySelector('input'))){assert.equal(input.disabled,true);assert.equal(input.name,'');assert.equal(input.placeholder,'');}
+  // O EAN da Tabela de Preços é outro campo: o GTIN do cadastro (o da nota) aparece na dica.
+  assert.match(d.querySelector('[data-campo=ean] input').title,/GTIN do cadastro, que vai na nota, é 7908855913168/);
+  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const data=requests[0].payload.data;
+  assert.equal(data.gtin,'7908855913168');
+  for(const k of ['ean','model','certificate','certificate_number','certificate_valid_until','pricing_id'])assert.equal(k in data,false,k);
+  // Cópia antiga da Tabela de Preços: sem Validade, a caixa fica vazia.
+  const old=await open(fullProduct());
+  assert.deepEqual(values(old.document),['7908855913175','A17 Pro Max','Anatel','07197-26-18234','']);
+  // Sem linha na Tabela de Preços (ou sem certificado): tudo vazio, sem "SEM GTIN".
+  const none=await open(fullProduct({price_table:null}));
+  assert.deepEqual(values(none.document),['','','','','']);
+  assert.doesNotMatch(none.document.querySelector('.product-head').innerHTML,/SEM GTIN/);
+});
+
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
   const p={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:7,unit:'UN',status:'active',gtin:'012345678905',gtin_tax:''}};
   const {dom,document:d,requests}=await setup({products:[p]});

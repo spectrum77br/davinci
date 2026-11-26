@@ -37,6 +37,22 @@ const productHeadRows=[
 function productHead(cells){
  return productHeadRows.map((row,index)=>`<div class="product-head-row" data-linha="${index+1}">${row.map(campo=>`<div class="product-head-cell" data-campo="${campo}">${cells[campo]||''}</div>`).join('')}</div>`).join('');
 }
+// M-71 (26/11/2026): EAN, Modelo, Certificado, Número e Validade, só para leitura, lidos da Tabela de
+// Preços do DaVinci e do certificado do produto (price_table.for_sku: ean, model, certificate,
+// certificate_number, certificate_valid_until em dd/mm/aaaa). Campo que não vem (produto sem linha,
+// sem certificado ou a cópia antiga da Tabela de Preços, sem a Validade) = caixa vazia. Este EAN é o
+// da Tabela de Preços; o GTIN do cadastro, que vai na nota, não muda e continua guardado.
+function productReferenceCells(product){
+ const t=product.price_table||{},gtin=(product.details||{}).gtin||'',ean=t.ean||'',from='Lido da Tabela de Preços do DaVinci';
+ const read=(label,value,title=from)=>`<label>${label}<input value="${esc(value??'')}" disabled title="${esc(title)}"></label>`;
+ return {
+  ean:read('EAN',ean,ean&&gtin&&ean!==gtin?`${from}. O GTIN do cadastro, que vai na nota, é ${gtin}.`:from),
+  modelo:read('Modelo',t.model),
+  certificado:read('Certificado',t.certificate),
+  numero:read('Número',t.certificate_number),
+  validade:read('Validade',t.certificate_valid_until),
+ };
+}
 function productDetailsForm(){
  if(!ensureFullProduct(editingProduct))return `<section class="panel"><p class="source-line">Abrindo ${esc(editingProduct)}…</p></section>`;
  const product=state.products.find(p=>p.sku===editingProduct);
@@ -46,6 +62,7 @@ function productDetailsForm(){
  const cells={
   codigo:`<label>Código (SKU)<input value="${esc(product.sku)}" disabled></label>${consulta?'':'<button type="button" class="secondary" id="product-rename-open">Trocar código</button>'}`,
   situacao:`<label class="product-switch">Situação<span><input type="checkbox" name="status" value="active" ${d.status==='inactive'?'':'checked'}><i></i><small data-status-label>${d.status==='inactive'?'Inativo':'Ativado'}</small></span></label>`,
+  ...productReferenceCells(product),
  };
  return panel(`Produto · ${esc(product.sku)}`,'',`<form id="product-edit-form"${consulta?' class="read-only"':''}><div class="form-footer">${consulta?'<span class="consulta-note">Somente consulta: o cadastro continua sendo feito no Bling até a troca.</span><button type="button" class="secondary" id="product-edit-cancel">Fechar</button>':'<button type="button" class="secondary" id="product-edit-cancel">Cancelar</button><button>Salvar produto</button>'}</div><div class="product-head">${field('name','Nome *',product.name)}${productHead(cells)}</div><div class="reference-tabs" role="tablist" aria-label="Dados do produto">${tabs.map(([id,label])=>`<button type="button" role="tab" data-product-edit-tab="${id}" aria-selected="${productEditTab===id}" class="${productEditTab===id?'active':''}">${label}</button>`).join('')}</div><section data-product-section="characteristics" ${productEditTab==='characteristics'?'':'hidden'}>${productCharacteristics(product)}</section><section data-product-section="stock" ${productEditTab==='stock'?'':'hidden'}><div class="product-grid">${field('stock_min','Mínimo',d.stock_min,'number')}${field('stock_max','Máximo',d.stock_max,'number')}<label>Crossdocking<input name="crossdocking" type="number" min="0" max="9999" step="1" value="${esc(d.crossdocking??'')}"></label>${field('location','Localização',d.location)}</div><p class="source-line">Para gerenciar o estoque acesse o módulo de <button type="button" class="link-action inline" data-stock-product="${esc(product.sku)}">Controle de Estoques</button>. Crossdocking é o prazo adicional, em dias, para despachar o produto.</p><div class="forms">${field('cost_price','Preço de custo do cadastro (R$)',product.cost_price,'number')}</div><p class="source-line">O custo do cadastro não recalcula o custo médio físico. Controle por lote ainda não disponível no núcleo próprio; quando homologado, será ativado produto a produto.</p></section><section data-product-section="structure" ${productEditTab==='structure'?'':'hidden'}>${productStructureEditor(product)}</section><div class="form-footer"><span>Pedidos registrados preservam o cadastro e a composição usados na venda.</span>${consulta?'':'<button>Salvar alterações do produto</button>'}</div></form>`);
 }
