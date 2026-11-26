@@ -43,6 +43,11 @@ centro) e o DELETE vai com `destino_id`: transfere e exclui num commit só. Os p
 Produtos (products.segment_id) não travam: vão junto ou ficam sem segmento. Categoria e Tag de
 envio (Produtos 2) seguem como antes: a ligação produto → categoria/tag mora na base do ERP, que
 esta API só lê — transferir exigiria gravar lá (e a tag faz parte do SKU).
+
+M-91 (26/11/2026): a lixeira da Categoria de venda aceita a do meio. As seguintes sobem uma
+posição e, em todas as contas do centro, a margem/frete de cada uma anda junto (o GET /uso diz
+quais andam em `sobem` e em quantas contas a margem/frete da excluída somem em `contas_centro`).
+Pela aba Segmentos continua só a última (services/categorias_venda.py).
 """
 
 from __future__ import annotations
@@ -145,7 +150,9 @@ class UsoVendaOut(UsoOut):
     em uso (`precisa_destino`), `mensagem` é o quadro vermelho e a tela pede o destino entre
     `destinos` (as outras ativas do mesmo centro). `produtos_tela_produtos` (products.segment_id)
     não trava: vão junto para o destino ou ficam sem segmento. `avisos`: frases da confirmação
-    simples (nome reservado; produtos da tela Produtos que ficam sem segmento)."""
+    simples (nome reservado; produtos da tela Produtos que ficam sem segmento).
+    M-91: `sobem` = as categorias que andam uma posição na aba Contas (vazia se for a última) e
+    `contas_centro` = em quantas contas do centro a margem/frete dela são apagados."""
 
     contas: int = 0
     produtos_tela_produtos: int = 0
@@ -153,6 +160,8 @@ class UsoVendaOut(UsoOut):
     destinos: list[DestinoOut] = []
     centro_custo: str | None = None
     avisos: list[str] = []
+    sobem: list[str] = []
+    contas_centro: int = 0
 
 
 class TipoIn(BaseModel):
@@ -660,7 +669,7 @@ async def uso_categoria_venda(
     """Para a lixeira avisar antes: o uso na tabela dela, se a exclusão é barrada e, em uso
     (M-90), para quais categorias de venda dá para transferir."""
     seg, raiz = await _venda(session, venda_id)
-    uso, bloqueio = await cv.bloqueio_exclusao(session, seg, raiz)
+    uso, bloqueio = await cv.bloqueio_exclusao(session, seg, raiz, pela_lixeira=True)
     precisa_destino = bloqueio is None and uso.em_uso
     opcoes = await cv.destinos(session, seg, raiz) if precisa_destino else []
     if bloqueio is not None:
@@ -669,6 +678,10 @@ async def uso_categoria_venda(
         mensagem = cv.mensagem_em_uso(seg, raiz, uso)
     else:
         mensagem = None
+    # M-91: a do meio sai e as seguintes andam uma posição (a janela lista quais).
+    sobem, contas_centro = (
+        await cv.previa_colunas(session, seg, raiz) if bloqueio is None else ([], 0)
+    )
     return UsoVendaOut(
         regra=cv.CHAVE,
         produtos=uso.produtos,
@@ -680,6 +693,8 @@ async def uso_categoria_venda(
         destinos=[DestinoOut(id=s.id, nome=s.name) for s in opcoes],
         centro_custo=raiz.name,
         avisos=cv.avisos_exclusao(seg, uso) if bloqueio is None else [],
+        sobem=sobem,
+        contas_centro=contas_centro,
     )
 
 
@@ -691,10 +706,13 @@ async def excluir_categoria_venda(
     destino_id: Annotated[UUID | None, Query()] = None,
 ) -> Response:
     """M-90: em uso na tabela dela, vai com `destino_id` (outra categoria de venda ativa do
-    mesmo centro): produtos e contas passam para ela e a categoria sai — tudo num commit só."""
+    mesmo centro): produtos e contas passam para ela e a categoria sai — tudo num commit só.
+    M-91: pode ser a do meio — as seguintes sobem uma posição e a margem/frete de cada conta do
+    centro andam junto, no mesmo commit."""
     seg, raiz = await _venda(session, venda_id)
-    await cv.excluir(session, seg, raiz, destino_id)
-    # M-86: a coluna "marg" dela sai da aba Contas (ver o criar).
+    await cv.excluir(session, seg, raiz, destino_id, pela_lixeira=True)
+    # M-86: a coluna "marg" dela sai da aba Contas (ver o criar); o Custo total é recalculado
+    # com as margens que ficaram (já nas posições novas).
     await recalcular_contas_da_raiz(session, raiz.id)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

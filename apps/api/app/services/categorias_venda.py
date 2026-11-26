@@ -19,8 +19,17 @@ Por isso as regras abaixo, que seguram as posições (valem aqui e em Cadastros 
 - ao nascer na posição N, as contas daquele centro com o vínculo slot{N} vazio passam a apontar
   para ela (a mesma regra de routers/pricing._default_slot_segments): sem isso a página Margem
   ficaria sem o frete "Projetado" dos produtos dela;
-- excluir: só a ÚLTIMA do centro de custo — nenhuma posição é renumerada, então nenhuma outra
-  muda de coluna. O uso é conferido só na tabela dela (M-90, Harry 26/11/2026): produtos da
+- excluir pela aba Segmentos: só a ÚLTIMA do centro de custo — nenhuma posição é renumerada,
+  então nenhuma outra muda de coluna e nenhuma margem/frete das contas é mexida (a aba Segmentos
+  não é só do administrador, e margem/frete das contas são só dele — M-10);
+- excluir pela lixeira de Cadastros › Produtos (só administrador, M-91, Harry 26/11/2026):
+  qualquer uma, inclusive do meio. Na mesma transação as categorias das posições seguintes sobem
+  uma posição e, em TODAS as contas do centro (kit, as duas linhas do par do ML e a coluna de
+  catálogo, cujas margens próprias são o `margens_catalogo`), margem, frete e vínculo slot de
+  cada posição seguinte andam junto (N+1 → N …); a última posição ocupada fica vazia e a
+  margem/frete da excluída somem. Assim cada categoria que fica guarda, em cada conta, a mesma
+  margem e o mesmo frete, e o preço de quem não foi transferido não muda (ver colunas_ao_excluir);
+- em qualquer das duas telas, o uso é conferido só na tabela dela (M-90, Harry 26/11/2026): produtos da
   Tabela de Preços (`pricing_products.segment_id`) e contas apontando DIRETO para ela
   (`pricing_accounts.segment_id`). Em uso, a exclusão pede o DESTINO (outra categoria de venda
   ATIVA do mesmo centro): produtos e contas passam para ela e a categoria sai, na mesma
@@ -47,6 +56,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CentroCusto, PricingAccount, PricingProduct, Product, Segment
+from app.models.pricing import CANAL_KIT
 from app.schemas.segments import _slugify
 from app.services import centros_custo
 from app.services.categorias_ordem import posicao_categoria
@@ -74,6 +84,14 @@ _SLOTS = (
     PricingAccount.slot3_segment_id,
     PricingAccount.slot4_segment_id,
     PricingAccount.slot5_segment_id,
+)
+
+# M-91: o que a conta guarda pela POSIÇÃO da categoria (0..4 → margin1..5 / shipping1..5 /
+# slot1..5_segment_id). Na coluna de catálogo, margin1..5 são as margens próprias
+# (`margens_catalogo`). Excluir uma do meio anda os três juntos.
+_POR_POSICAO = tuple(
+    tuple(f"{campo}{n}{fim}" for n in range(1, LIMITE + 1))
+    for campo, fim in (("margin", ""), ("shipping", ""), ("slot", "_segment_id"))
 )
 
 
@@ -432,13 +450,91 @@ async def destinos(session: AsyncSession, seg: Segment, raiz: Segment) -> list[S
     return [s for s in await filhas(session, raiz.id) if s.id != seg.id and s.active]
 
 
-async def bloqueio_exclusao(
+@dataclass
+class Colunas:
+    """M-91: o que acontece com as colunas de margem/frete da aba Contas ao excluir pela lixeira
+    de Cadastros › Produtos. `posicao` = a da excluída (0..4); `ultima` = a última posição
+    ocupada do centro (contando a excluída); `sobem` = as categorias que andam uma posição, na
+    ordem das colunas (vazia quando a excluída é a última)."""
+
+    posicao: int
+    ultima: int
+    sobem: list[Segment]
+
+
+async def colunas_ao_excluir(
     session: AsyncSession, seg: Segment, raiz: Segment
+) -> Colunas | None:
+    """As colunas que andam ao excluir `seg` (M-91). None = nenhuma coluna é mexida, como antes:
+    posição fora de 0..4 ou outra categoria do centro na MESMA posição (dados antigos, de quando a
+    nova nascia na posição 0) — aí a coluna continua sendo da outra e nada pode andar."""
+    pos = int(seg.sort_order)
+    irmas = [s for s in await filhas(session, raiz.id) if s.id != seg.id]
+    if not 0 <= pos < LIMITE:
+        return None
+    if any(not 0 <= int(s.sort_order) < LIMITE or int(s.sort_order) == pos for s in irmas):
+        return None
+    sobem = [s for s in irmas if s.sort_order > pos]
+    ultima = max([pos, *(int(s.sort_order) for s in sobem)])
+    return Colunas(posicao=pos, ultima=ultima, sobem=sobem)
+
+
+async def contas_do_centro(
+    session: AsyncSession, raiz: Segment, categorias: list[Segment]
+) -> list[PricingAccount]:
+    """Todas as linhas de conta do centro de custo: as que apontam para a raiz (o normal — kit,
+    as duas linhas do par do ML e a coluna de catálogo, que copia o `segment_id` da base) e as que
+    apontam direto para uma categoria dele. Lidas de novo do banco (populate_existing): as
+    transferências de excluir são UPDATE direto, que a sessão não enxerga."""
+    ids = [raiz.id, *(s.id for s in categorias)]
+    return list(
+        (
+            await session.execute(
+                select(PricingAccount)
+                .where(PricingAccount.segment_id.in_(ids))
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    )
+
+
+def quantas_contas(contas: list[PricingAccount]) -> int:
+    """Quantas contas a aba Contas mostra (o par do ML é uma linha; a coluna de catálogo vai
+    junto da base)."""
+    return len({c.par_id or c.id for c in contas if c.canal == CANAL_KIT})
+
+
+def andar_colunas(conta: PricingAccount, colunas: Colunas) -> None:
+    """Na conta, a margem, o frete e o vínculo slot de cada posição seguinte à excluída andam
+    uma posição (N+1 → N, até a última ocupada) e a última ocupada fica vazia. Posições depois
+    da última ocupada (sem categoria) não mudam."""
+    for campos in _POR_POSICAO:
+        for j in range(colunas.posicao, colunas.ultima):
+            setattr(conta, campos[j], getattr(conta, campos[j + 1]))
+        setattr(conta, campos[colunas.ultima], None)
+
+
+async def previa_colunas(
+    session: AsyncSession, seg: Segment, raiz: Segment
+) -> tuple[list[str], int]:
+    """Para a janela da lixeira (M-91): os nomes das categorias que andam uma posição e em
+    quantas contas do centro a margem/frete da excluída são apagados."""
+    colunas = await colunas_ao_excluir(session, seg, raiz)
+    if colunas is None:
+        return [], 0
+    contas = await contas_do_centro(session, raiz, await filhas(session, raiz.id))
+    return [s.name for s in colunas.sobem], quantas_contas(contas)
+
+
+async def bloqueio_exclusao(
+    session: AsyncSession, seg: Segment, raiz: Segment, *, pela_lixeira: bool = False
 ) -> tuple[Uso, Bloqueio | None]:
     """(uso, o porquê de não poder excluir — None = pode).
 
     M-90: estar em uso na tabela dela NÃO é bloqueio — a exclusão pede o destino (ver excluir).
-    Só bloqueia quando não há destino possível (nenhuma outra ativa no centro)."""
+    Só bloqueia quando não há destino possível (nenhuma outra ativa no centro).
+    M-91: pela lixeira de Cadastros › Produtos (`pela_lixeira`) a do meio também sai (as
+    seguintes andam uma posição); pela aba Segmentos continua só a última."""
     await travar_centro(session, raiz.id)
     uso = await contar_uso(session, seg.id)
     if uso.subsegmentos:
@@ -449,12 +545,24 @@ async def bloqueio_exclusao(
             0,
         )
     depois = [s for s in await filhas(session, raiz.id) if s.sort_order > seg.sort_order]
-    if depois:
+    if depois and not pela_lixeira:
+        return uso, Bloqueio(
+            "categoria_venda_do_meio",
+            f"Pela aba Segmentos só dá para excluir a última categoria de venda de {raiz.name} "
+            f"(“{depois[-1].name}”). Para excluir “{seg.name}”, use a lixeira de Cadastros › "
+            "Produtos: lá as colunas seguintes da aba Contas andam uma posição, levando a margem "
+            "e o frete de cada conta.",
+            0,
+            0,
+        )
+    if depois and await colunas_ao_excluir(session, seg, raiz) is None:
+        # Dados antigos (duas categorias na mesma posição ou posição fora de 1..5): andar as
+        # colunas trocaria a margem de alguém. Fica como antes da M-91.
         return uso, Bloqueio(
             "categoria_venda_do_meio",
             f"Só dá para excluir a última categoria de venda de {raiz.name} "
-            f"(“{depois[-1].name}”): excluir “{seg.name}” deixaria um buraco nas colunas de "
-            "margem/frete da aba Contas.",
+            f"(“{depois[-1].name}”): as posições das categorias de {raiz.name} estão "
+            "repetidas ou fora das 5 colunas de margem/frete; fale com a equipe.",
             0,
             0,
         )
@@ -474,7 +582,12 @@ def recusa(b: Bloqueio) -> HTTPException:
 
 
 async def excluir(
-    session: AsyncSession, seg: Segment, raiz: Segment, destino_id: UUID | None = None
+    session: AsyncSession,
+    seg: Segment,
+    raiz: Segment,
+    destino_id: UUID | None = None,
+    *,
+    pela_lixeira: bool = False,
 ) -> Segment | None:
     """Confere, transfere e exclui (sem commit — quem chama faz um commit só: se algo falhar,
     nada muda). Devolve o destino (None = sem transferência).
@@ -483,10 +596,16 @@ async def excluir(
     de venda ativa do mesmo centro; sem ele, 409 `categoria_venda_em_uso` (a aba Segmentos, que
     não pergunta o destino, continua recusando). Os produtos da tela Produtos vão para o destino
     ou, sem destino, ficam sem segmento. Limpa os vínculos slot1..5 que apontam para ela na
-    mesma transação — a FK já é ON DELETE SET NULL, mas assim não depende do banco."""
-    uso, bloqueio = await bloqueio_exclusao(session, seg, raiz)
+    mesma transação — a FK já é ON DELETE SET NULL, mas assim não depende do banco.
+
+    M-91 (`pela_lixeira`, Cadastros › Produtos): pode ser a do meio. As seguintes sobem uma
+    posição e, em todas as contas do centro, margem/frete/vínculo de cada posição seguinte andam
+    junto (andar_colunas); a margem/frete da excluída somem. Aba Segmentos: como antes."""
+    uso, bloqueio = await bloqueio_exclusao(session, seg, raiz, pela_lixeira=pela_lixeira)
     if bloqueio is not None:
         raise recusa(bloqueio)
+    # Antes de mexer em nada: as posições como estão agora.
+    colunas = await colunas_ao_excluir(session, seg, raiz) if pela_lixeira else None
     destino: Segment | None = None
     if destino_id is not None:
         opcoes = await destinos(session, seg, raiz)
@@ -535,5 +654,14 @@ async def excluir(
             .values({coluna.key: None})
             .execution_options(synchronize_session=False)
         )
+    if colunas is not None:
+        # M-91: as contas do centro (lidas DEPOIS das transferências e da limpeza acima) andam as
+        # colunas; as categorias seguintes sobem uma posição. Mesma transação.
+        irmas = [s for s in await filhas(session, raiz.id) if s.id != seg.id]
+        for conta in await contas_do_centro(session, raiz, irmas):
+            andar_colunas(conta, colunas)
+        for s in colunas.sobem:
+            s.sort_order = int(s.sort_order) - 1
     await session.delete(seg)
+    await session.flush()
     return destino

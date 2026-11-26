@@ -121,6 +121,7 @@ const factory = new AsyncFunction(
     centros, cadCentro, cadEhVenda, tiposDoMenu,
     cadTabela, tabelasDoMenu, trocarTabela, podeMexer, cadEditando,
     excluirDestino, escolherDestino, precisaDestino, textoTransferencia, textoPrecos, textoTelaProdutos,
+    doMeio, textosDoMeio,
   }`,
 )
 
@@ -333,10 +334,10 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.equal(p.excluindo.value, null, 'a lixeira não abre')
     assert.ok(!calls.some((c) => c.url.includes('/uso')), 'nada vai ao servidor')
   }
-  // M-75: lixeira de Categoria de venda — uso pela rota dela; bloqueada (ex.: não é a última)
-  // não tem Excluir; livre, exclui sem confirmar=true
+  // M-75: lixeira de Categoria de venda — uso pela rota dela; bloqueada (ex.: em uso sem destino
+  // possível) não tem Excluir; livre, exclui sem confirmar=true
   {
-    const doMeio = 'Só dá para excluir a última categoria de venda de Celular (“Apple”): excluir “Regular” deixaria um buraco nas colunas de margem/frete da aba Contas.'
+    const doMeio = '“Apple” (Celular) está em uso: 1 produto da Tabela de Preços, e não há outra categoria de venda ativa em Celular para recebê-los.'
     const { p, calls } = await pagina({
       respostas: {
         'GET /api/produto-cadastros/categorias-venda/s1/uso': { regra: 'categoria_venda', produtos: 0, bloqueia: true, mensagem: doMeio, precisa_destino: false, destinos: [], avisos: [] },
@@ -443,6 +444,72 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     )
     assert.equal(p.textoPrecos.value, null)
     assert.equal(p.textoTelaProdutos.value, null)
+    assert.equal(p.doMeio.value, false, 'a última: sem a lista da M-91')
+    assert.deepEqual(p.textosDoMeio.value, [])
+  }
+  // M-91: Categoria de venda do meio, em uso — "Diversos" (Celular) com destino "Regular": a lista
+  // abaixo de "Transferir para" (transferência com os preços, colunas que andam, margem/frete
+  // apagados, "Não dá para desfazer."), sem os textos da M-90; DELETE com ?destino_id=
+  {
+    const { p, calls } = await pagina({
+      respostas: {
+        'GET /api/produto-cadastros/categorias-venda/s1/uso': {
+          regra: 'categoria_venda', produtos: 11, bloqueia: false, mensagem: 'x', contas: 0,
+          produtos_tela_produtos: 0, precisa_destino: true, centro_custo: 'Celular', avisos: [],
+          destinos: [{ id: 'd1', nome: 'Acessórios' }, { id: 'd3', nome: 'Regular' }, { id: 'd4', nome: 'Robusto' }],
+          sobem: ['Regular', 'Robusto'], contas_centro: 40,
+        },
+      },
+    })
+    const diversos = { ...CADS[2], nome: 'Diversos' }
+    await p.pedirExclusao(diversos)
+    assert.equal(p.doMeio.value, true)
+    // Antes de escolher o destino: só as colunas e o apagar.
+    assert.deepEqual(p.textosDoMeio.value, [
+      'Na aba Contas, as colunas “Regular” e “Robusto” andam uma posição, levando a margem e o frete de cada conta.',
+      'A margem e o frete de “Diversos” nas 40 contas são apagados.',
+      'Não dá para desfazer.',
+    ])
+    p.escolherDestino('d3')
+    assert.deepEqual(p.textosDoMeio.value, [
+      'Os 11 produtos passam para “Regular” e os preços deles passam a usar a margem e o frete de “Regular”.',
+      'Na aba Contas, as colunas “Regular” e “Robusto” andam uma posição, levando a margem e o frete de cada conta.',
+      'A margem e o frete de “Diversos” nas 40 contas são apagados.',
+      'Não dá para desfazer.',
+    ])
+    await p.confirmarExclusao()
+    assert.deepEqual(
+      calls.filter((c) => c.method === 'DELETE').map((c) => c.url),
+      ['/api/produto-cadastros/categorias-venda/s1?destino_id=d3'],
+    )
+    // o desenho: a lista fica abaixo de "Transferir para" e os textos da M-90 somem no "do meio"
+    assert.match(tpl, /v-if="textoTransferencia && !doMeio"/)
+    assert.ok(tpl.indexOf('data-campo="transferir-para"') < tpl.indexOf('data-aviso="do-meio"'))
+    assert.match(tpl, /v-if="textosDoMeio\.length"[\s\S]{0,120}data-aviso="do-meio"[\s\S]{0,80}v-for="t in textosDoMeio"/)
+  }
+  // M-91: do meio, sem uso — só uma coluna anda, uma conta; botão "Excluir" e DELETE simples
+  {
+    const { p, calls } = await pagina({
+      respostas: {
+        'GET /api/produto-cadastros/categorias-venda/s1/uso': {
+          regra: 'categoria_venda', produtos: 0, bloqueia: false, mensagem: null, contas: 0,
+          produtos_tela_produtos: 0, precisa_destino: false, destinos: [], centro_custo: 'Eletro',
+          avisos: [], sobem: ['3'], contas_centro: 1,
+        },
+      },
+    })
+    await p.pedirExclusao({ ...CADS[2], nome: '2' })
+    assert.equal(p.precisaDestino.value, false)
+    assert.deepEqual(p.textosDoMeio.value, [
+      'Na aba Contas, a coluna “3” anda uma posição, levando a margem e o frete de cada conta.',
+      'A margem e o frete de “2” na conta são apagados.',
+      'Não dá para desfazer.',
+    ])
+    await p.confirmarExclusao()
+    assert.deepEqual(
+      calls.filter((c) => c.method === 'DELETE').map((c) => c.url),
+      ['/api/produto-cadastros/categorias-venda/s1'],
+    )
   }
   console.log('cadastro-produtos-sfc: ok')
 })().catch((e) => { console.error(e); process.exit(1) })

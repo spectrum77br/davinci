@@ -11,7 +11,11 @@ São os segmentos filhos das raízes (mesma tabela `segments`), não um cadastro
 - excluir: em uso na tabela dela (produto da Tabela de Preços ou conta apontando DIRETO para
   ela) pede o destino (M-90) — outra ativa do mesmo centro — e transfere e exclui; sem destino,
   recusa com as contagens; produtos da tela Produtos não travam (vão junto ou ficam sem
-  segmento); os vínculos slot1..5 das contas não contam e são limpos; só a última do centro sai;
+  segmento); os vínculos slot1..5 das contas não contam e são limpos; pela aba Segmentos só a
+  última do centro sai; pela lixeira de Cadastros › Produtos (M-91) a do meio também — as
+  seguintes sobem uma posição e margem/frete/vínculo de cada conta do centro (kit, par do ML,
+  catálogo) andam junto: cada categoria que fica guarda a mesma margem/frete e o preço de quem
+  não foi transferido não muda (conferido na grade de preços); outros centros não mudam;
 - incluir na posição N preenche o slot{N} vazio das contas daquele centro (nas duas telas);
 - o menu de centros de custo (sem o Catálogo) e a ordem Celular, Eletro, Mala, Catálogo;
 - posição e centro de custo não mudam pela aba Segmentos; nome repetido no centro também não;
@@ -20,6 +24,9 @@ São os segmentos filhos das raízes (mesma tabela `segments`), não um cadastro
 """
 
 from __future__ import annotations
+
+from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -33,6 +40,7 @@ from app.models import (
     Segment,
     UserRole,
 )
+from app.services.pricing.custo_total import calcular_custo_total
 
 pytestmark = pytest.mark.asyncio
 
@@ -479,6 +487,9 @@ async def test_vinculo_slot_nao_conta_e_e_limpo_ao_excluir(client, db, make_user
         "destinos": [],
         "centro_custo": "Eletro",
         "avisos": [],
+        # M-91: é a última — nenhuma anda; a margem/frete dela some nas 2 contas do Eletro.
+        "sobem": [],
+        "contas_centro": 2,
     }
     assert (await client.delete(f"{ROTA}/{e['3']}")).status_code == 204
     assert await _slots(db, a) == [e["1"], e["2"], None, None, None]
@@ -518,14 +529,18 @@ async def test_nova_na_posicao_n_preenche_o_slot_n_vazio(client, db, make_user, 
     assert str((await _slots(db, trocada))[4]) == r.json()["id"]
 
 
-async def test_so_a_ultima_sai_e_nenhuma_muda_de_coluna(client, db, make_user, auth_as, centros):
+async def test_aba_segmentos_continua_so_a_ultima(client, db, make_user, auth_as, centros):
+    """M-91: a do meio só sai pela lixeira de Cadastros › Produtos; pela aba Segmentos continua
+    recusada e nada muda. A última sai pelas duas e as outras não mudam de coluna."""
     await _admin(make_user, auth_as)
-    r = await client.get(f"{ROTA}/{centros['Eletro/2'].id}/uso")
-    assert r.json()["bloqueia"] is True and r.json()["produtos"] == 0
-    for rota in (f"{ROTA}/{centros['Eletro/2'].id}", f"/api/segments/{centros['Eletro/2'].id}"):
-        r = await client.delete(rota)
-        assert r.status_code == 409, rota
-        assert r.json()["detail"]["code"] == "categoria_venda_do_meio"
+    r = await client.delete(f"/api/segments/{centros['Eletro/2'].id}")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "categoria_venda_do_meio"
+    assert "lixeira de Cadastros › Produtos" in r.json()["detail"]["mensagem"]
+    assert [n for n, _p, _a in await _filhos(db, centros["Eletro"])] == ["1", "2", "3"]
+    # Pela lixeira a do meio não bloqueia: a janela diz quais andam.
+    uso = (await client.get(f"{ROTA}/{centros['Eletro/2'].id}/uso")).json()
+    assert (uso["bloqueia"], uso["sobem"], uso["mensagem"]) == (False, ["3"], None)
 
     r = await client.get(f"{ROTA}/{centros['Eletro/3'].id}/uso")
     uso = r.json()
@@ -545,6 +560,251 @@ async def test_so_a_ultima_sai_e_nenhuma_muda_de_coluna(client, db, make_user, a
         ("1", 0, True),
         ("2", 1, True),
         ("Três", 2, True),
+    ]
+
+
+# ================================================================ M-91: excluir a do meio
+
+D = Decimal
+CELULAR = ("Acessórios", "Diversos", "Regular", "Robusto")
+
+
+def _pares(*pares) -> dict:
+    """[(margem, frete), …] → margin1/shipping1, margin2/shipping2…"""
+    campos: dict = {}
+    for n, (m, f) in enumerate(pares, start=1):
+        campos[f"margin{n}"] = None if m is None else D(m)
+        campos[f"shipping{n}"] = None if f is None else D(f)
+    return campos
+
+
+def _coluna(conta: PricingAccount, n: int) -> tuple:
+    """(margem, frete, vínculo) da coluna n (1..5)."""
+    return (
+        getattr(conta, f"margin{n}"),
+        getattr(conta, f"shipping{n}"),
+        getattr(conta, f"slot{n}_segment_id"),
+    )
+
+
+async def _ler_conta(db, conta_id) -> PricingAccount:
+    return (
+        await db.execute(
+            select(PricingAccount)
+            .where(PricingAccount.id == conta_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+async def _grade(client, dept: str) -> dict[tuple[str, str], str | None]:
+    """{(conta, produto): preço} da grade de preços (o cálculo de verdade)."""
+    r = await client.get("/api/pricing/grid", params={"department": dept})
+    assert r.status_code == 200, r.text
+    return {
+        (c["pricing_account_id"], c["pricing_product_id"]): c["price"] for c in r.json()["cells"]
+    }
+
+
+async def test_excluir_do_meio_anda_as_colunas_e_nenhum_preco_muda(
+    client, db, make_user, auth_as, centros
+):
+    """A conferência do pedido M-91: Celular com 4 categorias (Acessórios, Diversos, Regular,
+    Robusto) e margens/fretes DIFERENTES em cada conta (Shopee, par do ML e a coluna de
+    catálogo do Clássico). Exclui "Diversos" (2ª) mandando para "Regular":
+    (i) cada categoria que fica tem, em cada conta, a mesma margem/frete/vínculo de antes;
+    (ii) o preço de cada produto não transferido fica igual na grade;
+    (iii) os transferidos ficam com o preço do destino;
+    (iv) o Eletro não muda nada."""
+    dono = await _admin(make_user, auth_as)
+    await db.delete(await db.get(Segment, centros["Celular/Apple"].id))
+    await db.commit()
+    cel = {n: centros[f"Celular/{n}"] for n in CELULAR}
+    slots = {f"slot{n}_segment_id": cel[nome].id for n, nome in enumerate(CELULAR, start=1)}
+    raiz = centros["Celular"]
+
+    def conta(nome, plataforma, **kw) -> PricingAccount:
+        return PricingAccount(user_id=dono.id, name=nome, platform=plataforma, **kw)
+
+    aguiar = conta(
+        "Shopee aguiar",
+        PricingPlatform.SHOPEE,
+        segment_id=raiz.id,
+        commission=D("0.20"),
+        margem_minima_pct=D("25"),
+        custo_total_pct=D("3"),
+        # Diversos é a menor margem: sem ela, o Custo total (M-86) sobe.
+        **_pares(("0.549", "7"), ("0.30", "35"), ("0.356", "36"), ("0.356", "37"), ("0.99", "99")),
+        **slots,
+    )
+    par = uuid4()
+    classico = conta(
+        "ML londres",
+        PricingPlatform.ML,
+        segment_id=raiz.id,
+        listing_type="ml classico",
+        par_id=par,
+        commission=D("0.11"),
+        **_pares(("0.40", "10"), ("0.35", "22"), ("0.33", "25"), ("0.31", "30")),
+        **slots,
+    )
+    premium = conta(
+        "ML londres",
+        PricingPlatform.ML,
+        segment_id=raiz.id,
+        listing_type="ml premium",
+        par_id=par,
+        commission=D("0.16"),
+        **_pares(("0.45", "11"), ("0.38", "23"), ("0.36", "26"), ("0.34", "31")),
+        **slots,
+    )
+    eletro = conta(
+        "Shopee eletro",
+        PricingPlatform.SHOPEE,
+        segment_id=centros["Eletro"].id,
+        commission=D("0.15"),
+        **_pares(("0.10", "1"), ("0.20", "2"), ("0.30", "3")),
+    )
+    db.add_all([aguiar, classico, premium, eletro])
+    await db.flush()
+    # Coluna de catálogo do Clássico: margens próprias (margens_catalogo) em 1, 3 e 4; a 2
+    # vazia usa a da base.
+    filha = conta(
+        "ML londres",
+        PricingPlatform.ML,
+        segment_id=raiz.id,
+        listing_type="ml classico",
+        canal="catalogo",
+        conta_base_id=classico.id,
+        margin1=D("0.50"),
+        margin3=D("0.42"),
+        margin4=D("0.41"),
+        **slots,
+    )
+    db.add(filha)
+
+    def produto(sku, seg, custo) -> PricingProduct:
+        return PricingProduct(
+            user_id=dono.id,
+            sku=sku,
+            name=sku,
+            segment_id=seg.id,
+            cost_kit1=D(custo),
+            preco_catalogo=D(custo),
+        )
+
+    acess = produto("a1", cel["Acessórios"], "10")
+    div1 = produto("d1", cel["Diversos"], "40")  # mesmo custo do r1: depois, mesmo preço
+    div2 = produto("d2", cel["Diversos"], "30")
+    reg = produto("r1", cel["Regular"], "40")
+    rob = produto("b1", cel["Robusto"], "50")
+    ele = produto("e1", centros["Eletro/2"], "60")
+    db.add_all([acess, div1, div2, reg, rob, ele])
+    await db.commit()
+    contas = (aguiar, classico, premium, filha)
+    antes = {c.id: [_coluna(c, n) for n in range(1, 6)] for c in contas}
+    eletro_antes = [_coluna(eletro, n) for n in range(1, 6)]
+    grade_cel = await _grade(client, "celular")
+    grade_ele = await _grade(client, "eletro")
+    # Os 5 produtos do Celular × 4 colunas (a de catálogo junto da base), todos com preço.
+    assert len(grade_cel) == 20 and all(p is not None for p in grade_cel.values())
+    for c in contas:
+        assert grade_cel[(str(c.id), str(div1.id))] != grade_cel[(str(c.id), str(reg.id))], c.name
+
+    # A janela: as que andam e em quantas contas (o par conta uma; o catálogo vai com a base).
+    uso = (await client.get(f"{ROTA}/{cel['Diversos'].id}/uso")).json()
+    assert (uso["bloqueia"], uso["precisa_destino"], uso["produtos"]) == (False, True, 2)
+    assert (uso["sobem"], uso["contas_centro"]) == (["Regular", "Robusto"], 2)
+
+    r = await client.delete(
+        f"{ROTA}/{cel['Diversos'].id}", params={"destino_id": str(cel["Regular"].id)}
+    )
+    assert r.status_code == 204, r.text
+
+    # As posições: fica 1 Acessórios, 2 Regular, 3 Robusto.
+    assert await _filhos(db, raiz) == [
+        ("Acessórios", 0, True),
+        ("Regular", 1, True),
+        ("Robusto", 2, True),
+    ]
+    # (i) cada categoria que fica: mesma margem, frete e vínculo, na coluna nova, em cada conta.
+    for c in contas:
+        depois = await _ler_conta(db, c.id)
+        velho = antes[c.id]
+        assert _coluna(depois, 1) == velho[0], c.name  # Acessórios
+        assert _coluna(depois, 2) == velho[2], c.name  # Regular (era a 3)
+        assert _coluna(depois, 3) == velho[3], c.name  # Robusto (era a 4)
+        # (d) a última ocupada fica vazia; a de Diversos sumiu.
+        assert _coluna(depois, 4) == (None, None, None), c.name
+        # Coluna sem categoria depois da última não muda.
+        assert _coluna(depois, 5) == velho[4], c.name
+    # O exemplo do pedido, na Shopee aguiar.
+    ag = await _ler_conta(db, aguiar.id)
+    assert (ag.margin1, ag.shipping1, ag.margin2, ag.shipping2, ag.margin3, ag.shipping3) == (
+        D("0.549"),
+        D("7"),
+        D("0.356"),
+        D("36"),
+        D("0.356"),
+        D("37"),
+    )
+    # M-86: o Custo total é recalculado com as margens que ficaram.
+    esperado = calcular_custo_total([D("0.549"), D("0.356"), D("0.356")], D("25"), [D("0.20")])
+    assert esperado == D("6")
+    assert ag.custo_total_pct == esperado
+
+    grade_depois = await _grade(client, "celular")
+    assert grade_depois.keys() == grade_cel.keys()
+    for c in contas:
+        # (ii) quem não foi transferido: o mesmo preço.
+        for p in (acess, reg, rob):
+            chave = (str(c.id), str(p.id))
+            assert grade_depois[chave] == grade_cel[chave], (c.name, p.sku)
+        # (iii) os transferidos: o preço do destino (d1 tem o custo do r1).
+        assert grade_depois[(str(c.id), str(div1.id))] == grade_cel[(str(c.id), str(reg.id))]
+        assert grade_depois[(str(c.id), str(div2.id))] is not None
+    for p in (div1, div2):
+        assert await _segmento_de(db, PricingProduct, p.id) == cel["Regular"].id
+
+    # (iv) o Eletro não mudou.
+    assert await _grade(client, "eletro") == grade_ele
+    el = await _ler_conta(db, eletro.id)
+    assert [_coluna(el, n) for n in range(1, 6)] == eletro_antes
+    assert [n for n, _p, _a in await _filhos(db, centros["Eletro"])] == ["1", "2", "3"]
+
+
+async def test_excluir_inativa_do_meio_sem_uso(client, db, make_user, auth_as, centros):
+    """Categoria inativa no meio (dado antigo), sem uso: mesmo tratamento — a seguinte sobe e a
+    margem/frete dela anda junto; botão Excluir simples (sem destino)."""
+    dono = await _admin(make_user, auth_as)
+    e = {n: centros[f"Eletro/{n}"] for n in ("1", "2", "3")}
+    seg = await db.get(Segment, e["2"].id)
+    seg.active = False
+    await db.commit()
+    a = await _conta(
+        db,
+        dono,
+        centros["Eletro"],
+        "a",
+        **_pares(("0.10", "1"), ("0.20", "2"), ("0.30", "3")),
+        slot1_segment_id=e["1"].id,
+        slot2_segment_id=e["2"].id,
+        slot3_segment_id=e["3"].id,
+    )
+    uso = (await client.get(f"{ROTA}/{e['2'].id}/uso")).json()
+    assert (uso["bloqueia"], uso["precisa_destino"], uso["sobem"], uso["contas_centro"]) == (
+        False,
+        False,
+        ["3"],
+        1,
+    )
+    assert (await client.delete(f"{ROTA}/{e['2'].id}")).status_code == 204
+    assert await _filhos(db, centros["Eletro"]) == [("1", 0, True), ("3", 1, True)]
+    depois = await _ler_conta(db, a.id)
+    assert [_coluna(depois, n) for n in range(1, 4)] == [
+        (D("0.10"), D("1"), e["1"].id),
+        (D("0.30"), D("3"), e["3"].id),
+        (None, None, None),
     ]
 
 

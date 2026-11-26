@@ -252,6 +252,8 @@ async def delete_segment(
     # M-75: categoria de venda só sai sem produto e sem conta apontando direto
     # para ela, e só a última do centro de custo (as outras não mudam de
     # coluna). Antes vinha um erro genérico do banco quando havia produto.
+    # M-91: a do meio sai só pela lixeira de Cadastros › Produtos (só ADM), que
+    # anda as colunas de margem/frete das contas; aqui continua só a última.
     # Os vínculos slot1..5 das contas não contam como uso e são limpos junto.
     # M-90: produto da tela Produtos (products.segment_id) não conta como uso e
     # fica sem segmento; transferir para outra categoria só pela lixeira de

@@ -32,6 +32,10 @@
 // manda o destino (DELETE ?destino_id=); o servidor transfere e exclui de uma vez. Sem uso,
 // confirmação simples com os avisos do servidor (nome reservado, produtos da tela Produtos que
 // ficam sem segmento). Categoria e Tag de envio seguem como antes.
+// M-91 (Harry 26/11/2026): a lixeira da Categoria de venda aceita a do meio (não só a última).
+// O GET /uso manda `sobem` (as que andam uma posição) e `contas_centro`; a janela lista o que
+// acontece (transferência, colunas que andam levando margem/frete, margem/frete apagados, "Não dá
+// para desfazer.") e o DELETE é o mesmo da M-90 — o servidor faz tudo num commit só.
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -64,6 +68,10 @@ type Uso = {
   destinos?: { id: string; nome: string }[]
   centro_custo?: string | null
   avisos?: string[]
+  // M-91: as categorias que andam uma posição na aba Contas (vazia se for a última) e em
+  // quantas contas do centro a margem/frete da excluída são apagados.
+  sobem?: string[]
+  contas_centro?: number
 }
 // Uma opção do menu "Tabela" do Novo cadastro; `centro` = o centro de custo (tabelas de Contas).
 type Tabela = { id: string; nome: string; centro: string | null }
@@ -324,6 +332,53 @@ const textoTelaProdutos = computed(() => {
   return n === 1
     ? `1 produto da tela Produtos vai junto para “${destinoNome.value}”.`
     : `${numero(n)} produtos da tela Produtos vão junto para “${destinoNome.value}”.`
+})
+
+// M-91: Categoria de venda "do meio" — sai, e as seguintes andam uma posição na aba Contas
+// levando a margem e o frete de cada conta. A janela troca os textos da M-90 por esta lista.
+const doMeio = computed(() => !excluirUso.value?.bloqueia && (excluirUso.value?.sobem?.length ?? 0) > 0)
+
+// ["A", "B", "C"] → “A”, “B” e “C”
+function entreAspas(nomes: string[]): string {
+  const itens = nomes.map((n) => `“${n}”`)
+  return itens.length === 1 ? itens[0] : `${itens.slice(0, -1).join(', ')} e ${itens[itens.length - 1]}`
+}
+
+const textosDoMeio = computed<string[]>(() => {
+  const u = excluirUso.value
+  const nome = excluindo.value?.nome
+  if (!doMeio.value || !u || !nome) return []
+  const linhas: string[] = []
+  const p = u.produtos ?? 0
+  const c = u.contas ?? 0
+  if (precisaDestino.value && destinoNome.value && (p || c)) {
+    const destino = `“${destinoNome.value}”`
+    const partes: string[] = []
+    if (p) partes.push(p === 1 ? 'o produto' : `os ${numero(p)} produtos`)
+    if (c) partes.push(c === 1 ? 'a conta' : `as ${numero(c)} contas`)
+    const quem = partes.join(' e ')
+    let t = `${quem.charAt(0).toUpperCase()}${quem.slice(1)} ${p + c === 1 ? 'passa' : 'passam'} para ${destino}`
+    if (p === 1) t += ` e o preço ${c ? 'do produto' : 'dele'} passa a usar a margem e o frete de ${destino}`
+    else if (p) t += ` e os preços ${c ? 'dos produtos' : 'deles'} passam a usar a margem e o frete de ${destino}`
+    linhas.push(`${t}.`)
+  }
+  if (precisaDestino.value && textoTelaProdutos.value) linhas.push(textoTelaProdutos.value)
+  const sobem = u.sobem ?? []
+  linhas.push(
+    sobem.length === 1
+      ? `Na aba Contas, a coluna ${entreAspas(sobem)} anda uma posição, levando a margem e o frete de cada conta.`
+      : `Na aba Contas, as colunas ${entreAspas(sobem)} andam uma posição, levando a margem e o frete de cada conta.`,
+  )
+  const n = u.contas_centro ?? 0
+  if (n) {
+    linhas.push(
+      n === 1
+        ? `A margem e o frete de “${nome}” na conta são apagados.`
+        : `A margem e o frete de “${nome}” nas ${numero(n)} contas são apagados.`,
+    )
+  }
+  linhas.push('Não dá para desfazer.')
+  return linhas
 })
 
 // M-89: Tipo de conta não tem lápis nem lixeira (na coluna Ações aparece "—").
@@ -657,12 +712,20 @@ async function confirmarExclusao() {
               {{ d.nome }}
             </label>
           </div>
-          <div v-if="textoTransferencia" class="space-y-1 pt-1 text-xs text-destructive" data-aviso="transferencia">
+          <div v-if="textoTransferencia && !doMeio" class="space-y-1 pt-1 text-xs text-destructive" data-aviso="transferencia">
             <p>{{ textoTransferencia }}</p>
             <p v-if="textoPrecos">{{ textoPrecos }}</p>
             <p v-if="textoTelaProdutos">{{ textoTelaProdutos }}</p>
           </div>
         </div>
+        <!-- M-91: categoria do meio — o que acontece, abaixo de "Transferir para". -->
+        <ul
+          v-if="textosDoMeio.length"
+          class="list-disc space-y-1 pl-4 text-xs text-destructive"
+          data-aviso="do-meio"
+        >
+          <li v-for="t in textosDoMeio" :key="t">{{ t }}</li>
+        </ul>
         <div class="flex justify-end gap-2">
           <Button size="sm" variant="ghost" @click="fecharExclusao">{{ excluirUso?.bloqueia ? 'Fechar' : 'Cancelar' }}</Button>
           <Button
