@@ -427,6 +427,46 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
   delete globalThis.document
   erroAds.value = null
   assert.equal(avisos.length, 0)
+  // Revisão M-79 + M-80: a pessoa digita 30 no % de um produto sem Ads e
+  // clica direto na caixinha "Ads" — o blur grava, o clique liga o filtro e a
+  // recusa do Custo total chega depois. Antes, linhaAdsNaTela ainda via a linha
+  // (valor otimista), não saía o aviso solto, e a volta ao salvo tirava o Ads
+  // do produto: o filtro escondia a linha junto com o aviso. Agora a linha
+  // recusada fica presa na lista, com o aviso junto do campo.
+  // A janela = o que produtosDoAds mostra naquela hora.
+  const linhaNaJanela = (sel) => {
+    const m = /^\[data-ads-produto-linha="([^"]+)"\]$/.exec(sel)
+    return m && naLista().includes(m[1]) ? {} : null
+  }
+  globalThis.document = { querySelector: (sel) => (sel === '[data-ads-painel="c1"]' ? { querySelector: linhaNaJanela } : null) }
+  assert.equal(soComAds.value, false)
+  assert.equal(ads.value.contas.c1.produtos.p3, undefined, 'p3 sem Ads')
+  resposta = estouro()
+  f.gravarCampoAds(campo('30', { adsConta: 'c1', adsCampo: 'pode_gastar_pct', adsProduto: 'p3' }))
+  f.alternarFiltroAds()
+  assert.deepEqual(naLista(), ['p3'], 'com o pedido no ar: p3 aparece pelo valor otimista')
+  await tique()
+  assert.deepEqual(pedidos.pop(), ['/api/pricing/ads/c1/produto/p3', 'PUT', { pode_gastar_pct: 30 }])
+  assert.equal(ads.value.contas.c1.produtos.p3, undefined, 'recusado: volta ao salvo (sem Ads)')
+  assert.deepEqual(naLista(), ['p3'], 'recusado com a caixinha ligada: a linha não some')
+  assert.equal(f.erroAdsEm('c1', 'produto:p3:', true), MSG, 'o aviso fica junto do campo, na linha que está na tela')
+  assert.equal(avisos.length, 0, 'linha na tela: sem aviso solto')
+  // Desligar e ligar a caixinha solta o produto recusado (como o limpo).
+  f.alternarFiltroAds()
+  f.alternarFiltroAds()
+  assert.deepEqual(naLista(), [])
+  // Recusa com a caixinha ligada de um produto que a categoria esconde: a
+  // linha não está na tela, então vai no aviso solto.
+  filtroCategoriaAds.value = ['rob']
+  resposta = estouro()
+  await f.gravarAds('c1', { pode_gastar_pct: 30 }, 'p3')
+  assert.deepEqual(naLista(), [], 'Capa Azul é Acessórios: continua fora')
+  assert.equal(avisos.pop(), `Não salvou o Ads | ${MSG}`)
+  filtroCategoriaAds.value = []
+  f.alternarFiltroAds()
+  delete globalThis.document
+  erroAds.value = null
+  assert.equal(avisos.length, 0)
   pedidos.splice(nPedidos)
   console.log('pricing contas ads: filtro Ads na gravação ok')
 

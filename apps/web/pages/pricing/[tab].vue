@@ -1883,6 +1883,12 @@ async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: str
     if (erroAds.value?.accId === accId) erroAds.value = null
     flash(accId, 'ads')
   } catch (e: any) {
+    // M-80: recusado com a caixinha "Ads" ligada — mesmo que ela tenha sido
+    // ligada com o pedido no ar — a linha fica na lista com o aviso. A volta
+    // ao salvo (logo abaixo) pode tirar o Ads do produto, e aí o filtro
+    // esconderia a linha junto com o aviso, depois de linhaAdsNaTela já ter
+    // visto a linha na tela (e não ter mandado o aviso solto).
+    if (prodId && filtroAdsLigado(adsDa(accId))) adsMantidosNoFiltro.value.add(prodId)
     const estouro = erroCustoTotalDe(e)
     if (estouro) {
       erroAds.value = { accId, chave: chaveAds(mudanca, prodId), mensagem: estouro }
