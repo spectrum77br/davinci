@@ -237,7 +237,7 @@ async function submitAdd() {
     closeAdd()
     await load()
   } catch (e: any) {
-    // M-75: o limite de 5 por centro de custo vem com a frase em `mensagem`.
+    // M-75: o limite por centro de custo (10 desde a M-93) vem com a frase em `mensagem`.
     error.value = e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     adding.value = false

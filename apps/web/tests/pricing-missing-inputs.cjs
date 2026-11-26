@@ -16,12 +16,16 @@ const names = [
   'ehCatalogo', 'contaBase', 'contaParametros', 'margemPropria', 'custoDaConta',
   'getKitCost', 'getMarginShipping', 'margemFreteDaColuna', 'computePrice',
 ]
-const selected = names.map((name) => {
+// M-93: o teto das posições (10) é a constante da página.
+const maxStatement = source.statements.find((candidate) => ts.isVariableStatement(candidate)
+  && candidate.declarationList.declarations.some((d) => d.name.getText(source) === 'MAX_CATEGORIAS_VENDA'))
+assert.ok(maxStatement, 'MAX_CATEGORIAS_VENDA exists')
+const selected = [maxStatement.getText(source), ...names.map((name) => {
   const node = source.statements.find((candidate) =>
     ts.isFunctionDeclaration(candidate) && candidate.name?.text === name)
   assert.ok(node, `real page helper ${name} exists`)
   return node.getText(source)
-})
+})]
 const compiled = ts.transpileModule(selected.join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }, reportDiagnostics: true,
 })
@@ -63,4 +67,30 @@ base.commission = null
 assert.equal(compute(catalogue, product), null, 'catalogue cannot invent a missing base commission')
 contasPorId.value.clear()
 assert.equal(compute(catalogue, product), null, 'catalogue needs its base account')
+
+// M-93 (26/11/2026): positions 6..10 read margin6..10/shipping6..10 — never the 5th pair.
+{
+  const five = { margin5: 0.53, shipping5: 30 }
+  const amazon = { id: 'atlas', canal: 'kit', kit_number: 1, platform: 'amazon', commission: 0.1, ...five }
+  const p = (product_type) => ({ cost_kit1: 100, product_type })
+  // Same price as before for positions 1..5.
+  assert.equal(compute(amazon, p(5)), Math.round((100 * 1.53 + 30) / 0.9))
+  // A new category (position 6..10) starts with "—": no computed price, no fallback to the 5th.
+  for (const t of [6, 7, 8, 9, 10]) {
+    assert.equal(compute(amazon, p(t)), null, `position ${t} without margin has no price`)
+    assert.equal(compute({ ...amazon, [`margin${t}`]: null, [`shipping${t}`]: 25 }, p(t)), null)
+  }
+  assert.equal(compute({ ...amazon, margin8: 0.4, shipping8: 25 }, p(8)), Math.round((100 * 1.4 + 25) / 0.9))
+  assert.equal(compute({ ...amazon, margin10: '0.2', shipping10: '10' }, p(10)), Math.round((100 * 1.2 + 10) / 0.9))
+  // Above 10 (never sent by the server) is held at 10, like calc.py.
+  assert.equal(compute({ ...amazon, margin10: 0.2, shipping10: 10 }, p(14)), Math.round((100 * 1.2 + 10) / 0.9))
+  // Catalogue: own margin at position 7 with the base shipping7; without it, the base margin7.
+  const base7 = { ...amazon, id: 'base7', platform: 'mercadolivre', margin7: 0.3, shipping7: 12 }
+  contasPorId.value.set(base7.id, base7)
+  const cat7 = { id: 'cat7', canal: 'catalogo', conta_base_id: base7.id, margens_catalogo: { '7': '0.5' } }
+  const prod7 = { cost_kit1: 100, preco_catalogo: 200, product_type: 7 }
+  assert.equal(compute(cat7, prod7), Math.round((200 * 1.5 + 12) / 0.9))
+  assert.equal(compute({ ...cat7, margens_catalogo: { '7': null } }, prod7), Math.round((200 * 1.3 + 12) / 0.9))
+  contasPorId.value.clear()
+}
 console.log('Pricing missing-input and catalogue calculation checks passed')

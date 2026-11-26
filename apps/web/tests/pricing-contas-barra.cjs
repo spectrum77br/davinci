@@ -219,8 +219,8 @@ console.log('pricing contas barra: filtro Contas com o par do ML ok')
 // Excel: as contas da tela, as colunas à vista e na ordem da tabela (M-52..M-57);
 // sem Kit/Comissão/margens/fretes para quem não é ADM. M-85: "Margem mínima (%)"
 // depois do "Custo total (%)", só para o ADM.
-const nomesExcel = ['STORE_NOTE_FIELDS', 'camposAnotacao', 'fmtCommission', 'fmtMargin', 'fmtShipping', 'textoComissao',
-  'textoComissaoPar', 'tipoDaContaSolta', 'pctGeralAds', 'linhasExcelContas']
+const nomesExcel = ['MAX_CATEGORIAS_VENDA', 'STORE_NOTE_FIELDS', 'camposAnotacao', 'fmtCommission', 'fmtMargin', 'fmtShipping',
+  'textoComissao', 'textoComissaoPar', 'tipoDaContaSolta', 'pctGeralAds', 'linhasExcelContas']
 const fpC = mlLinha('fpC', 'forpaper', 'ml classico', 'p1', {
   kit_number: 2, commission: '0.14', margin1: '0.25', shipping1: '20', margin2: null, shipping2: null,
   afiliado_pct: '4.50', desconto_pct: '10.00', custo_total_pct: '20.00', margem_minima_pct: '25.00',
@@ -237,14 +237,23 @@ const bravo = {
   afiliado_pct: null, desconto_pct: '0', custo_total_pct: null, observation: null, equipes: [],
 }
 accounts.value = [fpC, fpP, solo, bravo]
+const excelDepartamento = ref('mala')
+const excelGrupos = ref([{ platform: 'mercadolivre', rows: [fpC, solo] }, { platform: 'shopee', rows: [bravo] }])
 const linhasExcelContas = new Function('computed', 'isAdmin', 'department', 'TYPE_HEADERS', 'accountsGrouped', 'mostraColunaConta',
   'platformLabel', 'parDe', 'ehCatalogo', 'rotuloTipo', 'podeTerCatalogo', 'catalogoAtivo', 'rotuloEquipes', 'ads', 'adsDa',
   `${js(nomesExcel.map(pega).join('\n'))}\nreturn linhasExcelContas`,
 )(
-  computed, isAdmin, ref('mala'), ref({ mala: ['Acessórios', '12"'] }),
-  ref([{ platform: 'mercadolivre', rows: [fpC, solo] }, { platform: 'shopee', rows: [bravo] }]),
+  computed, isAdmin, excelDepartamento, ref({
+    mala: ['Acessórios', '12"'],
+    // M-93: o exemplo do pedido — Eletro com 10 categorias de venda.
+    eletro: ['Acessórios', 'airfryer', 'barbecue', 'slush', '5', 'cafeteira', 'cooktop', 'cookware', 'purificador',
+      'smart cooking'],
+    // Mais que 10 nunca vem do servidor; se viesse, o Excel para no par 10.
+    teste: Array.from({ length: 11 }, (_, i) => `c${i + 1}`),
+  }),
+  excelGrupos,
   P.mostraColunaConta,
-  (p) => ({ mercadolivre: 'ML', shopee: 'Shopee' })[p],
+  (p) => ({ mercadolivre: 'ML', shopee: 'Shopee', amazon: 'Amazon' })[p],
   parBase.parDe,
   (a) => a.canal === 'catalogo',
   (a) => (a.listing_type || '').replace(/^ml /, '').replace('classico', 'clássico'),
@@ -294,6 +303,39 @@ assert.ok(!/14%|19%|25\.0%/.test(JSON.stringify(semAdm)), 'nada de comissão ou 
 assert.ok(!JSON.stringify(semAdm).includes('Margem mínima'), 'sem ADM: sem a Margem mínima (M-85)')
 isAdmin.value = true
 P.colunasOcultasContas.value = []
+// M-93: Eletro com 10 categorias — um par marg/frete por categoria ativa, na ordem; a
+// Amazon atlas continua com 53,0% / 30 nas cinco primeiras e vazio nas cinco novas.
+{
+  const atlas = {
+    id: 'atlas', name: 'atlas', platform: 'amazon', department: 'eletro', kit_number: 1, commission: '0.15',
+    ...Object.fromEntries([1, 2, 3, 4, 5].flatMap((n) => [[`margin${n}`, '0.5300'], [`shipping${n}`, '30.00']])),
+    margin6: null, shipping6: null, margin7: null, shipping7: null, margin8: null, shipping8: null,
+    margin9: null, shipping9: null, margin10: null, shipping10: null,
+    afiliado_pct: null, desconto_pct: null, custo_total_pct: null, margem_minima_pct: null, observation: null, equipes: [],
+  }
+  excelDepartamento.value = 'eletro'
+  excelGrupos.value = [{ platform: 'amazon', rows: [atlas] }]
+  P.colunasOcultasContas.value = ['catalogo', 'equipe', 'kit', 'comissao', 'obs']
+  const [cab, linha] = linhasExcelContas()
+  const nomes = ['Acessórios', 'airfryer', 'barbecue', 'slush', '5', 'cafeteira', 'cooktop', 'cookware', 'purificador',
+    'smart cooking']
+  assert.deepEqual(cab, ['Plataforma', 'Conta', ...nomes.flatMap((n) => [`${n} marg`, `${n} frete`]),
+    'Afiliado (%)', 'Desconto (%)', 'Ads (%)', 'Custo total (%)', 'Margem mínima (%)'], 'M-93: 10 pares, na ordem')
+  assert.deepEqual(linha.slice(0, 22), ['Amazon', 'atlas',
+    ...Array(5).fill(['53.0%', '30']).flat(), ...Array(10).fill('')], 'as cinco novas em branco')
+  // A posição 8 preenchida sai no par da 8ª categoria (cookware), não noutro lugar.
+  atlas.margin8 = '0.4000'
+  atlas.shipping8 = '25'
+  const l8 = linhasExcelContas()[1]
+  assert.equal(l8[2 + 7 * 2], '40.0%')
+  assert.equal(l8[2 + 7 * 2 + 1], '25')
+  // Mais que 10 (nunca vem do servidor): para no 10º par.
+  excelDepartamento.value = 'teste'
+  assert.equal(linhasExcelContas()[0].filter((c) => / marg$/.test(String(c))).length, 10)
+  excelDepartamento.value = 'mala'
+  excelGrupos.value = [{ platform: 'mercadolivre', rows: [fpC, solo] }, { platform: 'shopee', rows: [bravo] }]
+  P.colunasOcultasContas.value = []
+}
 const exportar = pega('exportarExcelContas')
 assert.match(exportar, /if \(!accountsFiltered\.value\.length\) return/)
 assert.match(exportar, /gerarXlsx\(linhasExcelContas\(\), 'Contas'\)/)

@@ -91,6 +91,13 @@ assert.equal(colunas(), 4 + 5 + 1, 'Kit e Comissão escondidos não mudam nada p
 isAdmin.value = true
 assert.equal(colunas(), 4 + 10 + 6 + 1, 'ADM sem Kit e Comissão')
 ocultas = []
+// M-93: com 10 categorias ativas, 10 pares marg/frete (20 colunas) no ADM; os outros não mudam.
+nTiposAba.value = 10
+assert.equal(colunas(), 4 + 2 + 20 + 6 + 1)
+isAdmin.value = false
+assert.equal(colunas(), 4 + 5 + 1, 'quem não é ADM não vê os pares')
+isAdmin.value = true
+nTiposAba.value = 5
 console.log('pricing contas só ADM: colspan ok')
 
 // ---------- 3) script: conta nova sem kit/comissão, recálculo e aviso só do ADM
@@ -108,7 +115,7 @@ const contas = tpl.slice(tpl.indexOf("tab === 'contas'"), tpl.indexOf("tab === '
 assert.doesNotMatch(contas, /colSpan="30"/, 'colspan fixo saiu')
 assert.equal((contas.match(/:colspan="colunasContas"/g) || []).length, 3)
 const cab = contas.slice(0, contas.indexOf('</thead>'))
-assert.match(cab, /<template v-if="isAdmin">\s*<th[^>]*data-coluna-so-admin="kit">Kit<\/th>\s*<th[^>]*data-coluna-so-admin="comissao">Comissão<\/th>\s*<th\s+v-for="\(label, i\) in TYPE_HEADERS\[department\] \?\? \[\]"[\s\S]*?<\/th>\s*<\/template>/)
+assert.match(cab, /<template v-if="isAdmin">\s*<th[^>]*data-coluna-so-admin="kit">Kit<\/th>\s*<th[^>]*data-coluna-so-admin="comissao">Comissão<\/th>\s*<!--[^>]*-->\s*<th\s+v-for="\(label, i\) in tiposAba"[\s\S]*?<\/th>\s*<\/template>/)
 // Linha de adicionar conta: kit, comissão e os "—" dos pares, só ADM.
 assert.match(contas, /<template v-if="isAdmin">\s*<td[^>]*>\s*<input\s+v-model\.number="newAcc\.kit_number"[\s\S]*?v-model="newAcc\.commission"[\s\S]*?v-for="i in nTiposAba \* 2"[\s\S]*?<\/td>\s*<\/template>/)
 // Linha da conta: kit, comissão e pares dentro do mesmo v-if.

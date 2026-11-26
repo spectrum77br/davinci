@@ -150,12 +150,12 @@ const AJUDA_CONTAS = {
     {
       titulo: 'Colunas',
       itens: [
-        { termo: 'Plataforma e Conta', texto: 'o marketplace e o nome da conta.' },
+        { termo: 'Plataforma e Conta', texto: 'o marketplace e o nome da conta. Com muitas categorias a tabela rola para o lado e estas duas ficam fixas à esquerda.' },
         { termo: 'Catálogo ML', texto: 'só nas contas do Mercado Livre: Ativo ou Inativo; clique para ligar ou desligar o catálogo. As margens próprias do catálogo, só o ADM muda.' },
         { termo: 'Equipe', texto: 'número da equipe que vê a conta; vem da loja ou da integração ligada a ela. Sem nenhuma, aparece "Sem equipe".' },
         { termo: 'Kit (ADM)', texto: 'qual dos kits de custo da aba Produtos a conta usa.' },
         { termo: 'Comissão (ADM)', texto: '% da plataforma. No ML aparece Clássico · Premium; clique para mudar.' },
-        { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) por tipo de produto; são eles que formam o preço.' },
+        { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) de cada categoria de venda ativa, na ordem (até 10); são eles que formam o preço. Categoria nova começa com "—" em todas as contas: os produtos dela ficam sem preço calculado até a marg ser preenchida.' },
         { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
         { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado. Com Produto, a lista mostra a categoria de venda de cada produto; o botão Categoria de venda mostra só os produtos das categorias marcadas (nenhuma marcada = todos) e a caixinha Ads só os que têm % ou gasto por dia nesta conta. Os dois somam com a busca, não gravam nada e voltam zerados ao abrir a janela.' },
         { termo: 'Custo total (ADM)', texto: 'teto de Desconto + Afiliado ou de Desconto + Ads (vale o maior dos dois): a venda vem por Ads ou por afiliado, nunca pelos dois. Se passar, o sistema não grava e mostra a conta que passou. Todos veem. Com a Margem mínima preenchida, ele é calculado e não se digita (fica cinza).' },
@@ -254,6 +254,13 @@ const TYPE_HEADERS_FALLBACK: Record<string, string[]> = {
 
 const TYPE_HEADERS = ref<Record<string, string[]>>({ ...TYPE_HEADERS_FALLBACK })
 
+// M-93 (26/11/2026): cada tabela de Contas (Celular, Eletro, Mala) aceita até 10
+// categorias de venda — o mesmo número do servidor (MAX_CATEGORIAS_VENDA em
+// services/pricing/posicoes.py). Cada conta guarda margin1..10, shipping1..10 e
+// slot1..10_segment_id; a N-ésima categoria ativa fica sobre o par N. Tudo que
+// lê as posições (aba Contas, cálculo, Catálogo ML, slots, Excel) vai até aqui.
+const MAX_CATEGORIAS_VENDA = 10
+
 type SegmentRow = {
   id: string
   parent_id: string | null
@@ -309,17 +316,31 @@ async function loadSegments() {
 
 // ============================================================ slot editor
 // Compact per-account popover that lets the user pick which segment
-// slot{1..5}_segment_id points to. Default mapping mirrors the department
+// slot{1..10}_segment_id points to. Default mapping mirrors the department
 // children's sort_order; this popover only matters when the user wants to
 // remap (e.g. swap Acessórios/Diversos for one specific account).
 const slotPopoverAccountId = ref<string | null>(null)
-const slotPopoverValues = ref<Array<string | null>>([null, null, null, null, null])
+const slotPopoverValues = ref<Array<string | null>>([])
 // Como a janela abriu (para mandar só o que a pessoa mudou) e, na conta ML com
 // par, em que campos o Clássico e o Premium estão diferentes.
-const slotPopoverAbertos = ref<Array<string | null>>([null, null, null, null, null])
-const slotPopoverDiferentes = ref<boolean[]>([false, false, false, false, false])
+const slotPopoverAbertos = ref<Array<string | null>>([])
+const slotPopoverDiferentes = ref<boolean[]>([])
 const slotPopoverSaving = ref(false)
 const slotPopoverError = ref<string | null>(null)
+
+// Quantos slots a janela mostra (M-93): os 5 de sempre, ou mais quando a aba
+// da conta tem mais categorias ativas ou já há slot gravado depois do 5º —
+// nunca mais que MAX_CATEGORIAS_VENDA. Celular e Mala (até 5) não mudam.
+function nSlotsDaConta(acc: Account): number {
+  let n = Math.max(5, (TYPE_HEADERS.value[acc.department as DeptKey] ?? []).length)
+  for (let i = MAX_CATEGORIAS_VENDA; i > n; i--) {
+    if ((acc as any)[`slot${i}_segment_id`] != null) {
+      n = i
+      break
+    }
+  }
+  return Math.min(n, MAX_CATEGORIAS_VENDA)
+}
 
 // Conta ML com par (M-53): cada campo abre com o slot do Clássico, ou o do
 // Premium se o do Clássico está vazio (atlas/fiore têm o Clássico sem slots e
@@ -328,7 +349,8 @@ function openSlotPopover(acc: Account) {
   const par = parDe(acc)
   const valores: Array<string | null> = []
   const diferentes: boolean[] = []
-  for (let i = 1; i <= 5; i++) {
+  const n = Math.max(nSlotsDaConta(acc), par ? nSlotsDaConta(par.premium) : 0)
+  for (let i = 1; i <= n; i++) {
     const k = `slot${i}_segment_id`
     const c: string | null = ((par ? par.classico : acc) as any)[k] ?? null
     const p: string | null = par ? ((par.premium as any)[k] ?? null) : null
@@ -352,13 +374,13 @@ function segmentChildrenFor(acc: Account): SegmentRow[] {
     .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
 }
 // Conta ML com par: só vão os slots que a pessoa mudou (o servidor copia para
-// o Premium; mandar os 5 apagaria os do Premium que a janela não mostrou) e,
-// nada mudado, não grava nada. Conta sem par: os 5, como sempre.
+// o Premium; mandar todos apagaria os do Premium que a janela não mostrou) e,
+// nada mudado, não grava nada. Conta sem par: todos os da janela, como sempre.
 async function saveSlotPopover(accId: string) {
   const acc = accounts.value.find((a) => a.id === accId)
   const par = acc ? parDe(acc) : null
   const body: Record<string, string | null> = {}
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < slotPopoverValues.value.length; i++) {
     if (!par || slotPopoverValues.value[i] !== slotPopoverAbertos.value[i]) {
       body[`slot${i + 1}_segment_id`] = slotPopoverValues.value[i]
     }
@@ -552,6 +574,18 @@ type Account = {
   shipping4: string | number | null
   margin5: string | number | null
   shipping5: string | number | null
+  // M-93 (migration 0520): as posições 6..10, mesmos nomes; vazias (null) até
+  // alguém preencher — categoria nova começa com "—" em todas as contas.
+  margin6?: string | number | null
+  shipping6?: string | number | null
+  margin7?: string | number | null
+  shipping7?: string | number | null
+  margin8?: string | number | null
+  shipping8?: string | number | null
+  margin9?: string | number | null
+  shipping9?: string | number | null
+  margin10?: string | number | null
+  shipping10?: string | number | null
   email: string | null
   phone: string | null
   observation: string | null
@@ -595,6 +629,17 @@ type Account = {
   slot3_segment_name: string | null
   slot4_segment_name: string | null
   slot5_segment_name: string | null
+  // M-93: slot6..10 (mesma FK dos de cima).
+  slot6_segment_id?: string | null
+  slot7_segment_id?: string | null
+  slot8_segment_id?: string | null
+  slot9_segment_id?: string | null
+  slot10_segment_id?: string | null
+  slot6_segment_name?: string | null
+  slot7_segment_name?: string | null
+  slot8_segment_name?: string | null
+  slot9_segment_name?: string | null
+  slot10_segment_name?: string | null
   // Catálogo ML (06/10/2026): 'kit' = conta normal; 'catalogo' = coluna de
   // catálogo ligada numa conta ML de kit ("filha", conta_base_id = a conta de
   // kit). A filha herda comissão, margens, fretes e anotações da base na hora
@@ -604,8 +649,8 @@ type Account = {
   // Na conta de kit: id da coluna de catálogo dela (catálogo ligado), ou null.
   conta_catalogo_id?: string | null
   // Margem própria do catálogo (07/10/2026), só na conta de catálogo:
-  // {"1".."5": margem do tipo, ou null = usa a da conta de kit}. Os
-  // margin1..5 dela continuam vindo com os da base.
+  // {"1".."10": margem do tipo, ou null = usa a da conta de kit} (até "5"
+  // antes da M-93). Os margin1..10 dela continuam vindo com os da base.
   margens_catalogo?: Record<string, string | number | null> | null
   // Coluna "Equipe" da aba Contas (03/11/2026): as equipes de vendas que veem
   // a conta ("Equipe 1/2/3", a mesma de Lojas), pela régua da cerca. Vazia =
@@ -711,7 +756,7 @@ function podeTerCatalogo(acc: Account): boolean {
 function temMargemPropria(acc: Account): boolean {
   const filha = catalogoPorBase.value.get(acc.id)
   if (!filha) return false
-  for (let t = 1; t <= 5; t++) if (margemPropria(filha, t) != null) return true
+  for (let t = 1; t <= MAX_CATEGORIAS_VENDA; t++) if (margemPropria(filha, t) != null) return true
   return false
 }
 
@@ -901,7 +946,11 @@ const accountsCurrent = computed(() => accountsByDept.value[department.value] ??
 // Pares marg/frete da aba Contas: um por tipo ATIVO do departamento (os
 // títulos do cabeçalho). Desenhar sempre 5 desalinhava a tabela quando um
 // tipo é desativado (Mala sem "Queima de estoque", 07/10/2026).
-const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).length)
+// M-93: até MAX_CATEGORIAS_VENDA (10) — o servidor não deixa passar disso; o
+// corte aqui só garante que cabeçalho, células, Excel e Catálogo ML nunca
+// apontem para um margin11 que não existe.
+const tiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).slice(0, MAX_CATEGORIAS_VENDA))
+const nTiposAba = computed(() => tiposAba.value.length)
 
 // Layout ▾ da aba Contas (M-51, 25/11/2026): caixas para mostrar ou esconder
 // colunas, como o Layout da Tabela de Preços (marcada = aparece; lembrado
@@ -4717,7 +4766,7 @@ function margemPropria(acc: Account, t: number): number | null {
 function resumoMargemPropria(acc: Account): string {
   const nomes = TYPE_HEADERS.value[acc.department as DeptKey] ?? []
   const partes: string[] = []
-  for (let t = 1; t <= 5; t++) {
+  for (let t = 1; t <= MAX_CATEGORIAS_VENDA; t++) {
     const m = margemPropria(acc, t)
     if (m != null) partes.push(`${nomes[t - 1] ?? `tipo ${t}`} ${fmtMargin(m)}`)
   }
@@ -5087,8 +5136,11 @@ function getKitCost(prod: PricingProduct, kitNumber: number | null): number {
   return Number(v ?? 0)
 }
 
+// O tipo do produto (a posição da categoria de venda, 1..10 desde a M-93) escolhe
+// o par margin{t}/shipping{t}; o servidor (services/pricing/calc.py) prende no
+// mesmo teto. Posição sem margem na conta = sem preço calculado ("—").
 function getMarginShipping(acc: Account, productType: number): { margin: number; shipping: number } | null {
-  const t = Math.max(1, Math.min(5, productType || 1))
+  const t = Math.max(1, Math.min(MAX_CATEGORIAS_VENDA, productType || 1))
   const rawMargin = (acc as any)[`margin${t}`]
   if (rawMargin == null || rawMargin === '') return null
   const margin = Number(rawMargin)
@@ -5101,7 +5153,7 @@ function getMarginShipping(acc: Account, productType: number): { margin: number;
 // própria do tipo (se houver) com o frete da conta de kit.
 function margemFreteDaColuna(acc: Account, productType: number): { margin: number; shipping: number } | null {
   const params = contaParametros(acc)
-  const t = Math.max(1, Math.min(5, productType || 1))
+  const t = Math.max(1, Math.min(MAX_CATEGORIAS_VENDA, productType || 1))
   const propria = margemPropria(acc, t)
   if (propria == null) return getMarginShipping(params, productType)
   const shipping = Number((params as any)[`shipping${t}`] ?? 0)
@@ -5285,7 +5337,9 @@ function linhasExcelContas(): CelulaPlanilha[][] {
     const n = Number(v)
     return Number.isFinite(n) ? n : ''
   }
-  const tipos = TYPE_HEADERS.value[department.value] ?? []
+  // Um par "<categoria> marg | <categoria> frete" por categoria ativa, na ordem
+  // da aba (até 10, M-93).
+  const tipos = (TYPE_HEADERS.value[department.value] ?? []).slice(0, MAX_CATEGORIAS_VENDA)
   const notas = camposAnotacao.value.filter((f) => f.key !== 'observation' || mostraColunaConta('obs'))
   const cab: CelulaPlanilha[] = ['Plataforma', 'Conta']
   if (mostraColunaConta('catalogo')) cab.push('Catálogo ML')
@@ -5545,18 +5599,24 @@ function fmtBRL(v: string | number | null) {
 function tabelaName(p: PricingProduct): string {
   const headers = TYPE_HEADERS.value
   const list = headers[(p.department as DeptKey)] ?? headers.celular
-  const t = Math.max(1, Math.min(5, p.product_type || 1))
+  const t = Math.max(1, Math.min(MAX_CATEGORIAS_VENDA, p.product_type || 1))
   return list[t - 1] ?? '—'
 }
 
+// Uma cor por posição; 6..10 desde a M-93 (as 5 primeiras não mudaram).
 function tabelaBadgeClass(p: PricingProduct): string {
-  const t = Math.max(1, Math.min(5, p.product_type || 1))
+  const t = Math.max(1, Math.min(MAX_CATEGORIAS_VENDA, p.product_type || 1))
   switch (t) {
     case 1: return 'bg-slate-100 text-slate-700'
     case 2: return 'bg-blue-100 text-blue-700'
     case 3: return 'bg-emerald-100 text-emerald-700'
     case 4: return 'bg-orange-100 text-orange-700'
     case 5: return 'bg-purple-100 text-purple-700'
+    case 6: return 'bg-pink-100 text-pink-700'
+    case 7: return 'bg-teal-100 text-teal-700'
+    case 8: return 'bg-amber-100 text-amber-800'
+    case 9: return 'bg-cyan-100 text-cyan-700'
+    case 10: return 'bg-lime-100 text-lime-800'
     default: return 'bg-gray-100 text-gray-700'
   }
 }
@@ -5975,9 +6035,18 @@ watch(department, async () => {
                  como o conteúdo. M-52 (25/11/2026): Plataforma e depois Conta,
                  na ordem da tela de Lojas. A coluna Tipo ML saiu na M-53: a
                  conta do ML é uma linha só (Clássico e Premium). -->
+            <!-- M-93: com muitas categorias a tabela rola para o lado dentro do
+                 quadro e Plataforma e Conta ficam FIXAS à esquerda (cabeçalho e
+                 linhas): sticky com fundo opaco. A Plataforma tem 100px fixos e
+                 a Conta encosta nela (left-[100px]). Com border-collapse a borda
+                 vertical de uma célula sticky não anda com ela (fica uma fresta
+                 de 1px por onde o que rola aparece): nas células fixas as linhas
+                 verticais são desenhadas por before:/after: de 1px (cor da borda),
+                 que andam junto — a da esquerda cobre a fresta e a da direita da
+                 Conta fica em cima da borda da coluna seguinte (sem linha dupla). -->
             <tr>
-              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[100px]">Plataforma</th>
-              <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px]">Conta</th>
+              <th class="sticky left-0 z-[1] bg-muted text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-[100px] min-w-[100px] max-w-[100px]" data-coluna-fixa="plataforma">Plataforma</th>
+              <th class="sticky left-[100px] z-[1] bg-muted text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border min-w-[120px] after:absolute after:inset-y-0 after:-right-px after:w-px after:bg-border" data-coluna-fixa="conta">Conta</th>
               <!-- Catálogo ML, Equipe, Kit, Comissão e Obs: escondidos pelo
                    Layout ▾ (M-51). Desconto e Custo total ficam sempre. -->
               <th
@@ -5994,8 +6063,9 @@ watch(department, async () => {
               <template v-if="isAdmin">
               <th v-if="mostraColunaConta('kit')" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-12" data-coluna-so-admin="kit">Kit</th>
               <th v-if="mostraColunaConta('comissao')" class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20" title="Comissão da conta. No ML: Clássico · Premium — clique para mudar." data-coluna-so-admin="comissao">Comissão</th>
+              <!-- Uma dupla marg | frete por categoria ATIVA, na ordem (até 10, M-93). -->
               <th
-                v-for="(label, i) in TYPE_HEADERS[department] ?? []"
+                v-for="(label, i) in tiposAba"
                 :key="i"
                 colSpan="2"
                 class="text-center px-1 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
@@ -6038,12 +6108,13 @@ watch(department, async () => {
             <!-- add row: Plataforma e depois Conta (M-52). ML nasce com Clássico
                  e Premium, sem escolher tipo (M-53). -->
             <tr v-if="showAddAcc" class="bg-blue-50/40 dark:bg-blue-900/10">
-              <td class="border border-border px-1 py-1">
+              <!-- M-93: as duas fixas têm fundo opaco com a mesma cor da linha por cima. -->
+              <td class="sticky left-0 z-[1] bg-background [background-image:linear-gradient(rgb(239_246_255/0.4),rgb(239_246_255/0.4))] dark:[background-image:linear-gradient(rgb(30_58_138/0.1),rgb(30_58_138/0.1))] border border-border px-1 py-1 w-[100px] min-w-[100px] max-w-[100px] before:absolute before:inset-y-0 before:-left-px before:w-px before:bg-border" data-coluna-fixa="plataforma">
                 <select v-model="newAcc.platform" class="w-full text-xs border rounded px-1 py-1 bg-background">
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
               </td>
-              <td class="border border-border px-1 py-1">
+              <td class="sticky left-[100px] z-[1] bg-background [background-image:linear-gradient(rgb(239_246_255/0.4),rgb(239_246_255/0.4))] dark:[background-image:linear-gradient(rgb(30_58_138/0.1),rgb(30_58_138/0.1))] border border-border px-1 py-1 before:absolute before:inset-y-0 before:-left-px before:w-px before:bg-border after:absolute after:inset-y-0 after:-right-px after:w-px after:bg-border" data-coluna-fixa="conta">
                 <input
                   id="new-acc-name"
                   v-model="newAcc.name"
@@ -6105,23 +6176,29 @@ watch(department, async () => {
             <template v-for="group in accountsGrouped" :key="group.platform">
               <tr class="bg-muted/40">
                 <td :colspan="colunasContas" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase" data-grupo-contas>
-                  {{ group.label }} · {{ group.rows.length }} CONTA(S)
+                  <!-- M-93: o nome do grupo acompanha as colunas fixas ao rolar para o lado. -->
+                  <span class="sticky left-3">{{ group.label }} · {{ group.rows.length }} CONTA(S)</span>
                 </td>
               </tr>
               <template v-for="acc in group.rows" :key="acc.id">
-              <tr class="hover:bg-accent/30">
+              <tr class="group/linha hover:bg-accent/30">
               <!-- plataforma (M-52: primeira coluna, à esquerda). Conta ML com
                    Clássico e Premium não troca de plataforma por aqui; conta ML
                    sem par (só um tipo) mostra o tipo ao lado de "ML". -->
+              <!-- M-93: fixa à esquerda (sticky, 100px); fundo opaco — o verde de
+                   "gravado" é o opaco equivalente e o realce da linha vem por cima. -->
               <td
-                class="border border-border px-2 py-1.5 text-xs text-left whitespace-nowrap"
-                :class="{
-                  'cursor-pointer': !parDe(acc),
-                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'platform'),
-                  'ring-1 ring-destructive ring-inset': erroPlataforma?.id === acc.id && !isEditing(acc.id, 'platform'),
-                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'platform'),
-                }"
+                class="border border-border px-2 py-1.5 text-xs text-left whitespace-nowrap sticky left-0 z-[1] w-[100px] min-w-[100px] max-w-[100px] before:absolute before:inset-y-0 before:-left-px before:w-px before:bg-border group-hover/linha:[background-image:linear-gradient(hsl(var(--accent)/0.3),hsl(var(--accent)/0.3))]"
+                :class="[
+                  isFlashed(acc.id, 'platform') ? 'bg-emerald-50 dark:bg-emerald-950' : 'bg-background',
+                  {
+                    'cursor-pointer': !parDe(acc),
+                    'ring-2 ring-blue-500 ring-inset': isEditing(acc.id, 'platform'),
+                    'ring-1 ring-destructive ring-inset': erroPlataforma?.id === acc.id && !isEditing(acc.id, 'platform'),
+                  },
+                ]"
                 :title="parDe(acc) ? 'Conta do ML com Clássico e Premium (as duas colunas na Tabela de Preços)' : undefined"
+                data-coluna-fixa="plataforma"
                 data-coluna-plataforma
                 @click="!isEditing(acc.id, 'platform') && !parDe(acc) && startEditAccount(acc, 'platform')"
               >
@@ -6147,13 +6224,19 @@ watch(department, async () => {
                   data-erro-plataforma
                 >{{ erroPlataforma?.mensagem }}</p>
               </td>
-              <!-- conta (o nome, como está cadastrado; M-52: segunda coluna) -->
+              <!-- conta (o nome, como está cadastrado; M-52: segunda coluna).
+                   M-93: fixa à esquerda, encostada na Plataforma (left-[100px]). A
+                   janela de Slots sai daqui de dentro: com ela aberta a célula sobe
+                   (z-[9], abaixo do cabeçalho) para a janela não ficar por baixo
+                   das colunas fixas das linhas de baixo. -->
               <td
-                class="border border-border px-2 py-1.5 text-xs text-left relative"
-                :class="{
-                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'name'),
-                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'name'),
-                }"
+                class="border border-border px-2 py-1.5 text-xs text-left sticky left-[100px] before:absolute before:inset-y-0 before:-left-px before:w-px before:bg-border after:absolute after:inset-y-0 after:-right-px after:w-px after:bg-border group-hover/linha:[background-image:linear-gradient(hsl(var(--accent)/0.3),hsl(var(--accent)/0.3))]"
+                :class="[
+                  slotPopoverAccountId === acc.id ? 'z-[9]' : 'z-[1]',
+                  isFlashed(acc.id, 'name') ? 'bg-emerald-50 dark:bg-emerald-950' : 'bg-background',
+                  { 'ring-2 ring-blue-500 ring-inset': isEditing(acc.id, 'name') },
+                ]"
+                data-coluna-fixa="conta"
               >
                 <input
                   v-if="isEditing(acc.id, 'name')"
@@ -6188,8 +6271,9 @@ watch(department, async () => {
                   <div class="text-xs font-semibold mb-2">
                     Slots desta conta · {{ DEPARTMENTS.find(d => d.value === acc.department)?.label }}
                   </div>
-                  <div class="space-y-1.5">
-                    <div v-for="i in 5" :key="i">
+                  <div class="space-y-1.5 max-h-80 overflow-y-auto">
+                    <!-- Os 5 de sempre, ou até 10 quando a aba tem mais categorias (M-93). -->
+                    <div v-for="i in slotPopoverValues.length" :key="i">
                       <div class="flex items-center gap-2">
                         <span class="text-[10px] text-muted-foreground w-12 shrink-0">
                           slot{{ i }}<br/>
@@ -6289,7 +6373,7 @@ watch(department, async () => {
                           </div>
                           <div
                             v-if="catalogoJanelaMargens && catalogoJanelaAtivo"
-                            class="mt-1 space-y-1 border-t px-1 pt-1.5"
+                            class="mt-1 space-y-1 border-t px-1 pt-1.5 max-h-80 overflow-y-auto"
                             data-margens-catalogo
                           >
                             <label class="flex cursor-pointer items-center gap-2">
@@ -6302,8 +6386,9 @@ watch(department, async () => {
                               />
                               Usar as margens da conta
                             </label>
+                            <!-- Uma margem por categoria ativa da aba (até 10, M-93). -->
                             <div
-                              v-for="(nome, i) in TYPE_HEADERS[department] ?? []"
+                              v-for="(nome, i) in tiposAba"
                               :key="i"
                               class="flex items-center justify-between gap-2"
                             >

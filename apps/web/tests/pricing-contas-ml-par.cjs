@@ -209,7 +209,7 @@ async function catalogo() {
   const fmtMargin = (v) => (v == null || v === '' ? '—' : `${(Number(v) * 100).toFixed(1)}%`)
   const g = new Function('accounts', 'isAdmin', 'canEditContas', 'api', 'flash', 'ref', 'loadAccounts', 'confirm', 'toast',
     'department', 'TYPE_HEADERS', 'nTiposAba', 'fmtMargin', 'platformLabel', 'rotuloTipo', 'nomeComTipo', 'resumoMargemPropria', js([
-      funcao('ehCatalogo'), funcao('ordemTipo'), funcao('parseDec'),
+      constante('MAX_CATEGORIAS_VENDA'), funcao('ehCatalogo'), funcao('ordemTipo'), funcao('parseDec'),
       computado('linhasPorPar'), funcao('parDe'), funcao('tituloConta'),
       computado('catalogoPorBase'), funcao('catalogoAtivo'), funcao('podeTerCatalogo'), funcao('margemPropria'),
       funcao('temMargemPropria'),
@@ -439,16 +439,23 @@ async function estouroNaTabela() {
 // ---------- 6) janela de Slots da conta ML com par: abre com o Premium onde o
 // Clássico está vazio, avisa se os dois diferem e só manda o que mudou
 async function slots() {
-  const p = new Function('accounts', 'api', 'ref', js([
-    funcao('ehCatalogo'), funcao('ordemTipo'),
+  // M-93: a janela mostra os 5 de sempre, ou até 10 quando a aba da conta tem mais categorias.
+  const TYPE_HEADERS = ref({
+    mala: ['Acessórios', '12"', '18" e 20"', '24" acima'],
+    eletro: ['Acessórios', 'airfryer', 'barbecue', 'slush', '5', 'cafeteira', 'cooktop', 'cookware', 'purificador',
+      'smart cooking'],
+  })
+  const p = new Function('accounts', 'api', 'ref', 'TYPE_HEADERS', js([
+    constante('MAX_CATEGORIAS_VENDA'), funcao('ehCatalogo'), funcao('ordemTipo'),
     computado('linhasPorPar'), funcao('parDe'), funcao('irmaDe'),
     constante('CAMPOS_SO_DA_LINHA'), funcao('espelharNaIrma'),
     constante('slotPopoverAccountId'), constante('slotPopoverValues'), constante('slotPopoverAbertos'),
     constante('slotPopoverDiferentes'), constante('slotPopoverSaving'), constante('slotPopoverError'),
-    funcao('openSlotPopover'), funcao('closeSlotPopover'), funcao('saveSlotPopover'),
-    `return { slotPopoverAccountId, slotPopoverValues, slotPopoverDiferentes, slotPopoverError,
-      openSlotPopover, closeSlotPopover, saveSlotPopover }`,
-  ].join('\n')))(accounts, api, ref)
+    funcao('nSlotsDaConta'), funcao('openSlotPopover'), funcao('closeSlotPopover'), funcao('saveSlotPopover'),
+    `return { MAX_CATEGORIAS_VENDA, slotPopoverAccountId, slotPopoverValues, slotPopoverDiferentes, slotPopoverError,
+      nSlotsDaConta, openSlotPopover, closeSlotPopover, saveSlotPopover }`,
+  ].join('\n')))(accounts, api, ref, TYPE_HEADERS)
+  assert.equal(p.MAX_CATEGORIAS_VENDA, 10, 'M-93: até 10 categorias de venda')
   const sl = (v) => Object.fromEntries([1, 2, 3, 4, 5].map((n, i) => [[`slot${n}_segment_id`, v[i]], [`slot${n}_segment_name`, v[i] && `nome-${v[i]}`]]).flat())
   // atlas: Clássico sem slots, Premium preenchido (como em produção);
   // slot5 diferente nos dois.
@@ -499,6 +506,42 @@ async function slots() {
   assert.equal(p.slotPopoverAccountId.value, 'atC')
   pedidos.length = 0
   p.closeSlotPopover()
+  // M-93: Eletro com 10 categorias → 10 slots; a conta sem par manda os 10 (os novos vazios).
+  const sl10 = (v) => Object.fromEntries(v.flatMap((id, i) => [[`slot${i + 1}_segment_id`, id], [`slot${i + 1}_segment_name`, id && `nome-${id}`]]))
+  const el = conta('el', { platform: 'amazon', department: 'eletro', ...sl10(['e1', 'e2', 'e3', 'e4', 'e5']) })
+  accounts.value = [el]
+  assert.equal(p.nSlotsDaConta(el), 10)
+  p.openSlotPopover(el)
+  assert.deepEqual(p.slotPopoverValues.value, ['e1', 'e2', 'e3', 'e4', 'e5', null, null, null, null, null])
+  assert.deepEqual(p.slotPopoverDiferentes.value, Array(10).fill(false))
+  p.slotPopoverValues.value[7] = 'e8'
+  respostas = [{ ...el, slot8_segment_id: 'e8', slot8_segment_name: 'nome-e8' }]
+  await p.saveSlotPopover('el')
+  assert.deepEqual(pedidos.pop()[2], {
+    slot1_segment_id: 'e1', slot2_segment_id: 'e2', slot3_segment_id: 'e3', slot4_segment_id: 'e4', slot5_segment_id: 'e5',
+    slot6_segment_id: null, slot7_segment_id: null, slot8_segment_id: 'e8', slot9_segment_id: null, slot10_segment_id: null,
+  })
+  // Mala (4 ativas) continua com os 5 de sempre; slot gravado depois do 5º também aparece.
+  assert.equal(p.nSlotsDaConta(conta('m', {})), 5)
+  assert.equal(p.nSlotsDaConta(conta('m7', { slot7_segment_id: 'x' })), 7)
+  assert.equal(p.nSlotsDaConta(conta('m12', { department: 'eletro', slot12_segment_id: 'x' })), 10, 'nunca passa de 10')
+  // Par do ML no Eletro: Clássico com 5 e Premium com o 9º preenchido → 10 campos, só o que mudou vai.
+  const eC = conta('eC', { department: 'eletro', listing_type: 'ml classico', par_id: 'P10', ...sl10(['e1', null, null, null, null]) })
+  const eP = conta('eP', { department: 'eletro', listing_type: 'ml premium', par_id: 'P10', ...sl10(['e1', null, null, null, null, null, null, null, 'e9']) })
+  accounts.value = [eC, eP]
+  p.openSlotPopover(eC)
+  assert.equal(p.slotPopoverValues.value.length, 10)
+  assert.equal(p.slotPopoverValues.value[8], 'e9', 'vazio no Clássico: abre com o do Premium')
+  await p.saveSlotPopover('eC')
+  assert.equal(pedidos.length, 0, 'nada mudou: nada vai')
+  p.openSlotPopover(eC)
+  p.slotPopoverValues.value[9] = 'e10'
+  respostas = [{ ...eC, slot10_segment_id: 'e10', slot10_segment_name: 'nome-e10' }]
+  await p.saveSlotPopover('eC')
+  assert.deepEqual(pedidos.pop()[2], { slot10_segment_id: 'e10' })
+  assert.equal(eP.slot10_segment_id, 'e10', 'Premium local acompanha')
+  assert.equal(eP.slot9_segment_id, 'e9')
+  pedidos.length = 0
   console.log('pricing contas ML par: slots ok')
 }
 
@@ -553,11 +596,12 @@ function template() {
   const ordem = ['data-coluna-plataforma', '<!-- conta (o nome', 'data-coluna-catalogo', 'data-coluna-equipe']
     .map((t) => linha.indexOf(t))
   assert.ok(ordem.every((i, k) => i > 0 && (k === 0 || i > ordem[k - 1])), `células na ordem do cabeçalho: ${ordem}`)
-  assert.match(linha, /<td\s+class="border border-border px-2 py-1\.5 text-xs text-left whitespace-nowrap"[\s\S]*?data-coluna-plataforma/)
+  assert.match(linha, /<td\s+class="border border-border px-2 py-1\.5 text-xs text-left whitespace-nowrap sticky left-0 [^"]*"[\s\S]*?data-coluna-plataforma/)
   assert.match(linha, /data-tipo-conta-solta>\{\{ tipoDaContaSolta\(acc\) \}\}/)
   assert.ok(!contas.includes('definirTipoMl') && !contas.includes('rotuloTipoMl'))
   // T5: a troca de plataforma usa a lista sem ML; o erro do servidor no campo.
-  const celPlat = linha.slice(linha.indexOf('<td\n                class="border border-border px-2 py-1.5 text-xs text-left whitespace-nowrap"'), linha.indexOf('<!-- conta (o nome'))
+  const celPlat = linha.slice(linha.indexOf('<td\n                class="border border-border px-2 py-1.5 text-xs text-left whitespace-nowrap sticky left-0'), linha.indexOf('<!-- conta (o nome'))
+  assert.ok(celPlat.length > 200, 'célula da Plataforma')
   assert.ok(celPlat.includes('<option v-for="p in plataformasDaTroca(acc)" :key="p.value" :value="p.value">{{ p.label }}</option>'))
   assert.match(celPlat, /v-if="erroPlataforma\?\.id === acc\.id"[\s\S]*?role="alert"[\s\S]*?data-erro-plataforma\s*>\{\{ erroPlataforma\?\.mensagem \}\}<\/p>/)
   assert.ok(celPlat.includes("'ring-1 ring-destructive ring-inset': erroPlataforma?.id === acc.id"))
@@ -592,7 +636,7 @@ function template() {
     'data-acao="margens-catalogo"',
     'v-model="catalogoJanelaUsarDaConta"',
     'Usar as margens da conta',
-    'v-for="(nome, i) in TYPE_HEADERS[department] ?? []"',
+    'v-for="(nome, i) in tiposAba"',
     ':value="margemDaContaTexto(acc, i + 1)"',
     'v-model="catalogoJanelaValores[i]"',
     '@click="fecharCatalogo()"',

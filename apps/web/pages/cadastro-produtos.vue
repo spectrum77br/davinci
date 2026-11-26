@@ -11,7 +11,9 @@
 // M-75 (Harry 25/11/2026): tipo "Categoria de venda" = os grupos de margem/frete da aba Contas.
 // NÃO é cadastro novo: são os segmentos filhos de Cadastros › Segmentos (o mesmo dado), com a
 // raiz como centro de custo. Vão pelas rotas /categorias-venda; a nova entra no fim do
-// centro de custo (até 5), só a última sai e "Apple"/"Queima de estoque" não trocam de nome
+// centro de custo (até 5; até 10 desde a M-93, 26/11/2026 — a recusa da 11ª vem do servidor,
+// «… já tem 10 categorias de venda.»), só a última sai (a do meio desde a M-91) e
+// "Apple"/"Queima de estoque" não trocam de nome
 // (o servidor confere e manda a frase). O menu "Centro de custo" do Novo cadastro vem de um
 // lugar só: `centros_custo` da lista (services/categorias_venda.centros_do_menu no servidor).
 // M-76: esse menu é a lista de Cadastros › Centro de custo. Centro novo aparece, mas ainda não

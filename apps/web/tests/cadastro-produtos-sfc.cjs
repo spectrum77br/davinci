@@ -248,9 +248,10 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.equal(p.excluindo.value, null)
   }
   // M-75 + M-89: Novo cadastro de Categoria de venda — a Tabela "Contas Mala" escolhe o tipo e o
-  // centro de custo; vai para /categorias-venda; o limite de 5 mostra a frase do servidor
+  // centro de custo; vai para /categorias-venda; o limite (10 desde a M-93; era 5) mostra a
+  // frase do servidor como veio — a tela não tem número próprio
   {
-    const limite = 'Este centro de custo já tem 5 categorias de venda.'
+    const limite = 'Este centro de custo já tem 10 categorias de venda.'
     const { p, calls } = await pagina({
       respostas: { 'POST /api/produto-cadastros/categorias-venda': erro(409, { code: 'categoria_venda_limite', mensagem: limite }) },
     })
