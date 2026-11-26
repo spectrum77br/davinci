@@ -377,8 +377,10 @@ test('M-70: the product editor shows only the clean head and the three tabs, wit
   assert.equal(form.querySelector('.product-head>label input[name=name]').value,'A17 Preto');
   assert.match(form.querySelector('[data-campo=codigo]').textContent,/Código \(SKU\)/);assert.equal(form.querySelector('[data-campo=codigo] input').value,'dg053.sp');
   assert.equal(form.querySelector('[data-campo=situacao] [name=status]').checked,true);
-  // Linha 2: as 4 primeiras ficam reservadas para a M-73; as 3 últimas são da M-74.
-  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio'])assert.equal(form.querySelector(`[data-campo=${campo}]`).innerHTML,'',campo);
+  // Linha 2: as 4 primeiras são os menus da M-73; as 3 últimas são da M-74.
+  assert.deepEqual(['centro_custo','categoria','categoria_venda','tag_envio'].map(campo=>form.querySelector(`[data-campo=${campo}] label`).firstChild.textContent),['Centro de custo','Categoria','Categoria de venda','Tag de envio']);
+  // M-73: o select de Categoria saiu de Características (foi para a linha 2).
+  assert.equal(form.querySelector('[name=product_category]'),null);
   assert.deepEqual(['margem_min','condicao_especial','duimp_padrao'].map(campo=>form.querySelector(`[data-campo=${campo}] label`).firstChild.textContent),['Margem mín (%)','Condição especial','DUIMP padrão']);
   const characteristics=form.querySelector('[data-product-section=characteristics]');
   assert.equal(characteristics.querySelector('.product-grid'),null);
@@ -419,12 +421,12 @@ test('M-70: saving from the clean screen sends back every hidden field exactly a
   again.querySelector('[name=notes]').value='Nota nova';
   const status=again.querySelector('[name=status]');status.checked=false;status.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
   assert.equal(again.querySelector('[data-status-label]').textContent,'Inativo');
-  again.querySelector('[name=product_category]').value='';
   again.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
   await new Promise(r=>setImmediate(r));
   const changed=requests[0].payload;
   assert.deepEqual(changed.data,{...expected,notes:'Nota nova',status:'inactive'});
-  assert.deepEqual(changed.category,{version:1,category_id:null});
+  // M-73: a categoria troca no menu da linha 2, na hora; o "Salvar produto" nunca a manda.
+  assert.equal('category' in changed,false);
   assert.ok(!changed.tax&&!changed.suppliers&&!changed.images&&!changed.type&&!changed.structure);
 });
 
@@ -598,7 +600,7 @@ async function rulesEditor(product,{rules=regrasVazias,status=200,consulta}={}){
       for(const [k,v] of Object.entries(body))data[k]=k==='margem_min'&&v!==null?Number(v):v;
     }
     if(method==='POST'){data.condicoes.push({id:'c'+(data.condicoes.length+1),pedido_de:body.pedido_de,pedido_ate:body.pedido_ate,piso:body.piso,vigente:true});data.condicao_resumo='até 30/11 · piso 5%';return {ok:true,status:201,json:async()=>copia()};}
-    if(method==='DELETE'){data.condicoes=data.condicoes.filter(c=>!url.endsWith('/condicoes/'+c.id));if(!data.condicoes.length)data.condicao_resumo='—';return {ok:true,status:204,json:async()=>{throw new Error('sem corpo');}};}
+    if(method==='DELETE'){data.condicoes=data.condicoes.filter(c=>!url.split('?')[0].endsWith('/condicoes/'+c.id));if(!data.condicoes.length)data.condicao_resumo='—';return {ok:true,status:204,json:async()=>{throw new Error('sem corpo');}};}
     return {ok:true,status:200,json:async()=>copia()};
   };
   ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
@@ -611,10 +613,11 @@ async function rulesEditor(product,{rules=regrasVazias,status=200,consulta}={}){
 
 test('M-74: row 2 shows Margem mín, Condição especial and DUIMP padrão from the DaVinci, the inherited value in grey',async()=>{
   const e=await rulesEditor(fullProduct());
-  assert.deepEqual(e.calls,[{url:'/api/produto-regras/dg053.sp',method:'GET',body:undefined,credentials:'same-origin'}]);
+  // M-73: o endereço leva a categoria do produto (e a linha, quando o ERP a tem).
+  assert.deepEqual(e.calls,[{url:'/api/produto-regras/dg053.sp?categoria=Malas',method:'GET',body:undefined,credentials:'same-origin'}]);
   const row=[...e.document.querySelectorAll('.product-head-row[data-linha="2"]>[data-campo]')];
   assert.deepEqual(row.map(c=>c.dataset.campo),['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao']);
-  for(const c of row.slice(0,4))assert.equal(c.innerHTML,'',c.dataset.campo);
+  assert.deepEqual(row.slice(0,4).map(c=>c.querySelector('label').firstChild.textContent),['Centro de custo','Categoria','Categoria de venda','Tag de envio']);
   assert.deepEqual(row.slice(4).map(c=>c.querySelector('label').firstChild.textContent),['Margem mín (%)','Condição especial','DUIMP padrão']);
   const margem=e.input('margem_min'),duimp=e.input('duimp_padrao'),botao=e.cell('condicao_especial').querySelector('button');
   // Em branco: o herdado aparece em cinza (placeholder), nunca como valor.
@@ -634,7 +637,7 @@ test('M-74: row 2 shows Margem mín, Condição especial and DUIMP padrão from 
 test('M-74: typing saves through the DaVinci API, blank goes back to inherit and Salvar produto never sends them',async()=>{
   const e=await rulesEditor(fullProduct());
   e.change(e.input('margem_min'),'12');await ticks();
-  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp',method:'PUT',body:{margem_min:'0.1200'},credentials:'same-origin'});
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp?categoria=Malas',method:'PUT',body:{margem_min:'0.1200'},credentials:'same-origin'});
   assert.equal(e.input('margem_min').value,'12');assert.match(e.notice(),/Margem mín de dg053 gravada/);
   e.change(e.input('margem_min'),'12,5');await ticks();
   assert.deepEqual(e.calls.at(-1).body,{margem_min:'0.1250'});
@@ -699,18 +702,282 @@ test('M-74: the Condição especial window adds and removes the product rule, li
   assert.equal(e.calls.length,1);assert.match(janela().querySelector('[data-p2-condicao-msg]').textContent,/Preencha De e Até/);
   campo('p2_condicao_ate').value='2026-11-30';campo('p2_condicao_piso').value='5';
   janela().querySelector('[data-p2-condicao-add]').click();await ticks();
-  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp/condicoes',method:'POST',body:{pedido_de:'2026-11-26',pedido_ate:'2026-11-30',piso:'0.0500'},credentials:'same-origin'});
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp/condicoes?categoria=Malas',method:'POST',body:{pedido_de:'2026-11-26',pedido_ate:'2026-11-30',piso:'0.0500'},credentials:'same-origin'});
   assert.match(janela().querySelector('[data-p2-condicao-msg]').textContent,/Condição adicionada/);
   assert.match(janela().textContent,/1 condição vigente/);assert.match(janela().textContent,/26\/11\/2026 até 30\/11\/2026 · margem mínima 5%/);
   assert.equal(e.cell('condicao_especial').querySelector('button').textContent,'até 30/11 · piso 5%');
   // Remover: DELETE e relê.
   janela().querySelector('[data-p2-condicao-del="c1"]').click();await ticks();
-  assert.deepEqual(e.calls.slice(-2).map(c=>[c.method,c.url]),[['DELETE','/api/produto-regras/dg053.sp/condicoes/c1'],['GET','/api/produto-regras/dg053.sp']]);
+  assert.deepEqual(e.calls.slice(-2).map(c=>[c.method,c.url]),[['DELETE','/api/produto-regras/dg053.sp/condicoes/c1?categoria=Malas'],['GET','/api/produto-regras/dg053.sp?categoria=Malas']]);
   assert.match(janela().textContent,/Nenhuma condição especial vigente/);assert.equal(e.cell('condicao_especial').querySelector('button').textContent,'—');
   // Abrir a janela não salvou o produto; Fechar tira a janela.
   assert.equal(e.requests.length,0);
   janela().querySelector('[data-p2-condicao-fechar]').click();
   assert.equal(janela(),null);
+});
+
+// M-73 (26/11/2026): Centro de custo, Categoria, Categoria de venda e Tag de envio na linha 2 (colunas
+// 1 a 4). Caixa branca com o valor e a setinha; o menu tem um checkbox por linha, só um marcado, com as
+// opções lidas NA HORA das rotas do DaVinci/ERP. Só o administrador troca; funciona no modo Consulta;
+// nada disso vai no "Salvar produto".
+const centrosM73=[{id:'CEL',nome:'Celular',fixo:true,segment_id:'R-CEL'},{id:'ELE',nome:'Eletro',fixo:true,segment_id:'R-ELE'},{id:'MAL',nome:'Mala',fixo:true,segment_id:'R-MAL'},{id:'BRI',nome:'Brinquedos',fixo:false,segment_id:null}];
+const listasM73={categorias:['Acessórios','Celular','Celular Kit','Eletro','Eletro Kit','Insumos','Mala','Mala Kit'],tags_envio:['.cd','.ci','.pi','.ra','.sa','.sp']};
+const opcoesCelular=[['S-ACE','Acessórios'],['S-DIV','Diversos'],['S-REG','Regular'],['S-ROB','Robusto'],['S-APP','Apple']].map(([segment_id,nome],i)=>({segment_id,nome,product_type:i+1}));
+const linhaUranyx={id:'L19',nome:'Uranyx F105',codigos:['dg019','dg020'],departamento:'Celular',centro_custo_id:'CEL',centro_custo:'Celular',segment_id:'S-REG',categoria_venda:'Regular',categoria_venda_ativa:true,product_type:3,opcoes:opcoesCelular};
+// O exemplo do pedido: "Uranyx F105 12.64 - Preto + Óculos" (dg019.ra+a020.ra).
+const kitUranyx=(extra={})=>fullProduct({sku:'dg019.ra+a020.ra',name:'Uranyx F105 12.64 - Preto + Óculos',category:{version:1,id:'c2',path:[{name:'Celular Kit'}]},price_table:{line:'dg019,dg020',line_name:'Uranyx F105',department:'Celular',pricing_id:'L19'},...extra});
+const regrasUranyx=(extra={})=>({...regrasVazias,sku:'dg019.ra+a020.ra',sku_base:'dg019+a020',centro_custo_id:null,centro_custo:null,centro_custo_herdado:{id:'CEL',nome:'Celular'},centro_custo_origem:'do departamento da linha da Tabela de Preços',linha:JSON.parse(JSON.stringify(linhaUranyx)),...extra});
+const categoriasM73=[{id:'c1',name:'Malas',path:'Malas',status:'active'},{id:'c2',name:'Celular Kit',path:'Celular Kit',status:'active'},{id:'c3',name:'Celular',path:'Celular',status:'active'}];
+const m73Paths=['/api/produto-regras/','/api/centros-custo','/api/produto-cadastros/listas','/api/pricing/products/','/api/produtos/trocar-tag','/api/erp-local/catalog/bulk-category'];
+async function menusEditor(product,{rules=regrasUranyx(),status=200,consulta,centros=centrosM73,listas=listasM73,previa,troca,patch,bulk,renomeia=true}={}){
+  const products=[product];
+  const ctx=await setup({products,categories:categoriasM73,...(consulta?{consulta}:{})});
+  const w=ctx.dom.window,calls=[];w.HTMLElement.prototype.scrollIntoView=()=>{};
+  const data=JSON.parse(JSON.stringify(rules)),plain=w.fetch;
+  const reply=(st,body)=>({ok:st<400,status:st,json:async()=>JSON.parse(JSON.stringify(body??null))});
+  const box={centros,listas};
+  w.fetch=async(url,options={})=>{
+    url=String(url);const path=url.split('?')[0],method=options.method||'GET',body=options.body?JSON.parse(options.body):undefined;
+    if(!m73Paths.some(p=>path.startsWith(p)))return plain(url,options);
+    calls.push({url,path,method,body,credentials:options.credentials,headers:options.headers||{}});
+    if(path.startsWith('/api/produto-regras/')){
+      if(status>=400)return reply(status,{});
+      if(method==='PUT'&&'centro_custo_id' in body){const c=box.centros.find(c=>c.id===body.centro_custo_id);data.centro_custo_id=c?c.id:null;data.centro_custo=c?c.nome:null;}
+      return reply(200,data);
+    }
+    if(path==='/api/centros-custo')return reply(200,box.centros);
+    if(path==='/api/produto-cadastros/listas')return reply(200,box.listas);
+    if(path.startsWith('/api/pricing/products/')){
+      const r=patch?.(body);if(r)return reply(r.status,r.body);
+      const o=data.linha.opcoes.find(o=>o.product_type===body.product_type);Object.assign(data.linha,{segment_id:o.segment_id,categoria_venda:o.nome,product_type:o.product_type});
+      return reply(200,{id:data.linha.id,product_type:o.product_type});
+    }
+    if(path==='/api/produtos/trocar-tag/previa'){const r=previa(body);return reply(r.status||200,r.body);}
+    if(path==='/api/produtos/trocar-tag'){
+      const r=troca(body);
+      const ok=(r.body?.itens||[]).find(i=>i.estado==='ok');
+      if(ok&&renomeia)products[0]={...products[0],sku:ok.novo};
+      return reply(r.status||200,r.body);
+    }
+    // A rota do "Alterar categoria" (Configuração em massa): o ERP grava e a lista relida já mostra.
+    const r=bulk?.(body);if(r)return reply(r.status,r.body);
+    const c=categoriasM73.find(c=>c.name===body.category);products[0]={...products[0],category:{version:2,id:c.id,path:[{name:c.name}]}};
+    return reply(200,{changed:1,skipped:[],message:'Categoria alterada em 1 produto'});
+  };
+  ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+  await ticks();
+  const d=ctx.document,cell=campo=>d.querySelector(`[data-campo=${campo}]`),caixa=campo=>cell(campo).querySelector('[data-p2-menu]');
+  const abrir=async campo=>{caixa(campo).click();await ticks();return cell(campo).querySelector('[data-p2-menu-box]');};
+  const opcoes=campo=>[...cell(campo).querySelectorAll('[data-p2-menu-opcao]')].map(i=>[i.closest('label').textContent,i.checked]);
+  const marcar=async(campo,valor)=>{const i=[...cell(campo).querySelectorAll('[data-p2-menu-opcao]')].find(i=>i.closest('label').textContent===valor);assert.ok(i,`opção ${valor}`);i.click();await ticks(10);};
+  return {...ctx,w,calls,data,box,products,cell,caixa,abrir,opcoes,marcar,notice:()=>d.getElementById('notice').textContent,mine:p=>calls.filter(c=>c.path===p||c.path.startsWith(p))};
+}
+
+test('M-73: row 2 starts with Centro de custo, Categoria, Categoria de venda and Tag de envio, each a white box with the value and an arrow',async()=>{
+  const e=await menusEditor(kitUranyx());
+  // O DaVinci recebe a linha (pricing_id) e a categoria do ERP para devolver o herdado e a categoria de venda.
+  assert.deepEqual(e.mine('/api/produto-regras/').map(c=>[c.method,c.url]),[['GET','/api/produto-regras/dg019.ra%2Ba020.ra?linha=L19&categoria=Celular+Kit']]);
+  const row=[...e.document.querySelectorAll('.product-head-row[data-linha="2"]>[data-campo]')].slice(0,4);
+  assert.deepEqual(row.map(c=>c.querySelector('label').firstChild.textContent),['Centro de custo','Categoria','Categoria de venda','Tag de envio']);
+  // O exemplo do pedido: Celular | Celular Kit | Regular | .ra.
+  assert.deepEqual(row.map(c=>c.querySelector('[data-p2-menu] span').textContent),['Celular','Celular Kit','Regular','.ra']);
+  for(const c of row){const b=c.querySelector('[data-p2-menu]');assert.equal(b.type,'button');assert.equal(b.disabled,false,c.dataset.campo);assert.equal(b.getAttribute('aria-haspopup'),'true');assert.ok(b.querySelector('svg.p2-menu-seta'));assert.equal(b.name,'');}
+  // Em branco, o centro é o departamento (em cinza), com a origem na dica.
+  assert.ok(e.caixa('centro_custo').classList.contains('is-herdado'));
+  assert.match(e.caixa('centro_custo').title,/Em branco: usa Celular \(do departamento da linha da Tabela de Preços\)/);
+  assert.match(e.caixa('categoria_venda').title,/Vale para todas as cores e tags desta linha/);
+  // Nenhum menu aberto até clicar; os centros só são lidos ao abrir.
+  assert.equal(e.document.querySelector('[data-p2-menu-box]'),null);assert.equal(e.mine('/api/centros-custo').length,0);
+  // Produto sem tag mostra "—".
+  const z=await menusEditor(fullProduct({sku:'z2821',price_table:null}),{rules:{...regrasUranyx(),sku:'z2821',sku_base:'z2821',linha:null,centro_custo_herdado:null,centro_custo_origem:null}});
+  assert.equal(z.caixa('tag_envio').textContent,'—');assert.equal(z.caixa('centro_custo').textContent,'—');
+});
+
+test('M-73: Centro de custo reads Cadastros › Centro de custo when it opens, keeps one checked, saves for the product and unchecking goes back to the department',async()=>{
+  const e=await menusEditor(kitUranyx());
+  const menu=await e.abrir('centro_custo');
+  assert.equal(menu.getAttribute('role'),'dialog');assert.equal(e.caixa('centro_custo').getAttribute('aria-expanded'),'true');
+  assert.equal(e.mine('/api/centros-custo').length,1);assert.equal(e.mine('/api/centros-custo')[0].credentials,'same-origin');
+  // Um item por linha, só o atual marcado; "Brinquedos" (criado em Cadastros › Centro de custo) aparece.
+  assert.deepEqual(e.opcoes('centro_custo'),[['Celular',true],['Eletro',false],['Mala',false],['Brinquedos',false]]);
+  assert.match(menu.textContent,/Em branco: usa Celular/);
+  await e.marcar('centro_custo','Brinquedos');
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg019.ra%2Ba020.ra?linha=L19&categoria=Celular+Kit',path:'/api/produto-regras/dg019.ra%2Ba020.ra',method:'PUT',body:{centro_custo_id:'BRI'},credentials:'same-origin',headers:e.calls.at(-1).headers});
+  assert.equal(e.caixa('centro_custo').textContent,'Brinquedos');assert.ok(!e.caixa('centro_custo').classList.contains('is-herdado'));
+  assert.equal(e.document.querySelector('[data-p2-menu-box]'),null,'o menu fecha depois de gravar');
+  assert.match(e.notice(),/Centro de custo de dg019\+a020: Brinquedos/);
+  // Centro diferente do departamento da linha: a Categoria de venda trava, dizendo de quem é a linha.
+  assert.equal(e.caixa('categoria_venda').disabled,true);assert.match(e.caixa('categoria_venda').title,/A linha da Tabela de Preços é do Celular/);
+  // Lido de novo a cada abertura: um centro criado agora aparece; desmarcar o escolhido volta ao departamento.
+  e.box.centros=[...centrosM73,{id:'PAP',nome:'Papelaria',fixo:false,segment_id:null}];
+  await e.abrir('centro_custo');
+  assert.equal(e.mine('/api/centros-custo').length,2);
+  assert.deepEqual(e.opcoes('centro_custo').filter(([,on])=>on),[['Brinquedos',true]]);
+  assert.ok(e.opcoes('centro_custo').some(([n])=>n==='Papelaria'));
+  await e.marcar('centro_custo','Brinquedos');
+  assert.deepEqual(e.calls.at(-1).body,{centro_custo_id:null});
+  assert.equal(e.caixa('centro_custo').textContent,'Celular');assert.ok(e.caixa('centro_custo').classList.contains('is-herdado'));
+  assert.match(e.notice(),/em branco: volta a usar o departamento \(Celular\)/);
+  assert.equal(e.caixa('categoria_venda').disabled,false);
+  // Marcar o que já vale (o departamento) não grava nada.
+  const antes=e.calls.length;await e.abrir('centro_custo');await e.marcar('centro_custo','Celular');
+  assert.equal(e.calls.filter(c=>c.method==='PUT').length,e.calls.slice(0,antes).filter(c=>c.method==='PUT').length);
+  // Nada disto vai no "Salvar produto" nem deixa o cadastro "sujo".
+  assert.notEqual(e.document.querySelector('#product-edit-form').dataset.dirty,'true');
+  e.document.querySelector('#product-edit-form').dispatchEvent(new e.w.Event('submit',{bubbles:true,cancelable:true}));await ticks();
+  assert.deepEqual(e.requests.map(r=>r.kind),['product.update']);
+  const sent=e.requests[0].payload;assert.equal('category' in sent,false);
+  for(const k of ['centro_custo','centro_custo_id','categoria','categoria_venda','tag_envio','product_category'])assert.equal(k in sent.data,false,k);
+});
+
+test('M-73: Categoria uses the "Alterar categoria" route for this one SKU, also in modo Consulta, and shows the refusal as the ERP says it',async()=>{
+  let recusa=null;
+  const e=await menusEditor(kitUranyx(),{consulta:{active:true},bulk:()=>recusa});
+  assert.ok(e.document.querySelector('#product-edit-form.read-only'));
+  assert.equal(e.caixa('categoria').disabled,false);
+  const lidas=e.mine('/api/produto-cadastros/listas').length;
+  await e.abrir('categoria');
+  assert.equal(e.mine('/api/produto-cadastros/listas').length,lidas+1,'lida de novo ao abrir');
+  assert.deepEqual(e.opcoes('categoria'),listasM73.categorias.map(n=>[n,n==='Celular Kit']));
+  await e.marcar('categoria','Celular');
+  const bulk=e.mine('/api/erp-local/catalog/bulk-category');
+  assert.equal(bulk.length,1);assert.deepEqual(bulk[0].body,{skus:['dg019.ra+a020.ra'],category:'Celular'});assert.equal(bulk[0].headers['X-ERP-Local'],'1');
+  assert.equal(e.requests.length,0,'nenhum comando do cadastro (o modo Consulta trava os outros)');
+  assert.match(e.notice(),/Categoria de dg019\.ra\+a020\.ra trocada para Celular/);
+  assert.equal(e.caixa('categoria').textContent,'Celular');
+  // O DaVinci relê o herdado com a categoria nova.
+  assert.equal(e.calls.filter(c=>c.path.startsWith('/api/produto-regras/')).at(-1).url,'/api/produto-regras/dg019.ra%2Ba020.ra?linha=L19&categoria=Celular');
+  // Recusa do ERP: a mensagem como veio.
+  recusa={status:422,body:{code:'category_unknown',message:'Categoria não encontrada no ERP: Insumos. Escolha uma categoria cadastrada.'}};
+  await e.abrir('categoria');await e.marcar('categoria','Insumos');
+  assert.equal(e.notice(),'Categoria não encontrada no ERP: Insumos. Escolha uma categoria cadastrada.');
+  assert.equal(e.caixa('categoria').textContent,'Celular');
+  // Fora do modo Consulta, com o cadastro mexido e não salvo, não troca (a troca relê a tela).
+  const f=await menusEditor(kitUranyx());
+  const notes=f.document.querySelector('[name=notes]');notes.value='mexi';notes.dispatchEvent(new f.w.Event('input',{bubbles:true}));
+  await f.abrir('categoria');await f.marcar('categoria','Celular');
+  assert.equal(f.mine('/api/erp-local/catalog/bulk-category').length,0);assert.equal(f.notice(),'Salve ou cancele o produto antes de trocar a categoria.');
+});
+
+test('M-73: Categoria de venda lists the active ones of the line department, asks before changing the line price and uses the Tabela column route',async()=>{
+  let recusa=null;
+  const e=await menusEditor(kitUranyx(),{patch:()=>recusa});
+  const menu=await e.abrir('categoria_venda');
+  // As opções vêm da linha relida agora no DaVinci (não da cópia do ERP).
+  assert.equal(e.calls.at(-1).method,'GET');
+  assert.deepEqual(e.opcoes('categoria_venda'),[['Acessórios',false],['Diversos',false],['Regular',true],['Robusto',false],['Apple',false]]);
+  assert.match(menu.textContent,/Vale para todas as cores e tags desta linha \(Uranyx F105: dg019, dg020\)/);
+  await e.marcar('categoria_venda','Robusto');
+  const janela=()=>e.document.getElementById('p2-confirmar');
+  assert.ok(janela());assert.equal(janela().getAttribute('role'),'dialog');
+  assert.equal(janela().querySelector('[data-p2-confirmar-texto]').textContent,'Isso muda a margem/frete da linha Uranyx F105 (dg019, dg020) na Tabela de Preços. Continuar?');
+  // Cancelar não muda nada.
+  janela().querySelector('[data-p2-confirmar="nao"]').click();await ticks();
+  assert.equal(janela(),null);assert.equal(e.mine('/api/pricing/products/').length,0);
+  await e.abrir('categoria_venda');await e.marcar('categoria_venda','Robusto');
+  janela().querySelector('[data-p2-confirmar="sim"]').click();await ticks(10);
+  const patch=e.mine('/api/pricing/products/');
+  assert.equal(patch.length,1);assert.equal(patch[0].url,'/api/pricing/products/L19');assert.equal(patch[0].method,'PATCH');
+  assert.deepEqual(patch[0].body,{product_type:4});assert.equal(patch[0].credentials,'same-origin');
+  assert.equal(e.caixa('categoria_venda').textContent,'Robusto');
+  assert.match(e.notice(),/Categoria de venda da linha Uranyx F105: Robusto\. Vale para todas as cores e tags da linha\./);
+  // A rota recusa só com o código: a frase em português.
+  recusa={status:400,body:{detail:{code:'invalid_segment'}}};
+  await e.abrir('categoria_venda');await e.marcar('categoria_venda','Apple');janela().querySelector('[data-p2-confirmar="sim"]').click();await ticks(10);
+  assert.equal(e.notice(),'Esta categoria de venda não existe mais neste departamento da Tabela de Preços.');
+  assert.equal(e.caixa('categoria_venda').textContent,'Robusto');
+  // Sem linha na Tabela de Preços: apagada, com a dica.
+  const s=await menusEditor(kitUranyx({price_table:null}),{rules:regrasUranyx({linha:null,centro_custo_herdado:{id:'CEL',nome:'Celular'},centro_custo_origem:'da categoria Celular Kit'})});
+  assert.equal(s.caixa('categoria_venda').disabled,true);assert.equal(s.caixa('categoria_venda').title,'Produto sem linha na Tabela de Preços');assert.equal(s.caixa('categoria_venda').textContent,'—');
+  assert.match(s.caixa('centro_custo').title,/Em branco: usa Celular \(da categoria Celular Kit\)/);
+  assert.equal(s.mine('/api/produto-regras/')[0].url,'/api/produto-regras/dg019.ra%2Ba020.ra?categoria=Celular+Kit');
+  // Centro escolhido diferente do departamento da linha: travada (não muda o departamento da linha).
+  const t=await menusEditor(kitUranyx(),{rules:regrasUranyx({centro_custo_id:'ELE',centro_custo:'Eletro'})});
+  assert.equal(t.caixa('categoria_venda').disabled,true);assert.match(t.caixa('categoria_venda').title,/A linha da Tabela de Preços é do Celular/);
+  t.caixa('categoria_venda').click();await ticks();assert.equal(t.document.querySelector('[data-p2-menu-box]'),null);
+});
+
+test('M-73: Tag de envio asks the M-46 preview, shows current → new code, swaps only after OK with an Idempotency-Key and reopens by the new code',async()=>{
+  const simples=fullProduct({price_table:{line:'dg052,dg053',line_name:'uranyx A17',department:'Celular',pricing_id:'L53'}});
+  const e=await menusEditor(simples,{consulta:{active:true},rules:regrasUranyx({sku:'dg053.sp',sku_base:'dg053'}),
+    previa:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ra',acao:'alterar',motivo:null}],alterar:1,pular:0}}),
+    troca:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ra',estado:'ok',motivo:null,situacao:'ok'}],ok:1,pulado:0,falhou:0,sem_confirmacao:0}})});
+  assert.equal(e.caixa('tag_envio').textContent,'.sp');
+  await e.abrir('tag_envio');
+  assert.deepEqual(e.opcoes('tag_envio'),listasM73.tags_envio.map(t=>[t,t==='.sp']));
+  await e.marcar('tag_envio','.ra');
+  const previa=e.mine('/api/produtos/trocar-tag/previa');
+  assert.equal(previa.length,1);assert.deepEqual(previa[0].body,{skus:['dg053.sp'],tag:'.ra'});assert.equal(previa[0].credentials,'same-origin');
+  assert.equal(e.mine('/api/produtos/trocar-tag').filter(c=>c.path==='/api/produtos/trocar-tag').length,0,'nada trocado antes do OK');
+  const janela=()=>e.document.getElementById('p2-tag-produto');
+  assert.equal(janela().querySelector('[data-p2-tag-troca]').textContent,'dg053.sp → dg053.ra');
+  // Cancelar: nada troca.
+  janela().querySelector('[data-p2-tag-cancelar]').click();await ticks();
+  assert.equal(janela(),null);assert.equal(e.calls.filter(c=>c.path==='/api/produtos/trocar-tag').length,0);
+  await e.abrir('tag_envio');await e.marcar('tag_envio','.ra');
+  janela().querySelector('[data-p2-tag-confirmar]').click();await ticks(12);
+  const troca=e.calls.filter(c=>c.path==='/api/produtos/trocar-tag');
+  assert.equal(troca.length,1);assert.deepEqual(troca[0].body,{skus:['dg053.sp'],tag:'.ra'});assert.match(troca[0].headers['Idempotency-Key'],/^[0-9a-f-]{36}$/);
+  // Avisa e reabre pelo código novo.
+  assert.equal(janela(),null);
+  assert.equal(e.notice(),'O código mudou: dg053.sp → dg053.ra. O cadastro foi aberto pelo código novo.');
+  assert.equal(e.document.querySelector('[data-campo=codigo] input').value,'dg053.ra');
+  assert.equal(e.requests.length,0);
+  // O ERP ainda sem o código novo: volta à lista e diz quando aparece.
+  const l=await menusEditor(simples,{renomeia:false,rules:regrasUranyx({sku:'dg053.sp',sku_base:'dg053'}),
+    previa:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ci',acao:'alterar',motivo:null}],alterar:1,pular:0}}),
+    troca:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ci',estado:'ok',motivo:null,situacao:'ok'}],ok:1,pulado:0,falhou:0}})});
+  await l.abrir('tag_envio');await l.marcar('tag_envio','.ci');
+  l.document.getElementById('p2-tag-produto').querySelector('[data-p2-tag-confirmar]').click();await ticks(12);
+  assert.equal(l.document.querySelector('#product-edit-form'),null);
+  assert.equal(l.notice(),'O código mudou: dg053.sp → dg053.ci. O Produtos 2 leva até ~1 hora para mostrar o código novo: abra o produto pela lista depois.');
+});
+
+test('M-73: Tag de envio follows the M-46 rules: a kit is skipped with its reason (no swap), and so is a code that already exists',async()=>{
+  const e=await menusEditor(kitUranyx(),{
+    previa:b=>({body:{itens:[{sku:b.skus[0],novo:'dg019.ra+a020.sp',acao:'pular',motivo:'kit não muda de tag: troque nas peças'}],alterar:0,pular:1}}),
+    troca:()=>{throw new Error('não deveria trocar');}});
+  const menu=await e.abrir('tag_envio');
+  assert.match(menu.textContent,/Kit não troca de tag \(regra da troca de tag da Configuração\): troque nas peças/);
+  await e.marcar('tag_envio','.sp');
+  const janela=e.document.getElementById('p2-tag-produto');
+  assert.equal(janela.querySelector('[data-p2-tag-troca]').textContent,'dg019.ra+a020.ra → dg019.ra+a020.sp');
+  assert.equal(janela.querySelector('[data-p2-tag-motivo]').textContent,'Não troca: kit não muda de tag: troque nas peças');
+  assert.equal(janela.querySelector('[data-p2-tag-confirmar]'),null);
+  janela.querySelector('[data-p2-tag-cancelar]').click();await ticks();
+  assert.equal(e.calls.filter(c=>c.path==='/api/produtos/trocar-tag').length,0);assert.equal(e.caixa('tag_envio').textContent,'.ra');
+  // Código novo que já existe: o motivo da M-46, sem trocar.
+  const x=await menusEditor(fullProduct(),{rules:regrasUranyx({sku:'dg053.sp',sku_base:'dg053'}),
+    previa:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ra',acao:'pular',motivo:'já existe: use Transferir no estoque'}],alterar:0,pular:1}})});
+  await x.abrir('tag_envio');await x.marcar('tag_envio','.ra');
+  assert.equal(x.document.querySelector('[data-p2-tag-motivo]').textContent,'Não troca: já existe: use Transferir no estoque');
+  // O Bling fora do ar na prévia: a recusa como o DaVinci deu.
+  const b=await menusEditor(fullProduct(),{rules:regrasUranyx({sku:'dg053.sp',sku_base:'dg053'}),previa:()=>({status:503,body:{detail:{code:'bling_not_connected',message:'Bling não conectado.'}}})});
+  await b.abrir('tag_envio');await b.marcar('tag_envio','.ra');
+  assert.equal(b.notice(),'Bling não conectado.');assert.equal(b.document.getElementById('p2-tag-produto'),null);
+  // Na hora de trocar a M-46 ainda pode pular (outro trocou antes): mostra o motivo.
+  const p=await menusEditor(fullProduct(),{rules:regrasUranyx({sku:'dg053.sp',sku_base:'dg053'}),
+    previa:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ra',acao:'alterar',motivo:null}],alterar:1,pular:0}}),
+    troca:b=>({body:{itens:[{sku:b.skus[0],novo:'dg053.ra',estado:'pulado',motivo:'já existe: use Transferir no estoque',situacao:'pulado'}],ok:0,pulado:1,falhou:0}})});
+  await p.abrir('tag_envio');await p.marcar('tag_envio','.ra');
+  p.document.getElementById('p2-tag-produto').querySelector('[data-p2-tag-confirmar]').click();await ticks(12);
+  assert.equal(p.document.querySelector('[data-p2-tag-motivo]').textContent,'Não trocou: já existe: use Transferir no estoque');
+  assert.equal(p.document.querySelector('[data-campo=codigo] input').value,'dg053.sp');
+});
+
+test('M-73: whoever is not admin sees the four locked, and without the DaVinci they stay locked showing what the ERP knows',async()=>{
+  const v=await menusEditor(kitUranyx(),{rules:regrasUranyx({pode_editar:false})});
+  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio']){assert.equal(v.caixa(campo).disabled,true,campo);assert.match(v.caixa(campo).title,/Só o administrador altera\./,campo);}
+  assert.deepEqual(['centro_custo','categoria','categoria_venda','tag_envio'].map(c=>v.caixa(c).textContent),['Celular','Celular Kit','Regular','.ra']);
+  v.caixa('centro_custo').click();await ticks();
+  assert.equal(v.document.querySelector('[data-p2-menu-box]'),null);assert.equal(v.mine('/api/centros-custo').length,0);
+  // DaVinci sem resposta: travados, com a dica; a categoria e a tag (do ERP) continuam à mostra.
+  const off=await menusEditor(kitUranyx(),{status:502});
+  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio']){assert.equal(off.caixa(campo).disabled,true,campo);assert.match(off.caixa(campo).title,/Não consegui ler do DaVinci/,campo);}
+  assert.deepEqual(['centro_custo','categoria','categoria_venda','tag_envio'].map(c=>off.caixa(c).textContent),['—','Celular Kit','—','.ra']);
+  // Serviço: sem Categoria (como o select antigo de Características).
+  const srv=await menusEditor(kitUranyx({sku:'srv.1',kind:'service'}));
+  assert.equal(srv.cell('categoria').innerHTML,'');assert.ok(srv.caixa('centro_custo'));
 });
 
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
@@ -1275,12 +1542,13 @@ test('opening product details replaces the list and cancel restores the current 
  d.querySelector('[name=name]').value='Mudança sem salvar';d.querySelector('#product-edit-cancel').click();assert.ok(d.querySelector('.product-list'));assert.equal(d.querySelector('#catalog-search [name=query]').value,'aparelho');assert.equal(requests.length,0);
 });
 
-test('characteristics form sends DUN, tags, category and clean rich text, and keeps the hidden measures as loaded',async()=>{
+test('characteristics form sends DUN, tags and clean rich text, never the category, and keeps the hidden measures as loaded',async()=>{
  const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:2,status:'active',condition:'unspecified',production:'',free_shipping:null,dimension_unit:'m',width_cm:'30.000',height_cm:null,length_cm:null,weight_kg:'1.500',dun:[],tags:['Azul'],short_description_html:'',complementary_html:'<p>Texto <img src=x onerror=alert(1)></p>'},category:{version:0,id:null,path:[]}};
  const {dom,document:d,requests}=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
  assert.equal(d.querySelector('[data-rich-body] img'),null);assert.doesNotMatch(d.querySelector('#product-edit-form').textContent,/Peso anterior/);
- d.querySelector('[name=product_category]').value='c1';
+ // M-73: a Categoria não está mais em Características (é o menu da linha 2).
+ assert.equal(d.querySelector('[name=product_category]'),null);
  d.querySelector('[name=dun_code]').value='17891234567892';d.querySelector('[name=dun_quantity]').value='12';
  const tag=d.querySelector('[name=product_tag_input]');tag.value='Mala, azul';tag.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
@@ -1288,7 +1556,7 @@ test('characteristics form sends DUN, tags, category and clean rich text, and ke
  assert.equal(data.width_cm,'30.000');assert.equal(data.height_cm,null);assert.equal(data.length_cm,null);assert.equal(data.dimension_unit,'m');assert.equal('weight_kg' in data,false);
  assert.equal(data.condition,'unspecified');assert.equal(data.production,'');assert.equal(data.free_shipping,null);
  assert.deepEqual(data.dun,[{code:'17891234567892',quantity:'12'}]);assert.deepEqual(data.tags,['Azul','Mala']);
- assert.doesNotMatch(data.complementary_html,/img|onerror/);assert.deepEqual(sent.payload.category,{version:0,category_id:'c1'});
+ assert.doesNotMatch(data.complementary_html,/img|onerror/);assert.equal('category' in sent.payload,false);
 });
 
 test('half filled DUN never reaches the API and source mode cannot inject script through the editor',async()=>{
@@ -2224,7 +2492,7 @@ test('M-40: the bar trash sends only the selected products, after confirmation',
 test('service forms show only Características and keep values, and deleted products stay out',async()=>{
  const {dom,document:d,requests}=await catalogPage();
  d.querySelector('[data-edit-product="d.serv"]').click();
- assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('.product-category[data-physical-only]').hidden,true);
+ assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('[data-campo=categoria]').innerHTML,'');
  d.querySelector('#product-edit-cancel').click();
  d.querySelector('[data-edit-product="a.ativo"]').click();
  assert.equal(d.querySelector('[name=product_type]'),null);

@@ -151,14 +151,23 @@ window.addEventListener('message',e=>{
 // os seus. Em branco = usa o da categoria de venda (segmento): o valor herdado aparece em cinza. Só o
 // administrador grava (o servidor devolve pode_editar). Nada disto vai no "Salvar produto" (sem name).
 const productRulesData={};
-const rulesUrl=sku=>'/api/produto-regras/'+encodeURIComponent(sku);
+// M-73: o endereço leva a linha da Tabela de Preços (pricing_id) e a categoria do produto no ERP: o
+// DaVinci devolve com elas o Centro de custo herdado (o departamento) e a categoria de venda da linha.
+function rulesQuery(sku){
+ const product=state?.products?.find(p=>p.sku===sku),q=new URLSearchParams();
+ const linha=product?.price_table?.pricing_id,categoria=product?productCategoryName(product):'';
+ if(linha)q.set('linha',String(linha));
+ if(categoria)q.set('categoria',categoria);
+ const text=q.toString();return text?'?'+text:'';
+}
+const rulesUrl=(sku,rest='')=>'/api/produto-regras/'+encodeURIComponent(sku)+rest+rulesQuery(sku);
 function loadProductRules(sku,force=false){
  if(productRulesData[sku]&&!force)return;
  if(!productRulesData[sku])productRulesData[sku]={state:'loading'};
  fetch(rulesUrl(sku),{credentials:'same-origin',headers:{Accept:'application/json'}})
   .then(r=>r.ok?r.json():Promise.reject(new Error(String(r.status))))
   .then(data=>{productRulesData[sku]=data&&data.sku_base?{state:'ok',data}:{state:'erro'};},()=>{if(productRulesData[sku]?.state!=='ok')productRulesData[sku]={state:'erro'};})
-  .finally(()=>{refreshProductRulesCells();refreshProductConditions();});
+  .finally(()=>{refreshProductRulesCells();refreshProductMenuCells();refreshProductConditions();});
 }
 // 0,125 → "12,5"; vazio → "".
 const rulePct=frac=>frac===null||frac===undefined||frac===''?'':String(Math.round(Number(frac)*10000)/100).replace('.',',');
@@ -186,9 +195,18 @@ function refreshProductRulesCells(){
 async function rulesRequest(method,url,body){
  const r=await fetch(url,{method,credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
  const data=r.status===204?null:await r.json().catch(()=>null);
- if(!r.ok)throw new Error(data?.detail?.message||(r.status===403?'Só o administrador altera este campo.':'Não consegui gravar no DaVinci agora. Tente de novo.'));
+ if(!r.ok)throw new Error(p2RefusalText(data)||(r.status===403?'Só o administrador altera este campo.':'Não consegui gravar no DaVinci agora. Tente de novo.'));
  return data;
 }
+// O motivo que o DaVinci deu, como ele deu (as rotas usam detail.message ou detail.mensagem).
+function p2RefusalText(data){
+ const d=data?.detail;
+ if(typeof d==='string'&&d)return d;
+ for(const k of ['message','mensagem'])if(typeof d?.[k]==='string'&&d[k])return d[k];
+ return p2RefusalCodes[d?.code]||'';
+}
+// Recusas da rota da coluna "Tabela" (PATCH /api/pricing/products) que vêm só com o código.
+const p2RefusalCodes={invalid_segment:'Esta categoria de venda não existe mais neste departamento da Tabela de Preços.',product_not_found:'A linha da Tabela de Preços deste produto não existe mais.'};
 function saveProductRule(input){
  const sku=editingProduct,kept=productRulesData[sku];
  if(kept?.state!=='ok'||!kept.data.pode_editar)return;
@@ -250,13 +268,13 @@ function addProductCondition(dialog){
  let fracao=null;
  if(piso){const n=Number(piso.replace(',','.'));if(!Number.isFinite(n)||n<-100||n>100){conditionsNote(dialog,'Margem inválida: use um número de -100 a 100, ex.: 5.',true);return;}fracao=(n/100).toFixed(4);}
  const button=dialog.querySelector('[data-p2-condicao-add]');if(button)button.disabled=true;
- rulesRequest('POST',rulesUrl(sku)+'/condicoes',{pedido_de:de,pedido_ate:ate,piso:fracao})
+ rulesRequest('POST',rulesUrl(sku,'/condicoes'),{pedido_de:de,pedido_ate:ate,piso:fracao})
   .then(data=>{productRulesData[sku]={state:'ok',data};refreshProductRulesCells();refreshProductConditions('Condição adicionada.');})
   .catch(e=>{if(button)button.disabled=false;conditionsNote(dialog,e.message,true);});
 }
 function removeProductCondition(dialog,id){
  const sku=dialog.dataset.sku;
- rulesRequest('DELETE',rulesUrl(sku)+'/condicoes/'+encodeURIComponent(id))
+ rulesRequest('DELETE',rulesUrl(sku,'/condicoes/'+encodeURIComponent(id)))
   .then(()=>rulesRequest('GET',rulesUrl(sku)))
   .then(data=>{productRulesData[sku]={state:'ok',data};refreshProductRulesCells();refreshProductConditions('Condição removida.');})
   .catch(e=>conditionsNote(dialog,e.message,true));
@@ -268,6 +286,246 @@ document.addEventListener('click',e=>{
  if(e.target.closest('[data-p2-condicao-add]')){addProductCondition(dialog);return;}
  const del=e.target.closest('[data-p2-condicao-del]');if(del)removeProductCondition(dialog,del.dataset.p2CondicaoDel);
 });
+// M-73 (26/11/2026): Centro de custo, Categoria, Categoria de venda e Tag de envio na linha 2 (colunas
+// 1 a 4). Cada um é uma caixa branca com o valor e uma setinha; clicar abre um menu com checkbox, um
+// item por linha e só um marcado, com as opções lidas NA HORA das rotas do DaVinci e do ERP (nenhuma
+// lista fixa: o que for incluído, renomeado ou excluído nos Cadastros aparece ou some aqui).
+//  - Centro de custo: Cadastros › Centro de custo (/api/centros-custo). Guardado por produto no DaVinci
+//    (PUT /api/produto-regras, centro_custo_id; vale para o código em todas as tags, como a M-74). Em
+//    branco = o departamento, calculado: o da linha da Tabela de Preços; sem linha, o da categoria (em
+//    cinza). Desmarcar o escolhido volta ao departamento.
+//  - Categoria: o tipo "Categoria" de Cadastros › Produtos (/api/produto-cadastros/listas). Troca pela
+//    MESMA rota do "Alterar categoria" da Configuração em massa, com um SKU só (liberada no modo
+//    Consulta; o ERP guarda o histórico da categoria).
+//  - Categoria de venda: a coluna "Tabela" da LINHA da Tabela de Preços do produto (pricing_id). Opções:
+//    as ativas do departamento da linha. Troca pela rota da coluna (PATCH /api/pricing/products, o
+//    Histórico da Tabela de Preços registra), depois de confirmar: muda a margem/frete (o preço) da
+//    linha inteira. Travada quando o Centro de custo do produto não é o departamento da linha, para
+//    nunca mudar o departamento da linha daqui. Sem linha: apagada.
+//  - Tag de envio: o fim do código ("—" sem tag). Trocar a tag = trocar o código, pelas rotas da M-46:
+//    a prévia, "código atual → código novo", a confirmação e só então a troca (Idempotency-Key). Quando a
+//    M-46 pula (kit, código que já existe, Amazon, mala…), mostra o motivo dela e não troca. Depois de
+//    trocar, avisa e reabre o cadastro pelo código novo.
+// Só o administrador troca (pode_editar do DaVinci); os outros veem travado. Funcionam no modo Consulta
+// (rotas do DaVinci e a do "Alterar categoria", já liberada). Nada disso vai no "Salvar produto": as
+// caixas e os menus não têm name.
+const p2MenuLabels={centro_custo:'Centro de custo',categoria:'Categoria',categoria_venda:'Categoria de venda',tag_envio:'Tag de envio'};
+let p2Menu={campo:'',sku:'',state:'',opcoes:[],nota:'',vazio:'',error:'',busy:false,atual:''};
+const p2Arrow='<svg class="p2-menu-seta" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+// A categoria do produto no ERP, pelo nome (é por ele que os Cadastros e o "Alterar categoria" a acham).
+function productCategoryName(product){
+ const id=product?.category?.id;if(!id)return '';
+ const c=(state.categories||[]).find(c=>c.id===id);
+ return String(c?.name||product.category?.path?.at?.(-1)?.name||'');
+}
+// A tag do fim do código pela lista dada (a mais longa que casar; sobra numeração), como skuTag.
+function p2TagOf(sku,tags){const s=String(sku||'').trim().toLowerCase();return tags.map(t=>String(t).trim().toLowerCase()).filter(t=>t&&s.length>t.length&&s.endsWith(t)).sort((a,b)=>b.length-a.length)[0]||'';}
+const p2Codes=linha=>(linha?.codigos||[]).join(', ');
+// Travas e valores de cada caixa, a partir do que o DaVinci devolveu (d) e do produto do ERP.
+function productMenuInfo(product){
+ const kept=productRulesData[product.sku],d=kept?.state==='ok'?kept.data:null,busy=!kept||kept.state==='loading';
+ const naoLeu='Não consegui ler do DaVinci agora. Feche e abra o produto de novo.',so='Só o administrador altera.';
+ const lock=d?(d.pode_editar?'':so):(busy?'Carregando…':naoLeu);
+ return {d,busy,lock,naoLeu};
+}
+function p2CentroValue(d){
+ if(d?.centro_custo)return {text:d.centro_custo,grey:false,title:`Escolhido para este produto (o código ${d.sku_base} em todas as tags). Desmarque no menu para voltar ao departamento${d.centro_custo_herdado?` (${d.centro_custo_herdado.nome})`:''}.`};
+ if(d?.centro_custo_herdado)return {text:d.centro_custo_herdado.nome,grey:true,title:`Em branco: usa ${d.centro_custo_herdado.nome} (${d.centro_custo_origem}).`};
+ return {text:'—',grey:true,title:d?(d.centro_custo_origem?`Em branco: ${d.centro_custo_origem}.`:'Em branco: o produto não tem linha na Tabela de Preços nem categoria com centro de custo.'):''};
+}
+// A categoria de venda trava quando o centro ESCOLHIDO não é o departamento da linha.
+function p2VendaLock(d){
+ const linha=d?.linha;
+ if(!linha)return 'Produto sem linha na Tabela de Preços';
+ if(d.centro_custo_id&&d.centro_custo_id!==linha.centro_custo_id)return `A linha da Tabela de Preços é do ${linha.departamento||'—'}`;
+ return '';
+}
+function p2MenuBox(campo,{text,grey=false,title='',lock='',busy=false}){
+ const open=p2Menu.campo===campo&&p2Menu.sku===editingProduct,label=p2MenuLabels[campo];
+ const hint=[title,lock].filter(Boolean).join('\n');
+ return `<label class="p2-menu-cell">${label}<button type="button" class="p2-menu-caixa${grey?' is-herdado':''}" data-p2-menu="${campo}" aria-haspopup="true" aria-expanded="${open}" title="${esc(hint)}"${lock?' disabled':''}${busy?' aria-busy="true"':''}><span>${esc(text)}</span>${p2Arrow}</button></label>${open?p2MenuPopup(campo):''}`;
+}
+function p2MenuPopup(campo){
+ const m=p2Menu,label=p2MenuLabels[campo];let body;
+ if(m.state==='loading')body='<p class="p2-menu-nota">Carregando…</p>';
+ else if(m.state==='erro')body=`<p class="p2-menu-nota erro" role="alert">${esc(m.error||'Não consegui ler as opções agora. Tente de novo.')}</p>`;
+ else body=(m.nota?`<p class="p2-menu-nota">${esc(m.nota)}</p>`:'')+(m.opcoes.length?m.opcoes.map(o=>`<label class="p2-menu-linha"><input type="checkbox" data-p2-menu-opcao="${esc(o.value)}"${o.checked?' checked':''}${m.busy?' disabled':''}><span>${esc(o.label)}</span></label>`).join(''):`<p class="p2-menu-nota">${esc(m.vazio||'Nenhuma opção cadastrada.')}</p>`)+(m.busy?'<p class="p2-menu-nota" aria-busy="true">Gravando…</p>':'');
+ return `<div class="p2-menu" role="dialog" aria-label="${esc(label)}" data-p2-menu-box="${campo}">${body}</div>`;
+}
+function productMenuCells(product){
+ const {d,busy,lock}=productMenuInfo(product),loading=busy?'…':'—';
+ const centro=d?p2CentroValue(d):{text:loading,grey:true,title:''};
+ const categoria=productCategoryName(product),tags=typeof catalogListOf==='function'?catalogListOf('tags_envio'):[],tag=p2TagOf(product.sku,tags);
+ const linha=d?.linha,vendaLock=d?p2VendaLock(d):'';
+ const venda=linha?{text:linha.categoria_venda?(linha.categoria_venda_ativa===false?`${linha.categoria_venda} (inativa)`:linha.categoria_venda):'—',grey:!linha.categoria_venda,title:`A coluna "Tabela" da Tabela de Preços › Produtos, na linha ${linha.nome} (${p2Codes(linha)}). Vale para todas as cores e tags desta linha.`}:{text:d||!product.price_table?'—':loading,grey:true,title:''};
+ return {
+  centro_custo:p2MenuBox('centro_custo',{...centro,lock,busy}),
+  // Serviço não tem categoria (como o select antigo de Características, que ficava escondido).
+  categoria:product.kind==='service'?'':p2MenuBox('categoria',{text:categoria||'Sem categoria',grey:!categoria,title:'A categoria do produto no ERP (a do filtro Categoria e do "Alterar categoria" da Configuração).',lock,busy}),
+  // A linha que vale é a que o DaVinci leu agora (p2VendaLock: sem linha, ou centro de outro departamento).
+  categoria_venda:p2MenuBox('categoria_venda',{...venda,lock:lock||vendaLock,busy}),
+  tag_envio:p2MenuBox('tag_envio',{text:tag||'—',grey:!tag,title:'O fim do código do produto. Trocar a tag troca o código (como a troca de tag da Configuração).',lock,busy}),
+ };
+}
+function refreshProductMenuCells(){
+ const form=document.getElementById('product-edit-form'),product=state?.products?.find(p=>p.sku===editingProduct);
+ if(!form||!product)return;
+ const cells=productMenuCells(product);
+ for(const campo of Object.keys(p2MenuLabels)){const box=form.querySelector(`[data-campo=${campo}]`);if(box)box.innerHTML=cells[campo];}
+}
+function p2Close(redraw=true){p2Menu={campo:'',sku:'',state:'',opcoes:[],nota:'',vazio:'',error:'',busy:false,atual:''};if(redraw)refreshProductMenuCells();}
+async function p2Get(url){
+ let r;try{r=await fetch(url,{credentials:'same-origin',headers:{Accept:'application/json'}});}catch(_){throw new Error('Sem resposta do DaVinci. Tente de novo.');}
+ const data=await r.json().catch(()=>null);
+ if(!r.ok)throw new Error(p2RefusalText(data)||(r.status===403?'Sem permissão para ler esta lista.':'Não consegui ler as opções agora. Tente de novo.'));
+ return data;
+}
+async function p2Send(method,url,body){
+ let r;try{r=await fetch(url,{method,credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify(body)});}catch(_){throw new Error('Sem resposta do DaVinci. Confira a Tabela de Preços antes de tentar de novo.');}
+ const data=await r.json().catch(()=>null);
+ if(!r.ok)throw new Error(p2RefusalText(data)||(r.status===403?'Só o administrador altera este campo.':'O DaVinci não aceitou agora. Tente de novo.'));
+ return data||{};
+}
+// As opções de cada menu, lidas agora.
+async function p2Options(campo,sku){
+ const product=state.products.find(p=>p.sku===sku);
+ if(campo==='centro_custo'){
+  const list=await p2Get('/api/centros-custo'),d=productRulesData[sku]?.data||{};
+  const marcado=d.centro_custo_id||d.centro_custo_herdado?.id||'';
+  const nota=d.centro_custo_id?`Escolhido para este produto. Desmarque para voltar ao departamento${d.centro_custo_herdado?` (${d.centro_custo_herdado.nome})`:''}.`:d.centro_custo_herdado?`Em branco: usa ${d.centro_custo_herdado.nome} (${d.centro_custo_origem}).`:'Em branco: o produto ainda não tem departamento.';
+  return {opcoes:(Array.isArray(list)?list:[]).map(c=>({value:String(c.id),label:String(c.nome),checked:String(c.id)===marcado})),nota,vazio:'Nenhum centro de custo em Cadastros › Centro de custo.'};
+ }
+ if(campo==='categoria'||campo==='tag_envio'){
+  const listas=await p2Get('/api/produto-cadastros/listas');
+  if(campo==='categoria'){
+   const atual=productCategoryName(product),names=(listas?.categorias||[]).map(String),hit=names.find(n=>n.toLowerCase()===atual.toLowerCase());
+   return {opcoes:names.map(n=>({value:n,label:n,checked:n===hit})),atual,nota:'A mesma troca do "Alterar categoria" da Configuração, só para este produto.'+(atual&&!hit?` A categoria atual (${atual}) não está em Cadastros › Produtos.`:''),vazio:'Nenhuma categoria em Cadastros › Produtos.'};
+  }
+  const tags=(listas?.tags_envio||[]).map(String),atual=p2TagOf(sku,tags);
+  const kit=sku.includes('+')?' Kit não troca de tag (regra da troca de tag da Configuração): troque nas peças.':'';
+  return {opcoes:tags.map(t=>({value:t,label:t,checked:t.toLowerCase()===atual})),atual,nota:`Trocar a tag troca o código do produto: antes, mostra o código atual → o novo e pede confirmação.${kit}`,vazio:'Nenhuma tag em Cadastros › Produtos.'};
+ }
+ // Categoria de venda: a linha relida agora (a categoria atual e as opções do departamento dela).
+ const data=await p2Get(rulesUrl(sku));productRulesData[sku]={state:'ok',data};
+ const travada=p2VendaLock(data);if(travada||!data.pode_editar)throw new Error(travada||'Só o administrador altera.');
+ const linha=data.linha;
+ return {opcoes:linha.opcoes.map(o=>({value:String(o.segment_id),label:String(o.nome),checked:String(o.segment_id)===linha.segment_id})),nota:`Vale para todas as cores e tags desta linha (${linha.nome}: ${p2Codes(linha)}).`+(linha.categoria_venda_ativa===false?` A categoria atual (${linha.categoria_venda}) está inativa.`:''),vazio:'O departamento desta linha não tem categoria de venda ativa.'};
+}
+async function p2Open(campo){
+ const sku=editingProduct;
+ if(p2Menu.busy)return;
+ if(p2Menu.campo===campo&&p2Menu.sku===sku){p2Close();return;}
+ p2Menu={campo,sku,state:'loading',opcoes:[],nota:'',vazio:'',error:'',busy:false,atual:''};refreshProductMenuCells();
+ try{const o=await p2Options(campo,sku);if(p2Menu.campo!==campo||p2Menu.sku!==sku)return;Object.assign(p2Menu,{state:'ok',...o});}
+ catch(e){if(p2Menu.campo!==campo||p2Menu.sku!==sku)return;Object.assign(p2Menu,{state:'erro',error:e.message});}
+ refreshProductMenuCells();
+}
+const p2Dirty=()=>!state.consulta?.active&&document.getElementById('product-edit-form')?.dataset.dirty==='true';
+function p2Busy(on){p2Menu.busy=on;refreshProductMenuCells();}
+async function p2ChooseCentro(sku,d,value){
+ const escolhido=d.centro_custo_id||'',herdado=d.centro_custo_herdado?.id||'';
+ if(!escolhido&&value===herdado){p2Close();return;}
+ const novo=value===escolhido?null:value;
+ p2Busy(true);
+ try{
+  const data=await rulesRequest('PUT',rulesUrl(sku),{centro_custo_id:novo});productRulesData[sku]={state:'ok',data};p2Close(false);
+  message(novo===null?`Centro de custo de ${data.sku_base} em branco: volta a usar o departamento${data.centro_custo_herdado?` (${data.centro_custo_herdado.nome})`:''}.`:`Centro de custo de ${data.sku_base}: ${data.centro_custo}.`);
+ }catch(e){p2Menu.busy=false;message(e.message,true);}
+ refreshProductMenuCells();refreshProductRulesCells();
+}
+async function p2ChooseCategoria(sku,value){
+ if(p2Dirty()){message('Salve ou cancele o produto antes de trocar a categoria.',true);return;}
+ if(value.toLowerCase()===String(p2Menu.atual||'').toLowerCase()){p2Close();return;}
+ p2Busy(true);
+ try{
+  const r=await erpPost('/api/erp-local/catalog/bulk-category',{skus:[sku],category:value});
+  const pulou=(r.skipped||[])[0];p2Close(false);
+  delete fullProducts[sku];await refresh().catch(()=>{});
+  message(pulou?`Categoria de ${sku}: ${pulou.reason}`:`Categoria de ${sku} trocada para ${value}.`);
+  if(editingProduct===sku)loadProductRules(sku,true);
+ }catch(e){p2Menu.busy=false;refreshProductMenuCells();message(e.message,true);}
+}
+async function p2ChooseVenda(sku,d,value){
+ const linha=d.linha,opt=linha?.opcoes.find(o=>String(o.segment_id)===value);
+ if(!opt)return;
+ if(value===linha.segment_id){p2Close();return;}
+ p2Close();
+ const ok=await p2Confirm(`Trocar a categoria de venda para ${opt.nome}`,`Isso muda a margem/frete da linha ${linha.nome} (${p2Codes(linha)}) na Tabela de Preços. Continuar?`,'Continuar');
+ if(!ok||editingProduct!==sku)return;
+ try{await p2Send('PATCH','/api/pricing/products/'+encodeURIComponent(linha.id),{product_type:opt.product_type});}
+ catch(e){message(e.message,true);return;}
+ try{
+  const data=await p2Get(rulesUrl(sku));productRulesData[sku]={state:'ok',data};
+  message(`Categoria de venda da linha ${linha.nome}: ${data.linha?.categoria_venda||opt.nome}. Vale para todas as cores e tags da linha.`);
+ }catch(_){message(`Categoria de venda da linha ${linha.nome} trocada para ${opt.nome}. Não consegui reler a linha agora: feche e abra o produto para conferir.`);}
+ refreshProductMenuCells();refreshProductRulesCells();
+}
+// Janela de confirmação simples (Cancelar / Continuar): resolve true só no Continuar.
+function p2Confirm(title,text,okLabel){
+ return new Promise(resolve=>{
+  const dialog=openProductDialog('p2-confirmar',esc(title),`<p class="p2-dialog-info" data-p2-confirmar-texto>${esc(text)}</p><div class="form-footer"><button type="button" class="secondary" data-p2-confirmar="nao">Cancelar</button><button type="button" data-p2-confirmar="sim">${esc(okLabel)}</button></div>`);
+  let done=false;
+  const end=v=>{if(done)return;done=true;resolve(v);if(dialog.isConnected){if(dialog.open&&dialog.close)dialog.close();else dialog.remove();}};
+  dialog.addEventListener('click',e=>{const b=e.target.closest('[data-p2-confirmar]');if(b)end(b.dataset.p2Confirmar==='sim');});
+  dialog.addEventListener('close',()=>end(false));
+ });
+}
+// Tag de envio: prévia da M-46 → "código atual → código novo" → confirmação → troca.
+async function p2ChooseTag(sku,value){
+ if(p2Dirty()){message('Salve ou cancele o produto antes de trocar a tag.',true);return;}
+ if(value.toLowerCase()===String(p2Menu.atual||'').toLowerCase()){p2Close();return;}
+ p2Busy(true);
+ let previa;
+ try{previa=await davinciPost('/api/produtos/trocar-tag/previa',{skus:[sku],tag:value});}
+ catch(e){p2Menu.busy=false;refreshProductMenuCells();message(e.message,true);return;}
+ p2Close();
+ const item=(previa.itens||[]).find(i=>i.sku===sku)||(previa.itens||[])[0]||{sku,novo:null,acao:'pular',motivo:'o DaVinci não devolveu a prévia'};
+ const troca=item.acao==='alterar';
+ const codigo=`<p class="p2-tag-troca" data-p2-tag-troca><span class="p2-code">${esc(item.sku||sku)}</span>${item.novo?` → <span class="p2-code">${esc(item.novo)}</span>`:''}</p>`;
+ const dialog=openProductDialog('p2-tag-produto',`Trocar a tag para ${esc(value)}`,`<div class="p2-tag-body">${codigo}${troca?'<p class="p2-dialog-info">O código do produto muda no Bling, e o DaVinci acompanha, como na troca de tag da Configuração. Continuar?</p>':`<p class="p2-dialog-error" data-p2-tag-motivo>Não troca: ${esc(item.motivo||'')}</p>`}<p class="p2-dialog-error" role="alert" hidden></p><div class="form-footer"><button type="button" class="secondary" data-p2-tag-cancelar>${troca?'Cancelar':'Fechar'}</button>${troca?'<button type="button" data-p2-tag-confirmar>Trocar código</button>':''}</div></div>`);
+ dialog.addEventListener('click',async e=>{
+  if(e.target.closest('[data-p2-tag-cancelar],[data-p2-tag-fechar]')){if(dialog.dataset.busy==='1')return;actionKeysDrop(dialog.dataset.idemScope);dialog.remove();return;}
+  const go=e.target.closest('[data-p2-tag-confirmar]');if(!go||go.disabled||dialog.dataset.busy==='1')return;
+  const cancel=dialog.querySelector('[data-p2-tag-cancelar]'),box=dialog.querySelector('.p2-dialog-error[role=alert]');
+  dialog.dataset.busy='1';go.disabled=true;go.textContent='Trocando…';cancel.disabled=true;box.hidden=true;
+  try{
+   const r=await davinciPost('/api/produtos/trocar-tag',{skus:[sku],tag:value},{idempotent:true,scope:dialog.dataset.idemScope});
+   const it=(r.itens||[]).find(i=>i.sku===sku)||(r.itens||[])[0]||{};
+   dialog.dataset.busy='';
+   if(it.estado==='ok'){actionKeysDrop(dialog.dataset.idemScope);dialog.remove();await p2Renamed(sku,it.novo||item.novo);return;}
+   dialog.querySelector('.p2-tag-body').innerHTML=`${codigo}<p class="p2-dialog-error" data-p2-tag-motivo>${it.estado==='pulado'?'Não trocou':'Não confirmou a troca'}: ${esc(it.motivo||'')}</p><div class="form-footer"><button type="button" data-p2-tag-fechar>Fechar</button></div>`;
+  }catch(error){
+   dialog.dataset.busy='';
+   if(!dialog.isConnected){message(error.uncertain?'Troca de tag: pode ter sido gravada (a janela foi fechada durante o envio): confira o código antes de trocar de novo.':`Troca de tag: ${error.message}`,true);return;}
+   go.disabled=false;go.textContent='Trocar código';cancel.disabled=false;box.textContent=error.message;box.hidden=false;
+  }
+ });
+}
+// Depois da troca: avisa e reabre pelo código novo (o ERP pode levar até ~1 hora para tê-lo).
+async function p2Renamed(from,to){
+ for(const cache of [fullProducts,productRulesData])delete cache[from];
+ editingProduct=to;await refresh().catch(()=>{});
+ if(editingProduct===to&&state.products.some(p=>p.sku===to)){message(`O código mudou: ${from} → ${to}. O cadastro foi aberto pelo código novo.`);return;}
+ if(editingProduct===to){editingProduct='';render();}
+ message(`O código mudou: ${from} → ${to}. O Produtos 2 leva até ~1 hora para mostrar o código novo: abra o produto pela lista depois.`);
+}
+function p2Choose(value){
+ const campo=p2Menu.campo,sku=p2Menu.sku,d=productRulesData[sku]?.data;
+ if(!campo||sku!==editingProduct||p2Menu.busy||p2Menu.state!=='ok'||!d?.pode_editar)return;
+ if(campo==='centro_custo')p2ChooseCentro(sku,d,value);
+ else if(campo==='categoria')p2ChooseCategoria(sku,value);
+ else if(campo==='categoria_venda')p2ChooseVenda(sku,d,value);
+ else if(campo==='tag_envio')p2ChooseTag(sku,value);
+}
+document.addEventListener('click',e=>{
+ const opt=e.target.closest?.('[data-p2-menu-opcao]');
+ // O checkbox não muda sozinho: a marca segue o que foi gravado (o menu é redesenhado depois).
+ if(opt){e.preventDefault();p2Choose(opt.dataset.p2MenuOpcao);return;}
+ const box=e.target.closest?.('[data-p2-menu]');
+ if(box){e.preventDefault();if(!box.disabled)p2Open(box.dataset.p2Menu);return;}
+ if(p2Menu.campo&&!e.target.closest?.('[data-p2-menu-box],.p2-menu-cell')&&!p2Menu.busy)p2Close();
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&p2Menu.campo&&!p2Menu.busy&&!document.querySelector('dialog[open],[role=dialog].product-supplier-dialog'))p2Close();});
 function productDetailsForm(){
  if(!ensureFullProduct(editingProduct))return `<section class="panel"><p class="source-line">Abrindo ${esc(editingProduct)}…</p></section>`;
  const product=state.products.find(p=>p.sku===editingProduct);
@@ -281,14 +539,15 @@ function productDetailsForm(){
   ...productMeasureCells(product),
   ...productMediaCells(product),
   ...productRulesCells(product),
+  ...productMenuCells(product),
  };
  return panel(`Produto · ${esc(product.sku)}`,'',`<form id="product-edit-form"${consulta?' class="read-only"':''}><div class="form-footer">${consulta?'<span class="consulta-note">Somente consulta: o cadastro continua sendo feito no Bling até a troca.</span><button type="button" class="secondary" id="product-edit-cancel">Fechar</button>':'<button type="button" class="secondary" id="product-edit-cancel">Cancelar</button><button>Salvar produto</button>'}</div><div class="product-head">${field('name','Nome *',product.name)}${productHead(cells)}</div><div class="reference-tabs" role="tablist" aria-label="Dados do produto">${tabs.map(([id,label])=>`<button type="button" role="tab" data-product-edit-tab="${id}" aria-selected="${productEditTab===id}" class="${productEditTab===id?'active':''}">${label}</button>`).join('')}</div><section data-product-section="characteristics" ${productEditTab==='characteristics'?'':'hidden'}>${productCharacteristics(product)}</section><section data-product-section="stock" ${productEditTab==='stock'?'':'hidden'}><div class="product-grid">${field('stock_min','Mínimo',d.stock_min,'number')}${field('stock_max','Máximo',d.stock_max,'number')}<label>Crossdocking<input name="crossdocking" type="number" min="0" max="9999" step="1" value="${esc(d.crossdocking??'')}"></label>${field('location','Localização',d.location)}</div><p class="source-line">Para gerenciar o estoque acesse o módulo de <button type="button" class="link-action inline" data-stock-product="${esc(product.sku)}">Controle de Estoques</button>. Crossdocking é o prazo adicional, em dias, para despachar o produto.</p><div class="forms">${field('cost_price','Preço de custo do cadastro (R$)',product.cost_price,'number')}</div><p class="source-line">O custo do cadastro não recalcula o custo médio físico. Controle por lote ainda não disponível no núcleo próprio; quando homologado, será ativado produto a produto.</p></section><section data-product-section="structure" ${productEditTab==='structure'?'':'hidden'}>${productStructureEditor(product)}</section><div class="form-footer"><span>Pedidos registrados preservam o cadastro e a composição usados na venda.</span>${consulta?'':'<button>Salvar alterações do produto</button>'}</div></form>`);
 }
 document.addEventListener('click',e=>{
  const edit=e.target.closest('[data-edit-product]'),tab=e.target.closest('[data-product-edit-tab]');
- if(edit){editingProduct=edit.dataset.editProduct;productEditTab='characteristics';for(const id in productMediaData)delete productMediaData[id];for(const sku in productRulesData)delete productRulesData[sku];render();document.getElementById('product-edit-form')?.scrollIntoView({behavior:'smooth'});}
+ if(edit){editingProduct=edit.dataset.editProduct;productEditTab='characteristics';for(const id in productMediaData)delete productMediaData[id];for(const sku in productRulesData)delete productRulesData[sku];p2Close(false);render();document.getElementById('product-edit-form')?.scrollIntoView({behavior:'smooth'});}
  if(tab){productEditTab=tab.dataset.productEditTab;const f=document.getElementById('product-edit-form');for(const n of f.querySelectorAll('[data-product-section]'))n.hidden=n.dataset.productSection!==productEditTab;for(const b of f.querySelectorAll('[data-product-edit-tab]')){const active=b===tab;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}}
- if(e.target.closest('#product-edit-cancel')){editingProduct='';render();}
+ if(e.target.closest('#product-edit-cancel')){editingProduct='';p2Close(false);render();}
  if(e.target.closest('#product-rename-open'))openProductRename();
  if(e.target.closest('[data-rename-cancel]'))document.getElementById('product-rename-dialog')?.remove();
  if(e.target.closest('[data-rename-confirm]')){
@@ -311,7 +570,10 @@ function openProductRename(){
 //  - o preço de venda: o servidor mantém o gravado. Reenviar a cópia da tela desfaria um "Novo
 //    preço" da Configuração em massa, que muda o preço sem mudar a versão do cadastro;
 //  - Tributação (NCM…), Fornecedores e Imagens: têm versão própria e não têm tela aqui;
-//  - Categoria, Tipo e Estrutura: só quando a tela tem o campo e ele mudou.
+//  - a Categoria: desde a M-73 ela troca no menu da linha 2, na hora, pela rota do "Alterar
+//    categoria" (o select de Características saiu). O "Salvar produto" nunca manda categoria, para
+//    não gravar a carregada por cima da que o menu acabou de trocar;
+//  - Tipo e Estrutura: só quando a tela tem o campo e ele mudou.
 const productSaveKeys=['unit','location','status','stock_min','stock_max','crossdocking','brand','production','expiry_date','department','net_weight_kg','gross_weight_kg','items_per_box','volumes','gtin','gtin_tax','external_link','video_url','notes','dimension_unit','width_cm','height_cm','length_cm','free_shipping','condition','voltage','dun','tags','short_description_html','complementary_html'];
 function productSavePayload(product,form){
  const values=new FormData(form),loaded=product.details||{},data={},has=name=>!!form.querySelector(`[name="${name}"]`);
@@ -328,7 +590,6 @@ function productSavePayload(product,form){
   const components=[...form.querySelectorAll('[data-product-section=structure] .item-line')].map(r=>({sku:r.querySelector('[name=sku]').value,quantity:r.querySelector('[name=quantity]').value}));
   if(structureSignature(components)!==structureSignature(structure.components))payload.structure={version:structure.version,components,reason:values.get('structure_reason')};
  }
- if(has('product_category')){const categoryId=values.get('product_category')||null;if(categoryId!==(product.category?.id||null))payload.category={version:product.category?.version||0,category_id:categoryId};}
  if(has('product_type')){const productType=values.get('product_type');if(productType&&productType!==(product.kind==='service'?'service':'product'))payload.type=productType;}
  return payload;
 }

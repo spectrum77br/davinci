@@ -85,6 +85,27 @@ body[data-product-editor=true] header h1:before{content:none}
 .p2-regra-botao.is-vazio{color:#9aa6b8}
 .p2-regra-botao:not(:disabled):hover{border-color:#93b4f5}
 .p2-regra-botao:disabled{background:#f6f7f9;cursor:default;opacity:1}
+/* M-73 (26/11/2026): Centro de custo, Categoria, Categoria de venda e Tag de envio (linha 2, colunas 1 a
+   4): caixa branca com o valor e uma setinha; o menu abre embaixo, com um checkbox por linha. O valor
+   herdado (centro em branco = o departamento) fica em cinza. São trocas na hora (DaVinci e a rota do
+   "Alterar categoria"), então continuam clicáveis no modo Consulta, onde o resto do cadastro trava. */
+.product-head-cell[data-campo=centro_custo],.product-head-cell[data-campo=categoria],.product-head-cell[data-campo=categoria_venda],.product-head-cell[data-campo=tag_envio]{position:relative}
+.p2-menu-caixa{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;min-height:32px;padding:7px 10px;border:1px solid #cbd6e6;border-radius:5px;background:#fff;color:#21314b;font-size:12px;font-weight:400;text-align:left;box-shadow:none;cursor:pointer}
+.p2-menu-caixa>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.p2-menu-caixa.is-herdado>span{color:#9aa6b8}
+.p2-menu-seta{flex:none;color:#6b7a90}
+.p2-menu-caixa:not(:disabled):hover{border-color:#93b4f5}
+.p2-menu-caixa[aria-expanded=true]{border-color:#285be7;box-shadow:0 0 0 1px #285be7}
+.p2-menu-caixa:disabled{background:#f6f7f9;color:#4a5568;cursor:default;opacity:1}
+.p2-menu-caixa[aria-busy=true]{opacity:.6}
+.p2-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:70;min-width:100%;width:max-content;max-width:min(280px,calc(100vw - 32px));max-height:320px;overflow:auto;padding:6px;border:1px solid rgb(229,231,235);border-radius:8px;background:#fff;box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1)}
+.p2-menu-nota{margin:0 0 4px;padding:4px 6px;font-size:11px;line-height:15px;color:rgb(107,114,128);white-space:normal}
+.p2-menu-nota.erro{color:#a13a2a;background:#fff0ec;border-radius:4px}
+.p2-menu-linha{display:flex;align-items:center;gap:8px;margin:0;padding:5px 6px;border-radius:4px;font-size:13px;line-height:18px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
+.p2-menu-linha:hover{background:rgb(243,244,246)}
+.p2-menu-linha input[type=checkbox]{width:16px;height:16px;min-height:16px;margin:0;flex:none}
+#product-edit-form.read-only .p2-menu input[type=checkbox]{pointer-events:auto;background:#fff}
+.p2-tag-troca{margin:4px 0 10px;font-size:14px}
 .p2-condicao-dialog h3{margin:18px 0 8px;font-size:13px}
 .p2-condicao-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:end;border:1px solid #d5deea;border-radius:6px;padding:12px}
 .p2-condicao-form button{grid-column:1/-1;justify-self:end;padding:8px 14px}
