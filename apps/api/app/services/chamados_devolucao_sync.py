@@ -1369,6 +1369,16 @@ def lembrete_temu_txt(ch: Chamado) -> str:
         if link.startswith("https://")
         else "Abra a loja no perfil dela, em Gerenciar devoluções, buscando o nº do pedido"
     )
+    if ch.origem == "devolucao" and not (ch.chamado or "").strip():
+        # Resgate ainda não aberto (a Temu não tinha descontado, ou não era
+        # reivindicável): vê de novo se já dá pra abrir.
+        return (
+            f"{LEMBRETE_TEMU_PREFIXO}: o resgate deste pedido ainda não foi aberto. {onde}, "
+            "veja se a Temu já descontou a loja (Dedução de receita) e se o caso está "
+            "\"Reivindicável\": se sim, abra como no pedido automático acima e diga o ID da "
+            "devolução; se não, aguardar, dizendo o que a tela mostra. A Temu pediu login → "
+            "humano."
+        )
     return (
         f"{LEMBRETE_TEMU_PREFIXO}: a Temu não avisa o DaVinci quando decide. {onde}, "
         "veja o status do caso (resgate/reclamação e pós-venda) e registre: aprovado ou "
@@ -1553,6 +1563,130 @@ async def instruir_safet_amazon(session: AsyncSession, *, agora: datetime | None
         logger.info("chamado_amazon_safet_instrucao", chamado_id=str(ch.id), pedido=ch.pedido_bling)
     await session.commit()
     return {"vistos": len(chs), "instruidos": instruidos, "extraviados": extraviados}
+
+
+# 26/11/2026 (Vinicius: "pode fazer o processo para ela abrir quando precisar igual
+# nos outros"): o chamado de devolução da Temu nasce, como o da Amazon, só com o
+# aviso "abrir na mão" — a Temu não tem API de reclamação. Uma hora depois do
+# lançamento entra uma instrução do sistema pra IA de Chamado abrir o RESGATE na
+# tela (o caminho feito à mão no 306833 em 26/11). Extraviado ENTRA (é o caso
+# típico: a transportadora da própria Temu perdeu o pacote).
+INSTRUCAO_RESGATE_TEMU_PREFIXO = "Pedido automático (resgate da Temu)"
+INSTRUCAO_RESGATE_TEMU_ESPERA = timedelta(hours=1)
+URL_RASTREIO_ANJUN = "https://anjunexpress.com/trackPackage?tracking={}"
+
+
+def _texto_instrucao_resgate_temu(
+    ch: Chamado, linhas: list[Devolution], rastreio: str | None
+) -> str:
+    def _distintos(vals) -> str:
+        return ", ".join(dict.fromkeys(v for v in vals if v))
+
+    motivos = _distintos((d.motivo_devolucao or "").strip() for d in linhas)
+    condicoes = _distintos((d.condicao_produto or "").strip() for d in linhas)
+    pedido = (ch.pedido_marketplace or "").strip() or f"Bling {ch.pedido_bling}"
+    loja = (ch.conta or "").strip() or "a loja do pedido"
+    cod = (rastreio or "").strip()
+    prova = (
+        f"print do rastreio no site da Anjun ({URL_RASTREIO_ANJUN.format(cod)})"
+        if cod.upper().startswith("AJ")
+        else (f"print do rastreio da transportadora (código {cod})" if cod else "print do rastreio")
+    )
+    return (
+        f"{INSTRUCAO_RESGATE_TEMU_PREFIXO}: a Temu não tem API de reclamação. Abra o pedido "
+        f"{pedido} na tela da Temu ({loja}), em Gerenciar devoluções, e veja o caso"
+        f"; motivo do lançamento \"{motivos or '—'}\""
+        + (f", condição \"{condicoes}\"" if condicoes else "")
+        + ". Só abra o resgate (\"Registre uma nova solicitação\") se a Temu já descontou a "
+        "loja (Dedução de receita) e o caso estiver \"Reivindicável\". Escolha o motivo da "
+        "lista que bate com o que aconteceu, anexe "
+        + prova
+        + " e as fotos da linha, sem dado do cliente, e escreva a descrição sem código de "
+        "rastreio, cidade ou valor (a Temu recusa calada). Abriu: confirme \"Resgates em "
+        "andamento\" na lista e diga o ID da devolução (…-D01) como protocolo. Ainda não "
+        "descontou ou não é reivindicável: não abra, diga o que viu e aguarde. Nenhum "
+        "motivo da lista serve: humano, dizendo as opções."
+    )
+
+
+async def instruir_resgate_temu(session: AsyncSession, *, agora: datetime | None = None) -> dict:
+    """Cron (:25): como `instruir_safet_amazon`, pra Temu (sem a exceção do
+    Extraviado). Uma instrução por chamado; qualquer instrução ou análise já tira
+    o caso daqui. Commita."""
+    from app.models import Logistica
+
+    ref = agora or datetime.now(UTC)
+    hoje = ref.astimezone(chamados_svc.SAO_PAULO).date()
+    msg = ChamadoMensagem
+    sem_api = (
+        select(msg.id)
+        .where(
+            msg.chamado_id == Chamado.id,
+            msg.tipo == cd.TIPO_ABERTURA,
+            msg.erro == "plataforma_sem_api",
+        )
+        .exists()
+    )
+    ia_ja_olhou = (
+        select(msg.id)
+        .where(msg.chamado_id == Chamado.id, msg.tipo.in_(("instrucao", "analise")))
+        .exists()
+    )
+    chs = (
+        await session.execute(
+            select(Chamado).where(
+                Chamado.origem == "devolucao",
+                Chamado.resolvido.is_(False),
+                _nao_encerrado,
+                _plataforma_chamado().in_(PLATAFORMAS_TEMU),
+                func.coalesce(func.trim(Chamado.chamado), "") == "",
+                Chamado.created_at <= ref - INSTRUCAO_RESGATE_TEMU_ESPERA,
+                _fora_do_fixo(hoje),
+                sem_api,
+                ~ia_ja_olhou,
+            )
+        )
+    ).scalars().all()
+    instruidos = 0
+    for ch in chs:
+        dev = await cd._dev_de_chamado(session, ch)
+        if dev is None and (ch.pedido_bling or "").strip():
+            dev = (
+                await session.execute(
+                    select(Devolution)
+                    .where(Devolution.pedido_bling == ch.pedido_bling.strip())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if dev is None:
+            continue
+        linhas = [
+            d for d in await cd._linhas_do_pedido(session, dev)
+            if chamados_svc.motivo_pede_chamado(d)
+        ]
+        if not linhas:
+            continue
+        rastreio = (
+            await session.execute(
+                select(Logistica.rastreio)
+                .where(Logistica.pedido_bling == (ch.pedido_bling or "").strip())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        session.add(
+            chamados_svc.nova_mensagem(
+                ch,
+                texto=_texto_instrucao_resgate_temu(ch, linhas, rastreio),
+                tipo="instrucao",
+                direcao="sistema",
+                autor_nome=chamados_svc.AUTOR_SISTEMA,
+                status="registrada",
+            )
+        )
+        instruidos += 1
+        logger.info("chamado_temu_resgate_instrucao", chamado_id=str(ch.id), pedido=ch.pedido_bling)
+    await session.commit()
+    return {"vistos": len(chs), "instruidos": instruidos}
 
 
 # 22/09: o número em `chamados.chamado` foi capturado pelo robô na TELA — nenhuma

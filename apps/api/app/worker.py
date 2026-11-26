@@ -3047,6 +3047,13 @@ async def chamados_replica_automatica(ctx: dict) -> None:
         logger.info("chamados_amazon_safet_done", **safet)
     except Exception as e:  # noqa: BLE001 — não pode parar a varredura das presas
         logger.warning("chamados_amazon_safet_falhou", err=str(e)[:300])
+    # 26/11/2026: o mesmo pra Temu — a IA de Chamado abre o resgate na tela.
+    try:
+        async with session_scope() as s:
+            resgate = await chamados_devolucao_sync.instruir_resgate_temu(s)
+        logger.info("chamados_temu_resgate_done", **resgate)
+    except Exception as e:  # noqa: BLE001 — não pode parar a varredura das presas
+        logger.warning("chamados_temu_resgate_falhou", err=str(e)[:300])
     # 17/09: abertura que a API não consegue fazer (sem return, sem foto…) parava
     # aqui pra sempre. A varredura roteia pro robô ou pro humano e avisa no Threema.
     async with session_scope() as s:

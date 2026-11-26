@@ -131,3 +131,90 @@ async def test_lembrete_geral_de_2_dias_deixa_a_temu_pro_diario(db):
     await db.commit()
     assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 0
     assert (await sync.lembrar_temu(db, agora=agora))["lembrados"] == 1
+
+
+# ---- a IA abre o resgate sozinha (como a SAFE-T da Amazon) ------------------
+
+
+async def _temu_lancado(db, *, pedido: str = "306833", condicao: str = "Extraviado") -> Chamado:
+    from app.models import Devolution, Logistica
+
+    dev = Devolution(
+        id=uuid4(),
+        pedido_bling=pedido,
+        pedido_marketplace="PO-029-11708709484150003",
+        conta="Temu Barbosa",
+        sku="b012.12.20",
+        produtos="Kit Malas Lisa M2",
+        condicao_produto=condicao,
+        motivo_devolucao="Danificado (Outros)",
+    )
+    db.add(dev)
+    db.add(
+        Logistica(
+            pedido_bling=pedido,
+            plataforma="Temu",
+            conta="barbosa",
+            rastreio="AJ261102157415301",
+            meli_status={},
+        )
+    )
+    ch = Chamado(
+        id=uuid4(),
+        origem="devolucao",
+        origem_ref=str(dev.id),
+        plataforma="temu",
+        conta="barbosa",
+        canal="manual",
+        pedido_bling=pedido,
+        pedido_marketplace="PO-029-11708709484150003",
+    )
+    db.add(ch)
+    await db.flush()
+    db.add(
+        ChamadoMensagem(
+            chamado_id=ch.id,
+            direcao="enviada",
+            tipo="abertura",
+            status="registrada",
+            canal="manual",
+            autor_nome="sistema",
+            erro="plataforma_sem_api",
+            texto="temu não tem API pra contestar devolução: abrir na mão na plataforma.",
+        )
+    )
+    await db.commit()
+    return ch
+
+
+async def test_temu_lancado_ganha_instrucao_de_abrir_o_resgate_uma_vez(db):
+    ch = await _temu_lancado(db)  # Extraviado ENTRA (ao contrário da SAFE-T)
+    agora = datetime.now(UTC)
+    assert (await sync.instruir_resgate_temu(db, agora=agora))["instruidos"] == 0
+
+    depois = agora + sync.INSTRUCAO_RESGATE_TEMU_ESPERA + timedelta(minutes=1)
+    assert (await sync.instruir_resgate_temu(db, agora=depois))["instruidos"] == 1
+    assert (await sync.instruir_resgate_temu(db, agora=depois))["instruidos"] == 0
+    [m] = await _instrucoes(db, ch)
+    assert m.texto.startswith(sync.INSTRUCAO_RESGATE_TEMU_PREFIXO)
+    assert "PO-029-11708709484150003" in m.texto and "barbosa" in m.texto
+    assert "anjunexpress.com/trackPackage?tracking=AJ261102157415301" in m.texto
+    assert "Extraviado" in m.texto and "Reivindicável" in m.texto
+    # A SAFE-T (Amazon) não pega a Temu.
+    assert (await sync.instruir_safet_amazon(db, agora=depois))["instruidos"] == 0
+
+    # Um dia depois sem a IA ter aberto (sem nº): o lembrete pede pra ver se já dá.
+    db.add(
+        _msg(
+            ch,
+            tipo="analise",
+            em=depois + timedelta(minutes=5),
+            texto="Análise da IA de Chamado [x]: Temu ainda não descontou → aguardar a plataforma",
+        )
+    )
+    await db.commit()
+    assert (await sync.lembrar_temu(db, agora=depois + timedelta(days=1, minutes=6)))[
+        "lembrados"
+    ] == 1
+    ultimo = (await _instrucoes(db, ch))[-1]
+    assert "ainda não foi aberto" in ultimo.texto

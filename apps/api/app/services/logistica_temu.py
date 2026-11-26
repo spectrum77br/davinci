@@ -59,6 +59,20 @@ logger = structlog.get_logger()
 _TEMU_PLATAFORMAS = logistica_rules._TEMU_PLATAFORMAS
 API_PEDIDO = "bg.order.detail.v2.get"
 API_RASTREIO = "temu.track.trackinginfo.get"
+# Pós-venda (26/11/2026, pra a regra da aba Status mandar pras Devoluções):
+# a lista dá o tipo e a situação do caso de cada pedido; o detalhe dá o motivo —
+# na Temu "reembolso sem devolução" também é AJUSTE DE PREÇO (price match /
+# price adjustment: reembolso parcial quando o preço cai), que não é devolução.
+API_POS_VENDA_LISTA = "bg.aftersales.parentaftersales.list.get"
+API_POS_VENDA_DETALHE = "temu.aftersales.parentaftersales.detail.get"
+# A lista é por data de criação do caso, em janelas de 30 dias (o que a sonda
+# provou que a Temu aceita), até 90 dias pra trás.
+JANELAS_POS_VENDA = 3
+_DIAS_JANELA = 30
+_PAGINA_POS_VENDA = 50
+# Motivos que são ajuste de preço (vistos em 26/11: 40 "Price adjustment refund",
+# 59 "price match refund") — e qualquer motivo com "price" no texto.
+_MOTIVOS_AJUSTE_PRECO = frozenset({40, 59})
 
 # Uma linha por vez, com pausa: na 1ª rodada em produção (26/11 11:05) 3 em
 # paralelo levaram "Temu 4000004: too frequent requests" depois de 14 linhas — e
@@ -289,6 +303,107 @@ async def ler_pedido(client: TemuClient, parent_order_sn: str) -> dict[str, Any]
     }
 
 
+def montar_caso(caso: dict, detalhe: dict | None) -> dict[str, str]:
+    """Campos do caso de pós-venda pro `meli_status` (PURA). `caso` = item da
+    lista; `detalhe` = resposta do detalhe (None se não deu pra ler)."""
+    det = detalhe or {}
+    tipo_cod = _int(det.get("afterSalesType", caso.get("afterSalesType")))
+    status_cod = _int(det.get("parentAfterSalesStatus", caso.get("parentAfterSalesStatus")))
+    itens = list(det.get("afterSalesList") or [])
+    motivos = [_int(i.get("afterSalesReasonCode")) for i in itens]
+    textos = " ".join(str(i.get("afterSalesReasonDesc") or "") for i in itens).strip()
+    ajuste = any(m in _MOTIVOS_AJUSTE_PRECO for m in motivos if m is not None) or (
+        "price" in textos.lower()
+    )
+    if ajuste:
+        tipo = "PRICE_ADJUST"
+    elif tipo_cod == 1:
+        tipo = "REFUND"
+    elif tipo_cod is not None and caso.get("returnDeliveryType") is not None:
+        tipo = "RETURN_AND_REFUND"
+    elif tipo_cod is not None:
+        tipo = f"TEMU_TIPO_{tipo_cod}"
+    else:
+        tipo = ""
+    out: dict[str, str] = {}
+    if tipo:
+        out["return_type"] = tipo
+    if status_cod is not None:
+        out["return_status"] = f"TEMU_{status_cod}"
+    operacoes = det.get("availableOperateList", caso.get("availableOperateList")) or []
+    if operacoes:
+        out["return_pending"] = "1"  # a Temu espera uma ação da loja
+    if textos:
+        out["return_reason"] = textos[:120]
+    total = 0
+    for i in itens:
+        v = _int((i.get("applyRefundAmount") or {}).get("amount"))
+        total += v or 0
+    if total:
+        out["return_refunded"] = f"{total / 100:.2f}"
+    return out
+
+
+async def casos_pos_venda(
+    client: TemuClient, *, agora: datetime | None = None
+) -> dict[str, dict]:
+    """{parentOrderSn: caso mais novo} dos últimos 90 dias. TemuErro sobe."""
+    fim = int((agora or datetime.now(UTC)).timestamp())
+    casos: dict[str, dict] = {}
+    for j in range(JANELAS_POS_VENDA):
+        ate = fim - j * _DIAS_JANELA * 86400
+        desde = ate - _DIAS_JANELA * 86400
+        pagina = 1
+        while True:
+            r = await client._chamar(  # noqa: SLF001
+                API_POS_VENDA_LISTA,
+                {
+                    "pageNumber": pagina,
+                    "pageSize": _PAGINA_POS_VENDA,
+                    "createAtStart": desde,
+                    "createAtEnd": ate,
+                },
+            )
+            res = r.get("result") or {}
+            dados = list(res.get("data") or [])
+            for c in dados:
+                po = str(c.get("parentOrderSn") or "").strip()
+                if not po:
+                    continue
+                atual = casos.get(po)
+                if atual is None or (_int(c.get("createAt")) or 0) > (
+                    _int(atual.get("createAt")) or 0
+                ):
+                    casos[po] = c
+            total = _int(res.get("total")) or 0
+            if not dados or pagina * _PAGINA_POS_VENDA >= total or pagina >= 10:
+                break
+            pagina += 1
+    return casos
+
+
+async def caso_do_pedido(client: TemuClient, caso: dict) -> dict[str, str]:
+    """Lê o detalhe do caso (motivo, valor, ação pendente) e monta os campos.
+    Detalhe fora do ar: só o que a lista já disse."""
+    try:
+        r = await client._chamar(  # noqa: SLF001
+            API_POS_VENDA_DETALHE,
+            {
+                "parentAfterSalesSn": caso.get("parentAfterSalesSn"),
+                "parentOrderSn": caso.get("parentOrderSn"),
+            },
+        )
+        detalhe = r.get("result") or {}
+    except TemuErro as e:
+        logger.info(
+            "logistica_temu_pos_venda_detalhe_falhou",
+            pedido=caso.get("parentOrderSn"),
+            err=str(e)[:160],
+        )
+        detalhe = None
+    return montar_caso(caso, detalhe)
+
+
 async def build_enrichment(client: TemuClient, parent_order_sn: str) -> dict[str, Any]:
     leitura = await ler_pedido(client, parent_order_sn)
     return montar(
@@ -433,6 +548,7 @@ async def enrich_row(
     row: Logistica,
     *,
     client_cache: dict[str, TemuClient] | None = None,
+    casos: dict[str, dict] | None = None,
 ) -> bool:
     """Lê o pedido Temu da linha e grava. Levanta `TemuEnrichError` quando não
     dá pra prosseguir (linha não-Temu, sem pedido, conta sem a API)."""
@@ -452,8 +568,40 @@ async def enrich_row(
         if client_cache is not None:
             client_cache[conta] = client
     enr = await build_enrichment(client, po)
+    if enr.get("meli_status"):
+        if casos is None:
+            # Lista de pós-venda não lida nesta rodada: fica o caso que já estava.
+            for campo in CAMPOS_POS_VENDA:
+                if (row.meli_status or {}).get(campo):
+                    enr["meli_status"][campo] = row.meli_status[campo]
+        elif po in casos:
+            enr["meli_status"].update(await caso_do_pedido(client, casos[po]))
     aplicar(row, enr)
     return bool(enr.get("meli_status"))
+
+
+CAMPOS_POS_VENDA = (
+    "return_type",
+    "return_status",
+    "return_pending",
+    "return_reason",
+    "return_refunded",
+)
+
+
+async def casos_por_conta(
+    clientes: dict[str, TemuClient], *, agora: datetime | None = None
+) -> dict[str, dict[str, dict] | None]:
+    """Uma leitura da lista de pós-venda por conta. Conta cuja lista falhou fica
+    com None (as linhas dela guardam o caso que já tinham)."""
+    out: dict[str, dict[str, dict] | None] = {}
+    for conta, cliente in clientes.items():
+        try:
+            out[conta] = await casos_pos_venda(cliente, agora=agora)
+        except TemuErro as e:
+            logger.info("logistica_temu_pos_venda_lista_falhou", conta=conta, err=str(e)[:160])
+            out[conta] = None
+    return out
 
 
 async def enrich_recent(
@@ -514,9 +662,14 @@ async def enrich_recent(
     skipped = len(rows) - len(alvo)
     failed = 0
     interrompida = 0
+    # Pós-venda: uma leitura da lista por conta, antes das linhas.
+    casos = await casos_por_conta({c: cache[c] for c in dict.fromkeys(r.conta for r in alvo)})
     for lote in logistica_enrich.chunked(alvo, _CONCURRENCY):
         res = await asyncio.gather(
-            *(enrich_row(session, r, client_cache=cache) for r in lote),
+            *(
+                enrich_row(session, r, client_cache=cache, casos=casos.get(r.conta))
+                for r in lote
+            ),
             return_exceptions=True,
         )
         de_rede = False

@@ -572,8 +572,9 @@ A janela só aceita arquivo (foto até 10 MB, vídeo até 1 min): sem texto, sem
 A Temu **não tem API de reclamação**: o caso só existe na tela do Seller Center
 (`br.seller.temu.com`), e ela não avisa o DaVinci quando decide. Quem te traz o
 chamado é o **"Lembrete automático (Temu)"**, que o DaVinci deixa uma vez por dia
-em cada chamado Temu aberto. Leia, registre e feche o perfil — não age sem
-instrução de pessoa.
+em cada chamado Temu aberto, e o **"Pedido automático (resgate da Temu)"**, que pede
+pra abrir o resgate de uma devolução lançada. Fora disso: leia, registre e feche o
+perfil — não age sem instrução de pessoa.
 
 - **Perfil:** `python3 ferramentas/adspower.py achar --conta "<conta>" --plataforma temu`
   (Barbosa 115, Eron 126, ATV 138, JLAS 143).
@@ -601,14 +602,36 @@ instrução de pessoa.
   Vendedor… ATIVAR AGORA". Esses botões são adesão a promoção/programa: nunca
   clique. Feche no X da janela ou com `tecla Escape`; o aviso "Prorrogação da
   avaliação de atrasos… Entendi" também fecha com Escape.
-- **Abrir a reclamação (resgate) — só com instrução de pessoa:** na página de
-  detalhes, "Registre uma nova solicitação" → marcar o produto → "Próxima etapa"
-  → motivo (lista) → provas (Opção A: print do site da transportadora; Opção C:
-  print do 17track — **sem dado do cliente**) → Descrição (até 600 caracteres) →
-  Enviar. A Temu **recusa sem avisar** texto com "informação confidencial"
-  (código de rastreio, cidade/endereço, valor em R$): a tela fica parada no
-  formulário. Escreva sem esses dados — eles já estão nos prints. Só diga que
-  enviou quando a lista de devoluções mostrar **"Resgates em andamento"**.
+- **Abrir a reclamação (resgate)** — com instrução de pessoa ou com o
+  **"Pedido automático (resgate da Temu)"** (o DaVinci manda 1 h depois de a equipe
+  lançar a devolução). Antes, na página de detalhes do caso: só abra se a Temu já
+  descontou a loja (**"Dedução de receita"**) e o caso estiver **"Reivindicável"**
+  (na lista de devoluções). Senão: `esperar`, dizendo o que viu — o lembrete do
+  dia seguinte te traz de volta.
+  1. Prova do rastreio, SEM dado do cliente: `ir` no rastreio da transportadora
+     (Anjun: `https://anjunexpress.com/trackPackage?tracking=<código AJ…>#track-result`;
+     o link vem no pedido automático). Feche os avisos do site no X, role até a
+     caixa do rastreio (origem, destino e os eventos) e `foto tmp/<pedido>/rastreio.png`.
+     O site da Anjun só mostra cidades — pode ir. Print de página com nome/endereço do
+     cliente NÃO vai.
+  2. Volte à página de detalhes: "Registre uma nova solicitação" → marcar o produto
+     → "Próxima etapa" → **motivo** da lista que bate com o caso. Os que já vimos:
+     rastreio parado/atraso da transportadora → "As atualizações de rastreamento não
+     foram interrompidas por 15 dias e o pacote não teve atraso superior a 20 dias"
+     (vale quando, no dia do reembolso, o rastreio estava parado há menos de 15 dias);
+     pacote entregue antes do reembolso → "O pacote foi assinado antes de ser
+     reembolsado". Nenhum bate → `humano`, listando as opções que a tela deu.
+  3. Provas: o print do rastreio na **Opção A** ("captura de tela do site da
+     transportadora"); fotos da linha, se ajudarem, na última caixa.
+  4. **Descrição** (até 600 caracteres): fatos curtos — etiqueta comprada pela própria
+     Temu, data da coleta, o que deu errado na transportadora, que o reembolso saiu
+     antes do prazo da regra, "pedimos o resgate do valor deduzido", "prints em
+     anexo". A Temu **recusa sem avisar** texto com "informação confidencial"
+     (código de rastreio, cidade/endereço, valor em R$): a tela fica parada no
+     formulário. Escreva sem esses dados — eles já estão nos prints.
+  5. Enviar. Só diga que abriu quando a lista de devoluções do pedido mostrar
+     **"Resgates em andamento"** (o botão "Apresente uma reclamação" some). `decidir`
+     com `esperar`, `protocolo` = o ID da devolução (`PO-…-D01`) e print guardado.
 - **Nunca** mexa em "Gerenciar seus aplicativos" (Desautorizar, Editar
   permissões): é a ligação da API das lojas.
 

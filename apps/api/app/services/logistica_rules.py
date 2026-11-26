@@ -391,10 +391,56 @@ def temu_saiu(status: dict[str, str] | None) -> bool:
     return str(m.get("order_status") or "").strip().upper() in {"RECEIPTED", "PARTIALLY_RECEIPTED"}
 
 
+# Caso de pós-venda da Temu (26/11/2026), gravado pelo `logistica_temu` a partir
+# da lista + detalhe do pós-venda. Tipo: REFUND (reembolso sem devolução — o
+# cliente fica com o produto: painel Fraude), RETURN_AND_REFUND (vem pacote),
+# PRICE_ADJUST (ajuste de preço: reembolso parcial quando o preço cai — NÃO é
+# devolução), TEMU_TIPO_n (código que ainda não vimos). `return_pending` = a
+# Temu espera uma ação da loja (pode recusar dentro do prazo).
+TEMU_RETURN_TYPE_LABELS_PT: dict[str, str] = {
+    "REFUND": "Reembolso sem devolução (produto fica com o cliente)",
+    "RETURN_AND_REFUND": "Devolução + reembolso",
+    "PRICE_ADJUST": "Ajuste de preço (reembolso parcial)",
+}
+# Situação do caso (o código da Temu não é documentado; 5 = reembolsado, visto
+# no 306833). Código desconhecido aparece como veio ("TEMU_7").
+TEMU_RETURN_STATUS_LABELS_PT: dict[str, str] = {
+    "TEMU_5": "Reembolsado",
+}
+
+
+def caso_temu(status: dict[str, str] | None) -> str:
+    """3ª parte da assinatura da Temu — o texto que se cadastra na aba Status:
+    "Reembolso solicitado" / "Reembolso sem devolução" (só reembolso, a loja
+    ainda pode agir / já pago), "Devolução solicitada" / "Devolução",
+    "Ajuste de preço" ou "Pós-venda <código>"."""
+    m = status or {}
+    tipo = str(m.get("return_type") or "").strip().upper()
+    if not tipo:
+        return ""
+    pendente = bool(str(m.get("return_pending") or "").strip())
+    if tipo == "PRICE_ADJUST":
+        return "Ajuste de preço"
+    if tipo == "REFUND":
+        return "Reembolso solicitado" if pendente else "Reembolso sem devolução"
+    if tipo == "RETURN_AND_REFUND":
+        return "Devolução solicitada" if pendente else "Devolução"
+    return f"Pós-venda {tipo}"
+
+
 def assinatura_temu(status: dict[str, str] | None) -> str:
     """Assinatura em PT da Temu = status do pedido + status do envio (último
-    evento do rastreio), juntados por " | " (omite os ausentes)."""
+    evento do rastreio), juntados por " | " (omite os ausentes).
+
+    Com caso de pós-venda de reembolso/devolução, a assinatura vira SÓ o caso
+    ("Reembolso sem devolução", "Reembolso solicitado", "Devolução solicitada",
+    "Devolução"), como no TikTok: uma regra só na aba Status manda pras
+    Devoluções, qualquer que seja o status do pedido/envio. Ajuste de preço não
+    mexe na assinatura (não é devolução)."""
     m = status or {}
+    caso = caso_temu(m)
+    if caso and caso != "Ajuste de preço":
+        return caso
     partes = [
         _amz_label(TEMU_ORDER_LABELS_PT, m.get("order_status")),
         _amz_label(TEMU_LOGISTICS_LABELS_PT, m.get("logistics_status")),
@@ -1030,6 +1076,9 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
         return _ML_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
     if p in _AMAZON_PLATAFORMAS:
         return AMAZON_DEVOLUCAO_LABELS_PT.get(ret, f"Devolução: {ret}")
+    if p in _TEMU_PLATAFORMAS:
+        caso = caso_temu(status)
+        return None if caso in ("", "Ajuste de preço") else caso
     return None
 
 
@@ -1066,6 +1115,8 @@ _SINAL_DEVOLUCAO = {
     "temu": {
         "order_status": {"CANCELED"},
         "logistics_status": _TEMU_LOGISTICS_FALHOU,
+        # Ajuste de preço não é devolução.
+        "return_type": {"REFUND", "RETURN_AND_REFUND"},
     },
 }
 
@@ -1288,14 +1339,25 @@ _CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dic
         },
     ),
     "temu": (
-        ["order_status", "logistics_status"],
+        [
+            "order_status", "logistics_status", "return_type", "return_status",
+            "return_reason", "return_refunded",
+        ],
         {
             "order_status": "Status do pedido",
             "logistics_status": "Status do envio",
+            "return_type": "Tipo do caso",
+            "return_status": "Situação do caso",
+            "return_reason": "Motivo do cliente",
+            "return_refunded": "Valor reembolsado ao cliente",
+            "return_pending": "A Temu espera ação da loja",
         },
         {
             "order_status": TEMU_ORDER_LABELS_PT,
             "logistics_status": TEMU_LOGISTICS_LABELS_PT,
+            "return_type": TEMU_RETURN_TYPE_LABELS_PT,
+            "return_status": TEMU_RETURN_STATUS_LABELS_PT,
+            "return_pending": {"1": "sim"},
         },
     ),
 }

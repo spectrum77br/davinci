@@ -110,9 +110,11 @@ def _utc(epoch: int) -> datetime:
 class FakeTemu:
     """Responde as duas consultas com os payloads da sonda."""
 
-    def __init__(self, detalhe=None, rastreio=None):
+    def __init__(self, detalhe=None, rastreio=None, casos=None, detalhes_caso=None):
         self.detalhe = DETALHE if detalhe is None else detalhe
         self.rastreio = RASTREIO if rastreio is None else rastreio
+        self.casos = list(casos or [])  # itens da lista de pós-venda
+        self.detalhes_caso = dict(detalhes_caso or {})  # parentAfterSalesSn → detalhe
         self.chamadas: list[tuple[str, dict]] = []
 
     async def _chamar(self, api, params=None, **_kw):
@@ -121,7 +123,21 @@ class FakeTemu:
             return {"success": True, "result": self.detalhe}
         if api == logistica_temu.API_RASTREIO:
             return {"success": True, "result": self.rastreio}
+        if api == logistica_temu.API_POS_VENDA_LISTA:
+            p = params or {}
+            dentro = [
+                c for c in self.casos if p["createAtStart"] <= c["createAt"] <= p["createAtEnd"]
+            ]
+            return {"success": True, "result": {"total": len(dentro), "data": dentro}}
+        if api == logistica_temu.API_POS_VENDA_DETALHE:
+            return {
+                "success": True,
+                "result": self.detalhes_caso[(params or {})["parentAfterSalesSn"]],
+            }
         raise AssertionError(f"API inesperada: {api}")
+
+    def chamadas_de(self, api):
+        return [p for a, p in self.chamadas if a == api]
 
 
 # ---- regras (puro) ----------------------------------------------------------
@@ -265,8 +281,9 @@ async def test_enrich_recent_grava_a_linha(db: AsyncSession, dono, monkeypatch):
     assert row.localizacao == "Objeto chegou ao ponto de entrega"
     assert row.prazo_entrega_amazon == date(2026, 11, 17)
     assert row.status_datas["logistics_status"]["em"].startswith("2026-11-07T07:59:57")
-    assert [a for a, _ in fake.chamadas] == [logistica_temu.API_PEDIDO, logistica_temu.API_RASTREIO]
-    assert fake.chamadas[1][1] == {"packageSn": PACOTE}
+    pedido_e_rastreio = (logistica_temu.API_PEDIDO, logistica_temu.API_RASTREIO)
+    assert [a for a, _ in fake.chamadas if a in pedido_e_rastreio] == list(pedido_e_rastreio)
+    assert fake.chamadas_de(logistica_temu.API_RASTREIO) == [{"packageSn": PACOTE}]
 
 
 @pytest.mark.asyncio
@@ -841,3 +858,147 @@ async def test_rodada_coleta_pela_api_fica_verde_com_as_travas(db: AsyncSession,
         ).all()
     )
     assert origens == {"job_envio_temu", "temu_api_coleta"}
+
+
+# ---- pós-venda (26/11/2026: a regra da aba Status manda pras Devoluções) ------
+
+# Caso real do 306833 (lista + detalhe da sonda de 26/11) e um ajuste de preço.
+CASO_306833 = {
+    "parentAfterSalesSn": f"{PO}-D01",
+    "parentOrderSn": PO,
+    "afterSalesType": 1,
+    "parentAfterSalesStatus": 5,
+    "afterSalesStatusGroup": 5,
+    "availableOperateList": [],
+    "returnDeliveryType": None,
+    "createAt": 1795015708,  # 18/11 12:28 BRT
+}
+DETALHE_306833 = {
+    "parentAfterSalesSn": f"{PO}-D01",
+    "afterSalesType": 1,
+    "parentAfterSalesStatus": 5,
+    "availableOperateList": [],
+    "afterSalesList": [
+        {
+            "afterSalesReasonDesc": "Item arrived too late",
+            "afterSalesReasonCode": 19,
+            "applyRefundAmount": {"amount": 24816, "currency": "BRL"},
+        }
+    ],
+}
+DETALHE_AJUSTE = {
+    "afterSalesType": 1,
+    "parentAfterSalesStatus": 7,
+    "availableOperateList": [],
+    "afterSalesList": [
+        {
+            "afterSalesReasonDesc": "price match refund",
+            "afterSalesReasonCode": 59,
+            "applyRefundAmount": {"amount": 6999, "currency": "BRL"},
+        }
+    ],
+}
+
+
+def test_caso_de_pos_venda_da_temu():
+    m = logistica_temu.montar_caso(CASO_306833, DETALHE_306833)
+    assert m == {
+        "return_type": "REFUND",
+        "return_status": "TEMU_5",
+        "return_reason": "Item arrived too late",
+        "return_refunded": "248.16",
+    }
+    sig = {"order_status": "CANCELED", "logistics_status": "ARRIVED_AT_POST_OFFICE", **m}
+    # Com caso de reembolso, a assinatura é só o caso (uma regra só na aba Status).
+    assert logistica_rules.assinatura_para("Temu", sig) == "Reembolso sem devolução"
+    # Ajuste de preço não é devolução (nem Fraude, nem sinal de devolução).
+    aj = logistica_temu.montar_caso({**CASO_306833, "parentAfterSalesStatus": 7}, DETALHE_AJUSTE)
+    assert aj["return_type"] == "PRICE_ADJUST"
+    assert logistica_rules.caso_temu(aj) == "Ajuste de preço"
+    # Ajuste de preço não muda a assinatura do pedido entregue.
+    entregue = {"order_status": "RECEIPTED", "logistics_status": "DELIVERED", **aj}
+    assert logistica_rules.assinatura_para("Temu", entregue) == "Entregue | Entregue"
+    assert logistica_rules.devolucao_status_pt("Temu", aj) is None
+    assert logistica_rules.devolucao_status_pt("Temu", m) == "Reembolso sem devolução"
+    # A loja ainda pode agir: "Reembolso solicitado".
+    pend = logistica_temu.montar_caso(
+        {**CASO_306833, "availableOperateList": [1]},
+        {**DETALHE_306833, "availableOperateList": [1]},
+    )
+    assert logistica_rules.caso_temu(pend) == "Reembolso solicitado"
+    # Detalhe fora do ar: fica o que a lista disse.
+    assert logistica_temu.montar_caso(CASO_306833, None)["return_type"] == "REFUND"
+    # Sinal de devolução só pra reembolso/devolução.
+    datas = {"return_type": {"em": "2026-11-18T15:28:00+00:00"}}
+    assert logistica_rules.data_entrada_devolucao_estimada("Temu", m, datas) == (
+        "2026-11-18T15:28:00+00:00"
+    )
+    assert logistica_rules.data_entrada_devolucao_estimada("Temu", aj, datas) is None
+
+
+def test_painel_das_devolucoes_poe_o_reembolso_da_temu_na_fraude():
+    from app.routers import devolutions
+
+    m = logistica_temu.montar_caso(CASO_306833, DETALHE_306833)
+    tipo = devolutions._tipo_do_painel(None, None, m)
+    assert devolutions._fila(None, tipo) == ("fraude", False)
+    aj = logistica_temu.montar_caso(CASO_306833, DETALHE_AJUSTE)
+    assert devolutions._fila(None, devolutions._tipo_do_painel(None, None, aj))[0] == (
+        "acompanhamento"
+    )
+
+
+@pytest.mark.asyncio
+async def test_motor_le_o_pos_venda_uma_vez_por_conta(db: AsyncSession, dono, monkeypatch):
+    await _integracao(db, dono)
+    db.add(_linha())
+    db.add(_linha(pedido_bling="306900", pedido_marketplace="PO-029-9"))
+    await db.commit()
+    fake = FakeTemu(casos=[CASO_306833], detalhes_caso={f"{PO}-D01": DETALHE_306833})
+    monkeypatch.setattr(logistica_temu, "_build_temu_client", lambda _s, _i: fake)
+    monkeypatch.setattr(logistica_temu, "PAUSA_ENTRE_LINHAS", 0)
+
+    await logistica_temu.enrich_recent(
+        db, only_empty=True, agora=datetime(2026, 11, 26, 12, tzinfo=UTC)
+    )
+
+    linhas = {r.pedido_bling: r for r in (await db.execute(select(Logistica))).scalars()}
+    assert linhas["306833"].meli_status["return_type"] == "REFUND"
+    assert "return_type" not in linhas["306900"].meli_status
+    # 3 janelas de 30 dias da lista, uma vez (não por linha); detalhe só do caso.
+    assert len(fake.chamadas_de(logistica_temu.API_POS_VENDA_LISTA)) == 3
+    assert len(fake.chamadas_de(logistica_temu.API_POS_VENDA_DETALHE)) == 1
+
+
+@pytest.mark.asyncio
+async def test_lista_de_pos_venda_fora_do_ar_mantem_o_caso(db: AsyncSession, dono, monkeypatch):
+    from app.services.marketplaces.temu import TemuErro
+
+    await _integracao(db, dono)
+    db.add(
+        _linha(
+            meli_status={
+                "order_status": "CANCELED",
+                "return_type": "REFUND",
+                "return_status": "TEMU_5",
+            }
+        )
+    )
+    await db.commit()
+    fake = FakeTemu()
+
+    async def lista_quebrada(api, params=None, **kw):
+        if api == logistica_temu.API_POS_VENDA_LISTA:
+            raise TemuErro("Temu 4000004: too frequent", codigo=4000004, classe="retryable")
+        return await FakeTemu._chamar(fake, api, params, **kw)
+
+    fake._chamar = lista_quebrada  # type: ignore[method-assign]
+    monkeypatch.setattr(logistica_temu, "_build_temu_client", lambda _s, _i: fake)
+
+    await logistica_temu.enrich_recent(
+        db, only_empty=False, agora=datetime(2026, 11, 26, 12, tzinfo=UTC)
+    )
+
+    row = (await db.execute(select(Logistica))).scalars().one()
+    assert row.meli_status["return_type"] == "REFUND"
+    assert row.meli_status["return_status"] == "TEMU_5"
