@@ -178,6 +178,62 @@ async def test_sem_nada_gravado_vem_o_padrao_e_os_produtos_do_departamento(
     assert (await _ver(client, "xyz")).status_code == 400
 
 
+async def test_cada_produto_vem_com_a_categoria_de_venda_e_o_menu_do_filtro(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cenario
+):
+    """M-79: a categoria de venda (o segmento do produto) vai em cada produto, e
+    as opções do filtro vêm na ordem das colunas (sort_order); a inativa só
+    entra se algum produto da lista é dela."""
+    celular_1 = await db.get(Segment, cenario.cel_a.segment_id)
+    raiz_id = celular_1.parent_id
+
+    def folha(nome: str, ordem: int, ativa: bool = True) -> Segment:
+        s = Segment(
+            name=nome, slug=f"m79-{ordem}", sort_order=ordem, parent_id=raiz_id, active=ativa
+        )
+        db.add(s)
+        return s
+
+    robusto = folha("Robusto", 3)
+    acessorios = folha("Acessórios", -1)
+    velha = folha("Velha", 5, ativa=False)  # inativa e com produto: entra
+    folha("Sumida", 6, ativa=False)  # inativa e sem produto: fica fora
+    await db.flush()
+    db.add_all(
+        [
+            PricingProduct(
+                user_id=cenario.admin.id, sku="cel-r", name="Dura R", segment_id=robusto.id
+            ),
+            PricingProduct(
+                user_id=cenario.admin.id, sku="cel-v", name="Antigo V", segment_id=velha.id
+            ),
+        ]
+    )
+    await db.commit()
+
+    auth_as(cenario.admin)
+    corpo = (await _ver(client)).json()
+    assert [(p["sku"], p["categoria"]["name"]) for p in corpo["produtos"]] == [
+        ("cel-v", "Velha"),
+        ("cel-b", "celular-1"),
+        ("cel-a", "celular-1"),
+        ("cel-r", "Robusto"),
+    ]
+    assert corpo["produtos"][-1]["categoria"]["id"] == str(robusto.id)
+    # Acessórios entra no menu mesmo sem produto (ativa); a ordem é a das colunas.
+    assert [c["name"] for c in corpo["categorias"]] == [
+        "Acessórios",
+        "celular-1",
+        "Robusto",
+        "Velha",
+    ]
+    assert corpo["categorias"][0] == {"id": str(acessorios.id), "name": "Acessórios"}
+    # A Mala só tem as dela.
+    corpo = (await _ver(client, "mala")).json()
+    assert [c["name"] for c in corpo["categorias"]] == ["mala-1"]
+    assert [p["categoria"]["name"] for p in corpo["produtos"]] == ["mala-1"]
+
+
 async def test_put_da_geral_campo_ausente_nao_muda_e_null_apaga(
     db: AsyncSession, client: AsyncClient, auth_as: Callable, cenario
 ):

@@ -44,6 +44,12 @@ mesmo na irmã, nas duas rotas. M-56: Afiliado % + Desconto % + Ads % da conta
 não passa do Custo total (`app/services/pricing/custo_total.py`); o PUT que
 estoura (inclusive religar uma caixa) é recusado com 422 `custo_total_estourado`
 e nada é gravado.
+
+M-79 (26/11/2026): o GET manda também a categoria de venda de cada produto (o
+`segment_id`, filho do centro de custo da aba) e a lista `categorias` para o
+filtro "Categoria de venda" da janela (na ordem das colunas da aba Contas; a
+inativa só entra se algum produto da lista é dela). Só leitura; o filtro é da
+tela e não grava nada.
 """
 
 from __future__ import annotations
@@ -123,10 +129,19 @@ class AdsContaOut(AdsValoresOut):
     real: AdsRealOut
 
 
+class AdsCategoriaOut(BaseModel):
+    """Categoria de venda (M-79): o segmento filho do centro de custo da aba."""
+
+    id: UUID
+    name: str
+
+
 class AdsProdutoOut(BaseModel):
     id: UUID
     sku: str
     name: str
+    # M-79: a categoria de venda do produto (o `segment_id` dele).
+    categoria: AdsCategoriaOut
 
 
 class AdsOut(BaseModel):
@@ -134,6 +149,9 @@ class AdsOut(BaseModel):
     pode_editar: bool
     # Os produtos do departamento (as linhas da grade), por nome.
     produtos: list[AdsProdutoOut]
+    # M-79: as opções do filtro "Categoria de venda" da janela, na ordem das
+    # colunas da aba Contas (sort_order); a inativa só entra se tem produto.
+    categorias: list[AdsCategoriaOut]
     # {pricing_account_id: Ads} — as contas que a aba Contas mostra.
     contas: dict[str, AdsContaOut]
 
@@ -270,17 +288,44 @@ async def ver_ads(
     contas = [
         c for c in await _contas_da_grade(session, user, root_id) if c.canal != CANAL_CATALOGO
     ]
+    # M-79: com a categoria de venda (o join de `produtos_do_departamento` já
+    # traz o segmento do produto).
     produtos = (
         await session.execute(
             produtos_do_departamento(
-                select(PricingProduct.id, PricingProduct.sku, PricingProduct.name), root_id
+                select(
+                    PricingProduct.id,
+                    PricingProduct.sku,
+                    PricingProduct.name,
+                    Segment.id,
+                    Segment.name,
+                ),
+                root_id,
             ).order_by(PricingProduct.name, PricingProduct.sku)
         )
     ).all()
+    com_produto = {cat_id for _, _, _, cat_id, _ in produtos}
+    categorias = [
+        AdsCategoriaOut(id=s.id, name=s.name)
+        for s in (
+            await session.execute(
+                select(Segment)
+                .where(Segment.parent_id == root_id)
+                .order_by(Segment.sort_order, Segment.name)
+            )
+        ).scalars()
+        if s.active or s.id in com_produto
+    ]
     return AdsOut(
         department=department,
         pode_editar=_pode_editar(user),
-        produtos=[AdsProdutoOut(id=i, sku=s, name=n) for i, s, n in produtos],
+        produtos=[
+            AdsProdutoOut(
+                id=i, sku=s, name=n, categoria=AdsCategoriaOut(id=cat_id, name=cat_nome)
+            )
+            for i, s, n, cat_id, cat_nome in produtos
+        ],
+        categorias=categorias,
         contas=await _contas_out(session, contas, department),
     )
 

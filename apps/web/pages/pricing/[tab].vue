@@ -157,7 +157,7 @@ const AJUDA_CONTAS = {
         { termo: 'Comissão (ADM)', texto: '% da plataforma. No ML aparece Clássico · Premium; clique para mudar.' },
         { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) por tipo de produto; são eles que formam o preço.' },
         { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
-        { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado.' },
+        { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado. Com Produto, a lista mostra a categoria de venda de cada produto; o botão Categoria de venda mostra só os produtos das categorias marcadas (nenhuma marcada = todos) e a caixinha Ads só os que têm % ou gasto por dia nesta conta. Os dois somam com a busca, não gravam nada e voltam zerados ao abrir a janela.' },
         { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem.' },
       ],
     },
@@ -1611,6 +1611,12 @@ function desfazerAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
 // com o % Geral, o ROAS mínimo e o gasto por dia. Produto: só a busca e a
 // lista; produto sem % próprio fica sem Ads ("—"), não usa mais o Geral.
 // Trocar não apaga nada. Conta sem nada gravado = Geral.
+// M-79 + M-80 (26/11/2026): com Produto marcado, a mesma linha ganha, depois
+// de um traço fino, o filtro "Categoria de venda ▾" e a caixinha "Ads" (só os
+// produtos com Ads nesta conta); a lista ganha a coluna "Categoria de venda"
+// depois do nome (janela de 40rem). Os dois filtros são só da tela: somam com
+// a busca, não gravam e voltam zerados ao abrir a janela ou trocar de
+// departamento.
 type AdsValores = { pode_gastar_pct: number | null; gasto_dia: number | null }
 type AdsConta = AdsValores & {
   ads_geral_ligada: boolean
@@ -1618,10 +1624,14 @@ type AdsConta = AdsValores & {
   produtos: Record<string, AdsValores>
   real: { pct_gasto: number | null; roas: number | null }
 }
+// M-79: categoria de venda = o segmento do produto (filho do centro de custo da aba).
+type AdsCategoria = { id: string; name: string }
 type AdsResposta = {
   department: string
   pode_editar: boolean
-  produtos: { id: string; sku: string; name: string }[]
+  produtos: { id: string; sku: string; name: string; categoria: AdsCategoria | null }[]
+  // As opções do filtro "Categoria de venda", na ordem das colunas da aba.
+  categorias: AdsCategoria[]
   contas: Record<string, AdsConta>
 }
 // Conta sem nada gravado (ou criada depois da leitura): o padrão do servidor.
@@ -1636,6 +1646,19 @@ const ADS_PADRAO: AdsConta = {
 const ads = ref<AdsResposta | null>(null)
 const adsErro = ref(false)
 const buscaAdsProduto = ref('')
+// Os filtros da lista do Produto (M-79 e M-80), como a busca: uma só para
+// todas as contas, só da tela (não gravam, não ficam lembrados) e zerados a
+// cada abertura da janela e a cada troca de departamento.
+// M-79: ids das categorias de venda marcadas (nenhuma = todas).
+const filtroCategoriaAds = ref<string[]>([])
+const menuCategoriaAdsAberto = ref(false)
+// M-80: caixinha "Ads" = só os produtos com Ads nesta conta (% próprio ou
+// gasto por dia = têm linha em pricing_ads_produto; a mesma regra que os põe
+// no topo). Não usa gasto real nem campanha (o Marketing só tem por conta).
+const soComAds = ref(false)
+// Produtos limpos com a caixinha "Ads" ligada: continuam na lista (a linha não
+// some debaixo do cursor) até a caixinha ser desligada e ligada ou a janela reabrir.
+const adsMantidosNoFiltro = ref(new Set<string>())
 const podeEditarAds = computed(() => !!ads.value?.pode_editar)
 let seqAds = 0
 // Por conta: só a resposta da última gravação vale (duas no ar ao mesmo tempo).
@@ -1723,14 +1746,69 @@ function lerGasto(texto: string): number | null | undefined {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined
 }
 
-// Lista do Produto: os produtos do departamento (busca por SKU ou nome),
-// primeiro os que têm valor próprio, como na Margem.
-function produtosDoAds(c: AdsConta) {
+// Os filtros só valem com "Produto" marcado (é quando o botão e a caixinha
+// aparecem); com Geral ficam guardados até a janela fechar.
+function filtroCategoriaAdsDe(c: AdsConta): string[] {
+  return modoAds(c) === 'produto' ? filtroCategoriaAds.value : []
+}
+
+function filtroAdsLigado(c: AdsConta): boolean {
+  return soComAds.value && modoAds(c) === 'produto'
+}
+
+// Lista do Produto: os produtos do departamento que passam na busca (SKU ou
+// nome), no filtro Categoria de venda (M-79) e na caixinha Ads (M-80) — passa
+// quem passa em todos —, primeiro os que têm valor próprio, como na Margem.
+// `ate` para antes de um filtro ('busca' = só a busca; 'categoria' = busca +
+// categoria): é com isso que a lista vazia diz qual filtro a esvaziou.
+function produtosDoAds(c: AdsConta, ate: 'busca' | 'categoria' | 'ads' = 'ads') {
   const q = buscaAdsProduto.value.trim().toLowerCase()
+  const cats = ate === 'busca' ? [] : filtroCategoriaAdsDe(c)
+  const soAds = ate === 'ads' && filtroAdsLigado(c)
   const achados = (ads.value?.produtos ?? []).filter(
-    (p) => !q || p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q),
+    (p) =>
+      (!q || p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)) &&
+      (!cats.length || (!!p.categoria && cats.includes(p.categoria.id))) &&
+      (!soAds || !!c.produtos[p.id] || adsMantidosNoFiltro.value.has(p.id)),
   )
   return [...achados.filter((p) => c.produtos[p.id]), ...achados.filter((p) => !c.produtos[p.id])]
+}
+
+// Lista vazia: diz o que a esvaziou — a caixinha Ads, o filtro de categoria,
+// a busca ou o departamento sem produto.
+function textoListaAdsVazia(c: AdsConta): string {
+  if (produtosDoAds(c, 'categoria').length) return 'Nenhum produto com Ads nesta conta.'
+  if (produtosDoAds(c, 'busca').length) return 'Nenhum produto com esse filtro.'
+  return buscaAdsProduto.value.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.'
+}
+
+// M-79: marca ou desmarca uma categoria no filtro (só na tela).
+function alternarCategoriaAds(id: string) {
+  const atual = filtroCategoriaAds.value
+  filtroCategoriaAds.value = atual.includes(id) ? atual.filter((x) => x !== id) : [...atual, id]
+}
+
+// M-79: clique na janela fora do botão/menu do filtro fecha o menu.
+function fecharMenuCategoriaAdsFora(ev: Event) {
+  const el = ev.target as Element | null
+  if (menuCategoriaAdsAberto.value && !el?.closest?.('[data-filtro-ads-categoria]')) {
+    menuCategoriaAdsAberto.value = false
+  }
+}
+
+// M-80: liga ou desliga a caixinha "Ads"; os produtos limpos que estavam
+// presos na lista saem.
+function alternarFiltroAds() {
+  soComAds.value = !soComAds.value
+  adsMantidosNoFiltro.value = new Set()
+}
+
+// Zera os dois filtros e o menu (ao abrir a janela e ao trocar de departamento).
+function zerarFiltrosAds() {
+  filtroCategoriaAds.value = []
+  menuCategoriaAdsAberto.value = false
+  soComAds.value = false
+  adsMantidosNoFiltro.value = new Set()
 }
 
 function textoErroAds(e: any): string {
@@ -1781,6 +1859,9 @@ async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: str
   if (!r?.pode_editar) return
   const antes = adsDa(accId)
   const dep = r.department
+  // M-80: com a caixinha "Ads" ligada, o produto mexido fica na lista mesmo
+  // que fique sem Ads (até desligar e ligar a caixinha ou reabrir a janela).
+  if (prodId && filtroAdsLigado(antes)) adsMantidosNoFiltro.value.add(prodId)
   // Já na tela; volta ao salvo se o servidor recusar.
   r.contas[accId] = prodId
     ? {
@@ -1807,7 +1888,7 @@ async function gravarAds(accId: string, mudanca: Partial<AdsConta>, prodId?: str
       erroAds.value = { accId, chave: chaveAds(mudanca, prodId), mensagem: estouro }
       // O aviso junto do campo só basta se a linha recusada está na janela
       // aberta. Janela fechada (gravou ao fechar) ou produto escondido pela
-      // busca: vai também no aviso solto.
+      // busca ou pelos filtros Categoria de venda / Ads: vai também no aviso solto.
       const ehModo = 'ads_geral_ligada' in mudanca || 'ads_por_produto_ligada' in mudanca
       if (!linhaAdsNaTela(accId, prodId, ehModo)) toast.error('Não salvou o Ads', estouro)
     } else {
@@ -1841,10 +1922,13 @@ function gravarCampoAds(ev: Event) {
 
 // Esc ou clique fora fecham o painel com o campo ainda focado, sem change
 // (igual ao menu da Margem): ao fechar, grava o campo que está com o foco.
-// Ao abrir, a busca de produto começa vazia.
+// Ao abrir, a busca de produto começa vazia e os filtros Categoria de venda e
+// Ads (M-79/M-80) zerados; o menu de categorias fecha junto com a janela.
 function abrirOuFecharAds(aberto: boolean) {
+  menuCategoriaAdsAberto.value = false
   if (aberto) {
     buscaAdsProduto.value = ''
+    zerarFiltrosAds()
     erroAds.value = null
     return
   }
@@ -5456,6 +5540,7 @@ watch(department, async () => {
   prazos.value = null
   margem.value = null
   buscaAdsProduto.value = ''
+  zerarFiltrosAds()
   // Resposta de mapa do departamento anterior ainda no ar é descartada.
   seqEstoque++
   seqVendas++
@@ -6386,7 +6471,8 @@ watch(department, async () => {
                         :collision-padding="8"
                         data-menu-ads
                         :data-ads-painel="acc.id"
-                        class="z-[70] w-[30rem] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 text-xs shadow-lg"
+                        class="z-[70] w-[40rem] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 text-xs shadow-lg"
+                        @pointerdown="fecharMenuCategoriaAdsFora"
                       >
                         <!-- M-57: título = plataforma + conta (12px, negrito). M-78:
                              logo abaixo, a linha das caixas Geral | Produto (um ou
@@ -6394,16 +6480,17 @@ watch(department, async () => {
                              a linha "Todos os produtos"; com Produto, a busca, o
                              cabeçalho e a lista. Cabeçalho, Geral e lista reservam a
                              mesma faixa da barra de rolagem (scrollbar-gutter), para as
-                             colunas baterem. -->
+                             colunas baterem. M-79: janela de 40rem e a coluna
+                             "Categoria de venda" depois do nome, na mesma grade. -->
                         <div class="px-1 pb-1 text-xs font-bold" data-ads-titulo>{{ tituloConta(acc) }}</div>
                         <div v-if="!ads" class="px-1 py-1 text-muted-foreground">
                           {{ adsErro ? 'O Ads não carregou — recarregue a página.' : 'carregando o Ads…' }}
                         </div>
                         <!-- `c` = o Ads desta conta (alias para o template; nada até carregar). -->
                         <template v-for="c in ads ? [adsDa(acc.id)] : []" :key="acc.id">
-                          <!-- M-78: Geral e Produto lado a lado. Os próximos itens desta
-                               janela (coluna/filtro "Categoria de venda", filtro "Ads")
-                               entram nesta mesma linha, depois de Produto. -->
+                          <!-- M-78: Geral e Produto lado a lado. M-79/M-80: com Produto
+                               marcado, nesta mesma linha, depois de um traço fino, o
+                               filtro "Categoria de venda ▾" e a caixinha "Ads". -->
                           <div
                             class="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-1 pb-1.5"
                             data-ads-modo
@@ -6432,6 +6519,60 @@ watch(department, async () => {
                               />
                               Produto
                             </label>
+                            <!-- M-79 + M-80: filtros só da tela (não gravam; quem só vê
+                                 também usa). O menu de categorias é só caixinha + nome e
+                                 abre dentro da própria janela, para não fechar a janela
+                                 de Ads. -->
+                            <template v-if="modoAds(c) === 'produto'">
+                              <span class="h-4 w-px bg-border" aria-hidden="true"></span>
+                              <div class="relative" data-filtro-ads-categoria>
+                                <button
+                                  type="button"
+                                  class="inline-flex h-6 items-center gap-1 rounded border bg-background px-2 text-xs hover:bg-muted"
+                                  :class="{ 'border-blue-400 font-medium': filtroCategoriaAds.length }"
+                                  data-campo="ads-filtro-categoria"
+                                  title="Mostrar só os produtos das categorias de venda marcadas"
+                                  :aria-expanded="menuCategoriaAdsAberto"
+                                  @click="menuCategoriaAdsAberto = !menuCategoriaAdsAberto"
+                                >
+                                  {{ filtroCategoriaAds.length ? `Categoria de venda · ${filtroCategoriaAds.length}` : 'Categoria de venda' }}
+                                  <ChevronDown class="h-3 w-3" />
+                                </button>
+                                <div
+                                  v-if="menuCategoriaAdsAberto"
+                                  class="absolute left-0 top-full z-10 mt-1 max-h-64 w-48 overflow-y-auto rounded-md border bg-background p-1 shadow-lg"
+                                  data-menu-ads-categoria
+                                >
+                                  <label
+                                    v-for="cat in ads?.categorias ?? []"
+                                    :key="cat.id"
+                                    class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted/50"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      class="size-3.5"
+                                      :checked="filtroCategoriaAds.includes(cat.id)"
+                                      :data-campo="`ads-filtro-categoria-${cat.id}`"
+                                      @change="alternarCategoriaAds(cat.id)"
+                                    />
+                                    <span class="truncate">{{ cat.name }}</span>
+                                  </label>
+                                </div>
+                              </div>
+                              <label
+                                class="flex cursor-pointer items-center gap-1.5"
+                                title="Mostrar só os produtos com Ads nesta conta (% próprio ou gasto por dia)"
+                              >
+                                <input
+                                  type="checkbox"
+                                  class="size-3.5"
+                                  data-campo="ads-filtro-so-com-ads"
+                                  :checked="soComAds"
+                                  @change="alternarFiltroAds"
+                                />
+                                Ads
+                              </label>
+                            </template>
                           </div>
                           <p
                             v-if="erroAdsDoModo(acc.id)"
@@ -6443,20 +6584,24 @@ watch(department, async () => {
                             v-if="modoAds(c) === 'geral'"
                             class="overflow-hidden px-1 pt-1 [scrollbar-gutter:stable]"
                           >
+                            <!-- M-79: a mesma grade do Produto; a Geral não tem
+                                 categoria de venda (coluna vazia). -->
                             <div
-                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
+                              class="grid grid-cols-[minmax(0,1fr)_6rem_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
                               data-ads-cabecalho
                             >
+                              <span></span>
                               <span></span>
                               <span class="text-right">Pode gastar (%)</span>
                               <span class="text-right">ROAS mínimo</span>
                               <span class="text-right">Gasto por dia (R$)</span>
                             </div>
                             <div
-                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
+                              class="grid grid-cols-[minmax(0,1fr)_6rem_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
                               data-ads-geral
                             >
                               <span class="truncate">Todos os produtos</span>
+                              <span></span>
                               <span class="inline-flex items-center justify-end gap-0.5">
                                 <input
                                   type="text"
@@ -6508,11 +6653,13 @@ watch(department, async () => {
                             </div>
                           </div>
                           <div class="overflow-hidden px-1 [scrollbar-gutter:stable]">
+                            <!-- M-79: "Categoria de venda" logo depois do Produto. -->
                             <div
-                              class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
+                              class="grid grid-cols-[minmax(0,1fr)_6rem_5rem_4rem_6rem] items-end gap-x-2 pb-0.5 text-[11px] font-semibold leading-[14px] text-muted-foreground"
                               data-ads-cabecalho-produto
                             >
                               <span>Produto</span>
+                              <span>Categoria de venda</span>
                               <span class="text-right">Pode gastar (%)</span>
                               <span class="text-right">ROAS mínimo</span>
                               <span class="text-right">Gasto por dia (R$)</span>
@@ -6524,10 +6671,15 @@ watch(department, async () => {
                           >
                             <template v-for="p in produtosDoAds(c)" :key="p.id">
                               <div
-                                class="grid grid-cols-[minmax(0,1fr)_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
+                                class="grid grid-cols-[minmax(0,1fr)_6rem_5rem_4rem_6rem] items-center gap-x-2 py-0.5"
                                 :data-ads-produto-linha="p.id"
                               >
                                 <span class="truncate" :title="`${p.sku} — ${p.name}`">{{ p.name }}</span>
+                                <span
+                                  class="truncate text-muted-foreground"
+                                  :title="p.categoria?.name ?? ''"
+                                  data-ads-categoria
+                                >{{ p.categoria?.name ?? '' }}</span>
                                 <span class="inline-flex items-center justify-end gap-0.5">
                                   <input
                                     type="text"
@@ -6568,7 +6720,7 @@ watch(department, async () => {
                               >{{ erroAdsEm(acc.id, `produto:${p.id}:`, true) }}</p>
                             </template>
                             <p v-if="!produtosDoAds(c).length" class="py-1 text-muted-foreground">
-                              {{ buscaAdsProduto.trim() ? 'Nenhum produto encontrado.' : 'Nenhum produto neste departamento.' }}
+                              {{ textoListaAdsVazia(c) }}
                             </p>
                           </div>
                           </template>
