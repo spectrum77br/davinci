@@ -763,6 +763,91 @@ async def test_busca_no_banco_por_palavra_tipo_e_modelo(db: AsyncSession, make_u
     assert achados[0]["id"].startswith("b")
 
 
+async def test_a_busca_traz_a_da_mesma_loja_e_o_tipo_da_loja_sem_modelo(
+    db: AsyncSession, make_user, monkeypatch
+):
+    """26/11/2026: (c) as da MESMA loja com as palavras entram mesmo com a busca geral cheia de
+    outras lojas; (d) o mesmo tipo na loja, sem palavra em comum e sem modelo ou anúncio, fora dos
+    tipos de produto ("faz entrega em Recife?" × "sim, enviamos para todo o Brasil")."""
+    conversa = await _conversa(db, make_user)
+    loja = conversa.integration_id
+    agora = datetime.now(UTC)
+    # A busca geral com 1 lugar: a resposta de outra loja (mais palavras em comum) o ocupa.
+    monkeypatch.setattr(banco_respostas, "MAX_CANDIDATOS_BANCO", 1)
+    await _resposta(
+        db,
+        integ=None,
+        loja="Outra",
+        tipo="cobertura_regiao",
+        item=None,
+        modelos=(),
+        pergunta="Faz entrega em Recife? Entrega em Recife mesmo?",
+        resposta="Entrega em Recife só pela transportadora da plataforma.",
+    )
+    await _resposta(
+        db,
+        integ=loja,
+        tipo="cobertura_regiao",
+        item=None,
+        modelos=(),
+        pergunta="Vocês fazem entrega no Nordeste?",
+        resposta="Fazemos sim, o envio é para todo o Brasil.",
+        dias=3,
+    )
+    # (d): mesmo tipo e mesma loja, nenhuma palavra em comum.
+    await _resposta(
+        db,
+        integ=loja,
+        tipo="cobertura_regiao",
+        item=None,
+        modelos=(),
+        pergunta="Mandam pra Manaus?",
+        resposta="Sim, enviamos para todo o Brasil!",
+        dias=4,
+    )
+    # Nunca pelo (d): tipo de produto da loja e o mesmo tipo de outra loja, sem palavra em comum.
+    await _resposta(
+        db,
+        integ=loja,
+        tipo="espec_celular",
+        item=None,
+        modelos=(),
+        pergunta="Tem NFC?",
+        resposta="Esse não tem NFC.",
+    )
+    await _resposta(
+        db,
+        integ=None,
+        loja="Outra",
+        tipo="cobertura_regiao",
+        item=None,
+        modelos=(),
+        pergunta="Mandam pra Belém?",
+        resposta="Mandamos para o Pará também.",
+    )
+    comum = {
+        "pergunta": "Faz entrega em Recife?",
+        "plataforma": "shopee",
+        "integration_id": loja,
+        "item_ids": [],
+        "modelos": set(),
+        "tipo": "cobertura_regiao",
+        "conversa_id": conversa.id,
+        "as_of": agora,
+    }
+    respostas = [a["resposta"] for a in await banco_respostas.buscar(db, **comum)]
+    assert "Fazemos sim, o envio é para todo o Brasil." in respostas  # (c)
+    assert "Sim, enviamos para todo o Brasil!" in respostas  # (d)
+    assert "Esse não tem NFC." not in respostas
+    assert "Mandamos para o Pará também." not in respostas
+
+    # Sem os dois lados novos, só a de outra loja (a busca de antes).
+    monkeypatch.setattr(banco_respostas, "MAX_CANDIDATOS_DA_LOJA", 0)
+    monkeypatch.setattr(banco_respostas, "MAX_DO_TIPO_DA_LOJA", 0)
+    antes = [a["resposta"] for a in await banco_respostas.buscar(db, **comum)]
+    assert antes == ["Entrega em Recife só pela transportadora da plataforma."]
+
+
 async def test_pacote_lendo_o_banco_e_a_chave(db: AsyncSession, make_user, monkeypatch):
     from app.services.atendimento.agente import pares as pares_svc
 

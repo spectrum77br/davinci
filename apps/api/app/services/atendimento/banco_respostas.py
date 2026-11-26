@@ -798,10 +798,15 @@ def ia_enviou_igual(contagem: Mapping[str, Any]) -> tuple[int, float | None]:
 # (b) as do MESMO TIPO de pergunta e do MESMO MODELO ou anúncio, mesmo sem palavra em
 # comum ("faz pagamento por aproximação?" × "tem NFC?"). A nota: o `ts_rank_cd` (com um
 # piso para o lado b) × (1 + bônus de mesmo tipo, modelo, anúncio e loja) × a idade
-# (meia-vida de 90 dias: a mais nova pesa mais). Quem decide se a resposta SERVE para o
-# caso é o agente, e o verificador confere o lastro com as regras de sempre.
+# (meia-vida de 60 dias desde 26/11/2026: a mais nova pesa mais). Quem decide se a resposta
+# SERVE para o caso é o agente, e o verificador confere o lastro com as regras de sempre.
 
-MEIA_VIDA_BANCO_DIAS = 90
+# 26/11/2026 (o teste da busca sem API, 92 respostas da equipe que já estavam no banco): 90 → 60
+# dias e a mesma loja 0,25 → 0,75, com a cortesia fora da busca e o `ts_rank_cd` dividido pelo log
+# do tamanho (as respostas longas do Duoke enchiam os lugares): a resposta certa no pacote foi de 14
+# para 24 de 92 (da mesma loja, de 7 para 16 de 61). 30 dias dava o mesmo e fazia a CORREÇÃO de um
+# mês perder para a resposta de ontem (`BONUS_CORRECAO_DA_IA`, a regra do dono de 13/11).
+MEIA_VIDA_BANCO_DIAS = 60
 # A virada (13/11/2026, o Eduardo: "se ele não sabe e alguém responde editando a sugestão que
 # ele deu, ele tem que acertar essa na próxima ou parecida"): a CORREÇÃO da pessoa sobre o
 # rascunho da IA (`FONTE_AJUSTOU`) vem antes das outras respostas na busca.
@@ -809,18 +814,32 @@ BONUS_CORRECAO_DA_IA = 1.5
 BONUS_MESMO_TIPO = 1.0
 BONUS_MESMO_MODELO = 0.75
 BONUS_MESMO_ANUNCIO_BANCO = 0.75
-BONUS_MESMA_LOJA_BANCO = 0.25
+BONUS_MESMA_LOJA_BANCO = 0.75
 PISO_RANK_SEM_PALAVRA = 0.05
 MAX_CANDIDATOS_BANCO = 60
 # As do mesmo modelo ou anúncio com as palavras da pergunta (16/11/2026, ver `buscar`).
 MAX_CANDIDATOS_DO_PRODUTO = 30
 MAX_SEM_PALAVRA = 12
+# 26/11/2026 (o Eduardo: "se a gente melhorar a busca no banco teremos um resultado melhor?"):
+# quando a equipe repetiu uma resposta que já estava no banco, a busca não a trazia ao agente em
+# 31 de 46 casos. A busca geral pega as 60 de maior `ts_rank_cd` da PLATAFORMA inteira (as
+# respostas longas do Duoke de outras lojas enchem os lugares) e o lado "mesmo tipo" só roda com
+# modelo ou anúncio — "faz entrega em Recife?" (22 "sim, enviamos para todo Brasil" no banco) não
+# achava nenhuma. Dois lados a mais, só da MESMA loja: (c) as da loja com as palavras da pergunta;
+# (d) as do mesmo tipo na loja, sem palavra em comum, fora dos tipos de produto (a política e o
+# prazo variam por loja; o produto já tem o lado do modelo).
+MAX_CANDIDATOS_DA_LOJA = 30
+MAX_DO_TIPO_DA_LOJA = 8
 # O que só vale para o PRODUTO (a ficha): a resposta de outra loja sobre o mesmo produto
 # pode ser lastro. O resto (o que vem na caixa, estoque, preço, prazo, política) varia por
 # loja — o Eduardo, 28/10/2026: "acho q só na loja tá ok porque pode variar" — e só vale da
 # mesma loja.
 TIPOS_SO_DO_PRODUTO = frozenset(
     {"espec_celular", "espec_mala", "espec_eletro", "espec_outros", "resistencia_agua"}
+)
+# O lado (d) da busca (26/11/2026) não roda nestes: a resposta sobre o produto depende do modelo.
+TIPOS_DE_PRODUTO_DA_BUSCA = TIPOS_SO_DO_PRODUTO | frozenset(
+    {"conteudo_da_caixa", "acessorios_avulsos", "originalidade_condicao"}
 )
 
 
@@ -842,6 +861,29 @@ def nota_banco(
     bonus += BONUS_MESMO_ANUNCIO_BANCO if mesmo_anuncio else 0.0
     bonus += BONUS_MESMA_LOJA_BANCO if mesma_loja else 0.0
     return max(0.0, rank) * bonus * 0.5 ** (max(0.0, idade_dias) / MEIA_VIDA_BANCO_DIAS)
+
+
+# 26/11/2026 (ver `MEIA_VIDA_BANCO_DIAS`): a cortesia ("bom dia", "olá", "tudo bem") casava com
+# milhares de respostas e puxava as longas; o `ts_rank_cd` com a normalização 1 (÷ 1 + log do
+# tamanho) favorece a resposta curta da equipe.
+TIRAR_CORTESIA_DA_BUSCA = True
+NORMALIZACAO_RANK_BANCO = 1
+_CORTESIA = frozenset(
+    "ola oi bom boa dia dias tarde tardes noite noites tudo bem obrigado obrigada obg grato grata "
+    "favor por gostaria queria saber amigo amiga moca moco senhor senhora vcs voces voce "
+    "consegue conseguem poderia podem pode ajudar ajuda".split()
+)
+
+
+def _sem_cortesia(pergunta: str | None) -> str:
+    """A pergunta sem as palavras de cortesia; sem nada que sobre, a pergunta inteira. PURA."""
+    palavras = str(pergunta or "").split()
+    resto = [p for p in palavras if _sem_acento(re.sub(r"[^\w]", "", p)) not in _CORTESIA]
+    return " ".join(resto) if resto else str(pergunta or "")
+
+
+def _rank_da_busca(tsv: Any, consulta: Any) -> Any:
+    return func.ts_rank_cd(tsv, consulta, NORMALIZACAO_RANK_BANCO)
 
 
 async def buscar(
@@ -891,9 +933,10 @@ async def buscar(
         t.modelos,
     )
     achados: dict[int, tuple[Any, float]] = {}
-    qualquer = busca_texto.consulta_de(pergunta)
+    consulta = _sem_cortesia(pergunta) if TIRAR_CORTESIA_DA_BUSCA else pergunta
+    qualquer = busca_texto.consulta_de(consulta)
     if qualquer is not None:
-        rank = func.ts_rank_cd(t.tsv, qualquer)
+        rank = _rank_da_busca(t.tsv, qualquer)
         for linha in (
             await session.execute(
                 select(*colunas, rank.label("rank"))
@@ -912,7 +955,7 @@ async def buscar(
         do_produto = [t.item_id.in_(itens)] if itens else []
         if modelos:
             do_produto.append(t.modelos.op("?|")(func.cast(modelos, ARRAY(String))))
-        rank = func.ts_rank_cd(t.tsv, qualquer)
+        rank = _rank_da_busca(t.tsv, qualquer)
         for linha in (
             await session.execute(
                 select(*colunas, rank.label("rank"))
@@ -932,6 +975,35 @@ async def buscar(
                 .where(*base, t.tipo == tipo, or_(*do_caso))
                 .order_by(t.respondido_em.desc(), t.id)
                 .limit(MAX_SEM_PALAVRA)
+            )
+        ).all():
+            achados.setdefault(linha.id, (linha, PISO_RANK_SEM_PALAVRA))
+    if qualquer is not None and integration_id is not None and MAX_CANDIDATOS_DA_LOJA > 0:
+        # (c) 26/11/2026: as da MESMA loja com as palavras da pergunta entram sempre (ver acima).
+        rank = _rank_da_busca(t.tsv, qualquer)
+        for linha in (
+            await session.execute(
+                select(*colunas, rank.label("rank"))
+                .where(*base, t.tsv.op("@@")(qualquer), t.integration_id == integration_id)
+                .order_by(rank.desc(), t.respondido_em.desc(), t.id)
+                .limit(MAX_CANDIDATOS_DA_LOJA)
+            )
+        ).all():
+            achados.setdefault(linha.id, (linha, float(linha.rank or 0.0)))
+    if (
+        tipo
+        and tipo != tipos_pergunta.INDEFINIDO
+        and tipo not in TIPOS_DE_PRODUTO_DA_BUSCA
+        and integration_id is not None
+        and MAX_DO_TIPO_DA_LOJA > 0
+    ):
+        # (d) 26/11/2026: as do mesmo tipo na MESMA loja, as mais novas, sem palavra em comum.
+        for linha in (
+            await session.execute(
+                select(*colunas)
+                .where(*base, t.tipo == tipo, t.integration_id == integration_id)
+                .order_by(t.respondido_em.desc(), t.id)
+                .limit(MAX_DO_TIPO_DA_LOJA)
             )
         ).all():
             achados.setdefault(linha.id, (linha, PISO_RANK_SEM_PALAVRA))
