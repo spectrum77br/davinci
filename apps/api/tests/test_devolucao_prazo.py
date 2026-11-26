@@ -329,6 +329,45 @@ async def test_avisar_prazos_threema_fora_nao_marca(db, threema):
     assert all(r.aviso_prazo_at is not None for r in rows)
 
 
+async def test_avisar_prazos_ignora_novo_e_junta_o_kit(db, threema):
+    """Vinicius 26/11: voltou "Novo" sem motivo é devolução comum (não avisa), o
+    kit aparecia uma vez por peça e a peça sem motivo de um pedido que já tem
+    motivo em outra peça também avisava."""
+    agora = datetime.now(UTC)
+    cedo, tarde = agora + timedelta(hours=5), agora + timedelta(hours=9)
+    novo = await _dev(db, pedido_bling="10", condicao_produto="Novo", prazo_contestacao=cedo)
+    kit = [
+        await _dev(
+            db, pedido_bling="11", sku=f"k{i}", condicao_produto="Manutenção", prazo_contestacao=p
+        )
+        for i, p in enumerate((tarde, cedo, tarde))
+    ]
+    fone = await _dev(db, pedido_bling="12", sku="fone", prazo_contestacao=cedo)
+    await _dev(db, pedido_bling="12", sku="cel", motivo_devolucao="Dano funcional / Não funciona")
+    misto = await _dev(db, pedido_bling="13", condicao_produto="Novo", prazo_contestacao=cedo)
+    misto_sem_cond = await _dev(db, pedido_bling="13", sku="b2", prazo_contestacao=cedo)
+
+    assert await svc.avisar_prazos(db) == 2  # 11 (kit) e 13 (uma peça sem condição)
+    texto = threema.enviados[0][0]
+    assert texto.count("Pedido 11 (") == 1 and texto.count("Pedido 13 (") == 1
+    assert "Pedido 10" not in texto and "Pedido 12" not in texto
+    assert (
+        f"Pedido 11 (barbosa) — prazo {cedo.astimezone(svc.BRT).strftime('%d/%m %H:%M')}" in texto
+    )
+
+    for d in (novo, fone, misto, misto_sem_cond, *kit):
+        await db.refresh(d)
+    assert all(d.aviso_prazo_at is not None for d in (*kit, misto, misto_sem_cond))
+    assert novo.aviso_prazo_at is None and fone.aviso_prazo_at is None
+
+    # o "Novo" muda pra Manutenção antes do prazo: aí avisa
+    novo.condicao_produto = "Manutenção"
+    await db.commit()
+    assert await svc.avisar_prazos(db) == 1
+    assert "Pedido 10 (barbosa)" in threema.enviados[1][0]
+    assert "Pedido 11" not in threema.enviados[1][0]
+
+
 async def test_run_junta_os_dois(db, threema, monkeypatch):
     await _dev(db)
 

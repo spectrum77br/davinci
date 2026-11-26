@@ -163,14 +163,13 @@ async def atualizar_prazos(session: AsyncSession) -> dict[str, int]:
     return resumo
 
 
-def _texto_aviso(devs: list[Devolution]) -> str:
+def _texto_aviso(grupos: list[list[Devolution]]) -> str:
+    """Uma linha por pedido (o kit tem uma linha por peça), com o prazo mais curto."""
     linhas = []
-    for d in devs:
-        quando = (
-            d.prazo_contestacao.astimezone(BRT).strftime("%d/%m %H:%M")
-            if d.prazo_contestacao
-            else "?"
-        )
+    for linhas_do_pedido in grupos:
+        d = linhas_do_pedido[0]
+        prazos = [x.prazo_contestacao for x in linhas_do_pedido if x.prazo_contestacao]
+        quando = min(prazos).astimezone(BRT).strftime("%d/%m %H:%M") if prazos else "?"
         linhas.append(f"• Pedido {d.pedido_bling or '?'} ({d.conta}) — prazo {quando}")
     return (
         "Devolução SEM MOTIVO com prazo de contestação acabando (< 24 h). "
@@ -178,9 +177,36 @@ def _texto_aviso(devs: list[Devolution]) -> str:
     )
 
 
+def _chave(d: Devolution) -> tuple[str, str]:
+    return (d.conta, d.pedido_bling or str(d.id))
+
+
+async def _pedidos_com_motivo(
+    session: AsyncSession, devs: list[Devolution]
+) -> set[tuple[str, str]]:
+    """Pedidos em que OUTRA linha (outra peça do kit) já tem motivo: o chamado
+    sai por ela, então a peça sem motivo não precisa de aviso."""
+    pedidos = {d.pedido_bling for d in devs if d.pedido_bling}
+    if not pedidos:
+        return set()
+    rows = await session.execute(
+        select(Devolution.conta, Devolution.pedido_bling)
+        .where(Devolution.pedido_bling.in_(pedidos))
+        .where(Devolution.motivo_devolucao.is_not(None))
+        .where(Devolution.motivo_devolucao != "")
+    )
+    return {(conta, ped) for conta, ped in rows.all()}
+
+
 async def avisar_prazos(session: AsyncSession) -> int:
     """Threema (grupo geral) pras devoluções com motivo vazio e prazo em < 24 h
-    que ainda não foram avisadas. Devolve quantas avisou."""
+    que ainda não foram avisadas. Devolve quantos PEDIDOS avisou.
+
+    Vinicius 26/11: o aviso listava devolução comum (voltou "Novo", sem motivo
+    porque não há o que contestar) e repetia o pedido uma vez por peça do kit.
+    Agora fica de fora o pedido em que toda peça sem motivo voltou "Novo" ou em
+    que outra peça já tem motivo; o resto sai uma linha por pedido. O que fica
+    de fora não é marcado: se a condição mudar antes do prazo, o aviso sai."""
     agora = datetime.now(UTC)
     devs = list(
         (
@@ -201,6 +227,19 @@ async def avisar_prazos(session: AsyncSession) -> int:
     )
     if not devs:
         return 0
+    com_motivo = await _pedidos_com_motivo(session, devs)
+    grupos: dict[tuple[str, str], list[Devolution]] = {}
+    for d in devs:  # já vem do prazo mais curto pro mais longo
+        grupos.setdefault(_chave(d), []).append(d)
+    avisar = [
+        linhas
+        for chave, linhas in grupos.items()
+        if chave not in com_motivo
+        and any((x.condicao_produto or "").strip() != "Novo" for x in linhas)
+    ]
+    if not avisar:
+        return 0
+    devs = [d for linhas in avisar for d in linhas]
     destinos = threema.parse_recipients(get_settings().threema_recipients)
     if not destinos:
         logger.warning("devolucao_prazo_aviso_sem_threema", devolucoes=len(devs))
@@ -208,7 +247,7 @@ async def avisar_prazos(session: AsyncSession) -> int:
     try:
         with threema_registro.envio(K.DEVOLUCOES_PRAZO_CONTESTACAO):
             res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(
-                _texto_aviso(devs), destinos
+                _texto_aviso(avisar), destinos
             )
     except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima rodada
         logger.warning("devolucao_prazo_aviso_falhou", err=str(e)[:200])
@@ -218,8 +257,13 @@ async def avisar_prazos(session: AsyncSession) -> int:
     for d in devs:
         d.aviso_prazo_at = agora
     await session.commit()
-    logger.info("devolucao_prazo_avisado", devolucoes=len(devs), sent=len(res.get("sent") or []))
-    return len(devs)
+    logger.info(
+        "devolucao_prazo_avisado",
+        pedidos=len(avisar),
+        devolucoes=len(devs),
+        sent=len(res.get("sent") or []),
+    )
+    return len(avisar)
 
 
 async def run(session: AsyncSession) -> dict[str, int]:
