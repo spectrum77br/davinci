@@ -135,8 +135,8 @@ const AJUDA_TABELA = {
   ],
 }
 // Ajuda da aba Contas (M-59, 25/11/2026): o mesmo painel e o mesmo formato da
-// Tabela de Preços. "(ADM)": colunas que só o administrador muda (Kit, Comissão
-// e marg/frete ele também é o único que vê; Custo total todos veem).
+// Tabela de Preços. "(ADM)": colunas que só o administrador muda (Kit, Comissão,
+// marg/frete e Margem mínima ele também é o único que vê; Custo total todos veem).
 const AJUDA_CONTAS = {
   titulo: 'Contas',
   conteudo: [
@@ -159,6 +159,7 @@ const AJUDA_CONTAS = {
         { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
         { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado. Com Produto, a lista mostra a categoria de venda de cada produto; o botão Categoria de venda mostra só os produtos das categorias marcadas (nenhuma marcada = todos) e a caixinha Ads só os que têm % ou gasto por dia nesta conta. Os dois somam com a busca, não gravam nada e voltam zerados ao abrir a janela.' },
         { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem.' },
+        { termo: 'Margem mínima (ADM)', texto: 'margem mínima (%) da conta; só o administrador vê e muda. É diferente da "Margem Mín" da categoria de venda e da do produto: aquelas seguram o pedido na Margem; esta define o Custo total.' },
       ],
     },
     {
@@ -187,7 +188,7 @@ const AJUDA_CONTAS = {
     {
       titulo: 'Observação',
       itens: [
-        'Afiliado, Desconto, Ads e Custo total não mudam o preço da Tabela.',
+        'Afiliado, Desconto, Ads, Custo total e Margem mínima não mudam o preço da Tabela.',
         'Conta sem integração não envia preço e acende o cartão vermelho.',
         'Mudar as contas, Vincular Integrações e Adicionar Conta exigem a permissão de editar Contas.',
       ],
@@ -568,6 +569,9 @@ type Account = {
   // ADM muda. Nenhum dos dois entra no preço.
   desconto_pct?: string | number | null
   custo_total_pct?: string | number | null
+  // M-85 (26/11/2026, migration 0519): Margem mínima (%) da conta, só o ADM vê e
+  // muda (para os outros o servidor manda null).
+  margem_minima_pct?: string | number | null
   // M-53 (25/11/2026, migration 0511): o mesmo valor no Clássico e no Premium
   // da mesma conta ML de kit; nas outras linhas, null.
   par_id?: string | null
@@ -901,7 +905,8 @@ const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).le
 // Layout ▾ da aba Contas (M-51, 25/11/2026): caixas para mostrar ou esconder
 // colunas, como o Layout da Tabela de Preços (marcada = aparece; lembrado
 // neste navegador). Kit e Comissão só entram na lista de quem já vê essas
-// colunas (ADM, M-10). Desconto e Custo total (M-55/M-56) ficam sempre à mostra.
+// colunas (ADM, M-10). Desconto e Custo total (M-55/M-56) ficam sempre à mostra,
+// e a Margem mínima também (só para o ADM, M-85).
 // O menu mostra só a caixa e o nome (M-61); a explicação fica na Ajuda.
 const COLUNAS_LAYOUT_CONTAS = [
   { chave: 'catalogo', rotulo: 'Catálogo ML', soAdmin: false },
@@ -927,8 +932,8 @@ function lerColunasOcultasContas(texto: string | null): string[] {
 
 // Colunas da tabela da aba Contas (o colspan das linhas de grupo e de aviso):
 // Plataforma, Conta, Catálogo ML, Equipe, [Kit, Comissão e os pares
-// marg/frete — só ADM, M-10], as anotações e a lixeira. (Tipo ML saiu na M-53.)
-// Menos as que o Layout esconde (M-51).
+// marg/frete — só ADM, M-10], as anotações (a Margem mínima só ADM, M-85) e a
+// lixeira. (Tipo ML saiu na M-53.) Menos as que o Layout esconde (M-51).
 const colunasContas = computed(() =>
   2
   + (mostraColunaConta('catalogo') ? 1 : 0)
@@ -936,7 +941,7 @@ const colunasContas = computed(() =>
   + (isAdmin.value
     ? (mostraColunaConta('kit') ? 1 : 0) + (mostraColunaConta('comissao') ? 1 : 0) + nTiposAba.value * 2
     : 0)
-  + STORE_NOTE_FIELDS.length - (mostraColunaConta('obs') ? 0 : 1)
+  + camposAnotacao.value.length - (mostraColunaConta('obs') ? 0 : 1)
   + 1,
 )
 
@@ -1526,13 +1531,24 @@ async function focusEditInput() {
 // =========================================================== account inline edit
 
 // Anotações da conta na aba Contas, nesta ordem (M-55, 25/11/2026): Afiliado |
-// Desconto | Ads | Custo total | Obs. `observation` é a "Obs"; Ads abre o
-// painel do M-12 (gravado à parte, não no texto `ads`). Afiliado, Desconto e
-// Custo total são % próprios, sempre à mostra e fora do cálculo do preço.
+// Desconto | Ads | Custo total | Margem mínima | Obs. `observation` é a "Obs";
+// Ads abre o painel do M-12 (gravado à parte, não no texto `ads`). Afiliado,
+// Desconto, Custo total e Margem mínima são % próprios, fora do cálculo do preço.
 // Desconto até, Cupom até e Oferta limite saíram da tela (ficam no banco), e os
 // textos antigos discount/affiliate/coupon/offer também ficam só no banco.
-// `soAdmin`: todos veem, só o ADM muda (Custo total, M-56).
-type CampoAnotacao = { key: string; label: string; tipo?: 'pct'; soAdmin?: boolean; titulo?: string }
+// `soAdmin`: só o ADM muda (Custo total, M-56; Margem mínima, M-85).
+// `soAdminVe`: só o ADM vê — a coluna nem aparece para os outros, na tela e no
+// Excel (Margem mínima, M-85; o servidor também não manda o valor).
+// `cabecalho`: o título em linhas ("Margem" / "mínima"); sem ele, `label`.
+type CampoAnotacao = {
+  key: string
+  label: string
+  tipo?: 'pct'
+  soAdmin?: boolean
+  soAdminVe?: boolean
+  titulo?: string
+  cabecalho?: string[]
+}
 const STORE_NOTE_FIELDS: CampoAnotacao[] = [
   { key: 'afiliado_pct', label: 'Afiliado', tipo: 'pct', titulo: 'Quanto pode gastar com afiliado (%)' },
   { key: 'desconto_pct', label: 'Desconto', tipo: 'pct', titulo: 'Desconto da conta (%) — só anotação, fora do cálculo do preço' },
@@ -1541,10 +1557,20 @@ const STORE_NOTE_FIELDS: CampoAnotacao[] = [
     key: 'custo_total_pct', label: 'Custo total', tipo: 'pct', soAdmin: true,
     titulo: 'Teto de Afiliado + Desconto + Ads (%). Vazio = sem teto. Só o administrador muda',
   },
+  {
+    key: 'margem_minima_pct', label: 'Margem mínima', tipo: 'pct', soAdmin: true, soAdminVe: true,
+    cabecalho: ['Margem', 'mínima'],
+    titulo: 'Margem mínima da conta (%). Só o administrador vê e muda.',
+  },
   { key: 'observation', label: 'Obs' },
 ]
 
-// Quem muda o campo: Custo total só o ADM; os outros, quem edita Contas.
+// As anotações que esta pessoa vê (M-85): a Margem mínima só para o ADM. É a
+// lista da tabela (cabeçalho, linha de adicionar, linhas e colspan) e do Excel.
+const camposAnotacao = computed(() => STORE_NOTE_FIELDS.filter((f) => !f.soAdminVe || isAdmin.value))
+
+// Quem muda o campo: Custo total e Margem mínima só o ADM; os outros, quem
+// edita Contas.
 function podeEditarAnotacao(f: CampoAnotacao): boolean {
   return f.soAdmin ? isAdmin.value : canEditContas.value
 }
@@ -2061,7 +2087,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
     }
   } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'offer' || field === 'email' || field === 'phone') {
     payload[field] = raw || null
-  } else if (field === 'afiliado_pct' || field === 'desconto_pct' || field === 'custo_total_pct') {
+  } else if (field === 'afiliado_pct' || field === 'desconto_pct' || field === 'custo_total_pct' || field === 'margem_minima_pct') {
     const v = lerPct(raw)
     if (v === undefined) return
     payload[field] = v
@@ -5150,11 +5176,13 @@ function handleExportExcel() {
 // Excel da aba Contas (M-51, 25/11/2026): as contas que estão na tela (busca e
 // filtros, na ordem da tabela) com as colunas à vista (Layout), na ordem da
 // tabela: Plataforma | Conta | Catálogo ML | Equipe | Kit | Comissão |
-// marg/frete | Afiliado | Desconto | Ads | Custo total | Obs. Quem não é ADM não
-// recebe Kit, Comissão, margens e fretes (nem vêm do /accounts). A conta do ML
+// marg/frete | Afiliado | Desconto | Ads | Custo total | Margem mínima | Obs. Quem
+// não é ADM não recebe Kit, Comissão, margens, fretes nem a Margem mínima (M-85;
+// nem vêm do /accounts). A conta do ML
 // com Clássico e Premium é uma linha só, como na tela (M-53), com a Comissão
 // "14% · 19%"; Catálogo ML "Ativo"/"Inativo" (M-54). Afiliado, Desconto, Ads (o
-// % Geral) e Custo total vão como número; vazio fica em branco, não "—".
+// % Geral), Custo total e Margem mínima vão como número; vazio fica em branco,
+// não "—".
 function linhasExcelContas(): CelulaPlanilha[][] {
   const semTraco = (s: string) => (s === '—' ? '' : s)
   const numero = (v: unknown): number | '' => {
@@ -5163,7 +5191,7 @@ function linhasExcelContas(): CelulaPlanilha[][] {
     return Number.isFinite(n) ? n : ''
   }
   const tipos = TYPE_HEADERS.value[department.value] ?? []
-  const notas = STORE_NOTE_FIELDS.filter((f) => f.key !== 'observation' || mostraColunaConta('obs'))
+  const notas = camposAnotacao.value.filter((f) => f.key !== 'observation' || mostraColunaConta('obs'))
   const cab: CelulaPlanilha[] = ['Plataforma', 'Conta']
   if (mostraColunaConta('catalogo')) cab.push('Catálogo ML')
   if (mostraColunaConta('equipe')) cab.push('Equipe')
@@ -5884,17 +5912,19 @@ watch(department, async () => {
                 </div>
               </th>
               </template>
-              <!-- Afiliado / Desconto / Ads / Custo total (M-55/M-56): colunas de
-                   ~62px, centralizadas, com a caixinha de 34×24px; só Obs à esquerda. -->
+              <!-- Afiliado / Desconto / Ads / Custo total / Margem mínima (M-55/M-56/
+                   M-85): colunas de ~62px, centralizadas, com a caixinha de 34×24px; só
+                   Obs à esquerda. Margem mínima só para o ADM (camposAnotacao), com o
+                   título em duas linhas ("Margem" / "mínima"). -->
               <th
-                v-for="f in STORE_NOTE_FIELDS"
+                v-for="f in camposAnotacao"
                 v-show="f.key !== 'observation' || mostraColunaConta('obs')"
                 :key="`h-${f.key}`"
                 class="px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border"
                 :class="f.key === 'observation' ? 'text-left min-w-[120px]' : 'text-center w-[62px] min-w-[62px]'"
                 :title="f.titulo"
                 :data-coluna-anotacao="f.key"
-              >{{ f.label }}</th>
+              ><template v-if="f.cabecalho"><span v-for="parte in f.cabecalho" :key="parte" class="block">{{ parte }}</span></template><template v-else>{{ f.label }}</template></th>
               <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-16"></th>
             </tr>
           </thead>
@@ -5962,7 +5992,7 @@ watch(department, async () => {
               </template>
               <td v-for="i in nTiposAba * 2" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
               </template>
-              <td v-for="i in STORE_NOTE_FIELDS.length - (mostraColunaConta('obs') ? 0 : 1)" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-for="i in camposAnotacao.length - (mostraColunaConta('obs') ? 0 : 1)" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
                   <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="addingAcc" @click="submitNewAcc">
@@ -6397,12 +6427,13 @@ watch(department, async () => {
                 </td>
               </template>
               </template>
-              <!-- afiliado / desconto / ads / custo total / obs (M-55/M-56) -->
-              <template v-for="f in STORE_NOTE_FIELDS" :key="`c-${f.key}`">
+              <!-- afiliado / desconto / ads / custo total / margem mínima / obs (M-55/M-56/M-85) -->
+              <template v-for="f in camposAnotacao" :key="`c-${f.key}`">
                 <!-- Campos próprios (%): caixinha de 34×24px, 12px, número no meio e
                      "%" ao lado, sempre à mostra; gravam ao sair ou com Enter. Custo
-                     total: só o ADM muda, os outros veem travado. Recusa do Custo
-                     total (M-56): borda vermelha e o aviso do servidor junto do campo. -->
+                     total e Margem mínima: só o ADM muda (o Custo total os outros veem
+                     travado; a Margem mínima eles nem veem). Recusa do Custo total
+                     (M-56): borda vermelha e o aviso do servidor junto do campo. -->
                 <td
                   v-if="f.tipo"
                   class="relative border border-border px-1 py-1 text-center w-[62px] min-w-[62px]"

@@ -414,7 +414,12 @@ async def test_migration_0518_igual_ao_modelo_restrict_e_desce(db: AsyncSession)
     raiz = Path(__file__).resolve().parent.parent
     cfg = Config(str(raiz / "alembic.ini"))
     cfg.set_main_option("script_location", str(raiz / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0518_produto_regras_centro_custo"]
+    roteiro = ScriptDirectory.from_config(cfg)
+    # A 0519 (M-85, pricing_accounts.margem_minima_pct) vem logo depois desta; ponta única.
+    assert len(roteiro.get_heads()) == 1, roteiro.get_heads()
+    assert roteiro.get_revision("0519_contas_margem_minima").down_revision == (
+        "0518_produto_regras_centro_custo"
+    )
 
     modelo = Base.metadata.schema
     rascunho = f"{modelo}_m0518"

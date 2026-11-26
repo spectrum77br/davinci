@@ -264,6 +264,8 @@ _CAMPOS_HERDADOS_DA_BASE = (
     "discount", "affiliate", "ads", "coupon", "offer",
     "desconto_ate", "cupom_ate", "afiliado_pct", "oferta_limite_pct",
     "desconto_pct", "custo_total_pct",
+    # M-85: a Margem mínima também é a da base.
+    "margem_minima_pct",
     "observation", "observation2", "observation3",
 )
 
@@ -292,6 +294,7 @@ _MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
 # conta saem com esses campos vazios (null) — inclusive os que a coluna de
 # catálogo herda da base e as margens próprias dela —, e o POST/PATCH recusa
 # mudá-los. O preço da grade continua calculado aqui com os números de verdade.
+# M-85 (26/11/2026): a Margem mínima também (só o ADM vê e grava).
 _CAMPOS_OCULTOS_DE_QUEM_NAO_E_ADMIN = (
     "kit_number",
     "commission",
@@ -300,6 +303,7 @@ _CAMPOS_OCULTOS_DE_QUEM_NAO_E_ADMIN = (
     "margin3", "shipping3",
     "margin4", "shipping4",
     "margin5", "shipping5",
+    "margem_minima_pct",
 )
 # O que só o administrador GRAVA: os de cima e o Custo total (M-56, 25/11/2026),
 # que os outros perfis VEEM (fica fora da lista de ocultos).
@@ -342,6 +346,8 @@ _CAMPOS_DO_PAR = (
     "afiliado_pct",
     "desconto_pct",
     "custo_total_pct",
+    # M-85: um valor por conta.
+    "margem_minima_pct",
     "desconto_ate",
     "cupom_ate",
     "oferta_limite_pct",
@@ -370,7 +376,8 @@ def _recusar_campos_so_admin(user: User, body: PricingAccountCreate | PricingAcc
             detail={
                 "code": "campos_so_admin",
                 "message": (
-                    "Kit, comissão, margens, fretes e custo total só o administrador altera"
+                    "Kit, comissão, margens, fretes, custo total e margem mínima só o "
+                    "administrador altera"
                 ),
                 "campos": campos,
             },

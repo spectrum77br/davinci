@@ -35,6 +35,8 @@ CAMPOS_SO_ADMIN = (
     "commission",
     *(f"margin{i}" for i in range(1, 6)),
     *(f"shipping{i}" for i in range(1, 6)),
+    # M-85 (26/11/2026): a Margem mínima da conta também.
+    "margem_minima_pct",
 )
 
 
@@ -68,6 +70,7 @@ async def cenario(db: AsyncSession, make_user) -> SimpleNamespace:
         margin3=Decimal("0.30"),
         shipping3=Decimal("10.00"),
         discount="5%",
+        margem_minima_pct=Decimal("15"),
     )
     mega = PricingAccount(
         user_id=admin.id,
@@ -170,6 +173,7 @@ async def test_admin_recebe_tudo(client: AsyncClient, auth_as: Callable, cenario
         kia = contas[str(cenario.kia.id)]
         assert kia["kit_number"] == 2
         assert Decimal(kia["commission"]) == Decimal("0.10")
+        assert Decimal(kia["margem_minima_pct"]) == Decimal("15")
         assert Decimal(kia["margin1"]) == Decimal("0.20")
         assert Decimal(kia["shipping1"]) == Decimal("5.00")
         assert Decimal(kia["shipping3"]) == Decimal("10.00")
@@ -179,6 +183,7 @@ async def test_admin_recebe_tudo(client: AsyncClient, auth_as: Callable, cenario
         assert Decimal(filha["commission"]) == Decimal("0.10")
         assert Decimal(filha["shipping1"]) == Decimal("5.00")
         assert Decimal(filha["margens_catalogo"]["1"]) == Decimal("0.40")
+        assert Decimal(filha["margem_minima_pct"]) == Decimal("15")
         mega = contas[str(cenario.mega.id)]
         assert mega["kit_number"] == 1
         assert Decimal(mega["commission"]) == Decimal("0.14")

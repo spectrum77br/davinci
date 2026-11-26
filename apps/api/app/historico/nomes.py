@@ -595,6 +595,8 @@ CAMPOS: dict[str, str] = {
     "desconto_pct": "Desconto (%)",
     "custo_total_pct": "Custo total (%)",
     "par_id": "Par Clássico + Premium (ML)",
+    # M-85 (26/11/2026, migration 0519): em % como o Custo total (25 = 25%).
+    "margem_minima_pct": "Margem mínima (%)",
     # M-74 (26/11/2026, migration 0516): regras do produto no Produtos 2.
     "margem_min": "Margem mín (%)",
     # M-73 (26/11/2026, migration 0518): o Centro de custo escolhido no cadastro do Produtos 2 (a

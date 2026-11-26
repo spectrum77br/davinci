@@ -293,7 +293,7 @@ async function principal() {
     const secaoC = (t) => CONTAS.conteudo.find((s) => s.titulo === t)
     const termosC = (t) => secaoC(t).itens.map((i) => i.termo)
     assert.deepEqual(termosC('Colunas'), ['Plataforma e Conta', 'Catálogo ML', 'Equipe', 'Kit (ADM)', 'Comissão (ADM)',
-      'marg e frete (ADM)', 'Afiliado e Desconto', 'Ads', 'Custo total (ADM)'])
+      'marg e frete (ADM)', 'Afiliado e Desconto', 'Ads', 'Custo total (ADM)', 'Margem mínima (ADM)'])
     assert.deepEqual(termosC('Barra de botões'), ['Buscar', 'Plataforma e Contas', 'Layout', 'Equipes', 'Excel',
       'Vincular Integrações', 'Adicionar Conta'])
     assert.equal(secaoC('Passo a passo').numerada, true)
@@ -305,7 +305,10 @@ async function principal() {
     for (const trecho of ['vale para Clássico e Premium', 'só nas contas do Mercado Livre', 'Sem equipe',
       'nome, plataforma ou e-mail', 'busca e filtros', 'só com as colunas à mostra', 'não troca vínculo que já existe',
       'já nasce com Clássico e Premium', 'Atualizar › Conferir', 'não mudam o preço da Tabela', 'permissão de editar Contas',
-      'fica lembrado neste navegador']) {
+      'fica lembrado neste navegador',
+      // M-85 (26/11/2026): a Margem mínima da conta.
+      'só o administrador vê e muda', 'diferente da \\"Margem Mín\\" da categoria de venda e da do produto',
+      'seguram o pedido na Margem', 'esta define o Custo total']) {
       assert.ok(tudoC.includes(trecho), `o texto da aba Contas fala de: ${trecho}`)
     }
     // O SFC inteiro continua compilando.

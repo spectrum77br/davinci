@@ -72,6 +72,8 @@ class PricingAccount(Base, TimestampMixin):
         # M-55/M-56 (25/11/2026, migration 0511): Desconto % e Custo total %.
         CheckConstraint("desconto_pct BETWEEN 0 AND 100", name="desconto_pct"),
         CheckConstraint("custo_total_pct BETWEEN 0 AND 100", name="custo_total_pct"),
+        # M-85 (26/11/2026, migration 0519): Margem mínima %.
+        CheckConstraint("margem_minima_pct BETWEEN 0 AND 100", name="margem_minima_pct"),
         # M-53 (migration 0511): no par só um Clássico e um Premium.
         Index(
             "uq_pricing_accounts_par_tipo",
@@ -146,6 +148,11 @@ class PricingAccount(Base, TimestampMixin):
     # M-56 (migration 0511): teto de Afiliado % + Desconto % + Ads % da conta
     # (vazio = sem teto). Só o administrador grava; todos veem. Fora do preço.
     custo_total_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    # M-85 (26/11/2026, migration 0519): Margem mínima (%) da conta, em % como o
+    # Custo total (25 = 25%). Só o administrador vê e grava. Não é a "Margem
+    # Mín" da categoria de venda nem a do produto (essas seguram pedido na
+    # Margem); fora do cálculo do preço.
+    margem_minima_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     # M-53 (migration 0511): o Clássico e o Premium da mesma conta ML de kit
     # têm o mesmo `par_id` (nas outras linhas NULL). A aba Contas mostra o par
     # numa linha e a API grava as duas juntas; a grade, o cálculo, o envio e a

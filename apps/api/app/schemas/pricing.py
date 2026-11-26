@@ -82,6 +82,8 @@ class PricingAccountBase(BaseModel):
     # M-55/M-56 (25/11/2026): Desconto % e Custo total % (este só o ADM grava).
     desconto_pct: PctConta | None = None
     custo_total_pct: PctConta | None = None
+    # M-85 (26/11/2026): Margem mínima % (25 = 25%), só o ADM vê e grava.
+    margem_minima_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
@@ -139,6 +141,7 @@ class PricingAccountPatch(BaseModel):
     oferta_limite_pct: PctConta | None = None
     desconto_pct: PctConta | None = None
     custo_total_pct: PctConta | None = None
+    margem_minima_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None

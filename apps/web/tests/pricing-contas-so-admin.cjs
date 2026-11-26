@@ -61,15 +61,27 @@ console.log('pricing contas só ADM: grupos da grade ok')
 // ---------- 2) colspan da aba Contas
 const isAdmin = ref(true)
 const nTiposAba = ref(5)
-const STORE_NOTE_FIELDS = new Array(5).fill({})
+// As anotações que a pessoa vê (M-85): a Margem mínima só para o ADM — o
+// `camposAnotacao` real da página, sobre o STORE_NOTE_FIELDS real.
+const anotacoes = new Function('computed', 'isAdmin', js([
+  source.statements.find((s) => ts.isVariableStatement(s)
+    && s.declarationList.declarations.some((d) => d.name.getText(source) === 'STORE_NOTE_FIELDS')).getText(source),
+  `${computado('camposAnotacao')}\nreturn { STORE_NOTE_FIELDS, camposAnotacao: { get value() { return __f() } } }`,
+].join('\n')))((fn) => fn, isAdmin)
+assert.deepEqual(anotacoes.STORE_NOTE_FIELDS.filter((f) => f.soAdminVe).map((f) => f.key), ['margem_minima_pct'])
+assert.equal(anotacoes.camposAnotacao.value.length, 6)
+isAdmin.value = false
+assert.deepEqual(anotacoes.camposAnotacao.value.map((f) => f.key),
+  ['afiliado_pct', 'desconto_pct', 'ads', 'custo_total_pct', 'observation'], 'sem ADM: sem a Margem mínima')
+isAdmin.value = true
 // M-51: as colunas escondidas pelo Layout ▾ saem do colspan.
 let ocultas = []
 const mostraColunaConta = (chave) => !ocultas.includes(chave)
-const colunas = new Function('isAdmin', 'nTiposAba', 'STORE_NOTE_FIELDS', 'mostraColunaConta',
-  js(`${computado('colunasContas')}\nreturn __f`))(isAdmin, nTiposAba, STORE_NOTE_FIELDS, mostraColunaConta)
+const colunas = new Function('isAdmin', 'nTiposAba', 'camposAnotacao', 'mostraColunaConta',
+  js(`${computado('colunasContas')}\nreturn __f`))(isAdmin, nTiposAba, anotacoes.camposAnotacao, mostraColunaConta)
 // Plataforma, Conta, Catálogo ML, Equipe (Tipo ML saiu na M-53) + Kit, Comissão,
-// 5 pares + Afiliado, Desconto, Ads, Custo total, Obs + lixeira.
-assert.equal(colunas(), 4 + 2 + 10 + 5 + 1)
+// 5 pares + Afiliado, Desconto, Ads, Custo total, Margem mínima (ADM), Obs + lixeira.
+assert.equal(colunas(), 4 + 2 + 10 + 6 + 1)
 isAdmin.value = false
 assert.equal(colunas(), 4 + 5 + 1)
 ocultas = ['catalogo', 'equipe', 'obs']
@@ -77,7 +89,7 @@ assert.equal(colunas(), 2 + 4 + 1, 'sem Catálogo ML, Equipe e Obs (Desconto e C
 ocultas = ['kit', 'comissao']
 assert.equal(colunas(), 4 + 5 + 1, 'Kit e Comissão escondidos não mudam nada para quem não é ADM')
 isAdmin.value = true
-assert.equal(colunas(), 4 + 10 + 5 + 1, 'ADM sem Kit e Comissão')
+assert.equal(colunas(), 4 + 10 + 6 + 1, 'ADM sem Kit e Comissão')
 ocultas = []
 console.log('pricing contas só ADM: colspan ok')
 
@@ -102,13 +114,13 @@ assert.match(contas, /<template v-if="isAdmin">\s*<td[^>]*>\s*<input\s+v-model\.
 // Linha da conta: kit, comissão e pares dentro do mesmo v-if.
 const linha = contas.slice(contas.indexOf('<!-- kit, comissão e pares marg/frete: só ADM (M-10) -->'))
 assert.match(linha, /^<!-- kit, comissão e pares marg\/frete: só ADM \(M-10\) -->\s*<template v-if="isAdmin">/)
-const fimBloco = linha.indexOf('<!-- afiliado / desconto / ads / custo total / obs (M-55/M-56) -->')
+const fimBloco = linha.indexOf('<!-- afiliado / desconto / ads / custo total / margem mínima / obs (M-55/M-56/M-85) -->')
 assert.ok(fimBloco > 0)
 const bloco = linha.slice(0, fimBloco)
 for (const campo of ["'kit_number'", "'commission'", '`margin${t}`', '`shipping${t}`']) {
   assert.ok(bloco.includes(campo), `${campo} dentro do bloco só ADM`)
 }
-assert.ok(!contas.slice(contas.indexOf('<!-- afiliado / desconto / ads / custo total / obs')).includes("'commission'"))
+assert.ok(!contas.slice(contas.indexOf('<!-- afiliado / desconto / ads / custo total / margem mínima / obs')).includes("'commission'"))
 // A janela da comissão do ML (M-53) também fica dentro do bloco só ADM.
 assert.ok(bloco.includes('data-janela-comissao-ml'), 'comissão do ML só ADM')
 // Botão "Margens" da janela do Catálogo ML (M-54; antes o link "% margens"): só ADM.

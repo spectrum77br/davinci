@@ -4,8 +4,9 @@
 // ordem fica Afiliado | Desconto | Ads | Custo total | Obs ("Desconto até",
 // "Cupom até" e "Oferta limite" saem da tela), com colunas de ~62px e a
 // caixinha de 34×24px. M-56: Custo total só o ADM muda (os outros veem), e o
-// 422 custo_total_estourado volta o valor com o aviso junto do campo. Executa
-// as funções reais da página e confere o template.
+// 422 custo_total_estourado volta o valor com o aviso junto do campo. M-85
+// (26/11/2026): "Margem mínima" depois do Custo total, só o ADM vê e muda.
+// Executa as funções reais da página e confere o template.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -43,17 +44,30 @@ const avisos = []
 const toast = { error: (titulo, texto) => avisos.push(`${titulo} | ${texto}`) }
 const gravados = []
 const _patchAccount = async (id, campo, raw) => { gravados.push([id, campo, raw]) }
-const f = new Function('canEditContas', 'isAdmin', 'erroCustoTotal', 'toast', '_patchAccount', js([
-  constante('STORE_NOTE_FIELDS'),
-  funcao('lerPct'), funcao('podeEditarAnotacao'), funcao('textoAnotacao'), funcao('erroCustoTotalDe'),
-  funcao('estourouCustoTotal'), funcao('gravarAnotacao'), funcao('desfazerAnotacao'),
-  'return { STORE_NOTE_FIELDS, lerPct, podeEditarAnotacao, textoAnotacao, erroCustoTotalDe, estourouCustoTotal, gravarAnotacao, desfazerAnotacao }',
-].join('\n')))(canEditContas, isAdmin, erroCustoTotal, toast, _patchAccount)
+const computed = (fn) => ({ get value() { return fn() } })
+const nomesF = ['lerPct', 'podeEditarAnotacao', 'textoAnotacao', 'erroCustoTotalDe', 'estourouCustoTotal',
+  'gravarAnotacao', 'desfazerAnotacao']
+const f = new Function('canEditContas', 'isAdmin', 'erroCustoTotal', 'toast', '_patchAccount', 'computed', js([
+  constante('STORE_NOTE_FIELDS'), constante('camposAnotacao'),
+  ...nomesF.map(funcao),
+  `return { STORE_NOTE_FIELDS, camposAnotacao, ${nomesF.join(', ')} }`,
+].join('\n')))(canEditContas, isAdmin, erroCustoTotal, toast, _patchAccount, computed)
 
 assert.deepEqual(
-  f.STORE_NOTE_FIELDS.map((c) => `${c.label}:${c.key}:${c.tipo ?? ''}${c.soAdmin ? ':adm' : ''}`),
-  ['Afiliado:afiliado_pct:pct', 'Desconto:desconto_pct:pct', 'Ads:ads:', 'Custo total:custo_total_pct:pct:adm', 'Obs:observation:'],
+  f.STORE_NOTE_FIELDS.map((c) => `${c.label}:${c.key}:${c.tipo ?? ''}${c.soAdmin ? ':adm' : ''}${c.soAdminVe ? ':ve' : ''}`),
+  ['Afiliado:afiliado_pct:pct', 'Desconto:desconto_pct:pct', 'Ads:ads:', 'Custo total:custo_total_pct:pct:adm',
+    'Margem mínima:margem_minima_pct:pct:adm:ve', 'Obs:observation:'],
 )
+// M-85: a Margem mínima só aparece para o ADM; título em duas linhas e o title do pedido.
+const margemMinima = f.STORE_NOTE_FIELDS.find((c) => c.key === 'margem_minima_pct')
+assert.deepEqual(margemMinima.cabecalho, ['Margem', 'mínima'])
+assert.equal(margemMinima.titulo, 'Margem mínima da conta (%). Só o administrador vê e muda.')
+assert.deepEqual(f.camposAnotacao.value.map((c) => c.key),
+  ['afiliado_pct', 'desconto_pct', 'ads', 'custo_total_pct', 'observation'], 'quem não é ADM não vê')
+isAdmin.value = true
+assert.deepEqual(f.camposAnotacao.value.map((c) => c.key),
+  ['afiliado_pct', 'desconto_pct', 'ads', 'custo_total_pct', 'margem_minima_pct', 'observation'], 'ADM vê, depois do Custo total')
+isAdmin.value = false
 for (const fora of ['desconto_ate', 'cupom_ate', 'oferta_limite_pct', 'lerDiaMes', 'DIAS_NO_MES']) {
   assert.ok(!setup.includes(fora), `${fora} saiu da tela`)
 }
@@ -107,6 +121,18 @@ assert.equal(gravados.length, 0, 'não ADM não grava o Custo total')
 isAdmin.value = true
 f.gravarAnotacao(conta, campo('custo_total_pct'), evento('15'))
 assert.deepEqual(gravados.pop(), ['c1', 'custo_total_pct', '15'])
+// Margem mínima (M-85): só o ADM muda, com as regras do lerPct.
+assert.equal(f.podeEditarAnotacao(campo('margem_minima_pct')), true)
+f.gravarAnotacao(conta, campo('margem_minima_pct'), evento('25'))
+assert.deepEqual(gravados.pop(), ['c1', 'margem_minima_pct', '25'])
+f.gravarAnotacao(conta, campo('margem_minima_pct'), evento('101'))
+assert.equal(gravados.length, 0)
+assert.match(avisos.pop(), /^Margem mínima: valor inválido/)
+isAdmin.value = false
+assert.equal(f.podeEditarAnotacao(campo('margem_minima_pct')), false)
+f.gravarAnotacao(conta, campo('margem_minima_pct'), evento('20'))
+assert.equal(gravados.length, 0, 'não ADM não grava a Margem mínima')
+isAdmin.value = true
 
 // Aviso do Custo total estourado: só no campo recusado; gravar de novo o
 // mesmo campo tira o aviso antes de mandar.
@@ -129,19 +155,20 @@ console.log('pricing contas anotações: gravação ok')
 
 // ---------- 3) _patchAccount manda o valor normalizado e volta no estouro
 const patch = funcao('_patchAccount')
-assert.match(patch, /field === 'afiliado_pct' \|\| field === 'desconto_pct' \|\| field === 'custo_total_pct'\) \{\s*const v = lerPct\(raw\)\s*if \(v === undefined\) return\s*payload\[field\] = v/)
+assert.match(patch, /field === 'afiliado_pct' \|\| field === 'desconto_pct' \|\| field === 'custo_total_pct' \|\| field === 'margem_minima_pct'\) \{\s*const v = lerPct\(raw\)\s*if \(v === undefined\) return\s*payload\[field\] = v/)
 assert.match(patch, /const estouro = erroCustoTotalDe\(e\)\s*if \(estouro\) \{\s*Object\.assign\(acc, antes\)\s*erroCustoTotal\.value = \{ id, campo: field, mensagem: estouro \}\s*return\s*\}/)
-assert.match(setup, /afiliado_pct: string \| number \| null[\s\S]*?desconto_pct\?: string \| number \| null\s*custo_total_pct\?: string \| number \| null/)
+assert.match(setup, /afiliado_pct: string \| number \| null[\s\S]*?desconto_pct\?: string \| number \| null\s*custo_total_pct\?: string \| number \| null[\s\S]*?margem_minima_pct\?: string \| number \| null/)
 console.log('pricing contas anotações: script ok')
 
 // ---------- 4) template: campos sempre à mostra, colunas de ~62px, caixinha 34×24px
 const tpl = descriptor.template.content
 const contas = tpl.slice(tpl.indexOf("tab === 'contas'"), tpl.indexOf("tab === 'produtos'"))
 const cab = contas.slice(0, contas.indexOf('</thead>'))
-assert.match(cab, /v-for="f in STORE_NOTE_FIELDS"[\s\S]*?:class="f\.key === 'observation' \? 'text-left min-w-\[120px\]' : 'text-center w-\[62px\] min-w-\[62px\]'"[\s\S]*?>\{\{ f\.label \}\}<\/th>/)
+assert.match(cab, /v-for="f in camposAnotacao"[\s\S]*?:class="f\.key === 'observation' \? 'text-left min-w-\[120px\]' : 'text-center w-\[62px\] min-w-\[62px\]'"[\s\S]*?><template v-if="f\.cabecalho"><span v-for="parte in f\.cabecalho" :key="parte" class="block">\{\{ parte \}\}<\/span><\/template><template v-else>\{\{ f\.label \}\}<\/template><\/th>/)
 assert.doesNotMatch(cab, /capitalize/)
 for (const fora of ['Desconto até', 'Cupom até', 'Oferta limite']) assert.ok(!contas.includes(fora), `${fora} saiu`)
-const celulas = contas.slice(contas.indexOf('<!-- afiliado / desconto / ads / custo total / obs (M-55/M-56) -->'))
+const celulas = contas.slice(contas.indexOf('<!-- afiliado / desconto / ads / custo total / margem mínima / obs (M-55/M-56/M-85) -->'))
+assert.match(celulas, /^<!-- [^>]*-->\s*<template v-for="f in camposAnotacao" :key="`c-\$\{f\.key\}`">/)
 const proprio = celulas.slice(0, celulas.indexOf('v-else'))
 assert.match(proprio, /<td\s+v-if="f\.tipo"\s+class="relative border border-border px-1 py-1 text-center w-\[62px\] min-w-\[62px\]"/)
 const input = proprio.slice(proprio.indexOf('<input'), proprio.indexOf('/>'))

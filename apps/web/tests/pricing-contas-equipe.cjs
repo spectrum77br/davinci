@@ -105,18 +105,20 @@ const aEsquerda = abreTh.filter((th) => /\btext-left\b/.test(th))
 assert.equal(aEsquerda.length, 3, 'só Plataforma, Conta e Obs à esquerda')
 assert.match(cab, /text-left[^>]*>Plataforma<\/th>\s*<th[^>]*text-left[^>]*>Conta<\/th>/)
 assert.doesNotMatch(cab, />(Nome|Tipo ML)<\/th>/)
-assert.ok(aEsquerda.some((th) => th.includes('v-for="f in STORE_NOTE_FIELDS"')), 'Obs à esquerda')
+assert.ok(aEsquerda.some((th) => th.includes('v-for="f in camposAnotacao"')), 'Obs à esquerda')
 for (const th of abreTh.filter((t) => !/\btext-left\b/.test(t))) assert.match(th, /\btext-center\b/)
-// O `v-for` das anotações vale por 6 colunas: o alinhamento de cada uma sai
-// da expressão do :class (revisão M-7..M-12: o Ads ficava à esquerda).
+// O `v-for` das anotações vale por 6 colunas (7 com a Margem mínima do ADM,
+// M-85): o alinhamento de cada uma sai da expressão do :class (revisão
+// M-7..M-12: o Ads ficava à esquerda).
 const campos = new Function(`${ts.transpileModule(source.statements.find((s) => ts.isVariableStatement(s)
   && s.declarationList.declarations.some((d) => d.name.getText(source) === 'STORE_NOTE_FIELDS')).getText(source),
 { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText}\nreturn STORE_NOTE_FIELDS`)()
-const thNotas = abreTh.find((th) => th.includes('v-for="f in STORE_NOTE_FIELDS"'))
+const thNotas = abreTh.find((th) => th.includes('v-for="f in camposAnotacao"'))
 const classeNota = new Function('f', `return ${/:class="([^"]*)"/.exec(thNotas)[1]}`)
 const alinhamento = Object.fromEntries(campos.map((f) => [f.key, /\btext-left\b/.test(classeNota(f)) ? 'esquerda' : 'centro']))
 assert.deepEqual(alinhamento, {
-  afiliado_pct: 'centro', desconto_pct: 'centro', ads: 'centro', custo_total_pct: 'centro', observation: 'esquerda',
+  afiliado_pct: 'centro', desconto_pct: 'centro', ads: 'centro', custo_total_pct: 'centro',
+  margem_minima_pct: 'centro', observation: 'esquerda',
 }, 'das anotações, só Obs à esquerda')
 for (const f of campos) assert.match(classeNota(f), /\btext-(left|center)\b/)
 assert.match(contas, /v-else-if="f\.key === 'ads'"\s+class="[^"]*\btext-center\b/, 'célula do Ads centralizada')

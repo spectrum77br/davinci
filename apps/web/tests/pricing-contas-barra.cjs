@@ -217,12 +217,13 @@ P.contasNomesDesmarcados.value = []
 console.log('pricing contas barra: filtro Contas com o par do ML ok')
 
 // Excel: as contas da tela, as colunas à vista e na ordem da tabela (M-52..M-57);
-// sem Kit/Comissão/margens/fretes para quem não é ADM.
-const nomesExcel = ['STORE_NOTE_FIELDS', 'fmtCommission', 'fmtMargin', 'fmtShipping', 'textoComissao',
+// sem Kit/Comissão/margens/fretes para quem não é ADM. M-85: "Margem mínima (%)"
+// depois do "Custo total (%)", só para o ADM.
+const nomesExcel = ['STORE_NOTE_FIELDS', 'camposAnotacao', 'fmtCommission', 'fmtMargin', 'fmtShipping', 'textoComissao',
   'textoComissaoPar', 'tipoDaContaSolta', 'pctGeralAds', 'linhasExcelContas']
 const fpC = mlLinha('fpC', 'forpaper', 'ml classico', 'p1', {
   kit_number: 2, commission: '0.14', margin1: '0.25', shipping1: '20', margin2: null, shipping2: null,
-  afiliado_pct: '4.50', desconto_pct: '10.00', custo_total_pct: '20.00',
+  afiliado_pct: '4.50', desconto_pct: '10.00', custo_total_pct: '20.00', margem_minima_pct: '25.00',
   observation: 'ver & conferir', equipes: [{ numero: 101, nome: 'Equipe 1' }],
 })
 const fpP = mlLinha('fpP', 'forpaper', 'ml premium', 'p1', { kit_number: 2, commission: '0.19' })
@@ -236,11 +237,11 @@ const bravo = {
   afiliado_pct: null, desconto_pct: '0', custo_total_pct: null, observation: null, equipes: [],
 }
 accounts.value = [fpC, fpP, solo, bravo]
-const linhasExcelContas = new Function('isAdmin', 'department', 'TYPE_HEADERS', 'accountsGrouped', 'mostraColunaConta',
+const linhasExcelContas = new Function('computed', 'isAdmin', 'department', 'TYPE_HEADERS', 'accountsGrouped', 'mostraColunaConta',
   'platformLabel', 'parDe', 'ehCatalogo', 'rotuloTipo', 'podeTerCatalogo', 'catalogoAtivo', 'rotuloEquipes', 'ads', 'adsDa',
   `${js(nomesExcel.map(pega).join('\n'))}\nreturn linhasExcelContas`,
 )(
-  isAdmin, ref('mala'), ref({ mala: ['Acessórios', '12"'] }),
+  computed, isAdmin, ref('mala'), ref({ mala: ['Acessórios', '12"'] }),
   ref([{ platform: 'mercadolivre', rows: [fpC, solo] }, { platform: 'shopee', rows: [bravo] }]),
   P.mostraColunaConta,
   (p) => ({ mercadolivre: 'ML', shopee: 'Shopee' })[p],
@@ -255,12 +256,12 @@ const linhasExcelContas = new Function('isAdmin', 'department', 'TYPE_HEADERS', 
 )
 const cabTodo = ['Plataforma', 'Conta', 'Catálogo ML', 'Equipe', 'Kit', 'Comissão',
   'Acessórios marg', 'Acessórios frete', '12" marg', '12" frete',
-  'Afiliado (%)', 'Desconto (%)', 'Ads (%)', 'Custo total (%)', 'Obs']
+  'Afiliado (%)', 'Desconto (%)', 'Ads (%)', 'Custo total (%)', 'Margem mínima (%)', 'Obs']
 assert.deepEqual(linhasExcelContas(), [
   cabTodo,
-  ['ML', 'forpaper', 'Ativo', '1', 2, '14% · 19%', '25.0%', '20', '', '', 4.5, 10, 10, 20, 'ver & conferir'],
-  ['ML Premium', 'solo', 'Inativo', 'Sem equipe', 1, '16%', '', '', '', '', '', '', '', '', ''],
-  ['Shopee', 'Bravo', '', 'Sem equipe', '', '', '', '', '', '', '', 0, '', '', ''],
+  ['ML', 'forpaper', 'Ativo', '1', 2, '14% · 19%', '25.0%', '20', '', '', 4.5, 10, 10, 20, 25, 'ver & conferir'],
+  ['ML Premium', 'solo', 'Inativo', 'Sem equipe', 1, '16%', '', '', '', '', '', '', '', '', '', ''],
+  ['Shopee', 'Bravo', '', 'Sem equipe', '', '', '', '', '', '', '', 0, '', '', '', ''],
 ], 'ADM com tudo à mostra: o par do ML numa linha, comissão "14% · 19%" como na tela')
 for (const fora of ['Tipo ML', 'Desconto até', 'Cupom até', 'Oferta limite', 'Nome']) {
   assert.ok(!cabTodo.includes(fora), `coluna removida não volta no Excel: ${fora}`)
@@ -271,16 +272,18 @@ for (const fora of ['Tipo ML', 'Desconto até', 'Cupom até', 'Oferta limite', '
   const cabTpl = tplC.slice(tplC.indexOf("tab === 'contas'"), tplC.indexOf("tab === 'produtos'"))
   const cabHtml = cabTpl.slice(0, cabTpl.indexOf('</thead>'))
   const ths = [...cabHtml.matchAll(/<th[\s\S]*?>([^<]*)<\/th>/g)].map((m) => m[1].trim()).filter(Boolean)
-  assert.deepEqual(ths, ['Plataforma', 'Conta', 'Catálogo ML', 'Equipe', 'Kit', 'Comissão', '{{ f.label }}'])
+  assert.deepEqual(ths, ['Plataforma', 'Conta', 'Catálogo ML', 'Equipe', 'Kit', 'Comissão'])
+  // As anotações: o título em linhas (Margem mínima, M-85) ou o label.
+  assert.match(cabHtml, /v-for="f in camposAnotacao"[\s\S]*?><template v-if="f\.cabecalho"><span v-for="parte in f\.cabecalho" :key="parte" class="block">\{\{ parte \}\}<\/span><\/template><template v-else>\{\{ f\.label \}\}<\/template><\/th>/)
   assert.deepEqual(pega('STORE_NOTE_FIELDS').match(/label: '[^']+'/g),
-    ["label: 'Afiliado'", "label: 'Desconto'", "label: 'Ads'", "label: 'Custo total'", "label: 'Obs'"])
+    ["label: 'Afiliado'", "label: 'Desconto'", "label: 'Ads'", "label: 'Custo total'", "label: 'Margem mínima'", "label: 'Obs'"])
 }
 P.colunasOcultasContas.value = ['kit', 'obs']
 assert.deepEqual(linhasExcelContas()[0], ['Plataforma', 'Conta', 'Catálogo ML', 'Equipe', 'Comissão',
   'Acessórios marg', 'Acessórios frete', '12" marg', '12" frete',
-  'Afiliado (%)', 'Desconto (%)', 'Ads (%)', 'Custo total (%)'], 'segue o Layout')
+  'Afiliado (%)', 'Desconto (%)', 'Ads (%)', 'Custo total (%)', 'Margem mínima (%)'], 'segue o Layout')
 P.colunasOcultasContas.value = ['comissao', 'catalogo', 'equipe']
-assert.deepEqual(linhasExcelContas()[1], ['ML', 'forpaper', 2, '25.0%', '20', '', '', 4.5, 10, 10, 20, 'ver & conferir'])
+assert.deepEqual(linhasExcelContas()[1], ['ML', 'forpaper', 2, '25.0%', '20', '', '', 4.5, 10, 10, 20, 25, 'ver & conferir'])
 isAdmin.value = false
 P.colunasOcultasContas.value = ['catalogo']
 const semAdm = linhasExcelContas()
@@ -288,6 +291,7 @@ assert.deepEqual(semAdm[0], ['Plataforma', 'Conta', 'Equipe', 'Afiliado (%)', 'D
   'Custo total (%)', 'Obs'], 'sem ADM: sem Kit, Comissão, margens e fretes (Custo total todos veem)')
 assert.deepEqual(semAdm[1], ['ML', 'forpaper', '1', 4.5, 10, 10, 20, 'ver & conferir'])
 assert.ok(!/14%|19%|25\.0%/.test(JSON.stringify(semAdm)), 'nada de comissão ou margem')
+assert.ok(!JSON.stringify(semAdm).includes('Margem mínima'), 'sem ADM: sem a Margem mínima (M-85)')
 isAdmin.value = true
 P.colunasOcultasContas.value = []
 const exportar = pega('exportarExcelContas')
@@ -370,8 +374,8 @@ assert.doesNotMatch(cab, />Tipo ML<\/th>/, 'Tipo ML saiu (M-53)')
 assert.match(cab, /v-if="mostraColunaConta\('catalogo'\)"[^>]*>Catálogo ML<\/th>/)
 assert.match(contas, /<td\s+v-if="mostraColunaConta\('catalogo'\)"\s+class="[^"]*"[\s\S]*?data-coluna-catalogo/)
 assert.match(cab, /v-if="mostraColunaConta\('equipe'\)"[^>]*>Equipe<\/th>/)
-assert.match(cab, /v-for="f in STORE_NOTE_FIELDS"\s+v-show="f\.key !== 'observation' \|\| mostraColunaConta\('obs'\)"/)
-assert.match(contas, /<td v-for="i in STORE_NOTE_FIELDS\.length - \(mostraColunaConta\('obs'\) \? 0 : 1\)"/)
+assert.match(cab, /v-for="f in camposAnotacao"\s+v-show="f\.key !== 'observation' \|\| mostraColunaConta\('obs'\)"/)
+assert.match(contas, /<td v-for="i in camposAnotacao\.length - \(mostraColunaConta\('obs'\) \? 0 : 1\)"/)
 assert.match(contas, /<td\s+v-else\s+class="[^"]*"\s+v-show="f\.key !== 'observation' \|\| mostraColunaConta\('obs'\)"/)
 console.log('pricing contas barra: template ok')
 
