@@ -47,6 +47,7 @@ from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO, NOME_M
 from app.services import categorias_venda as cv
 from app.services import centros_custo
 from app.services import produto_cadastros as svc
+from app.services.pricing.custo_total import recalcular_contas_da_raiz
 
 router = APIRouter(prefix="/api/produto-cadastros", tags=["produto_cadastros"])
 
@@ -517,6 +518,9 @@ async def criar_categoria_venda(
         # Na mesma transação: as contas do centro com o slot{N} vazio passam a apontar
         # para ela (frete "Projetado" da página Margem).
         await cv.preencher_slots(session, raiz, seg)
+        # M-86: uma coluna "marg" a mais na aba Contas → o Custo total das contas do centro
+        # com Margem mínima é recalculado.
+        await recalcular_contas_da_raiz(session, raiz.id)
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
@@ -579,5 +583,7 @@ async def excluir_categoria_venda(
 ) -> Response:
     seg, raiz = await _venda(session, venda_id)
     await cv.excluir(session, seg, raiz)
+    # M-86: a coluna "marg" dela sai da aba Contas (ver o criar).
+    await recalcular_contas_da_raiz(session, raiz.id)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

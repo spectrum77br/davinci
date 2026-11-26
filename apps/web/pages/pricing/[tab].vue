@@ -158,8 +158,8 @@ const AJUDA_CONTAS = {
         { termo: 'marg e frete (ADM)', texto: 'margem (%) e frete (R$) por tipo de produto; são eles que formam o preço.' },
         { termo: 'Afiliado e Desconto', texto: '% de afiliado e de desconto da conta; são só anotação.' },
         { termo: 'Ads', texto: 'a caixinha mostra o % Geral; clique nela e marque Geral (um % e um gasto por dia para a conta toda) ou Produto (um % e um gasto por dia para cada produto; produto sem % fica sem Ads). Vale um ou outro; trocar não apaga o que foi digitado. Com Produto, a lista mostra a categoria de venda de cada produto; o botão Categoria de venda mostra só os produtos das categorias marcadas (nenhuma marcada = todos) e a caixinha Ads só os que têm % ou gasto por dia nesta conta. Os dois somam com a busca, não gravam nada e voltam zerados ao abrir a janela.' },
-        { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem.' },
-        { termo: 'Margem mínima (ADM)', texto: 'margem mínima (%) da conta; só o administrador vê e muda. É diferente da "Margem Mín" da categoria de venda e da do produto: aquelas seguram o pedido na Margem; esta define o Custo total.' },
+        { termo: 'Custo total (ADM)', texto: 'teto para Afiliado + Desconto + Ads; se passar, o sistema não grava. Todos veem. Com a Margem mínima preenchida, ele é calculado e não se digita (fica cinza).' },
+        { termo: 'Margem mínima (ADM)', texto: 'margem mínima (%) da conta; só o administrador vê e muda. É diferente da "Margem Mín" da categoria de venda e da do produto: aquelas seguram o pedido na Margem; esta define o Custo total. Preenchida, o Custo total sai do caso mais apertado da conta: a folga entre a menor marg da conta e a Margem mínima, tirada a comissão (no ML, a maior entre Clássico e Premium) e dividida por 1 mais a menor marg; arredondado para baixo, nunca abaixo de 0. Frete não entra. Ex.: Shopee aguiar, menor marg 35,6%, comissão 14% e Margem mínima 25%: (35,6% − 25%) × (1 − 14%) ÷ 1,356 = 6,7% → Custo total 6%. Sem nenhuma marg, o Custo total fica vazio. Muda sozinho quando mudam a Margem mínima, uma marg ou a comissão. Apagando a Margem mínima, o Custo total fica com o último valor e volta a ser digitado. Se ficar abaixo de Afiliado + Desconto + Ads, grava assim mesmo e a caixinha do Custo total fica com a borda vermelha até alguém corrigir.' },
       ],
     },
     {
@@ -570,7 +570,8 @@ type Account = {
   desconto_pct?: string | number | null
   custo_total_pct?: string | number | null
   // M-85 (26/11/2026, migration 0519): Margem mínima (%) da conta, só o ADM vê e
-  // muda (para os outros o servidor manda null).
+  // muda (para os outros o servidor manda null). M-86: preenchida, o Custo total
+  // acima é calculado pelo servidor e não se digita.
   margem_minima_pct?: string | number | null
   // M-53 (25/11/2026, migration 0511): o mesmo valor no Clássico e no Premium
   // da mesma conta ML de kit; nas outras linhas, null.
@@ -1575,6 +1576,27 @@ function podeEditarAnotacao(f: CampoAnotacao): boolean {
   return f.soAdmin ? isAdmin.value : canEditContas.value
 }
 
+// M-86 (26/11/2026): com a Margem mínima preenchida, o Custo total é calculado
+// pelo servidor e fica travado para todos, inclusive o ADM (fundo transparente,
+// texto cinza, sem digitar). Quem não é ADM não recebe a Margem mínima: vê o
+// Custo total travado como sempre, sem saber que é calculado.
+function calculadoPelaMargemMinima(acc: Account, f: CampoAnotacao): boolean {
+  return f.key === 'custo_total_pct' && acc.margem_minima_pct != null && acc.margem_minima_pct !== ''
+}
+
+function anotacaoTravada(acc: Account, f: CampoAnotacao): boolean {
+  return !podeEditarAnotacao(f) || calculadoPelaMargemMinima(acc, f)
+}
+
+// O título da caixinha; com o aviso do Custo total abaixo da soma, ele vai junto.
+function tituloAnotacao(acc: Account, f: CampoAnotacao): string | undefined {
+  let titulo = f.titulo
+  if (calculadoPelaMargemMinima(acc, f)) titulo = 'Calculado pela Margem mínima'
+  else if (f.soAdmin && !podeEditarAnotacao(f)) titulo = 'Só o administrador muda o Custo total'
+  const aviso = avisoNoCampo(acc, f)
+  return aviso ? `${titulo}. ${aviso}` : titulo
+}
+
 function textoAnotacao(acc: Account, f: CampoAnotacao): string {
   const v = (acc as any)[f.key]
   if (v == null || v === '') return ''
@@ -1602,7 +1624,7 @@ function estourouCustoTotal(acc: Account, campo: string): string | null {
 // `lerPct` da margem (só número de 0 a 100, com decimal). Valor inválido volta
 // ao que estava, com aviso; igual ao atual não grava.
 function gravarAnotacao(acc: Account, f: CampoAnotacao, ev: Event) {
-  if (!podeEditarAnotacao(f)) return
+  if (anotacaoTravada(acc, f)) return
   const el = ev.target as HTMLInputElement
   const valor = lerPct(el.value)
   if (valor === undefined) {
@@ -1723,6 +1745,66 @@ function modoAds(c: AdsConta): 'geral' | 'produto' | null {
 // O % do produto: só o próprio, com "Produto" marcado; sem ele, sem Ads.
 function pctDoProdutoAds(c: AdsConta, prodId: string): number | null {
   return modoAds(c) === 'produto' ? (c.produtos[prodId]?.pode_gastar_pct ?? null) : null
+}
+
+// ---------- Custo total abaixo de Afiliado + Desconto + Ads (M-86, item 7)
+// O Custo total calculado pela Margem mínima pode ficar abaixo do que já está
+// gravado: o servidor grava assim mesmo (não barra quem mexeu na Margem mínima,
+// na marg ou na comissão) e a caixinha do Custo total fica com a borda vermelha
+// e o aviso até alguém corrigir. A soma é a da trava do servidor
+// (services/pricing/custo_total.py): Afiliado + Desconto + o MAIOR Ads que vale
+// (com "Geral", o % Geral; com "Produto", o maior % próprio dos produtos da aba).
+
+// O maior Ads que vale na conta; sem Ads, 0.
+function maiorAdsDaConta(c: AdsConta, produtos: string[]): number {
+  const modo = modoAds(c)
+  if (modo === 'geral') return Number(c.pode_gastar_pct ?? 0)
+  if (modo !== 'produto') return 0
+  let maior = 0
+  for (const id of produtos) {
+    const v = c.produtos[id]?.pode_gastar_pct
+    if (v != null && Number(v) > maior) maior = Number(v)
+  }
+  return maior
+}
+
+// "Afiliado + Desconto + Ads (9%) passa do Custo total (6%)", ou null se cabe
+// (ou se a conta não tem Custo total). Conta em centésimos: os % têm 2 casas.
+function avisoSomaAcimaDoCustoTotal(acc: Account, adsPct: number): string | null {
+  const teto = acc.custo_total_pct
+  if (teto == null || teto === '') return null
+  const centesimos = (v: unknown) => Math.round(Number(v || 0) * 100)
+  const soma = centesimos(acc.afiliado_pct) + centesimos(acc.desconto_pct) + centesimos(adsPct)
+  const limite = centesimos(teto)
+  if (soma <= limite) return null
+  const pct = (c: number) => String(c / 100).replace('.', ',')
+  return `Afiliado + Desconto + Ads (${pct(soma)}%) passa do Custo total (${pct(limite)}%)`
+}
+
+// conta → aviso, das contas da aba (o Ads só depois que a janela de Ads carrega).
+const avisosCustoTotal = computed(() => {
+  const m = new Map<string, string>()
+  const produtos = ads.value?.produtos.map((p) => p.id) ?? []
+  for (const acc of accountsCurrent.value) {
+    const aviso = avisoSomaAcimaDoCustoTotal(acc, ads.value ? maiorAdsDaConta(adsDa(acc.id), produtos) : 0)
+    if (aviso) m.set(acc.id, aviso)
+  }
+  return m
+})
+
+function avisoNoCampo(acc: Account, f: CampoAnotacao): string | null {
+  return f.key === 'custo_total_pct' ? (avisosCustoTotal.value.get(acc.id) ?? null) : null
+}
+
+// O X fecha a caixinha do aviso (a borda vermelha fica); outro valor reabre.
+const avisosFechados = ref<Record<string, string>>({})
+function avisoAberto(acc: Account, f: CampoAnotacao): string | null {
+  const aviso = avisoNoCampo(acc, f)
+  return aviso && avisosFechados.value[acc.id] !== aviso ? aviso : null
+}
+function fecharAvisoCustoTotal(acc: Account) {
+  const aviso = avisosCustoTotal.value.get(acc.id)
+  if (aviso) avisosFechados.value = { ...avisosFechados.value, [acc.id]: aviso }
 }
 
 // Clique numa das caixas: marcar uma desmarca a outra; clicar na marcada
@@ -2106,8 +2188,9 @@ async function _patchAccount(id: string, field: string, raw: string) {
       body: payload,
     })
     Object.assign(acc, updated)
-    // Conta ML com par: o servidor gravou o mesmo no Premium (M-53).
-    espelharNaIrma(acc, Object.keys(payload))
+    // Conta ML com par: o servidor gravou o mesmo no Premium (M-53) — e o
+    // Custo total que ele recalculou pela Margem mínima (M-86), nas duas.
+    espelharNaIrma(acc, [...Object.keys(payload), 'custo_total_pct'])
     // O servidor apagou a coluna de catálogo (conta saiu do ML): tira ela da
     // lista local, senão o controle continua "Ligado" quando a conta volta
     // para o ML.
@@ -6432,8 +6515,12 @@ watch(department, async () => {
                 <!-- Campos próprios (%): caixinha de 34×24px, 12px, número no meio e
                      "%" ao lado, sempre à mostra; gravam ao sair ou com Enter. Custo
                      total e Margem mínima: só o ADM muda (o Custo total os outros veem
-                     travado; a Margem mínima eles nem veem). Recusa do Custo total
-                     (M-56): borda vermelha e o aviso do servidor junto do campo. -->
+                     travado; a Margem mínima eles nem veem). Com a Margem mínima
+                     preenchida (M-86) o Custo total é calculado e fica travado para
+                     todos, em cinza. Recusa do Custo total (M-56): borda vermelha e o
+                     aviso do servidor junto do campo. Custo total calculado abaixo de
+                     Afiliado + Desconto + Ads (M-86): borda vermelha e o aviso até
+                     alguém corrigir. -->
                 <td
                   v-if="f.tipo"
                   class="relative border border-border px-1 py-1 text-center w-[62px] min-w-[62px]"
@@ -6445,13 +6532,16 @@ watch(department, async () => {
                       type="text"
                       inputmode="decimal"
                       maxlength="6"
-                      :readonly="!podeEditarAnotacao(f)"
+                      :readonly="anotacaoTravada(acc, f)"
                       class="h-6 w-[34px] min-w-0 rounded border px-0.5 text-center text-xs"
                       :class="[
-                        podeEditarAnotacao(f) ? 'bg-background' : 'bg-transparent cursor-default',
-                        { 'border-destructive ring-1 ring-destructive': estourouCustoTotal(acc, f.key) },
+                        anotacaoTravada(acc, f) ? 'bg-transparent cursor-default' : 'bg-background',
+                        {
+                          'text-muted-foreground': calculadoPelaMargemMinima(acc, f),
+                          'border-destructive ring-1 ring-destructive': estourouCustoTotal(acc, f.key) || avisoNoCampo(acc, f),
+                        },
                       ]"
-                      :title="f.soAdmin && !podeEditarAnotacao(f) ? 'Só o administrador muda o Custo total' : f.titulo"
+                      :title="tituloAnotacao(acc, f)"
                       :data-campo="`conta-${f.key}`"
                       @blur="gravarAnotacao(acc, f, $event)"
                       @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
@@ -6471,6 +6561,20 @@ watch(department, async () => {
                       class="shrink-0 text-muted-foreground hover:text-foreground"
                       title="Fechar o aviso"
                       @click="erroCustoTotal = null"
+                    ><X class="h-3 w-3" /></button>
+                  </div>
+                  <div
+                    v-else-if="avisoAberto(acc, f)"
+                    class="absolute left-0 top-full z-20 mt-0.5 flex w-60 items-start gap-1 rounded border border-destructive/50 bg-background px-2 py-1 text-left text-[11px] leading-snug text-destructive shadow-md"
+                    role="alert"
+                    data-aviso-custo-total-abaixo
+                  >
+                    <span class="flex-1">{{ avisoAberto(acc, f) }}</span>
+                    <button
+                      type="button"
+                      class="shrink-0 text-muted-foreground hover:text-foreground"
+                      title="Fechar o aviso (a borda vermelha fica até corrigir)"
+                      @click="fecharAvisoCustoTotal(acc)"
                     ><X class="h-3 w-3" /></button>
                   </div>
                 </td>

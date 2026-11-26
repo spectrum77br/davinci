@@ -149,9 +149,11 @@ class PricingAccount(Base, TimestampMixin):
     # (vazio = sem teto). Só o administrador grava; todos veem. Fora do preço.
     custo_total_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     # M-85 (26/11/2026, migration 0519): Margem mínima (%) da conta, em % como o
-    # Custo total (25 = 25%). Só o administrador vê e grava. Não é a "Margem
-    # Mín" da categoria de venda nem a do produto (essas seguram pedido na
-    # Margem); fora do cálculo do preço.
+    # Custo total (25 = 25%). Só o administrador vê e grava. M-86: preenchida, o
+    # Custo total acima deixa de ser digitado e é calculado e gravado pelo
+    # servidor (services/pricing/custo_total.custo_total_pela_margem_minima).
+    # Não é a "Margem Mín" da categoria de venda nem a do produto (essas
+    # seguram pedido na Margem); fora do cálculo do preço.
     margem_minima_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     # M-53 (migration 0511): o Clássico e o Premium da mesma conta ML de kit
     # têm o mesmo `par_id` (nas outras linhas NULL). A aba Contas mostra o par

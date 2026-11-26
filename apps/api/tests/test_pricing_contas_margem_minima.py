@@ -1,8 +1,16 @@
-"""Aba Contas: Margem mínima % da conta (M-85) — migration 0519.
+"""Aba Contas: Margem mínima % da conta (M-85) e o Custo total calculado por ela
+(M-86) — migration 0519.
 
 - M-85: um valor por conta (0 a 100, 2 casas, vazio pode). Só o ADM vê e grava:
   quem não é ADM recebe null (lista, grade, resposta de uma conta) e o PATCH com
   ela é recusado. No par do ML vale nas duas linhas; o Catálogo mostra a da base.
+- M-86: preenchida, o Custo total = (m − r) × (1 − k) ÷ (1 + m) × 100, inteiro
+  para baixo, nunca menor que 0 (m = menor marg das categorias de venda ativas;
+  r = Margem mínima; k = comissão, no par a maior). Gravado no custo_total_pct
+  e recalculado quando muda a Margem mínima, uma marg, a comissão, o centro de
+  custo ou as categorias ativas. Custo total digitado → 409. Abaixo de Afiliado
+  + Desconto + Ads já gravados: grava mesmo assim (a tela avisa); a trava do
+  M-56 continua para quem mexe em Afiliado, Desconto ou Ads.
 Contas FABRICADAS no schema de teste.
 """
 
@@ -10,6 +18,7 @@ Contas FABRICADAS no schema de teste.
 from __future__ import annotations
 
 import importlib.util
+import math
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -33,6 +42,7 @@ from app.models import (
     Segment,
     UserRole,
 )
+from app.services.pricing.custo_total import calcular_custo_total
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,7 +61,47 @@ CLASSICO, PREMIUM = "ml classico", "ml premium"
 D = Decimal
 
 
-# =========================================================== histórico
+# =========================================================== a fórmula
+
+
+@pytest.mark.parametrize(
+    ("nome", "margens", "comissoes", "esperado"),
+    [
+        # Os exemplos do pedido (Margem mínima 25).
+        ("Shopee aguiar", ["0.549", "0.356", "0.356", "0.356"], ["0.14"], "6"),
+        ("ML atlas", ["0.55", "0.352", "0.352", "0.356"], ["0.11", "0.16"], "6"),
+        ("Amazon atlas", ["0.65", "0.425", "0.425", "0.425"], ["0.14"], "10"),
+        ("Magalu vortan", ["0.75", "0.45", "0.45", "0.45"], ["0.19"], "11"),
+        # Menor marg igual ou abaixo da mínima → 0 (nunca negativo).
+        ("menor marg = mínima", ["0.60", "0.25"], ["0.14"], "0"),
+        ("menor marg < mínima", ["0.60", "0.098"], ["0.14"], "0"),
+        # Vazias não contam; sem nenhuma (ou sem comissão) não calcula.
+        ("com vazias", [None, "0.356", None], ["0.14"], "6"),
+        ("sem marg", [None, None], ["0.14"], None),
+        ("sem comissão", ["0.356"], [None, None], None),
+        ("par com uma comissão vazia", ["0.352"], [None, "0.16"], "6"),
+    ],
+)
+def test_formula_exemplos(nome, margens, comissoes, esperado):
+    valor = calcular_custo_total(
+        [D(m) if m else None for m in margens], D("25"), [D(k) if k else None for k in comissoes]
+    )
+    assert valor == (D(esperado) if esperado is not None else None), nome
+
+
+def test_formula_arredonda_para_baixo_sem_erro_de_ponto_flutuante():
+    # (0,30 − 0,20) × (1 − 0,22) ÷ 1,30 × 100 = 6 certinho; em float dá
+    # 5,999…98 e o "para baixo" erraria para 5.
+    assert math.floor((0.30 - 0.20) * (1 - 0.22) / (1 + 0.30) * 100) == 5
+    assert calcular_custo_total([D("0.30")], D("20"), [D("0.22")]) == D("6")
+    # m = 100%, k = 0: (1 − r) ÷ 2 × 100. r = 88% → 6 exato; um nada acima de 6
+    # fica 6; um nada abaixo, 5.
+    assert calcular_custo_total([D("1")], D("88"), [D("0")]) == D("6")
+    assert calcular_custo_total([D("1")], D("87.9999998"), [D("0")]) == D("6")  # 6,0000001
+    assert calcular_custo_total([D("1")], D("88.0000002"), [D("0")]) == D("5")  # 5,9999999
+    # Sempre inteiro, de 0 a 100.
+    assert calcular_custo_total([D("99.9999")], D("0"), [D("0")]) == D("99")
+    assert calcular_custo_total([D("0.5")], D("10"), [D("1")]) == D("0")
 
 
 def test_historico_tem_o_nome_da_margem_minima():
@@ -136,9 +186,82 @@ def _margens(*valores: str) -> dict[str, Decimal]:
 
 
 AGUIAR = _margens("0.549", "0.356", "0.356", "0.356")
+ATLAS_ML = _margens("0.55", "0.352", "0.352", "0.356")
 
 
-# =========================================================== M-85 na API
+# =========================================================== M-85 + M-86 na API
+
+
+async def test_margem_minima_calcula_e_grava_o_custo_total(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    conta = await _conta(db, cena, "aguiar", commission=D("0.14"), **AGUIAR)
+    url = f"/api/pricing/accounts/{conta.id}"
+    auth_as(cena.admin)
+    # Vazia: o Custo total é digitado como hoje.
+    r = await client.patch(url, json={"custo_total_pct": 15})
+    assert r.status_code == 200, r.text
+    assert r.json()["margem_minima_pct"] is None
+
+    r = await client.patch(url, json={"margem_minima_pct": 25})
+    assert r.status_code == 200, r.text
+    assert (D(r.json()["margem_minima_pct"]), D(r.json()["custo_total_pct"])) == (D("25"), D("6"))
+    linha = await _ler(db, conta.id)
+    assert (linha.margem_minima_pct, linha.custo_total_pct) == (D("25.00"), D("6.00"))
+
+    # Preenchida: o Custo total não se digita (409, nada muda) — nem com outro
+    # campo junto.
+    for corpo in ({"custo_total_pct": 8}, {"custo_total_pct": None, "afiliado_pct": 1}):
+        r = await client.patch(url, json=corpo)
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "custo_total_calculado"
+    linha = await _ler(db, conta.id)
+    assert (linha.custo_total_pct, linha.afiliado_pct) == (D("6.00"), None)
+
+    # Muda a marg dos grupos → recalcula: menor marg 45% → (0,45 − 0,25) ×
+    # 0,86 ÷ 1,45 × 100 = 11,86 → 11.
+    r = await client.patch(url, json={"margin2": "0.45", "margin3": "0.45", "margin4": "0.45"})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("11")
+    # Muda a comissão → recalcula: 30% → 0,2 × 0,7 ÷ 1,45 × 100 = 9,65 → 9.
+    r = await client.patch(url, json={"commission": "0.30"})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("9")
+    # Muda a Margem mínima → recalcula: 40% → 0,05 × 0,7 ÷ 1,45 × 100 = 2,41 → 2.
+    r = await client.patch(url, json={"margem_minima_pct": 40})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("2")
+    # Mínima acima da menor marg → 0.
+    r = await client.patch(url, json={"margem_minima_pct": 50})
+    assert D(r.json()["custo_total_pct"]) == D("0")
+    # Apagar uma marg que não é a menor não muda; apagar todas → vazio (sem teto).
+    r = await client.patch(url, json={"margem_minima_pct": 25, "margin1": None})
+    assert D(r.json()["custo_total_pct"]) == D("9")
+    r = await client.patch(
+        url, json={"margin2": None, "margin3": None, "margin4": None}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["custo_total_pct"] is None
+    assert (await _ler(db, conta.id)).custo_total_pct is None
+
+    # Apagar a Margem mínima: o Custo total fica com o último valor e volta a
+    # ser digitado. (marg 60% → 0,35 × 0,7 ÷ 1,6 × 100 = 15,3 → 15.)
+    r = await client.patch(url, json={"margin1": "0.6"})
+    assert D(r.json()["custo_total_pct"]) == D("15")
+    r = await client.patch(url, json={"margem_minima_pct": None})
+    assert r.status_code == 200, r.text
+    assert (r.json()["margem_minima_pct"], D(r.json()["custo_total_pct"])) == (None, D("15"))
+    r = await client.patch(url, json={"custo_total_pct": 12.5})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("12.5")
+    # Mudar a marg sem Margem mínima não mexe no Custo total digitado.
+    r = await client.patch(url, json={"margin1": "0.2"})
+    assert D(r.json()["custo_total_pct"]) == D("12.5")
+    # Apagar a Margem mínima e digitar o Custo total no mesmo pedido: vale.
+    assert (await client.patch(url, json={"margem_minima_pct": 10})).status_code == 200
+    r = await client.patch(url, json={"margem_minima_pct": None, "custo_total_pct": 7})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("7")
 
 
 async def test_margem_minima_2_casas_de_0_a_100_e_banco_segura(
@@ -169,11 +292,12 @@ async def test_so_o_admin_ve_e_grava_a_margem_minima(
     assert (await client.patch(url, json={"margem_minima_pct": 25})).status_code == 200
 
     auth_as(cena.vendedor)
-    # Não vem em lugar nenhum.
+    # Não vem em lugar nenhum; o Custo total (calculado) continua indo.
     r = await client.get("/api/pricing/accounts", params={"department": "celular"})
     assert r.status_code == 200, r.text
     (vista,) = r.json()
     assert vista["margem_minima_pct"] is None
+    assert D(vista["custo_total_pct"]) == D("6")
     r = await client.get("/api/pricing/grid", params={"department": "celular"})
     assert r.status_code == 200, r.text
     assert [a["margem_minima_pct"] for a in r.json()["accounts"]] == [None]
@@ -196,7 +320,11 @@ async def test_so_o_admin_ve_e_grava_a_margem_minima(
     )
     assert r.status_code == 403, r.text
     linha = await _ler(db, conta.id)
-    assert (linha.margem_minima_pct, linha.observation) == (D("25.00"), "ok")
+    assert (linha.margem_minima_pct, linha.custo_total_pct, linha.observation) == (
+        D("25.00"),
+        D("6.00"),
+        "ok",
+    )
 
     # O ADM recebe.
     auth_as(cena.admin)
@@ -204,7 +332,7 @@ async def test_so_o_admin_ve_e_grava_a_margem_minima(
     assert D(r.json()[0]["margem_minima_pct"]) == D("25")
 
 
-async def test_par_do_ml_grava_nas_duas_e_o_catalogo_segue_a_base(
+async def test_par_do_ml_usa_a_maior_comissao_e_grava_nas_duas_e_o_catalogo_segue_a_base(
     db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
 ):
     auth_as(cena.admin)
@@ -215,33 +343,272 @@ async def test_par_do_ml_grava_nas_duas_e_o_catalogo_segue_a_base(
     assert r.status_code == 201, r.text
     classico_id, par_id = r.json()["id"], r.json()["par_id"]
     url = f"/api/pricing/accounts/{classico_id}"
+    # Margens do par (as duas linhas) e a Margem mínima: Clássico 11%, Premium
+    # 16% → usa 16% → (0,352 − 0,25) × 0,84 ÷ 1,352 × 100 = 6,34 → 6.
+    r = await client.patch(url, json={k: str(v) for k, v in ATLAS_ML.items()})
+    assert r.status_code == 200, r.text
     r = await client.patch(url, json={"margem_minima_pct": 25})
     assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("6")
     par = await _par(db, uuid.UUID(par_id))
-    assert {linha.margem_minima_pct for linha in par.values()} == {D("25.00")}
-    # Pela linha do Premium também grava nas duas.
-    r = await client.patch(
-        f"/api/pricing/accounts/{par[PREMIUM].id}", json={"margem_minima_pct": 20.5}
-    )
+    for linha in par.values():
+        assert (linha.margem_minima_pct, linha.custo_total_pct) == (D("25.00"), D("6.00"))
+
+    # A janela da comissão (as duas linhas): Premium 30% → 0,102 × 0,7 ÷ 1,352
+    # × 100 = 5,28 → 5 nas duas.
+    r = await client.put(f"{url}/comissao-ml", json={"classico": 0.11, "premium": 0.30})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["classico"]["custo_total_pct"]) == D("5")
+    assert D(r.json()["premium"]["custo_total_pct"]) == D("5")
+    # A maior vale mesmo sendo a do Clássico.
+    r = await client.put(f"{url}/comissao-ml", json={"classico": 0.16, "premium": 0.11})
     assert r.status_code == 200, r.text
     par = await _par(db, uuid.UUID(par_id))
-    assert {linha.margem_minima_pct for linha in par.values()} == {D("20.50")}
+    assert {linha.custo_total_pct for linha in par.values()} == {D("6.00")}
+    # PATCH de marg pela linha do Premium também grava nas duas.
+    r = await client.patch(f"/api/pricing/accounts/{par[PREMIUM].id}", json={"margin2": "0.30"})
+    assert r.status_code == 200, r.text
+    par = await _par(db, uuid.UUID(par_id))
+    # (0,30 − 0,25) × 0,84 ÷ 1,30 × 100 = 3,23 → 3.
+    assert {linha.custo_total_pct for linha in par.values()} == {D("3.00")}
+    assert {linha.margin2 for linha in par.values()} == {D("0.3000")}
+    # Custo total digitado pela outra linha: 409 também.
+    r = await client.patch(f"/api/pricing/accounts/{par[PREMIUM].id}", json={"custo_total_pct": 9})
+    assert r.status_code == 409, r.text
 
-    # Catálogo: mostra a Margem mínima da base e não se edita.
+    # Catálogo: mostra a Margem mínima e o Custo total da base e não se edita.
     r = await client.post(f"{url}/catalogo", json={"ativo": True})
     assert r.status_code == 200, r.text
     filha_id = r.json()["conta_catalogo"]["id"]
-    assert D(r.json()["conta_catalogo"]["margem_minima_pct"]) == D("20.5")
+    assert D(r.json()["conta_catalogo"]["margem_minima_pct"]) == D("25")
+    # Margem própria do catálogo não entra: o Custo total é o da conta.
+    r = await client.patch(f"/api/pricing/accounts/{filha_id}", json={"margin2": "0.10"})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("3")
     r = await client.patch(f"/api/pricing/accounts/{filha_id}", json={"margem_minima_pct": 10})
     assert r.status_code == 409, r.text
     r = await client.get("/api/pricing/accounts", params={"department": "celular"})
     contas = {c["id"]: c for c in r.json()}
-    assert D(contas[filha_id]["margem_minima_pct"]) == D("20.5")
+    assert D(contas[filha_id]["margem_minima_pct"]) == D("25")
+    assert D(contas[filha_id]["custo_total_pct"]) == D("3")
     # Quem não é ADM: a filha também sai sem a Margem mínima.
     auth_as(cena.vendedor)
     r = await client.get("/api/pricing/accounts", params={"department": "celular"})
     contas = {c["id"]: c for c in r.json()}
     assert contas[filha_id]["margem_minima_pct"] is None
+    assert D(contas[filha_id]["custo_total_pct"]) == D("3")
+
+
+async def test_custo_total_abaixo_da_soma_grava_e_a_trava_continua(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Item 7 da M-86: Afiliado 4 + Desconto 2 + Ads 3 = 9 com Custo total 10.
+    A Margem mínima 25 dá 6 (< 9): grava mesmo assim (quem mexe na Margem
+    mínima, na marg ou na comissão não é barrado). A trava do M-56 continua
+    para quem mexe em Afiliado, Desconto ou Ads, com o 6."""
+    conta = await _conta(db, cena, "aguiar", commission=D("0.14"), **AGUIAR)
+    url = f"/api/pricing/accounts/{conta.id}"
+    ads = f"/api/pricing/ads/{conta.id}"
+    auth_as(cena.admin)
+    assert (await client.patch(url, json={"custo_total_pct": 10})).status_code == 200
+    assert (await client.patch(url, json={"afiliado_pct": 4, "desconto_pct": 2})).status_code == 200
+    assert (await client.put(ads, json={"pode_gastar_pct": 3})).status_code == 200
+
+    r = await client.patch(url, json={"margem_minima_pct": 25})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("6")
+    # Marg e comissão também gravam abaixo da soma.
+    r = await client.patch(url, json={"margin2": "0.30"})
+    assert r.status_code == 200, r.text
+    # (0,30 − 0,25) × 0,86 ÷ 1,30 × 100 = 3,3 → 3.
+    assert D(r.json()["custo_total_pct"]) == D("3")
+    r = await client.patch(url, json={"commission": "0.10", "margin2": "0.356"})
+    assert r.status_code == 200, r.text
+    # (0,106 × 0,9 ÷ 1,356) = 7,03 → 7.
+    assert D(r.json()["custo_total_pct"]) == D("7")
+    linha = await _ler(db, conta.id)
+    assert (linha.afiliado_pct, linha.desconto_pct, linha.custo_total_pct) == (
+        D("4.00"),
+        D("2.00"),
+        D("7.00"),
+    )
+
+    # Afiliado/Desconto/Ads: a trava usa o 7 calculado.
+    r = await client.patch(url, json={"afiliado_pct": 3})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["mensagem"] == (
+        "Afiliado 3% + Desconto 2% + Ads 3% = 8%. Passa do Custo total (7%). Não gravado."
+    )
+    r = await client.put(ads, json={"pode_gastar_pct": 2.5})
+    assert r.status_code == 422, r.text
+    # Corrigir para caber: aceito.
+    r = await client.patch(url, json={"afiliado_pct": 2})
+    assert r.status_code == 200, r.text
+    assert (await client.put(ads, json={"pode_gastar_pct": 2})).status_code == 200
+    r = await client.put(ads, json={"pode_gastar_pct": 3.5})
+    assert r.status_code == 422, r.text
+    # Margem mínima junto com o Afiliado no mesmo pedido: a trava usa o Custo
+    # total novo (15 → 0,106 × 0,9 ÷ 1,356... com mínima 15: 0,206 × 0,9 ÷ 1,356
+    # × 100 = 13,67 → 13).
+    r = await client.patch(url, json={"margem_minima_pct": 15, "afiliado_pct": 9})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("13")
+    r = await client.patch(url, json={"margem_minima_pct": 25, "afiliado_pct": 9})
+    assert r.status_code == 422, r.text
+    linha = await _ler(db, conta.id)
+    assert (linha.margem_minima_pct, linha.afiliado_pct, linha.custo_total_pct) == (
+        D("15.00"),
+        D("9.00"),
+        D("13.00"),
+    )
+
+
+async def test_so_as_categorias_ativas_contam_e_mudar_a_categoria_recalcula(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    auth_as(cena.admin)
+    # Mala: a marg 5 (5%, da "Queima de estoque" desativada) não aparece na aba
+    # e não entra: menor marg 40% → 0,15 × 0,86 ÷ 1,4 × 100 = 9,2 → 9.
+    mala = await _conta(
+        db,
+        cena,
+        "kfa",
+        dept="mala",
+        commission=D("0.14"),
+        **_margens("0.52", "0.40", "0.40", "0.40", "0.05"),
+    )
+    r = await client.patch(f"/api/pricing/accounts/{mala.id}", json={"margem_minima_pct": 25})
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("9")
+    # Celular: a Apple (5ª, ativa) com 9,8% entra → 0.
+    cel = await _conta(
+        db,
+        cena,
+        "atlas",
+        commission=D("0.14"),
+        **_margens("0.439", "0.351", "0.351", "0.351", "0.098"),
+    )
+    r = await client.patch(f"/api/pricing/accounts/{cel.id}", json={"margem_minima_pct": 25})
+    assert D(r.json()["custo_total_pct"]) == D("0")
+    # Sem Margem mínima: não é recalculado por nada.
+    outra = await _conta(db, cena, "sem", commission=D("0.14"), custo_total_pct=D("8"), **AGUIAR)
+
+    # Desativar a Apple (Cadastros › Segmentos) recalcula as contas do Celular:
+    # menor marg 35,1% → 0,101 × 0,86 ÷ 1,351 × 100 = 6,4 → 6.
+    apple = cena.folhas["celular"][4]
+    r = await client.patch(f"/api/segments/{apple.id}", json={"active": False})
+    assert r.status_code == 200, r.text
+    assert (await _ler(db, cel.id)).custo_total_pct == D("6.00")
+    assert (await _ler(db, outra.id)).custo_total_pct == D("8.00")
+    # Reativar volta a 0.
+    r = await client.patch(f"/api/segments/{apple.id}", json={"active": True})
+    assert r.status_code == 200, r.text
+    assert (await _ler(db, cel.id)).custo_total_pct == D("0.00")
+    # A Mala não mudou.
+    assert (await _ler(db, mala.id)).custo_total_pct == D("9.00")
+
+
+async def test_criar_e_excluir_categoria_de_venda_recalcula(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    """Cadastros › Segmentos: a categoria nova entra no fim do centro (uma
+    coluna "marg" a mais na aba Contas) e a excluída sai — o Custo total das
+    contas com Margem mínima acompanha."""
+    auth_as(cena.admin)
+    eletro = Segment(name="Eletro", slug="eletro", sort_order=9)
+    db.add(eletro)
+    await db.flush()
+    for n in range(3):
+        db.add(Segment(name=str(n + 1), slug=f"eletro-{n + 1}", sort_order=n, parent_id=eletro.id))
+    await db.commit()
+    # A marg 4 (5%) está gravada, mas o Eletro só tem 3 categorias: não entra.
+    conta = PricingAccount(
+        user_id=cena.admin.id,
+        name="vortan",
+        platform=PricingPlatform.AMAZON,
+        segment_id=eletro.id,
+        commission=D("0.14"),
+        **_margens("0.55", "0.55", "0.55", "0.05"),
+    )
+    db.add(conta)
+    await db.commit()
+    r = await client.patch(f"/api/pricing/accounts/{conta.id}", json={"margem_minima_pct": 25})
+    # (0,55 − 0,25) × 0,86 ÷ 1,55 × 100 = 16,6 → 16.
+    assert D(r.json()["custo_total_pct"]) == D("16")
+
+    r = await client.post("/api/segments", json={"name": "4", "parent_id": str(eletro.id)})
+    assert r.status_code == 201, r.text
+    nova = r.json()["id"]
+    assert (await _ler(db, conta.id)).custo_total_pct == D("0.00"), "a marg 4 (5%) passa a valer"
+    r = await client.delete(f"/api/segments/{nova}")
+    assert r.status_code == 204, r.text
+    assert (await _ler(db, conta.id)).custo_total_pct == D("16.00")
+
+
+async def test_conta_nova_e_troca_de_centro_de_custo(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable, cena
+):
+    auth_as(cena.admin)
+    # Conta nova com a Margem mínima: calcula já (Shopee sem marg → vazio).
+    r = await client.post(
+        "/api/pricing/accounts",
+        json={
+            "name": "nova",
+            "platform": "shopee",
+            "department": "celular",
+            "commission": "0.14",
+            "margin2": "0.356",
+            "margem_minima_pct": 25,
+            "afiliado_pct": 9,
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert D(r.json()["custo_total_pct"]) == D("6")
+    r = await client.post(
+        "/api/pricing/accounts",
+        json={
+            "name": "outra",
+            "platform": "shopee",
+            "department": "celular",
+            "margem_minima_pct": 25,
+            "custo_total_pct": 6,
+        },
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "custo_total_calculado"
+    # ML: nasce com as comissões usuais (11% e 16%) e a maior entra.
+    r = await client.post(
+        "/api/pricing/accounts",
+        json={
+            "name": "ml",
+            "platform": "mercadolivre",
+            "department": "celular",
+            "margin1": "0.352",
+            "margem_minima_pct": 25,
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert D(r.json()["custo_total_pct"]) == D("6")
+
+    # Trocar de centro de custo: na Mala só as 4 ativas contam.
+    conta = await _conta(
+        db,
+        cena,
+        "kfa",
+        commission=D("0.14"),
+        margem_minima_pct=D("25"),
+        **_margens("0.52", "0.40", "0.40", "0.40", "0.05"),
+    )
+    r = await client.post(
+        f"/api/pricing/accounts/{conta.id}/department", json={"department": "mala"}
+    )
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("9")
+    r = await client.patch(
+        f"/api/pricing/accounts/{conta.id}", json={"department": "celular"}
+    )
+    assert r.status_code == 200, r.text
+    assert D(r.json()["custo_total_pct"]) == D("0")
 
 
 # =========================================================== migration 0519

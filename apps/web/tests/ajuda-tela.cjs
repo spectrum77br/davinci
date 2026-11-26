@@ -306,9 +306,10 @@ async function principal() {
       'nome, plataforma ou e-mail', 'busca e filtros', 'só com as colunas à mostra', 'não troca vínculo que já existe',
       'já nasce com Clássico e Premium', 'Atualizar › Conferir', 'não mudam o preço da Tabela', 'permissão de editar Contas',
       'fica lembrado neste navegador',
-      // M-85 (26/11/2026): a Margem mínima da conta.
+      // M-85/M-86 (26/11/2026): a Margem mínima da conta e o Custo total calculado por ela.
       'só o administrador vê e muda', 'diferente da \\"Margem Mín\\" da categoria de venda e da do produto',
-      'seguram o pedido na Margem', 'esta define o Custo total']) {
+      'seguram o pedido na Margem', 'esta define o Custo total', 'arredondado para baixo', 'Frete não entra',
+      'Shopee aguiar', 'Custo total 6%', 'é calculado e não se digita', 'borda vermelha até alguém corrigir']) {
       assert.ok(tudoC.includes(trecho), `o texto da aba Contas fala de: ${trecho}`)
     }
     // O SFC inteiro continua compilando.

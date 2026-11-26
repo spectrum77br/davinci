@@ -20,6 +20,7 @@ from app.schemas.segments import (
     _slugify,
 )
 from app.services import categorias_venda, centros_custo
+from app.services.pricing.custo_total import recalcular_contas_da_raiz
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/segments", tags=["segments"])
@@ -125,6 +126,9 @@ async def create_segment(
             # M-75: as contas do centro com o slot{N} vazio passam a apontar
             # para ela, na mesma transação (frete "Projetado" da Margem).
             await categorias_venda.preencher_slots(session, raiz, seg)
+            # M-86: uma coluna "marg" a mais na aba Contas → o Custo total das
+            # contas do centro com Margem mínima é recalculado.
+            await recalcular_contas_da_raiz(session, raiz.id)
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
@@ -204,10 +208,15 @@ async def patch_segment(
     if data.get("active") is not None and data["active"] != seg.active and raiz is not None:
         await categorias_venda.conferir_ativacao(session, seg, raiz, data["active"])
 
+    muda_ativa = data.get("active") is not None and data["active"] != seg.active
     for k, v in data.items():
         setattr(seg, k, v)
 
     try:
+        if muda_ativa and raiz is not None:
+            # M-86: a coluna "marg" da categoria entra ou sai da aba Contas →
+            # recalcula o Custo total das contas do centro com Margem mínima.
+            await recalcular_contas_da_raiz(session, raiz.id)
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
@@ -262,6 +271,8 @@ async def delete_segment(
     raiz = await categorias_venda.raiz_de(session, seg)
     if raiz is not None:
         await categorias_venda.excluir(session, seg, raiz)
+        # M-86: a coluna "marg" dela sai da aba Contas (ver o create).
+        await recalcular_contas_da_raiz(session, raiz.id)
     else:
         await session.delete(seg)
     await session.commit()

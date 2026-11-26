@@ -112,7 +112,15 @@ from app.services.pricing.anuncios import (
 from app.services.pricing.audit import scan_missing_skus
 from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.competitor import search_competitors
-from app.services.pricing.custo_total import EstadoAds, estado_ads, estouro
+from app.services.pricing.custo_total import (
+    CAMPOS_DA_MARGEM_MINIMA,
+    EstadoAds,
+    custo_total_pela_margem_minima,
+    estado_ads,
+    estouro,
+    recalcular,
+    valores_finais,
+)
 from app.services.pricing.push import (
     bases_com_catalogo_ligado,
     integracoes_com_marca_lida,
@@ -264,7 +272,7 @@ _CAMPOS_HERDADOS_DA_BASE = (
     "discount", "affiliate", "ads", "coupon", "offer",
     "desconto_ate", "cupom_ate", "afiliado_pct", "oferta_limite_pct",
     "desconto_pct", "custo_total_pct",
-    # M-85: a Margem mínima também é a da base.
+    # M-85: a Margem mínima também é a da base (o Custo total calculado dela, M-86, idem).
     "margem_minima_pct",
     "observation", "observation2", "observation3",
 )
@@ -346,7 +354,8 @@ _CAMPOS_DO_PAR = (
     "afiliado_pct",
     "desconto_pct",
     "custo_total_pct",
-    # M-85: um valor por conta.
+    # M-85: um valor por conta (o Custo total calculado dela, M-86, é o mesmo
+    # nas duas: a margem é a mesma e a comissão usada é a maior das duas).
     "margem_minima_pct",
     "desconto_ate",
     "cupom_ate",
@@ -708,6 +717,58 @@ def _recusar_custo_total_estourado(
 _CAMPOS_DO_CUSTO_TOTAL = frozenset({"afiliado_pct", "desconto_pct", "custo_total_pct"})
 
 
+def _recusar_custo_total_digitado(conta: PricingAccount | None, data: dict) -> None:
+    """M-86: com a Margem mínima preenchida (a que FICARIA gravada), o Custo
+    total é calculado pelo servidor e não se digita: 409 `custo_total_calculado`
+    e nada é gravado. Apagar a Margem mínima no mesmo pedido libera."""
+    if "custo_total_pct" not in data:
+        return
+    if "margem_minima_pct" in data:
+        margem = data["margem_minima_pct"]
+    else:
+        margem = conta.margem_minima_pct if conta is not None else None
+    if margem is not None:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "custo_total_calculado",
+                "message": (
+                    "O Custo total desta conta é calculado pela Margem mínima: apague a "
+                    "Margem mínima para digitar"
+                ),
+            },
+        )
+
+
+async def _custo_total_da_margem_minima(
+    session: AsyncSession,
+    row: PricingAccount,
+    data: dict,
+    irma: PricingAccount | None,
+    dados_irma: dict,
+) -> None:
+    """M-86: o PATCH mexe na Margem mínima, numa margem, na comissão ou no
+    centro de custo de uma conta com a Margem mínima (que FICARIA gravada)
+    preenchida: o Custo total recalculado entra no que vai ser gravado, na
+    linha e, no par do ML, na irmã (o mesmo valor: a menor margem e a maior
+    comissão das duas). Margem mínima vazia: nada muda aqui."""
+    final = valores_finais(row, data)
+    if final.margem_minima_pct is None:
+        return
+    linhas = [final] if irma is None else [final, valores_finais(irma, dados_irma)]
+    valor = await custo_total_pela_margem_minima(session, linhas)
+    data["custo_total_pct"] = valor
+    if irma is not None:
+        dados_irma["custo_total_pct"] = valor
+    logger.info(
+        "pricing.custo_total_calculado",
+        account_id=str(row.id),
+        par_id=str(row.par_id) if row.par_id else None,
+        margem_minima_pct=str(final.margem_minima_pct),
+        custo_total_pct=str(valor) if valor is not None else None,
+    )
+
+
 async def _ligar_ou_desligar_catalogo(
     session: AsyncSession, user: User, base: PricingAccount, ativo: bool
 ) -> PricingAccount | None:
@@ -1004,12 +1065,19 @@ async def create_account(
         slots = await _default_slot_segments(session, data["segment_id"])
         for n in (1, 2, 3, 4, 5):
             data[f"slot{n}_segment_id"] = slots[n - 1]
-    # M-56: conta nova não tem Ads; a soma é Afiliado + Desconto.
-    mensagem = estouro(
-        data.get("afiliado_pct"), data.get("desconto_pct"), Decimal(0), data.get("custo_total_pct")
-    )
-    if mensagem:
-        raise _erro_custo_total(mensagem)
+    # M-86: com a Margem mínima, o Custo total é calculado (não vem no corpo) e
+    # a trava do M-56 não segura a conta nova (a tela mostra o aviso).
+    _recusar_custo_total_digitado(None, body.model_dump(exclude_unset=True))
+    if data.get("margem_minima_pct") is None:
+        # M-56: conta nova não tem Ads; a soma é Afiliado + Desconto.
+        mensagem = estouro(
+            data.get("afiliado_pct"),
+            data.get("desconto_pct"),
+            Decimal(0),
+            data.get("custo_total_pct"),
+        )
+        if mensagem:
+            raise _erro_custo_total(mensagem)
     if data["platform"] == PricingPlatform.ML:
         # M-53: a conta ML nasce com o Clássico e o Premium (mesmo par_id), com
         # a comissão usual da categoria; `listing_type` e `commission` do corpo
@@ -1024,6 +1092,9 @@ async def create_account(
         if body.password:
             linha.password_enc = encrypt(body.password)
         session.add(linha)
+    # M-86: Margem mínima já na criação → o Custo total sai dela (no ML, com a
+    # maior das duas comissões usuais).
+    await recalcular(session, linhas)
     await session.commit()
     await session.refresh(row)
     if row.par_id is not None:
@@ -1072,9 +1143,18 @@ async def patch_account(
     # re-deriva os próprios slots se mudou de aba.
     irma = await _irma_de(session, row)
     dados_irma = {k: v for k, v in data.items() if k in _CAMPOS_DO_PAR}
-    # M-56: Afiliado + Desconto + Ads não passa do Custo total (valores novos;
-    # nas duas linhas do par). Recusa antes de gravar qualquer coisa.
-    if data.keys() & _CAMPOS_DO_CUSTO_TOTAL:
+    # M-86: Custo total digitado com a Margem mínima preenchida → 409; mexeu no
+    # que entra no cálculo → o Custo total recalculado vai junto (linha e irmã).
+    pedidos = set(data)
+    _recusar_custo_total_digitado(row, data)
+    if pedidos & CAMPOS_DA_MARGEM_MINIMA:
+        await _custo_total_da_margem_minima(session, row, data, irma, dados_irma)
+    # M-56: Afiliado + Desconto + Ads não passa do Custo total (valores novos,
+    # com o Custo total recalculado acima; nas duas linhas do par). Recusa antes
+    # de gravar qualquer coisa. Só segura quem mexeu em Afiliado, Desconto ou no
+    # Custo total: o recálculo pela Margem mínima, margem ou comissão grava
+    # mesmo abaixo da soma (M-86; a tela mostra o aviso).
+    if pedidos & _CAMPOS_DO_CUSTO_TOTAL:
         _recusar_custo_total_estourado(row, await estado_ads(session, row.id), data)
         if irma is not None:
             _recusar_custo_total_estourado(irma, await estado_ads(session, irma.id), dados_irma)
@@ -2829,9 +2909,12 @@ async def set_account_department(
     _recusar_edicao_da_filha(row)
     # M-53: o par muda de aba junto.
     irma = await _irma_de(session, row)
-    for conta in (row, irma) if irma is not None else (row,):
+    linhas = [row] if irma is None else [row, irma]
+    for conta in linhas:
         conta.segment_id = sid
         await _sincronizar_filha(session, conta)
+    # M-86: outro centro de custo, outras categorias de venda.
+    await recalcular(session, linhas)
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
@@ -2876,6 +2959,10 @@ async def gravar_comissao_ml(
         )
     classico.commission = body.classico
     premium.commission = body.premium
+    # M-86: a maior das duas entra no Custo total calculado pela Margem mínima
+    # (gravado nas duas; não é recusado se ficar abaixo de Afiliado + Desconto
+    # + Ads — a tela avisa).
+    await recalcular(session, [classico, premium])
     await session.commit()
     await session.refresh(classico)
     await session.refresh(premium)

@@ -82,7 +82,8 @@ class PricingAccountBase(BaseModel):
     # M-55/M-56 (25/11/2026): Desconto % e Custo total % (este só o ADM grava).
     desconto_pct: PctConta | None = None
     custo_total_pct: PctConta | None = None
-    # M-85 (26/11/2026): Margem mínima % (25 = 25%), só o ADM vê e grava.
+    # M-85 (26/11/2026): Margem mínima % (25 = 25%), só o ADM vê e grava. M-86:
+    # preenchida, o Custo total é calculado pelo servidor (não se digita).
     margem_minima_pct: PctConta | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None

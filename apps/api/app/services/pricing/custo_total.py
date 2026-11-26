@@ -24,21 +24,54 @@ não mostra nem deixa apagar, e não pode travar a conta (revisão da M-56).
 A trava fica no servidor, em toda gravação que mexe na soma (PATCH da conta,
 PUT do Ads da conta e PUT do Ads de produto), sempre com o estado que FICARIA
 gravado; se estoura, nada é gravado (422 `custo_total_estourado`).
+
+M-86 (26/11/2026): com a Margem mínima da conta preenchida (M-85,
+`margem_minima_pct`, só o administrador vê), o Custo total deixa de ser
+digitado e é CALCULADO pelo caso mais apertado:
+
+    Custo total (%) = (m − r) × (1 − k) ÷ (1 + m) × 100, arredondado PARA BAIXO
+    (inteiro), nunca menor que 0;
+
+m = a menor margem preenchida entre as categorias de venda da conta (as colunas
+"marg" da aba Contas: as categorias ATIVAS do centro de custo, a N-ésima sobre
+margin{N}); r = a Margem mínima (25 → 0,25); k = a comissão (no par do ML, a
+maior das duas). Frete não entra. Sem nenhuma margem (ou sem comissão)
+preenchida, não calcula: o Custo total fica vazio (sem teto). O valor é gravado
+no `custo_total_pct` de sempre, e a trava acima continua igual com ele. A conta
+é recalculada quando muda a Margem mínima, uma margem, a comissão, o centro de
+custo da conta ou as categorias ativas do centro. Margem mínima apagada: o
+Custo total fica com o último valor e volta a ser digitado.
+
+Mudar a Margem mínima, uma margem ou a comissão NÃO é recusado se o Custo total
+calculado ficar abaixo de Afiliado + Desconto + Ads já gravados (a tela mostra
+o aviso até alguém corrigir); a trava só segura quem mexe em Afiliado,
+Desconto ou Ads.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import PricingAccount, PricingAdsConta, PricingAdsProduto, PricingProduct, Segment
+from app.models.pricing import CANAL_KIT
 
 ZERO = Decimal("0")
+UM = Decimal("1")
+CEM = Decimal("100")
+
+# Os 5 pares margem/frete da conta (margin1..5); a categoria de venda na
+# posição N (a N-ésima ativa do centro de custo) usa o margin{N}.
+_MARGENS = tuple(f"margin{n}" for n in range(1, 6))
+# M-86: o que muda o Custo total calculado, na própria conta.
+CAMPOS_DA_MARGEM_MINIMA = frozenset({"margem_minima_pct", "commission", "segment_id", *_MARGENS})
 
 
 def caixas_ads(geral: PricingAdsConta | None) -> tuple[bool, bool]:
@@ -170,3 +203,113 @@ def estouro(
         f"Afiliado {pct_br(afiliado)}% + Desconto {pct_br(desconto)}% + Ads {pct_br(ads)}%"
         f" = {pct_br(soma)}%. Passa do Custo total ({pct_br(custo_total)}%). Não gravado."
     )
+
+
+# --------------------------------------------------------------- M-86
+
+
+def calcular_custo_total(
+    margens: Iterable[Decimal | None],
+    margem_minima_pct: Decimal,
+    comissoes: Iterable[Decimal | None],
+) -> Decimal | None:
+    """O Custo total (%) pela Margem mínima (ver o topo): inteiro, para baixo.
+
+    `margens` e `comissoes` em fração (0.356 = 35,6%, como `marginN` e
+    `commission`); `margem_minima_pct` em % (25 = 25%). None = não calcula
+    (nenhuma margem ou nenhuma comissão preenchida).
+
+    Tudo em Decimal e a divisão inteira `//` do Decimal, que é exata: um valor
+    que dá 6 certinho fica 6, e 5,9999999 fica 5 (em float, (0,30 − 0,20) ×
+    (1 − 0,22) ÷ 1,30 × 100 dá 5,999…98, e o "para baixo" virava 5 em vez de 6)."""
+    preenchidas = [m for m in margens if m is not None]
+    com_valor = [k for k in comissoes if k is not None]
+    if not preenchidas or not com_valor:
+        return None
+    m = min(preenchidas)
+    r = margem_minima_pct / CEM
+    k = max(com_valor)
+    numerador = (m - r) * (UM - k) * CEM
+    # m ≤ r (ou comissão de 100% ou mais): sem folga, 0. Assim 1 + m > 1 > 0.
+    if numerador <= 0:
+        return ZERO
+    # (1 − k) ≤ 1 e (m − r) < (1 + m): nunca passa de 100 (o CHECK do banco).
+    return min(numerador // (UM + m), CEM)
+
+
+def valores_finais(conta: PricingAccount, novos: Mapping[str, object] | None = None):
+    """Os campos do cálculo como FICARIAM gravados na conta (`novos` vence)."""
+    novos = novos or {}
+    return SimpleNamespace(
+        **{
+            campo: novos[campo] if campo in novos else getattr(conta, campo)
+            for campo in CAMPOS_DA_MARGEM_MINIMA
+        }
+    )
+
+
+async def categorias_ativas(session: AsyncSession, raiz_id: UUID) -> int:
+    """Quantas colunas "marg" a aba Contas mostra para o centro de custo: as
+    categorias de venda ATIVAS dele (pages/pricing/[tab].vue, TYPE_HEADERS; a
+    N-ésima ativa fica sobre margin{N}), no máximo 5. Margem gravada numa
+    posição sem categoria ativa (ex.: a da "Queima de estoque", que saiu da
+    Mala) não aparece na tela e não entra no cálculo."""
+    n = (
+        await session.execute(
+            select(func.count())
+            .select_from(Segment)
+            .where(Segment.parent_id == raiz_id, Segment.active.is_(True))
+        )
+    ).scalar_one()
+    return min(n, len(_MARGENS))
+
+
+async def custo_total_pela_margem_minima(
+    session: AsyncSession, linhas: Sequence[object]
+) -> Decimal | None:
+    """O Custo total calculado de UMA conta: `linhas` = a linha (e, no par do
+    ML, a irmã), com os valores finais (a conta em si ou `valores_finais`). A
+    primeira tem a Margem mínima preenchida (quem chama confere). A margem é a
+    menor das linhas e a comissão a maior (o caso mais apertado)."""
+    primeira = linhas[0]
+    n = await categorias_ativas(session, primeira.segment_id)
+    margens = [getattr(linha, campo) for linha in linhas for campo in _MARGENS[:n]]
+    return calcular_custo_total(
+        margens, primeira.margem_minima_pct, [linha.commission for linha in linhas]
+    )
+
+
+async def recalcular(session: AsyncSession, linhas: Sequence[PricingAccount]) -> bool:
+    """Recalcula e grava (sem commit) o Custo total de UMA conta (a linha e,
+    no par, a irmã) se ela tem a Margem mínima preenchida. False = vazia: nada
+    muda (o Custo total fica como está e é digitado)."""
+    com_margem = [linha for linha in linhas if linha.margem_minima_pct is not None]
+    if not com_margem:
+        return False
+    ordem = [com_margem[0], *(linha for linha in linhas if linha is not com_margem[0])]
+    valor = await custo_total_pela_margem_minima(session, ordem)
+    for linha in linhas:
+        linha.custo_total_pct = valor
+    return True
+
+
+async def recalcular_contas_da_raiz(session: AsyncSession, raiz_id: UUID) -> int:
+    """As categorias de venda do centro de custo mudaram (criada, excluída,
+    ativada ou desativada): as colunas "marg" da aba Contas mudam, e o Custo
+    total das contas do centro com Margem mínima é recalculado (sem commit).
+    Devolve quantas contas (o par conta uma vez)."""
+    contas = (
+        await session.execute(
+            select(PricingAccount).where(
+                PricingAccount.segment_id == raiz_id, PricingAccount.canal == CANAL_KIT
+            )
+        )
+    ).scalars().all()
+    grupos: dict[object, list[PricingAccount]] = {}
+    for conta in contas:
+        grupos.setdefault(conta.par_id or conta.id, []).append(conta)
+    feitas = 0
+    for linhas in grupos.values():
+        if await recalcular(session, linhas):
+            feitas += 1
+    return feitas
