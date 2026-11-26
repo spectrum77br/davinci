@@ -16,6 +16,8 @@
 //  - M-76: a aba "Centro de custo" vem logo depois de Produtos (tests/cadastro-centro-custo-sfc.cjs
 //    trava a tela dela); o menu "Centro de custo" é a lista de Cadastros › Centro de custo e o
 //    centro novo (aceita_categoria false) avisa e trava o Salvar.
+//  - M-84: a coluna "Centro de custo" saiu da tabela (Tipo | Nome | Ações); o centro segue no
+//    Novo cadastro e no lápis da Categoria de venda.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -70,19 +72,19 @@ const script = descriptor.scriptSetup.content
   assert.match(acoes, /<Button v-if="isAdmin" size="sm" data-acao="novo-cadastro"/, 'Novo cadastro azul (variante padrão) e só admin')
   assert.match(acoes, /<Button v-if="isAdmin" size="sm" variant="outline" data-acao="novo-tipo"/)
   const ths = [...tpl.matchAll(/<th\b[^>]*>([^<]*)<\/th>/g)]
-  assert.deepEqual(ths.map((m) => m[1]), ['Tipo', 'Nome', 'Centro de custo', 'Ações'])
+  // M-84: a coluna "Centro de custo" saiu (Tipo | Nome | Ações).
+  assert.deepEqual(ths.map((m) => m[1]), ['Tipo', 'Nome', 'Ações'])
   for (const m of ths) assert.match(m[0], /text-\[11px\] font-semibold leading-\[14px\]/, 'cabeçalho 11px semibold')
   const linha = tpl.slice(tpl.indexOf('<tr v-for="c in cadastros"'), tpl.indexOf('</tr>', tpl.indexOf('<tr v-for="c in cadastros"')))
   assert.match(linha, /class="h-8 /, 'linhas da mesma altura')
-  assert.equal((linha.match(/class="border border-border [^"]*text-xs/g) || []).length, 3, 'Tipo, Nome e Centro de custo em text-xs com borda')
+  assert.equal((linha.match(/class="border border-border [^"]*text-xs/g) || []).length, 2, 'Tipo e Nome em text-xs com borda')
   assert.match(linha, /<div v-if="isAdmin"[\s\S]*<Pencil[\s\S]*<Trash2/, 'lápis e lixeira, só admin')
-  for (const m of tpl.matchAll(/colspan="(\d+)"/g)) assert.equal(m[1], '4')
-  // M-75: Centro de custo (ou "—" cinza) e a marca "inativa" com o nome em cinza
-  assert.match(linha, /\{\{ c\.centro_custo \|\| '—' \}\}/)
-  assert.match(linha, /:class="\{ 'text-muted-foreground': !c\.centro_custo \}"/)
+  for (const m of tpl.matchAll(/colspan="(\d+)"/g)) assert.equal(m[1], '3')
+  // M-84: nenhuma célula do centro de custo na linha; a marca "inativa" com o nome em cinza segue
+  assert.doesNotMatch(linha, /c\.centro_custo/, 'sem a célula do centro de custo')
   assert.match(linha, /:class="\{ 'text-muted-foreground': c\.ativa === false \}"[\s\S]*v-if="c\.ativa === false"[\s\S]*>inativa<\/span>/)
-  const ordemCols = ['{{ c.tipo_nome }}', '{{ c.nome }}', "c.centro_custo || '—'", '<Pencil'].map((t) => linha.indexOf(t))
-  assert.ok(ordemCols.every((i, k) => i > 0 && (k === 0 || i > ordemCols[k - 1])), 'Tipo | Nome | Centro de custo | Ações')
+  const ordemCols = ['{{ c.tipo_nome }}', '{{ c.nome }}', '<Pencil'].map((t) => linha.indexOf(t))
+  assert.ok(ordemCols.every((i, k) => i > 0 && (k === 0 || i > ordemCols[k - 1])), 'Tipo | Nome | Ações')
   // Novo cadastro de Categoria de venda pede o centro de custo (menu); no lápis o centro aparece
   // travado (texto, pode ser o Catálogo, que não está no menu) e o tipo também fica travado
   assert.match(tpl, /<label v-if="cadEhVenda && cadEditando"[\s\S]{0,120}Centro de custo[\s\S]{0,120}:value="cadEditando\.centro_custo \|\| '—'"[\s\S]{0,60}disabled[\s\S]{0,200}data-campo="cadastro-centro-fixo"/)

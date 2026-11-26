@@ -10,13 +10,15 @@
 // nome; Tag de envio em uso pede confirmação com a contagem.
 // M-75 (Harry 25/11/2026): tipo "Categoria de venda" = os grupos de margem/frete da aba Contas.
 // NÃO é cadastro novo: são os segmentos filhos de Cadastros › Segmentos (o mesmo dado), com a
-// raiz na coluna "Centro de custo". Vão pelas rotas /categorias-venda; a nova entra no fim do
+// raiz como centro de custo. Vão pelas rotas /categorias-venda; a nova entra no fim do
 // centro de custo (até 5), só a última sai e "Apple"/"Queima de estoque" não trocam de nome
 // (o servidor confere e manda a frase). O menu "Centro de custo" do Novo cadastro vem de um
 // lugar só: `centros_custo` da lista (services/categorias_venda.centros_do_menu no servidor).
 // M-76: esse menu é a lista de Cadastros › Centro de custo. Centro novo aparece, mas ainda não
 // recebe categoria de venda: ao escolher, a janela avisa e o Salvar fica travado (o servidor
 // recusa com a mesma frase).
+// M-84 (Harry 26/11/2026): a coluna "Centro de custo" saiu da tabela (fica Tipo | Nome | Ações);
+// o centro continua nos dados, no Novo cadastro, no lápis e nos avisos.
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -303,18 +305,17 @@ async function confirmarExclusao() {
           <tr>
             <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-48">Tipo</th>
             <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border">Nome</th>
-            <th class="text-left px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-32">Centro de custo</th>
             <th class="text-center px-2 py-2 text-[11px] font-semibold leading-[14px] border-b border-border w-20">Ações</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !cadastros.length">
-            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">
+            <td colspan="3" class="text-center py-6 text-xs text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!cadastros.length">
-            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
+            <td colspan="3" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
           </tr>
           <tr v-for="c in cadastros" :key="c.id" class="h-8 hover:bg-accent/30" :data-cadastro="c.nome">
             <td class="border border-border px-2 py-1 text-xs">{{ c.tipo_nome }}</td>
@@ -328,9 +329,6 @@ async function confirmarExclusao() {
                 class="ml-1 rounded border border-border px-1 text-[10px] font-normal text-muted-foreground"
                 data-marca="inativa"
               >inativa</span>
-            </td>
-            <td class="border border-border px-2 py-1 text-xs" :class="{ 'text-muted-foreground': !c.centro_custo }">
-              {{ c.centro_custo || '—' }}
             </td>
             <td class="border border-border px-1 py-1 text-center">
               <div v-if="isAdmin" class="flex gap-0.5 justify-center">
