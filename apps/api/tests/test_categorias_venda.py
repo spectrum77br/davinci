@@ -4,14 +4,15 @@
 São os segmentos filhos das raízes (mesma tabela `segments`), não um cadastro novo. Cobre:
 - a lista de Cadastros › Produtos com as categorias de venda (Centro de custo, inativas, ordem
   das colunas) e os centros de custo;
-- incluir: entra no FIM do centro (próxima posição, não 0 — nas duas telas); máximo de 5
-  contando as inativas ("Este centro de custo já tem 5 categorias de venda."); o mesmo nome em
+- incluir: entra no FIM do centro (próxima posição, não 0 — nas duas telas); máximo de 10
+  (M-93; eram 5) contando as inativas ("Este centro de custo já tem 10 categorias de venda.");
+  o mesmo nome em
   outro centro pode, no mesmo não; "Apple"/"Queima de estoque" não são usados por outra;
 - renomear: "Apple" e "Queima de estoque" não trocam de nome (nas duas telas);
 - excluir: em uso na tabela dela (produto da Tabela de Preços ou conta apontando DIRETO para
   ela) pede o destino (M-90) — outra ativa do mesmo centro — e transfere e exclui; sem destino,
   recusa com as contagens; produtos da tela Produtos não travam (vão junto ou ficam sem
-  segmento); os vínculos slot1..5 das contas não contam e são limpos; pela aba Segmentos só a
+  segmento); os vínculos slot1..10 das contas não contam e são limpos; pela aba Segmentos só a
   última do centro sai; pela lixeira de Cadastros › Produtos (M-91) a do meio também — as
   seguintes sobem uma posição e margem/frete/vínculo de cada conta do centro (kit, par do ML,
   catálogo) andam junto: cada categoria que fica guarda a mesma margem/frete e o preço de quem
@@ -41,11 +42,14 @@ from app.models import (
     UserRole,
 )
 from app.services.pricing.custo_total import calcular_custo_total
+from app.services.pricing.posicoes import MAX_CATEGORIAS_VENDA, POSICOES
 
 pytestmark = pytest.mark.asyncio
 
 ROTA = "/api/produto-cadastros/categorias-venda"
-LIMITE_MSG = "Este centro de custo já tem 5 categorias de venda."
+LIMITE_MSG = "Este centro de custo já tem 10 categorias de venda."
+# Os 10 vínculos vazios (M-93).
+VAZIOS = [None] * MAX_CATEGORIAS_VENDA
 
 
 @pytest.fixture
@@ -130,7 +134,7 @@ async def _conta(db, dono, raiz: Segment, nome: str, **slots) -> PricingAccount:
 
 
 async def _slots(db, conta: PricingAccount) -> list:
-    """Os 5 vínculos da conta como estão no banco agora."""
+    """Os 10 vínculos da conta como estão no banco agora (M-93; eram 5)."""
     c = (
         await db.execute(
             select(PricingAccount)
@@ -138,7 +142,7 @@ async def _slots(db, conta: PricingAccount) -> list:
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    return [getattr(c, f"slot{n}_segment_id") for n in range(1, 6)]
+    return [getattr(c, f"slot{n}_segment_id") for n in POSICOES]
 
 
 # ================================================================ lista
@@ -228,20 +232,39 @@ async def test_nova_entra_no_fim_e_aparece_na_aba_segmentos(
     # O mesmo nome em outro centro pode (Acessórios existe no Celular e na Mala)...
     r = await _nova(client, centros, "Eletro", "Acessórios")
     assert r.status_code == 201, r.text
-    # ...e agora o Eletro tem 5.
+    # M-93: ...e o Eletro vai até a 10ª (o exemplo do pedido, depois das 5 primeiras)...
+    for nome in ("cafeteira", "cooktop", "cookware", "purificador", "smart cooking"):
+        r = await _nova(client, centros, "Eletro", nome)
+        assert r.status_code == 201, (nome, r.text)
+    filhos = await _filhos(db, centros["Eletro"])
+    assert [p for _n, p, _a in filhos] == list(range(10))
+    assert filhos[-1] == ("smart cooking", 9, True)
+    # ...e só a 11ª é recusada.
     r = await _nova(client, centros, "Eletro", "Mais um")
     assert r.status_code == 409
     assert r.json()["detail"] == {"code": "categoria_venda_limite", "mensagem": LIMITE_MSG}
+    assert len(await _filhos(db, centros["Eletro"])) == 10
 
 
-async def test_limite_de_5_contando_as_inativas(client, db, make_user, auth_as, centros):
-    """O exemplo do pedido: "Mochilas" na Mala (5 com a Queima de estoque inativa) é recusada."""
+async def test_limite_de_10_contando_as_inativas(client, db, make_user, auth_as, centros):
+    """M-93: o limite passou a 10, contando as inativas. "Mochilas" na Mala (5, a última inativa)
+    não esbarra mais no limite, e sim na regra de não nascer depois de uma inativa; no Celular,
+    com 10 e a 10ª desativada, é recusada pelo limite."""
     await _admin(make_user, auth_as)
-    for centro in ("Mala", "Celular"):
-        r = await _nova(client, centros, centro, "Mochilas")
-        assert r.status_code == 409, r.text
-        assert r.json()["detail"]["mensagem"] == LIMITE_MSG
+    r = await _nova(client, centros, "Mala", "Mochilas")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "categoria_venda_depois_de_inativa"
     assert len(await _filhos(db, centros["Mala"])) == 5
+    for n in range(6, 11):
+        r = await _nova(client, centros, "Celular", f"Linha {n}")
+        assert r.status_code == 201, r.text
+    ultima = r.json()["id"]
+    r = await client.patch(f"/api/segments/{ultima}", json={"active": False})
+    assert r.status_code == 200, r.text
+    r = await _nova(client, centros, "Celular", "Mochilas")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == {"code": "categoria_venda_limite", "mensagem": LIMITE_MSG}
+    assert len(await _filhos(db, centros["Celular"])) == 10
 
 
 async def test_nome_repetido_no_centro_e_nomes_fixos(client, make_user, auth_as, centros):
@@ -275,11 +298,24 @@ async def test_aba_segmentos_tambem_cria_no_fim(client, db, make_user, auth_as, 
     )
     assert r.status_code == 201, r.text
     assert r.json()["sort_order"] == 4
+    # M-93: pela aba Segmentos também vai até a 10ª e recusa a 11ª.
+    for n in range(6, 11):
+        r = await client.post(
+            "/api/segments", json={"name": f"N{n}", "parent_id": str(centros["Eletro"].id)}
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["sort_order"] == n - 1
+    r = await client.post(
+        "/api/segments", json={"name": "Onze", "parent_id": str(centros["Eletro"].id)}
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["mensagem"] == LIMITE_MSG
+    # Mala: a última (Queima de estoque) está inativa — a nova não nasce depois dela.
     r = await client.post(
         "/api/segments", json={"name": "Mochilas", "parent_id": str(centros["Mala"].id)}
     )
     assert r.status_code == 409
-    assert r.json()["detail"]["mensagem"] == LIMITE_MSG
+    assert r.json()["detail"]["code"] == "categoria_venda_depois_de_inativa"
 
 
 async def test_nova_nao_entra_depois_de_inativa(client, make_user, auth_as, centros):
@@ -394,7 +430,7 @@ async def test_em_uso_pede_destino_transfere_e_exclui(client, db, make_user, aut
     ):
         assert await _segmento_de(db, modelo, id_) == acessorios.id, modelo
     # O vínculo slot5 é limpo; a conta continua no centro.
-    assert await _slots(db, vinculo) == [None, None, None, None, None]
+    assert await _slots(db, vinculo) == VAZIOS
     assert await _segmento_de(db, PricingAccount, vinculo.id) == centros["Celular"].id
 
 
@@ -492,11 +528,11 @@ async def test_vinculo_slot_nao_conta_e_e_limpo_ao_excluir(client, db, make_user
         "contas_centro": 2,
     }
     assert (await client.delete(f"{ROTA}/{e['3']}")).status_code == 204
-    assert await _slots(db, a) == [e["1"], e["2"], None, None, None]
-    assert await _slots(db, b) == [None, None, None, None, None]
+    assert await _slots(db, a) == [e["1"], e["2"], *VAZIOS[2:]]
+    assert await _slots(db, b) == VAZIOS
     # Pela aba Segmentos, o mesmo.
     assert (await client.delete(f"/api/segments/{e['2']}")).status_code == 204
-    assert await _slots(db, a) == [e["1"], None, None, None, None]
+    assert await _slots(db, a) == [e["1"], *VAZIOS[1:]]
 
 
 async def test_nova_na_posicao_n_preenche_o_slot_n_vazio(client, db, make_user, auth_as, centros):
@@ -515,11 +551,11 @@ async def test_nova_na_posicao_n_preenche_o_slot_n_vazio(client, db, make_user, 
         None,
         None,
         quatro,
-        None,
+        *VAZIOS[4:],
     ]
     # Quem já tinha o slot4 preenchido fica como estava; conta de outro centro não muda.
-    assert await _slots(db, trocada) == [None, None, None, um, None]
-    assert await _slots(db, outra) == [None, None, None, None, None]
+    assert await _slots(db, trocada) == [None, None, None, um, *VAZIOS[4:]]
+    assert await _slots(db, outra) == VAZIOS
 
     r = await client.post(
         "/api/segments", json={"name": "Cinco", "parent_id": str(centros["Eletro"].id)}
@@ -527,6 +563,20 @@ async def test_nova_na_posicao_n_preenche_o_slot_n_vazio(client, db, make_user, 
     assert r.status_code == 201, r.text
     assert (await _slots(db, vazia))[4] is not None
     assert str((await _slots(db, trocada))[4]) == r.json()["id"]
+    # M-93: a 6ª..10ª preenchem slot6..10 (as posições novas), pelas duas telas.
+    novas = []
+    for n in range(6, 11):
+        if n % 2:
+            r = await _nova(client, centros, "Eletro", f"N{n}")
+        else:
+            r = await client.post(
+                "/api/segments", json={"name": f"N{n}", "parent_id": str(centros["Eletro"].id)}
+            )
+        assert r.status_code == 201, r.text
+        novas.append(r.json()["id"])
+    assert [str(x) for x in (await _slots(db, vazia))[5:]] == novas
+    assert [str(x) for x in (await _slots(db, trocada))[5:]] == novas
+    assert await _slots(db, outra) == VAZIOS
 
 
 async def test_aba_segmentos_continua_so_a_ultima(client, db, make_user, auth_as, centros):
@@ -579,7 +629,7 @@ def _pares(*pares) -> dict:
 
 
 def _coluna(conta: PricingAccount, n: int) -> tuple:
-    """(margem, frete, vínculo) da coluna n (1..5)."""
+    """(margem, frete, vínculo) da coluna n (1..10)."""
     return (
         getattr(conta, f"margin{n}"),
         getattr(conta, f"shipping{n}"),
@@ -702,8 +752,8 @@ async def test_excluir_do_meio_anda_as_colunas_e_nenhum_preco_muda(
     db.add_all([acess, div1, div2, reg, rob, ele])
     await db.commit()
     contas = (aguiar, classico, premium, filha)
-    antes = {c.id: [_coluna(c, n) for n in range(1, 6)] for c in contas}
-    eletro_antes = [_coluna(eletro, n) for n in range(1, 6)]
+    antes = {c.id: [_coluna(c, n) for n in POSICOES] for c in contas}
+    eletro_antes = [_coluna(eletro, n) for n in POSICOES]
     grade_cel = await _grade(client, "celular")
     grade_ele = await _grade(client, "eletro")
     # Os 5 produtos do Celular × 4 colunas (a de catálogo junto da base), todos com preço.
@@ -736,8 +786,9 @@ async def test_excluir_do_meio_anda_as_colunas_e_nenhum_preco_muda(
         assert _coluna(depois, 3) == velho[3], c.name  # Robusto (era a 4)
         # (d) a última ocupada fica vazia; a de Diversos sumiu.
         assert _coluna(depois, 4) == (None, None, None), c.name
-        # Coluna sem categoria depois da última não muda.
-        assert _coluna(depois, 5) == velho[4], c.name
+        # Colunas sem categoria depois da última não mudam (M-93: até a 10).
+        for n in range(5, MAX_CATEGORIAS_VENDA + 1):
+            assert _coluna(depois, n) == velho[n - 1], (c.name, n)
     # O exemplo do pedido, na Shopee aguiar.
     ag = await _ler_conta(db, aguiar.id)
     assert (ag.margin1, ag.shipping1, ag.margin2, ag.shipping2, ag.margin3, ag.shipping3) == (
@@ -769,7 +820,7 @@ async def test_excluir_do_meio_anda_as_colunas_e_nenhum_preco_muda(
     # (iv) o Eletro não mudou.
     assert await _grade(client, "eletro") == grade_ele
     el = await _ler_conta(db, eletro.id)
-    assert [_coluna(el, n) for n in range(1, 6)] == eletro_antes
+    assert [_coluna(el, n) for n in POSICOES] == eletro_antes
     assert [n for n, _p, _a in await _filhos(db, centros["Eletro"])] == ["1", "2", "3"]
 
 
@@ -808,7 +859,81 @@ async def test_excluir_inativa_do_meio_sem_uso(client, db, make_user, auth_as, c
     ]
 
 
+async def test_excluir_do_meio_com_7_desloca_as_posicoes_6_e_7(
+    client, db, make_user, auth_as, centros
+):
+    """M-93 + M-91: Eletro com 7 categorias. Excluir a 2ª pela lixeira faz a 3ª..7ª subirem uma
+    posição e, em cada conta (Shopee e o par do ML), margem/frete/vínculo da 3..7 andam para
+    2..6 — inclusive as posições 6 e 7, novas da M-93; a 7 fica vazia e a 8..10 (depois da
+    última ocupada) não mudam. O preço dos produtos das categorias 6ª e 7ª fica igual."""
+    dono = await _admin(make_user, auth_as)
+    raiz = centros["Eletro"]
+    eletro = [centros[f"Eletro/{n}"] for n in ("1", "2", "3")]
+    for n in range(4, 8):
+        s = Segment(parent_id=raiz.id, name=str(n), slug=f"eletro-{n - 1}", sort_order=n - 1)
+        db.add(s)
+        eletro.append(s)
+    await db.flush()
+    slots = {f"slot{n}_segment_id": seg.id for n, seg in enumerate(eletro, start=1)}
+    pares = [(f"0.{n}0", str(n * 10)) for n in range(1, 8)]
+    sobra = {"margin8": D("0.88"), "shipping8": D("88")}  # dado sem categoria: não anda
+
+    def conta(nome, plataforma, **kw) -> PricingAccount:
+        return PricingAccount(
+            user_id=dono.id, name=nome, platform=plataforma, segment_id=raiz.id, **kw
+        )
+
+    shopee = conta(
+        "Shopee eletro", PricingPlatform.SHOPEE, commission=D("0.20"), **_pares(*pares),
+        **sobra, **slots,
+    )
+    par = uuid4()
+    classico = conta(
+        "ML eletro", PricingPlatform.ML, listing_type="ml classico", par_id=par,
+        commission=D("0.11"), **_pares(*pares), **slots,
+    )
+    premium = conta(
+        "ML eletro", PricingPlatform.ML, listing_type="ml premium", par_id=par,
+        commission=D("0.16"), **_pares(*pares), **slots,
+    )
+    db.add_all([shopee, classico, premium])
+    produtos = [
+        PricingProduct(
+            user_id=dono.id, sku=f"e{n}", name=f"e{n}", segment_id=eletro[n - 1].id,
+            cost_kit1=D("100"),
+        )
+        for n in (1, 3, 6, 7)
+    ]
+    db.add_all(produtos)
+    await db.commit()
+    contas = (shopee, classico, premium)
+    antes = {c.id: [_coluna(c, n) for n in POSICOES] for c in contas}
+    grade = await _grade(client, "eletro")
+    assert all(grade[(str(c.id), str(p.id))] is not None for c in contas for p in produtos)
+
+    uso = (await client.get(f"{ROTA}/{eletro[1].id}/uso")).json()
+    assert (uso["bloqueia"], uso["precisa_destino"]) == (False, False)
+    assert (uso["sobem"], uso["contas_centro"]) == (["3", "4", "5", "6", "7"], 2)
+    r = await client.delete(f"{ROTA}/{eletro[1].id}")
+    assert r.status_code == 204, r.text
+
+    assert await _filhos(db, raiz) == [(str(n), i, True) for i, n in enumerate((1, 3, 4, 5, 6, 7))]
+    for c in contas:
+        depois = await _ler_conta(db, c.id)
+        velho = antes[c.id]
+        assert _coluna(depois, 1) == velho[0], c.name
+        # 3..7 → 2..6 (a 6 e a 7 são posições da M-93).
+        for n in range(2, 7):
+            assert _coluna(depois, n) == velho[n], (c.name, n)
+        assert _coluna(depois, 7) == (None, None, None), c.name
+        for n in range(8, MAX_CATEGORIAS_VENDA + 1):
+            assert _coluna(depois, n) == velho[n - 1], (c.name, n)
+    # O preço de cada produto que ficou (inclusive os da 6ª e da 7ª) não muda.
+    assert await _grade(client, "eletro") == grade
+
+
 # ================================================================ ativar/desativar (Segmentos)
+
 
 
 async def test_desativar_e_reativar_so_na_ordem(client, db, make_user, auth_as, centros):
@@ -846,7 +971,7 @@ async def test_aba_segmentos_nao_muda_lugar_nem_repete_nome(
     # Mandar o valor que já está não é mudança.
     r = await client.patch(f"/api/segments/{dois}", json={"sort_order": 1, "name": "Dois"})
     assert r.status_code == 200, r.text
-    # Uma raiz não vira categoria de venda por troca de pai (furaria o limite de 5).
+    # Uma raiz não vira categoria de venda por troca de pai (furaria o limite de 10).
     r = await client.patch(
         f"/api/segments/{centros['Catálogo'].id}", json={"parent_id": str(centros["Eletro"].id)}
     )

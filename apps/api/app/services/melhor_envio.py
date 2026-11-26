@@ -3,7 +3,7 @@
 Fluxo da spec (áudio 3): depois que a NF é emitida no processo "próprio", vai no
 Melhor Envio, cota a etiqueta com os dados do produto e pega o VALOR A PAGAR. Esse
 valor tem que estar DENTRO do frete PROJETADO (Tabela de Preços → Contas,
-`pricing_accounts.shipping{1..5}`). Se o menor frete cotado couber no projetado, o
+`pricing_accounts.shipping{1..10}`). Se o menor frete cotado couber no projetado, o
 sistema LIBERA a geração da etiqueta — ele só libera, NÃO paga nem segue o processo.
 
 Este módulo tem duas camadas:

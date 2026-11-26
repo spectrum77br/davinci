@@ -97,8 +97,8 @@ async def create_segment(
         pai = await _get_or_404(session, body.parent_id)
         # M-75: filho de raiz = categoria de venda (coluna de margem/frete da
         # aba Contas). Entra SEMPRE no FIM do centro de custo (antes gravava 0,
-        # a mesma da primeira; um sort_order no pedido é ignorado), até 5
-        # (services/categorias_venda).
+        # a mesma da primeira; um sort_order no pedido é ignorado), até 10 desde
+        # a M-93 (services/categorias_venda.LIMITE).
         if pai.parent_id is None:
             raiz = pai
             sort_order = await categorias_venda.conferir_nova(session, pai, body.name)
@@ -189,8 +189,8 @@ async def patch_segment(
     # ou reativar uma categoria de venda não pode tirar as outras da coluna de
     # margem/frete da aba Contas (services/categorias_venda). A posição e o
     # centro de custo de uma categoria de venda não mudam (nem um segmento vira
-    # categoria por troca de pai): as colunas sairiam do lugar e o limite de 5
-    # seria furado. A tela não manda esses campos; isto segura a API.
+    # categoria por troca de pai): as colunas sairiam do lugar e o limite de 10
+    # (M-93) seria furado. A tela não manda esses campos; isto segura a API.
     raiz = await categorias_venda.raiz_de(session, seg)
     if raiz is not None and (
         data.get("parent_id", seg.parent_id) != seg.parent_id
@@ -254,7 +254,7 @@ async def delete_segment(
     # coluna). Antes vinha um erro genérico do banco quando havia produto.
     # M-91: a do meio sai só pela lixeira de Cadastros › Produtos (só ADM), que
     # anda as colunas de margem/frete das contas; aqui continua só a última.
-    # Os vínculos slot1..5 das contas não contam como uso e são limpos junto.
+    # Os vínculos slot1..10 das contas não contam como uso e são limpos junto.
     # M-90: produto da tela Produtos (products.segment_id) não conta como uso e
     # fica sem segmento; transferir para outra categoria só pela lixeira de
     # Cadastros › Produtos (esta rota não recebe destino: em uso, recusa).

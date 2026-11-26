@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+from app.services.pricing.posicoes import POSICOES
+
 # --- tela em que a pessoa estava (página do front, pelo Referer) ------------
 # Nome do MENU ou da ABA, que é o que a pessoa clica. Prefixo mais longo vence.
 PAGINAS: dict[str, str] = {
@@ -662,7 +664,8 @@ CAMPOS: dict[str, str] = {
     "inscrito_em": "Inscrito em",
     "registro_tentativas": "Tentativas de registro",
 }
-for _i in range(1, 6):
+# M-93: as 10 posições de margem/frete da conta (services/pricing/posicoes).
+for _i in POSICOES:
     CAMPOS[f"margin{_i}"] = f"Margem {_i}"
     CAMPOS[f"shipping{_i}"] = f"Frete {_i}"
 for _i in range(1, 9):

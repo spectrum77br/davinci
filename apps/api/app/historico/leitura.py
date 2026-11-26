@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from app.historico import nomes
 from app.models.base import Base
+from app.services.pricing.posicoes import CAMPOS_FRETE, CAMPOS_MARGEM
 
 BRT = ZoneInfo("America/Sao_Paulo")
 
@@ -52,14 +53,14 @@ ITEM_FKS: dict[str, tuple[str, ...]] = {
 
 # Guardados como fração (0,125) e digitados como porcentagem (12,5%).
 PERCENTUAIS = {
-    "commission", "min_margin", *(f"margin{i}" for i in range(1, 6)),
+    "commission", "min_margin", *CAMPOS_MARGEM,
     # M-74: Margem mín e piso da Condição especial do produto (Produtos 2), em fração.
     "margem_min", "piso",
 }
 DINHEIRO = {
     "price_override", "bling_cost_price", "valorbase", "taxacomissao", "custofrete",
     "reembolso", "prejuizo", "preco_catalogo", "custo_bling", "gasto_dia",
-    *(f"cost_kit{i}" for i in range(1, 9)), *(f"shipping{i}" for i in range(1, 6)),
+    *(f"cost_kit{i}" for i in range(1, 9)), *CAMPOS_FRETE,
 }
 # "valor" só é dinheiro onde se sabe que é.
 DINHEIRO_TABELA = {("margem_saldo_manual", "valor")}

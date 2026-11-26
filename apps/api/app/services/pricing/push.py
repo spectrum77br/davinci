@@ -185,7 +185,7 @@ async def _store_idempotent(
 async def _resolve_product_type(
     session: AsyncSession, product: PricingProduct
 ) -> int | None:
-    """Returns the product_type (1..5) for a pricing_product by looking up
+    """Returns the product_type (1..10, M-93) for a pricing_product by looking up
     the leaf segment's sort_order under its root department. None if the
     segment chain doesn't resolve.
     """

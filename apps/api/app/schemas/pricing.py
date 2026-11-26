@@ -61,6 +61,17 @@ class PricingAccountBase(BaseModel):
     shipping4: Decimal | None = None
     margin5: Decimal | None = None
     shipping5: Decimal | None = None
+    # M-93 (migration 0520): posições 6..10 (até 10 categorias de venda por tabela de Contas).
+    margin6: Decimal | None = None
+    shipping6: Decimal | None = None
+    margin7: Decimal | None = None
+    shipping7: Decimal | None = None
+    margin8: Decimal | None = None
+    shipping8: Decimal | None = None
+    margin9: Decimal | None = None
+    shipping9: Decimal | None = None
+    margin10: Decimal | None = None
+    shipping10: Decimal | None = None
     server: str | None = None
     email: str | None = None
     phone: str | None = None
@@ -97,6 +108,11 @@ class PricingAccountBase(BaseModel):
     slot3_segment_id: UUID | None = None
     slot4_segment_id: UUID | None = None
     slot5_segment_id: UUID | None = None
+    slot6_segment_id: UUID | None = None
+    slot7_segment_id: UUID | None = None
+    slot8_segment_id: UUID | None = None
+    slot9_segment_id: UUID | None = None
+    slot10_segment_id: UUID | None = None
 
 
 class PricingAccountCreate(PricingAccountBase):
@@ -121,6 +137,17 @@ class PricingAccountPatch(BaseModel):
     shipping4: Decimal | None = None
     margin5: Decimal | None = None
     shipping5: Decimal | None = None
+    # M-93 (migration 0520): posições 6..10 (até 10 categorias de venda por tabela de Contas).
+    margin6: Decimal | None = None
+    shipping6: Decimal | None = None
+    margin7: Decimal | None = None
+    shipping7: Decimal | None = None
+    margin8: Decimal | None = None
+    shipping8: Decimal | None = None
+    margin9: Decimal | None = None
+    shipping9: Decimal | None = None
+    margin10: Decimal | None = None
+    shipping10: Decimal | None = None
     server: str | None = None
     email: str | None = None
     password: str | None = None
@@ -151,6 +178,11 @@ class PricingAccountPatch(BaseModel):
     slot3_segment_id: UUID | None = None
     slot4_segment_id: UUID | None = None
     slot5_segment_id: UUID | None = None
+    slot6_segment_id: UUID | None = None
+    slot7_segment_id: UUID | None = None
+    slot8_segment_id: UUID | None = None
+    slot9_segment_id: UUID | None = None
+    slot10_segment_id: UUID | None = None
 
 
 class EquipeDaConta(BaseModel):
@@ -177,6 +209,11 @@ class PricingAccountOut(PricingAccountBase):
     slot3_segment_name: str | None = None
     slot4_segment_name: str | None = None
     slot5_segment_name: str | None = None
+    slot6_segment_name: str | None = None
+    slot7_segment_name: str | None = None
+    slot8_segment_name: str | None = None
+    slot9_segment_name: str | None = None
+    slot10_segment_name: str | None = None
     # Catálogo ML (06/10/2026). Só saída: a filha nasce/morre pelo
     # POST /accounts/{id}/catalogo. Na filha (canal='catalogo') comissão,
     # margens, fretes, kit_number e anotações saem com os valores da BASE
@@ -185,8 +222,8 @@ class PricingAccountOut(PricingAccountBase):
     canal: str = "kit"
     conta_base_id: UUID | None = None
     conta_catalogo_id: UUID | None = None
-    # Margem própria do catálogo (07/10/2026), só na filha: {"1".."5": margem
-    # própria do tipo, ou null = usa a da base}. Os margin1..5 acima continuam
+    # Margem própria do catálogo (07/10/2026), só na filha: {"1".."10" (M-93): margem
+    # própria do tipo, ou null = usa a da base}. Os margin1..10 acima continuam
     # com os da base. Grava com PATCH /accounts/{filha} {"marginN": ...} (só
     # margens; null volta à da base). Desligar o catálogo apaga a filha e as
     # margens próprias: ao religar, a filha nova nasce sem nenhuma.

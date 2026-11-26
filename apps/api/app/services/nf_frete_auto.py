@@ -118,7 +118,7 @@ async def _resolver_frete_projetado(
     None + aviso (nunca chuta)."""
     segs = (await session.execute(select(Segment))).scalars().all()
     by_id = {s.id: s for s in segs}
-    # leaf segment id → (root segment id, slot 1..5)
+    # leaf segment id → (root segment id, slot 1..10 — M-93)
     leaf_info: dict = {}
     for s in segs:
         if s.parent_id is not None:

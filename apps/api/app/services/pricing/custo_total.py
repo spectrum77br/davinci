@@ -78,14 +78,16 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import PricingAccount, PricingAdsConta, PricingAdsProduto, PricingProduct, Segment
 from app.models.pricing import CANAL_KIT
+from app.services.pricing.posicoes import CAMPOS_MARGEM
 
 ZERO = Decimal("0")
 UM = Decimal("1")
 CEM = Decimal("100")
 
-# Os 5 pares margem/frete da conta (margin1..5); a categoria de venda na
-# posição N (a N-ésima ativa do centro de custo) usa o margin{N}.
-_MARGENS = tuple(f"margin{n}" for n in range(1, 6))
+# Os pares margem/frete da conta (margin1..10 desde a M-93, migration 0520); a
+# categoria de venda na posição N (a N-ésima ativa do centro de custo) usa o
+# margin{N}.
+_MARGENS = CAMPOS_MARGEM
 # M-86: o que muda o Custo total calculado, na própria conta.
 CAMPOS_DA_MARGEM_MINIMA = frozenset({"margem_minima_pct", "commission", "segment_id", *_MARGENS})
 
@@ -300,7 +302,7 @@ def valores_finais(conta: PricingAccount, novos: Mapping[str, object] | None = N
 async def categorias_ativas(session: AsyncSession, raiz_id: UUID) -> int:
     """Quantas colunas "marg" a aba Contas mostra para o centro de custo: as
     categorias de venda ATIVAS dele (pages/pricing/[tab].vue, TYPE_HEADERS; a
-    N-ésima ativa fica sobre margin{N}), no máximo 5. Margem gravada numa
+    N-ésima ativa fica sobre margin{N}), no máximo 10 (M-93). Margem gravada numa
     posição sem categoria ativa (ex.: a da "Queima de estoque", que saiu da
     Mala) não aparece na tela e não entra no cálculo."""
     n = (

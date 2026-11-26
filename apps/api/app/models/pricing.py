@@ -114,6 +114,18 @@ class PricingAccount(Base, TimestampMixin):
     shipping4: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     margin5: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     shipping5: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    # M-93 (26/11/2026, migration 0520): até 10 categorias de venda por tabela de Contas
+    # (services/pricing/posicoes.MAX_CATEGORIAS_VENDA). As posições 6..10 nasceram vazias.
+    margin6: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    shipping6: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    margin7: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    shipping7: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    margin8: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    shipping8: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    margin9: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    shipping9: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    margin10: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    shipping10: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     server: Mapped[str | None] = mapped_column(String(64), nullable=True)
     email: Mapped[str | None] = mapped_column(String(256), nullable=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -169,7 +181,9 @@ class PricingAccount(Base, TimestampMixin):
     # Slot-to-segment binding (one FK per shipping{N}/margin{N} pair). Lets
     # analysts JOIN slot{N}_segment_id → segments to see which subtype each
     # slot represents on a given account. Calc code keeps reading
-    # shipping1..5 / margin1..5 directly; these columns are pure metadata.
+    # shipping{N} / margin{N} directly by position; the slots are what the
+    # Margem view (frete "Projetado") and the M-91 column shift use.
+    # M-93 (migration 0520): slot6..10 for categories 6..10.
     slot1_segment_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("segments.id", ondelete="SET NULL"),
@@ -195,6 +209,36 @@ class PricingAccount(Base, TimestampMixin):
         index=True,
     )
     slot5_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot6_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot7_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot8_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot9_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot10_segment_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("segments.id", ondelete="SET NULL"),
         nullable=True,

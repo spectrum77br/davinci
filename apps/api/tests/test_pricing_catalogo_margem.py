@@ -1,7 +1,7 @@
 """Margem própria do Catálogo ML (07/10/2026).
 
 Eduardo: "para o catálogo a gente tem que poder colocar a margem própria
-dele também". A coluna de catálogo ("filha") guarda margin1..5 próprias: a
+dele também". A coluna de catálogo ("filha") guarda margin1..10 próprias (M-93: eram 1..5): a
 margem do tipo T é a da filha quando preenchida, senão a da conta de kit.
 Comissão e frete continuam sempre os da base. Só as margens se editam na
 filha (o resto continua 409). Desligar o catálogo apaga a filha: ao religar,
@@ -33,6 +33,7 @@ from app.models import (
 )
 from app.security.jwt import issue_session_token
 from app.services.pricing.calc import calculate
+from app.services.pricing.posicoes import POSICOES
 from tests.test_pricing_catalogo_ml import (  # noqa: F401 — fixtures
     PERM_FULL,
     MLFalso,
@@ -131,7 +132,7 @@ async def test_patch_so_aceita_margem_na_filha(
     auth_as(dono)
     base = cenario["base"]
     filha_id = (await _ligar(client, base.id)).json()["conta_catalogo"]["id"]
-    vazio = {str(i): None for i in range(1, 6)}
+    vazio = {str(i): None for i in POSICOES}  # M-93: as 10 posições
 
     r = await _margem(client, filha_id, margin1="0.4000", margin4="0.1250")
     assert r.status_code == 200, r.text
@@ -292,7 +293,7 @@ async def test_desligar_e_religar_nasce_sem_margem_propria(
     assert r.status_code == 200
     nova = r.json()["conta_catalogo"]
     assert nova["id"] != filha_id
-    assert nova["margens_catalogo"] == {str(i): None for i in range(1, 6)}
+    assert nova["margens_catalogo"] == {str(i): None for i in POSICOES}
     assert _preco(await _celulas(client), nova["id"], cenario["a003"]) == Decimal("79")
 
 

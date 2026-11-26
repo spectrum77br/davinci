@@ -123,6 +123,13 @@ from app.services.pricing.custo_total import (
     soma_do_custo_total,
     valores_finais,
 )
+from app.services.pricing.posicoes import (
+    CAMPOS_MARGEM,
+    CAMPOS_MARGEM_FRETE,
+    CAMPOS_SLOT,
+    MAX_CATEGORIAS_VENDA,
+    POSICOES,
+)
 from app.services.pricing.push import (
     bases_com_catalogo_ligado,
     integracoes_com_marca_lida,
@@ -185,10 +192,13 @@ async def _resolve_leaf_segment_id(
     dept_slug: str | None,
     product_type: int | None,
 ) -> UUID | None:
-    """Returns the leaf segment id for (root slug, column-index 1..5)."""
+    """Returns the leaf segment id for (root slug, column-index 1..10).
+
+    M-93: até MAX_CATEGORIAS_VENDA posições (antes 1..5; o Produtos 2 troca a
+    categoria de venda mandando o `product_type` da opção escolhida)."""
     if not dept_slug or product_type is None:
         return None
-    sort_order = max(0, min(4, int(product_type) - 1))
+    sort_order = max(0, min(MAX_CATEGORIAS_VENDA - 1, int(product_type) - 1))
     root_subq = select(Segment.id).where(
         and_(Segment.parent_id.is_(None), Segment.slug == dept_slug)
     )
@@ -210,7 +220,7 @@ async def _segment_index(
     translate department-slug filter queries:
 
       * `roots_by_id`     {segment_id: root_slug}      — for accounts
-      * `leaves_by_id`    {segment_id: (root_slug, product_type 1..5)} — products
+      * `leaves_by_id`    {segment_id: (root_slug, product_type 1..10)} — products
       * `root_id_by_slug` {slug: root_segment_id}      — for filter queries
     """
     rows = (await session.execute(select(Segment))).scalars().all()
@@ -240,15 +250,15 @@ async def _default_slot_segments(
     "Projetado" vazia na página Margem (caso 293416/293418/293422 — 97
     contas backfilled em 2026-08-31). Preencher o default no create garante
     que conta nova nunca nasce sem vínculo; o popover da UI continua
-    permitindo remapear depois."""
+    permitindo remapear depois. M-93: até MAX_CATEGORIAS_VENDA vínculos."""
     res = await session.execute(
         select(Segment.id)
         .where(Segment.parent_id == root_id)
         .order_by(Segment.sort_order)
-        .limit(5)
+        .limit(MAX_CATEGORIAS_VENDA)
     )
     kids = list(res.scalars().all())
-    return [kids[i] if i < len(kids) else None for i in range(5)]
+    return [kids[i] if i < len(kids) else None for i in range(MAX_CATEGORIAS_VENDA)]
 
 
 async def _segment_names_by_id(session: AsyncSession) -> dict[UUID, str]:
@@ -262,15 +272,11 @@ async def _segment_names_by_id(session: AsyncSession) -> dict[UUID, str]:
 # O que a coluna de catálogo ("filha") herda da conta base na hora do cálculo
 # e mostra no cabeçalho: os números da conta e as anotações de texto. As
 # margens saem com as da base também (a tela não quebra); as próprias da filha
-# vão à parte em `margens_catalogo`.
+# vão à parte em `margens_catalogo`. M-93: margem/frete das 10 posições.
 _CAMPOS_HERDADOS_DA_BASE = (
     "kit_number",
     "commission",
-    "margin1", "shipping1",
-    "margin2", "shipping2",
-    "margin3", "shipping3",
-    "margin4", "shipping4",
-    "margin5", "shipping5",
+    *CAMPOS_MARGEM_FRETE,
     "discount", "affiliate", "ads", "coupon", "offer",
     "desconto_ate", "cupom_ate", "afiliado_pct", "oferta_limite_pct",
     "desconto_pct", "custo_total_pct",
@@ -286,18 +292,14 @@ _CAMPOS_ESPELHADOS_NA_FILHA = (
     "platform",
     "listing_type",
     "segment_id",
-    "slot1_segment_id",
-    "slot2_segment_id",
-    "slot3_segment_id",
-    "slot4_segment_id",
-    "slot5_segment_id",
+    *CAMPOS_SLOT,
     "sort_order",
     "kit_number",
 )
 
 # Margem própria do catálogo (07/10/2026): o único número que a filha guarda.
-# Por tipo; NULL = usa a margem da conta base.
-_MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
+# Por tipo; NULL = usa a margem da conta base. M-93: as 10 posições.
+_MARGENS_PROPRIAS = CAMPOS_MARGEM
 
 # M-10 (18/11/2026): kit, comissão, margens e fretes da conta são só do
 # administrador. Para os demais, o /accounts, o /grid e as respostas de uma
@@ -308,11 +310,8 @@ _MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
 _CAMPOS_OCULTOS_DE_QUEM_NAO_E_ADMIN = (
     "kit_number",
     "commission",
-    "margin1", "shipping1",
-    "margin2", "shipping2",
-    "margin3", "shipping3",
-    "margin4", "shipping4",
-    "margin5", "shipping5",
+    # M-93: as 10 posições (as novas também só do administrador).
+    *CAMPOS_MARGEM_FRETE,
     "margem_minima_pct",
 )
 # O que só o administrador GRAVA: os de cima e o Custo total (M-56, 25/11/2026),
@@ -340,16 +339,8 @@ _CAMPOS_DO_PAR = (
     "name",
     "segment_id",
     "kit_number",
-    "margin1",
-    "shipping1",
-    "margin2",
-    "shipping2",
-    "margin3",
-    "shipping3",
-    "margin4",
-    "shipping4",
-    "margin5",
-    "shipping5",
+    # M-93: as 10 posições.
+    *CAMPOS_MARGEM_FRETE,
     "observation",
     "store_info_id",
     "integration_id",
@@ -362,11 +353,7 @@ _CAMPOS_DO_PAR = (
     "desconto_ate",
     "cupom_ate",
     "oferta_limite_pct",
-    "slot1_segment_id",
-    "slot2_segment_id",
-    "slot3_segment_id",
-    "slot4_segment_id",
-    "slot5_segment_id",
+    *CAMPOS_SLOT,
 )
 
 
@@ -422,7 +409,7 @@ def _account_out(
     out.has_password = bool(row.password_enc)
     out.department = roots_by_id.get(row.segment_id)
     if names_by_id is not None:
-        for n in (1, 2, 3, 4, 5):
+        for n in POSICOES:
             sid = getattr(row, f"slot{n}_segment_id", None)
             if sid is not None:
                 setattr(out, f"slot{n}_segment_name", names_by_id.get(sid))
@@ -682,11 +669,11 @@ async def _gravar_na_conta(session: AsyncSession, conta: PricingAccount, dados: 
     if (
         dados.get("segment_id") is not None
         and dados["segment_id"] != conta.segment_id
-        and not any(dados.get(f"slot{n}_segment_id") for n in (1, 2, 3, 4, 5))
+        and not any(dados.get(campo) for campo in CAMPOS_SLOT)
     ):
         slots = await _default_slot_segments(session, dados["segment_id"])
-        for n in (1, 2, 3, 4, 5):
-            dados[f"slot{n}_segment_id"] = slots[n - 1]
+        for campo, sid in zip(CAMPOS_SLOT, slots, strict=True):
+            dados[campo] = sid
     for k, v in dados.items():
         setattr(conta, k, v)
     await _sincronizar_filha(session, conta)
@@ -837,7 +824,7 @@ async def _patch_margens_da_filha(
     body: PricingAccountPatch,
 ) -> PricingAccountOut:
     """Margem própria do catálogo (07/10/2026): na coluna de catálogo só as
-    margens dos tipos (margin1..5) se editam; null volta a usar a da conta
+    margens dos tipos (margin1..10, M-93) se editam; null volta a usar a da conta
     de kit. Qualquer outro campo → 409, como antes. Cerca de equipe: a da
     conta base (a filha não tem loja nem integração), igual ao ligar/desligar."""
     campos = body.model_fields_set
@@ -1088,10 +1075,10 @@ async def create_account(
         data["segment_id"] = sid
     # Slots default: sem vínculo slot↔segmento a página Margem não consegue
     # casar o frete projetado (ver _default_slot_segments).
-    if not any(data.get(f"slot{n}_segment_id") for n in (1, 2, 3, 4, 5)):
+    if not any(data.get(campo) for campo in CAMPOS_SLOT):
         slots = await _default_slot_segments(session, data["segment_id"])
-        for n in (1, 2, 3, 4, 5):
-            data[f"slot{n}_segment_id"] = slots[n - 1]
+        for campo, sid in zip(CAMPOS_SLOT, slots, strict=True):
+            data[campo] = sid
     # M-86: com a Margem mínima, o Custo total é calculado (não vem no corpo) e
     # a trava do M-56 não segura a conta nova (a tela mostra o aviso).
     _recusar_custo_total_digitado(None, body.model_dump(exclude_unset=True))

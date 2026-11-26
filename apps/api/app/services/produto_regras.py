@@ -326,7 +326,8 @@ def linha_out(linha: LinhaTabela | None) -> dict | None:
         "segment_id": str(seg.id) if seg is not None else None,
         "categoria_venda": seg.name if folha else None,
         "categoria_venda_ativa": bool(seg.active) if folha else None,
-        # A posição na raiz (1 a 5): é o que a coluna "Tabela" da Tabela de Preços manda.
+        # A posição na raiz (1 a 10 desde a M-93): é o que a coluna "Tabela" da Tabela de Preços
+        # manda (o Produtos 2 troca a categoria de venda mandando este número no PATCH).
         "product_type": int(seg.sort_order) + 1 if folha else None,
         "opcoes": [
             {"segment_id": str(o.id), "nome": o.name, "product_type": int(o.sort_order) + 1}

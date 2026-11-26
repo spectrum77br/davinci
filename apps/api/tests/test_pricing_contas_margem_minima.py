@@ -846,7 +846,12 @@ async def test_migration_0519_cria_o_que_o_model_declara_e_o_downgrade_desfaz(
     raiz = Path(__file__).resolve().parent.parent
     cfg = Config(str(raiz / "alembic.ini"))
     cfg.set_main_option("script_location", str(raiz / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0519_contas_margem_minima"]
+    roteiro = ScriptDirectory.from_config(cfg)
+    # A 0520 (M-93, posições 6..10 da conta) vem logo depois desta; ponta única.
+    assert len(roteiro.get_heads()) == 1, roteiro.get_heads()
+    assert roteiro.get_revision("0520_contas_dez_categorias").down_revision == (
+        "0519_contas_margem_minima"
+    )
 
     schema_model = Base.metadata.schema
     rascunho = f"{schema_model}_mig0519"

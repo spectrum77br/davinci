@@ -6,14 +6,16 @@ NÃO é um cadastro novo: são os segmentos FILHOS das raízes de Cadastros › 
 M-76: o menu de centros de custo vem de Cadastros › Centro de custo (tabela centros_custo, cujos
 fixos apontam para essas raízes); centro novo, sem raiz, ainda não recebe categoria de venda.
 
-O que liga o produto à margem/frete da conta é a POSIÇÃO do filho: sort_order 0..4 →
-margin1..5 / shipping1..5 (routers/pricing._segment_index, services/pricing/push,
+O que liga o produto à margem/frete da conta é a POSIÇÃO do filho: sort_order 0..9 →
+margin1..10 / shipping1..10 (routers/pricing._segment_index, services/pricing/push,
 services/nf_frete_auto). E a aba Contas desenha os cabeçalhos pela ordem dos filhos ATIVOS
 (pages/pricing/[tab].vue, TYPE_HEADERS): o N-ésimo ativo fica sobre margin{N}.
+M-93 (Harry 26/11/2026, migration 0520): até 10 por centro de custo (eram 5); o número mora em
+services/pricing/posicoes.MAX_CATEGORIAS_VENDA (aqui, LIMITE).
 
 Por isso as regras abaixo, que seguram as posições (valem aqui e em Cadastros › Segmentos):
 - a nova entra no FIM do centro de custo (maior sort_order + 1 — antes gravava 0, a mesma
-  posição da primeira); com 5 (contando as inativas) é recusada: só existem 5 pares
+  posição da primeira); com 10 (contando as inativas) é recusada: só existem 10 pares
   margem/frete. Também é recusada se a última do centro estiver inativa (a nova ficaria ativa
   depois de uma inativa e os cabeçalhos da aba Contas sairiam do lugar);
 - ao nascer na posição N, as contas daquele centro com o vínculo slot{N} vazio passam a apontar
@@ -35,7 +37,7 @@ Por isso as regras abaixo, que seguram as posições (valem aqui e em Cadastros 
   ATIVA do mesmo centro): produtos e contas passam para ela e a categoria sai, na mesma
   transação. Os produtos da tela Produtos (`products.segment_id`, sobra da carga antiga) não
   travam: vão junto para o destino ou, sem destino, ficam sem segmento (NULL — o mesmo que o
-  banco já faria, FK ON DELETE SET NULL). Os vínculos automáticos slot1..5 NÃO contam como uso
+  banco já faria, FK ON DELETE SET NULL). Os vínculos automáticos slot1..10 NÃO contam como uso
   (toda conta aponta para todas as categorias do seu centro): são limpos na mesma transação;
 - desativar: só a última ATIVA; reativar: só se as de antes estiverem ativas. Assim as ativas
   ficam sempre nas primeiras posições e nenhum cabeçalho escorrega de coluna;
@@ -60,6 +62,7 @@ from app.models.pricing import CANAL_KIT
 from app.schemas.segments import _slugify
 from app.services import centros_custo
 from app.services.categorias_ordem import posicao_categoria
+from app.services.pricing.posicoes import CAMPOS_SLOT, MAX_CATEGORIAS_VENDA
 from app.services.produto_cadastros import ordem
 
 # O tipo "Categoria de venda" da tela Cadastros › Produtos não tem linha em
@@ -68,8 +71,9 @@ TIPO_ID = UUID("7d3c6a10-75a0-4c1e-9b0e-ca7e90c1a75e")
 TIPO_NOME = "Categoria de venda"
 CHAVE = "categoria_venda"
 
-# Só existem 5 pares margem/frete por conta (margin1..5 / shipping1..5).
-LIMITE = 5
+# Só existem 10 pares margem/frete por conta (margin1..10 / shipping1..10, M-93). O número
+# mora em services/pricing/posicoes (o modelo, o cálculo e o Histórico leem de lá).
+LIMITE = MAX_CATEGORIAS_VENDA
 
 # Procuradas pelo nome (lower(name) = 'apple' / 'queima de estoque') fora daqui.
 NOMES_PROCURADOS = ("Apple", "Queima de estoque")
@@ -78,16 +82,10 @@ NOMES_PROCURADOS = ("Apple", "Queima de estoque")
 # categoria de venda — ver centro_para_nova_categoria.
 MSG_SO_FIXOS = "Categoria de venda só em Celular, Eletro e Mala por enquanto."
 
-_SLOTS = (
-    PricingAccount.slot1_segment_id,
-    PricingAccount.slot2_segment_id,
-    PricingAccount.slot3_segment_id,
-    PricingAccount.slot4_segment_id,
-    PricingAccount.slot5_segment_id,
-)
+_SLOTS = tuple(getattr(PricingAccount, campo) for campo in CAMPOS_SLOT)
 
-# M-91: o que a conta guarda pela POSIÇÃO da categoria (0..4 → margin1..5 / shipping1..5 /
-# slot1..5_segment_id). Na coluna de catálogo, margin1..5 são as margens próprias
+# M-91: o que a conta guarda pela POSIÇÃO da categoria (0..9 → margin1..10 / shipping1..10 /
+# slot1..10_segment_id). Na coluna de catálogo, margin1..10 são as margens próprias
 # (`margens_catalogo`). Excluir uma do meio anda os três juntos.
 _POR_POSICAO = tuple(
     tuple(f"{campo}{n}{fim}" for n in range(1, LIMITE + 1))
@@ -371,7 +369,7 @@ class Uso:
 
 async def contar_uso(session: AsyncSession, seg_id: UUID) -> Uso:
     """Quem aponta para a categoria: produtos (Tabela de Preços e tela Produtos) e contas que
-    apontam direto para ela. Os vínculos slot1..5 não contam (são limpos ao excluir)."""
+    apontam direto para ela. Os vínculos slot1..10 não contam (são limpos ao excluir)."""
 
     async def conta(q) -> int:
         return int((await session.execute(q)).scalar_one() or 0)
@@ -453,7 +451,7 @@ async def destinos(session: AsyncSession, seg: Segment, raiz: Segment) -> list[S
 @dataclass
 class Colunas:
     """M-91: o que acontece com as colunas de margem/frete da aba Contas ao excluir pela lixeira
-    de Cadastros › Produtos. `posicao` = a da excluída (0..4); `ultima` = a última posição
+    de Cadastros › Produtos. `posicao` = a da excluída (0..9); `ultima` = a última posição
     ocupada do centro (contando a excluída); `sobem` = as categorias que andam uma posição, na
     ordem das colunas (vazia quando a excluída é a última)."""
 
@@ -466,7 +464,7 @@ async def colunas_ao_excluir(
     session: AsyncSession, seg: Segment, raiz: Segment
 ) -> Colunas | None:
     """As colunas que andam ao excluir `seg` (M-91). None = nenhuma coluna é mexida, como antes:
-    posição fora de 0..4 ou outra categoria do centro na MESMA posição (dados antigos, de quando a
+    posição fora de 0..9 ou outra categoria do centro na MESMA posição (dados antigos, de quando a
     nova nascia na posição 0) — aí a coluna continua sendo da outra e nada pode andar."""
     pos = int(seg.sort_order)
     irmas = [s for s in await filhas(session, raiz.id) if s.id != seg.id]
@@ -556,13 +554,13 @@ async def bloqueio_exclusao(
             0,
         )
     if depois and await colunas_ao_excluir(session, seg, raiz) is None:
-        # Dados antigos (duas categorias na mesma posição ou posição fora de 1..5): andar as
+        # Dados antigos (duas categorias na mesma posição ou posição fora de 1..10): andar as
         # colunas trocaria a margem de alguém. Fica como antes da M-91.
         return uso, Bloqueio(
             "categoria_venda_do_meio",
             f"Só dá para excluir a última categoria de venda de {raiz.name} "
             f"(“{depois[-1].name}”): as posições das categorias de {raiz.name} estão "
-            "repetidas ou fora das 5 colunas de margem/frete; fale com a equipe.",
+            f"repetidas ou fora das {LIMITE} colunas de margem/frete; fale com a equipe.",
             0,
             0,
         )
@@ -595,7 +593,7 @@ async def excluir(
     M-90: em uso na tabela dela (Tabela de Preços / contas) exige `destino_id` — outra categoria
     de venda ativa do mesmo centro; sem ele, 409 `categoria_venda_em_uso` (a aba Segmentos, que
     não pergunta o destino, continua recusando). Os produtos da tela Produtos vão para o destino
-    ou, sem destino, ficam sem segmento. Limpa os vínculos slot1..5 que apontam para ela na
+    ou, sem destino, ficam sem segmento. Limpa os vínculos slot1..10 que apontam para ela na
     mesma transação — a FK já é ON DELETE SET NULL, mas assim não depende do banco.
 
     M-91 (`pela_lixeira`, Cadastros › Produtos): pode ser a do meio. As seguintes sobem uma

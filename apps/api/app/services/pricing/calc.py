@@ -21,8 +21,13 @@ Equivalent to the SSH wording:
 Slot mapping (SSH semantics):
   * `cost` = `product.cost_kit_{account.kit_number}`, fallback `cost_kit1`.
   * `margin/shipping` = `account.margin_{product.product_type}` /
-    `account.shipping_{product.product_type}`. The product type (1..5)
-    is the leaf-segment column under the root department.
+    `account.shipping_{product.product_type}`. The product type (1..10 —
+    M-93, services/pricing/posicoes.MAX_CATEGORIAS_VENDA; antes 1..5) is the
+    leaf-segment column under the root department. Margem vazia na posição
+    (ex.: categoria nova, que nasce com "—" em todas as contas) = sem preço,
+    como qualquer célula sem margem: nenhum valor padrão é inventado.
+  * Sem o tipo resolvido (caminho antigo: o tipo vira o kit da conta), o tipo
+    continua preso em 1..5 como antes da M-93 — nenhum preço já calculado muda.
 
 `commission` and the matching margin slot must both be set — when missing,
 calc returns `None` and the caller treats the cell as "not configured"
@@ -47,6 +52,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
+
+from app.services.pricing.posicoes import MAX_CATEGORIAS_VENDA, POSICOES_ANTES_DA_M93
 
 if TYPE_CHECKING:
     from app.models import PricingAccount, PricingOverride, PricingProduct
@@ -84,22 +91,11 @@ def _kit_value(product: PricingProduct, kit: int) -> Decimal | None:
 def _account_pair(
     account: PricingAccount, slot: int
 ) -> tuple[Decimal | None, Decimal | None]:
-    margins = {
-        1: account.margin1,
-        2: account.margin2,
-        3: account.margin3,
-        4: account.margin4,
-        5: account.margin5,
-    }
-    shippings = {
-        1: account.shipping1,
-        2: account.shipping2,
-        3: account.shipping3,
-        4: account.shipping4,
-        5: account.shipping5,
-    }
-    m = margins.get(slot)
-    s = shippings.get(slot)
+    """(margin{slot}, shipping{slot}) da conta; posição fora de 1..10 = (None, None)."""
+    if not 1 <= slot <= MAX_CATEGORIAS_VENDA:
+        return None, None
+    m = getattr(account, f"margin{slot}", None)
+    s = getattr(account, f"shipping{slot}", None)
     return (
         Decimal(m) if m is not None else None,
         Decimal(s) if s is not None else None,
@@ -156,12 +152,17 @@ def calculate(
 
     kit = int(params.kit_number or 1)
     # Margin/shipping slot is the product type (Acessórios/Diversos/Regular/
-    # Robusto/Apple). When the caller didn't resolve it, fall back to a
+    # Robusto/Apple…). When the caller didn't resolve it, fall back to a
     # transient attr the API sets after the segment lookup; ultimate fallback
     # is the account's kit_number (legacy behavior).
+    teto = MAX_CATEGORIAS_VENDA
     if product_type is None:
-        product_type = getattr(product, "_product_type", None) or kit
-    slot = max(1, min(5, int(product_type)))
+        product_type = getattr(product, "_product_type", None)
+        if not product_type:
+            # Caminho antigo (o kit no lugar do tipo, ex.: services/audit/runner):
+            # preso em 1..5 como antes da M-93, para nenhum preço já calculado mudar.
+            product_type, teto = kit, POSICOES_ANTES_DA_M93
+    slot = max(1, min(teto, int(product_type)))
     if catalogo:
         cost = _preco_catalogo(product)
     else:
