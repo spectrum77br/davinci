@@ -39,7 +39,6 @@ from app.db import get_session, is_unique_violation
 from app.deps.auth import require_active_user, require_admin, require_permission
 from app.models import ProdutoCadastro, ProdutoCadastroTipo, Segment, User
 from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO, NOME_MAX
-from app.schemas.segments import _slugify
 from app.services import categorias_venda as cv
 from app.services import produto_cadastros as svc
 
@@ -155,8 +154,10 @@ def _venda_out(seg: Segment, raiz: Segment) -> CadastroOut:
 
 
 async def _centro(session: AsyncSession, centro_id: UUID) -> Segment:
-    raiz = await session.get(Segment, centro_id)
-    if raiz is None or raiz.parent_id is not None:
+    """O centro de custo escolhido no menu: tem de estar na MESMA lista do menu
+    (cv.centros_do_menu — o Catálogo, por exemplo, não está)."""
+    raiz = next((r for r in await cv.centros_do_menu(session) if r.id == centro_id), None)
+    if raiz is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             detail={"code": "centro_nao_encontrado", "mensagem": "Centro de custo não encontrado."},
@@ -330,15 +331,10 @@ async def listar(
         for c in (await session.execute(select(ProdutoCadastro))).scalars()
     ]
     cadastros.sort(key=lambda c: (svc.ordem(c.tipo_nome), svc.ordem(c.nome)))
-    # M-75: Categoria de venda = os segmentos filhos, por centro de custo (alfabético) e na
-    # ordem das colunas de margem/frete; o sort estável só encaixa o tipo entre os outros.
-    centros, vendas = await cv.listar(session)
-    centros.sort(key=lambda r: svc.ordem(r.name))
-    ordem_centro = {r.id: i for i, r in enumerate(centros)}
-    vendas.sort(
-        key=lambda par: (ordem_centro[par[1].id], par[0].sort_order, svc.ordem(par[0].name))
-    )
-    cadastros += [_venda_out(s, raiz) for s, raiz in vendas]
+    # M-75: Categoria de venda = os segmentos filhos, por centro de custo (Celular, Eletro,
+    # Mala e depois o Catálogo) e na ordem das colunas de margem/frete (cv.listar); o sort
+    # estável só encaixa o tipo entre os outros.
+    cadastros += [_venda_out(s, raiz) for s, raiz in await cv.listar(session)]
     cadastros.sort(key=lambda c: svc.ordem(c.tipo_nome))
     tipos_out = [TipoOut(id=t.id, nome=t.nome, chave=t.chave) for t in tipos]
     tipos_out.append(TipoOut(id=cv.TIPO_ID, nome=cv.TIPO_NOME, chave=cv.CHAVE))
@@ -346,7 +342,9 @@ async def listar(
     return ListaOut(
         tipos=tipos_out,
         cadastros=cadastros,
-        centros_custo=[CentroCustoOut(id=r.id, nome=r.name) for r in centros],
+        centros_custo=[
+            CentroCustoOut(id=r.id, nome=r.name) for r in await cv.centros_do_menu(session)
+        ],
     )
 
 
@@ -499,23 +497,20 @@ async def criar_categoria_venda(
     raiz = await _centro(session, body.centro_custo_id)
     nome = _nome(body.nome, "cadastro")
     posicao = await cv.conferir_nova(session, raiz, nome)
-    slug = _slugify(nome)
-    if not slug:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "nome_sem_letras", "mensagem": "O nome precisa ter letras ou números."},
-        )
     seg = Segment(
         user_id=admin.id,
         parent_id=raiz.id,
         name=nome,
-        slug=slug,
+        slug=await cv.slug_livre(session, raiz, nome),
         sort_order=posicao,
         active=True,
     )
     nome_centro = raiz.name  # o rollback abaixo expira os objetos da sessão
     session.add(seg)
     try:
+        # Na mesma transação: as contas do centro com o slot{N} vazio passam a apontar
+        # para ela (frete "Projetado" da página Margem).
+        await cv.preencher_slots(session, raiz, seg)
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
@@ -576,9 +571,6 @@ async def excluir_categoria_venda(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     seg, raiz = await _venda(session, venda_id)
-    _uso, bloqueio = await cv.bloqueio_exclusao(session, seg, raiz)
-    if bloqueio is not None:
-        raise cv.recusa(bloqueio)
-    await session.delete(seg)
+    await cv.excluir(session, seg, raiz)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

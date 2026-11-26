@@ -12,7 +12,8 @@
 // NÃO é cadastro novo: são os segmentos filhos de Cadastros › Segmentos (o mesmo dado), com a
 // raiz na coluna "Centro de custo". Vão pelas rotas /categorias-venda; a nova entra no fim do
 // centro de custo (até 5), só a última sai e "Apple"/"Queima de estoque" não trocam de nome
-// (o servidor confere e manda a frase).
+// (o servidor confere e manda a frase). O menu "Centro de custo" do Novo cadastro vem de um
+// lugar só: `centros_custo` da lista (services/categorias_venda.centros_do_menu no servidor).
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
@@ -132,7 +133,7 @@ const cadAberto = ref(false)
 const cadEditando = ref<Cadastro | null>(null)
 const cadTipo = ref('')
 const cadNome = ref('')
-const cadCentro = ref('') // Categoria de venda: o centro de custo (raiz de Segmentos)
+const cadCentro = ref('') // Categoria de venda nova: o id do centro de custo escolhido no menu
 const cadErro = ref<string | null>(null)
 const cadAviso = ref<string | null>(null) // tag em uso: confirmar a troca
 const cadSalvando = ref(false)
@@ -150,7 +151,8 @@ function abrirCadastro(c: Cadastro | null = null) {
   cadEditando.value = c
   cadTipo.value = c?.tipo_id ?? tipos.value[0]?.id ?? ''
   cadNome.value = c?.nome ?? ''
-  cadCentro.value = centros.value.find((r) => r.nome === c?.centro_custo)?.id ?? ''
+  // No lápis o centro de custo não muda (só aparece); no Novo cadastro a pessoa escolhe.
+  cadCentro.value = ''
   cadErro.value = null
   cadAviso.value = null
 }
@@ -422,13 +424,23 @@ async function confirmarExclusao() {
             <option v-for="t in tiposDoMenu" :key="t.id" :value="t.id">{{ t.nome }}</option>
           </select>
         </label>
-        <!-- Categoria de venda: o centro de custo (no lápis só o nome muda). -->
-        <label v-if="cadEhVenda" class="block text-xs text-muted-foreground">
+        <!-- Categoria de venda: o centro de custo. No lápis só o nome muda: o centro aparece
+             travado (pode ser um que não está no menu, como o Catálogo). -->
+        <label v-if="cadEhVenda && cadEditando" class="block text-xs text-muted-foreground">
+          Centro de custo
+          <input
+            :value="cadEditando.centro_custo || '—'"
+            type="text"
+            disabled
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground disabled:opacity-60"
+            data-campo="cadastro-centro-fixo"
+          />
+        </label>
+        <label v-else-if="cadEhVenda" class="block text-xs text-muted-foreground">
           Centro de custo
           <select
             v-model="cadCentro"
-            :disabled="!!cadEditando"
-            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground disabled:opacity-60"
+            class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
             data-campo="cadastro-centro"
           >
             <option value="" disabled>Escolha…</option>
@@ -441,7 +453,7 @@ async function confirmarExclusao() {
             v-model="cadNome"
             type="text"
             maxlength="60"
-            placeholder="ex.: .sp ou Celular"
+            :placeholder="cadEhVenda ? 'ex.: Acessórios' : 'ex.: .sp ou Celular'"
             class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
             data-campo="cadastro-nome"
             @keydown.enter="salvarCadastro(false)"

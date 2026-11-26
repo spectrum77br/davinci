@@ -79,8 +79,11 @@ const script = descriptor.scriptSetup.content
   assert.match(linha, /:class="\{ 'text-muted-foreground': c\.ativa === false \}"[\s\S]*v-if="c\.ativa === false"[\s\S]*>inativa<\/span>/)
   const ordemCols = ['{{ c.tipo_nome }}', '{{ c.nome }}', "c.centro_custo || '—'", '<Pencil'].map((t) => linha.indexOf(t))
   assert.ok(ordemCols.every((i, k) => i > 0 && (k === 0 || i > ordemCols[k - 1])), 'Tipo | Nome | Centro de custo | Ações')
-  // Novo cadastro de Categoria de venda pede o centro de custo; no lápis ele e o tipo ficam travados
-  assert.match(tpl, /<label v-if="cadEhVenda"[\s\S]{0,120}Centro de custo[\s\S]{0,200}:disabled="!!cadEditando"[\s\S]{0,300}data-campo="cadastro-centro"/)
+  // Novo cadastro de Categoria de venda pede o centro de custo (menu); no lápis o centro aparece
+  // travado (texto, pode ser o Catálogo, que não está no menu) e o tipo também fica travado
+  assert.match(tpl, /<label v-if="cadEhVenda && cadEditando"[\s\S]{0,120}Centro de custo[\s\S]{0,120}:value="cadEditando\.centro_custo \|\| '—'"[\s\S]{0,60}disabled[\s\S]{0,200}data-campo="cadastro-centro-fixo"/)
+  assert.match(tpl, /<label v-else-if="cadEhVenda"[\s\S]{0,120}Centro de custo[\s\S]{0,60}<select[\s\S]{0,40}v-model="cadCentro"[\s\S]{0,200}data-campo="cadastro-centro"[\s\S]{0,120}v-for="r in centros"/)
+  assert.match(tpl, /:placeholder="cadEhVenda \? 'ex\.: Acessórios' : 'ex\.: \.sp ou Celular'"/)
   assert.match(tpl, /:disabled="ehVenda\(cadEditando\)"/)
   assert.match(tpl, /v-for="t in tiposDoMenu"/)
   // O tipo Categoria de venda não é renomeado na janela de tipos
@@ -244,7 +247,7 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.equal(p.cadErro.value, limite)
     assert.equal(p.cadAberto.value, true)
   }
-  // M-75: lápis numa Categoria de venda — só o nome, pela rota dela; o centro vem preenchido;
+  // M-75: lápis numa Categoria de venda — só o nome, pela rota dela; o centro só aparece;
   // a recusa do nome fixo aparece como veio
   {
     const fixo = '“Apple” não pode trocar de nome: outras partes do sistema procuram esta categoria pelo nome “Apple”.'
@@ -253,7 +256,7 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     })
     p.abrirCadastro(CADS[2])
     assert.equal(p.cadEhVenda.value, true)
-    assert.equal(p.cadCentro.value, 'r-cel')
+    assert.equal(p.cadCentro.value, '', 'no lápis o centro não é escolhido (só aparece)')
     p.cadNome.value = 'iPhone'
     await p.salvarCadastro()
     assert.deepEqual(calls.at(-1), { url: '/api/produto-cadastros/categorias-venda/s1', method: 'PATCH', body: { nome: 'iPhone' } })

@@ -8,7 +8,11 @@ São os segmentos filhos das raízes (mesma tabela `segments`), não um cadastro
   contando as inativas ("Este centro de custo já tem 5 categorias de venda."); o mesmo nome em
   outro centro pode, no mesmo não; "Apple"/"Queima de estoque" não são usados por outra;
 - renomear: "Apple" e "Queima de estoque" não trocam de nome (nas duas telas);
-- excluir: em uso (produto ou conta) recusa com as contagens; só a última do centro sai;
+- excluir: em uso (produto ou conta apontando DIRETO para ela) recusa com as contagens; os
+  vínculos slot1..5 das contas não contam e são limpos; só a última do centro sai;
+- incluir na posição N preenche o slot{N} vazio das contas daquele centro (nas duas telas);
+- o menu de centros de custo (sem o Catálogo) e a ordem Celular, Eletro, Mala, Catálogo;
+- posição e centro de custo não mudam pela aba Segmentos; nome repetido no centro também não;
 - desativar/reativar fora de ordem (aba Segmentos) é recusado;
 - só administrador inclui/renomeia/exclui aqui.
 """
@@ -28,17 +32,20 @@ LIMITE_MSG = "Este centro de custo já tem 5 categorias de venda."
 
 @pytest.fixture
 async def centros(db):
-    """Celular (5), Mala (5, a última "Queima de estoque" inativa) e Eletro (3: espaço livre)."""
+    """Celular (5), Mala (5, a última "Queima de estoque" inativa), Eletro (3: espaço livre) e
+    a raiz antiga Catálogo (1: "Apple", como na produção)."""
     cel = Segment(name="Celular", slug="celular", sort_order=0)
     mala = Segment(name="Mala", slug="mala", sort_order=1)
     ele = Segment(name="Eletro", slug="eletro", sort_order=2)
-    db.add_all([cel, mala, ele])
+    cat = Segment(name="Catálogo", slug="catalogo", sort_order=3)
+    db.add_all([cel, mala, ele, cat])
     await db.flush()
     filhos: dict[str, Segment] = {}
     for raiz, nomes in (
         (cel, ["Acessórios", "Diversos", "Regular", "Robusto", "Apple"]),
         (mala, ["Acessórios", '12"', '18" e 20"', '24" acima', "Queima de estoque"]),
         (ele, ["1", "2", "3"]),
+        (cat, ["Apple"]),
     ):
         for i, nome in enumerate(nomes):
             s = Segment(
@@ -51,7 +58,7 @@ async def centros(db):
             db.add(s)
             filhos[f"{raiz.name}/{nome}"] = s
     await db.commit()
-    return {"Celular": cel, "Mala": mala, "Eletro": ele, **filhos}
+    return {"Celular": cel, "Mala": mala, "Eletro": ele, "Catálogo": cat, **filhos}
 
 
 async def _nova(client, centros, centro: str, nome: str):
@@ -75,6 +82,31 @@ async def _filhos(db, raiz: Segment) -> list[tuple[str, int, bool]]:
         )
     ).scalars()
     return [(s.name, s.sort_order, s.active) for s in linhas]
+
+
+async def _conta(db, dono, raiz: Segment, nome: str, **slots) -> PricingAccount:
+    conta = PricingAccount(
+        user_id=dono.id,
+        name=nome,
+        platform=PricingPlatform.SHOPEE,
+        segment_id=raiz.id,
+        **slots,
+    )
+    db.add(conta)
+    await db.commit()
+    return conta
+
+
+async def _slots(db, conta: PricingAccount) -> list:
+    """Os 5 vínculos da conta como estão no banco agora."""
+    c = (
+        await db.execute(
+            select(PricingAccount)
+            .where(PricingAccount.id == conta.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    return [getattr(c, f"slot{n}_segment_id") for n in range(1, 6)]
 
 
 # ================================================================ lista
@@ -104,12 +136,17 @@ async def test_lista_mostra_as_categorias_de_venda(client, make_user, auth_as, c
         ("Mala", '18" e 20"', True),
         ("Mala", '24" acima', True),
         ("Mala", "Queima de estoque", False),
+        # A raiz antiga Catálogo vem depois de Celular, Eletro e Mala (ordem da M-23).
+        ("Catálogo", "Apple", True),
     ]
     # A linha é o próprio segmento (mesmo id da aba Segmentos).
     apple = next(c for c in corpo["cadastros"] if c["nome"] == "Apple")
     assert apple["id"] == str(centros["Celular/Apple"].id)
     assert apple["tipo_nome"] == "Categoria de venda"
-    assert [c["nome"] for c in corpo["centros_custo"]] == ["Celular", "Eletro", "Mala"]
+    # O menu do "Novo cadastro": sem o Catálogo (não é centro de custo).
+    assert corpo["centros_custo"] == [
+        {"id": str(centros[n].id), "nome": n} for n in ("Celular", "Eletro", "Mala")
+    ]
 
 
 # ================================================================ incluir
@@ -159,9 +196,11 @@ async def test_nome_repetido_no_centro_e_nomes_fixos(client, make_user, auth_as,
         r = await client.post(ROTA, json={"centro_custo_id": eletro, "nome": nome})
         assert r.status_code == 409, nome
         assert r.json()["detail"]["code"] == "categoria_venda_nome_reservado"
-    # Centro de custo tem de ser uma raiz.
-    r = await client.post(ROTA, json={"centro_custo_id": str(centros["Eletro/1"].id), "nome": "X"})
-    assert r.status_code == 404
+    # Centro de custo tem de ser uma raiz do menu: nem um filho, nem o Catálogo.
+    for alvo in ("Eletro/1", "Catálogo"):
+        r = await client.post(ROTA, json={"centro_custo_id": str(centros[alvo].id), "nome": "X"})
+        assert r.status_code == 404, alvo
+        assert r.json()["detail"]["code"] == "centro_nao_encontrado"
 
 
 async def test_aba_segmentos_tambem_cria_no_fim(client, db, make_user, auth_as, centros):
@@ -172,6 +211,13 @@ async def test_aba_segmentos_tambem_cria_no_fim(client, db, make_user, auth_as, 
     )
     assert r.status_code == 201, r.text
     assert r.json()["sort_order"] == 3
+    # Uma posição no pedido não fura a regra: vai para o fim do mesmo jeito.
+    r = await client.post(
+        "/api/segments",
+        json={"name": "Cinco", "parent_id": str(centros["Eletro"].id), "sort_order": 0},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["sort_order"] == 4
     r = await client.post(
         "/api/segments", json={"name": "Mochilas", "parent_id": str(centros["Mala"].id)}
     )
@@ -219,34 +265,90 @@ async def test_renomear_e_nomes_fixos(client, make_user, auth_as, centros):
 
 
 async def test_em_uso_nao_sai_e_diz_quantos(client, db, make_user, auth_as, centros):
+    """Conta usa = `pricing_accounts.segment_id` apontando DIRETO para ela; o vínculo slot não."""
     dono = await _admin(make_user, auth_as)
     apple = centros["Celular/Apple"]
     db.add_all(
         [
             PricingProduct(user_id=dono.id, sku="i001", name="iPhone", segment_id=apple.id),
             PricingProduct(user_id=dono.id, sku="i002", name="iPad", segment_id=apple.id),
-            PricingAccount(
-                user_id=dono.id,
-                name="loja",
-                platform=PricingPlatform.SHOPEE,
-                segment_id=centros["Celular"].id,
-                slot5_segment_id=apple.id,
-            ),
         ]
     )
     await db.commit()
+    await _conta(db, dono, apple, "direta")
+    await _conta(db, dono, centros["Celular"], "só o vínculo", slot5_segment_id=apple.id)
 
     r = await client.get(f"{ROTA}/{apple.id}/uso")
     assert r.status_code == 200, r.text
     uso = r.json()
     assert (uso["regra"], uso["produtos"], uso["bloqueia"]) == ("categoria_venda", 2, True)
-    assert "2 produtos da Tabela de Preços e 1 conta" in uso["mensagem"]
+    assert "2 produtos da Tabela de Preços e 1 conta." in uso["mensagem"]
+    assert "Passe esses produtos e essa conta para outra categoria de venda" in uso["mensagem"]
     for rota in (f"{ROTA}/{apple.id}", f"/api/segments/{apple.id}"):
         r = await client.delete(rota)
         assert r.status_code == 409, rota
         d = r.json()["detail"]
         assert (d["code"], d["produtos"], d["contas"]) == ("categoria_venda_em_uso", 2, 1)
     assert ("Apple", 4, True) in await _filhos(db, centros["Celular"])
+
+
+async def test_vinculo_slot_nao_conta_e_e_limpo_ao_excluir(client, db, make_user, auth_as, centros):
+    dono = await _admin(make_user, auth_as)
+    e = {n: centros[f"Eletro/{n}"].id for n in ("1", "2", "3")}
+    a = await _conta(
+        db,
+        dono,
+        centros["Eletro"],
+        "a",
+        slot1_segment_id=e["1"],
+        slot2_segment_id=e["2"],
+        slot3_segment_id=e["3"],
+    )
+    # Vínculo trocado à mão (popover da aba Contas) também é limpo.
+    b = await _conta(db, dono, centros["Eletro"], "b", slot1_segment_id=e["3"])
+    r = await client.get(f"{ROTA}/{e['3']}/uso")
+    assert r.json() == {
+        "regra": "categoria_venda",
+        "produtos": 0,
+        "bloqueia": False,
+        "mensagem": None,
+    }
+    assert (await client.delete(f"{ROTA}/{e['3']}")).status_code == 204
+    assert await _slots(db, a) == [e["1"], e["2"], None, None, None]
+    assert await _slots(db, b) == [None, None, None, None, None]
+    # Pela aba Segmentos, o mesmo.
+    assert (await client.delete(f"/api/segments/{e['2']}")).status_code == 204
+    assert await _slots(db, a) == [e["1"], None, None, None, None]
+
+
+async def test_nova_na_posicao_n_preenche_o_slot_n_vazio(client, db, make_user, auth_as, centros):
+    """Mesma regra de _default_slot_segments: a página Margem não fica sem "Projetado"."""
+    dono = await _admin(make_user, auth_as)
+    um = centros["Eletro/1"].id
+    vazia = await _conta(db, dono, centros["Eletro"], "vazia", slot1_segment_id=um)
+    trocada = await _conta(db, dono, centros["Eletro"], "trocada", slot4_segment_id=um)
+    outra = await _conta(db, dono, centros["Celular"], "celular")
+
+    r = await _nova(client, centros, "Eletro", "Quatro")
+    assert r.status_code == 201, r.text
+    quatro = r.json()["id"]
+    assert [str(x) if x else None for x in await _slots(db, vazia)] == [
+        str(um),
+        None,
+        None,
+        quatro,
+        None,
+    ]
+    # Quem já tinha o slot4 preenchido fica como estava; conta de outro centro não muda.
+    assert await _slots(db, trocada) == [None, None, None, um, None]
+    assert await _slots(db, outra) == [None, None, None, None, None]
+
+    r = await client.post(
+        "/api/segments", json={"name": "Cinco", "parent_id": str(centros["Eletro"].id)}
+    )
+    assert r.status_code == 201, r.text
+    assert (await _slots(db, vazia))[4] is not None
+    assert str((await _slots(db, trocada))[4]) == r.json()["id"]
 
 
 async def test_so_a_ultima_sai_e_nenhuma_muda_de_coluna(client, db, make_user, auth_as, centros):
@@ -297,6 +399,60 @@ async def test_desativar_e_reativar_so_na_ordem(client, db, make_user, auth_as, 
     assert await ativa("Mala/Queima de estoque", True) == 200
     # Sem mudar o estado, nada a conferir (a tela manda o campo como está).
     assert await ativa("Eletro/1", True) == 200
+
+
+async def test_aba_segmentos_nao_muda_lugar_nem_repete_nome(
+    client, db, make_user, auth_as, centros
+):
+    await _admin(make_user, auth_as)
+    dois = centros["Eletro/2"].id
+    for corpo in (
+        {"sort_order": 4},
+        {"parent_id": str(centros["Mala"].id)},
+        {"parent_id": None},
+    ):
+        r = await client.patch(f"/api/segments/{dois}", json=corpo)
+        assert r.status_code == 409, corpo
+        assert r.json()["detail"]["code"] == "categoria_venda_posicao_fixa"
+    # Mandar o valor que já está não é mudança.
+    r = await client.patch(f"/api/segments/{dois}", json={"sort_order": 1, "name": "Dois"})
+    assert r.status_code == 200, r.text
+    # Uma raiz não vira categoria de venda por troca de pai (furaria o limite de 5).
+    r = await client.patch(
+        f"/api/segments/{centros['Catálogo'].id}", json={"parent_id": str(centros["Eletro"].id)}
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "categoria_venda_posicao_fixa"
+    # Nome repetido no mesmo centro, pela aba Segmentos, também não.
+    r = await client.patch(f"/api/segments/{dois}", json={"name": "3"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "nome_repetido"
+    assert await _filhos(db, centros["Eletro"]) == [
+        ("1", 0, True),
+        ("Dois", 1, True),
+        ("3", 2, True),
+    ]
+
+
+async def test_nome_de_uma_renomeada_pode_voltar(client, db, make_user, auth_as, centros):
+    """A renomeada guarda o slug antigo: a nova com aquele nome ganha outro slug (sem 409)."""
+    await _admin(make_user, auth_as)
+    r = await _nova(client, centros, "Eletro", "Novo")
+    assert r.status_code == 201, r.text
+    novo = r.json()["id"]
+    assert (await client.patch(f"{ROTA}/{novo}", json={"nome": "Outro"})).status_code == 200
+    r = await _nova(client, centros, "Eletro", "Novo")
+    assert r.status_code == 201, r.text
+    slugs = {
+        s.name: s.slug
+        for s in (
+            await db.execute(
+                select(Segment)
+                .where(Segment.parent_id == centros["Eletro"].id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    assert (slugs["Outro"], slugs["Novo"]) == ("novo", "novo-2")
 
 
 # ================================================================ quem pode

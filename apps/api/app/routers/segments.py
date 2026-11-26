@@ -91,14 +91,23 @@ async def create_segment(
     user: Annotated[User, Depends(require_permission("segmentos", "edit"))],
 ) -> SegmentOut:
     sort_order = body.sort_order
+    raiz: Segment | None = None  # o centro de custo, quando o novo é categoria de venda
     if body.parent_id is not None:
         pai = await _get_or_404(session, body.parent_id)
         # M-75: filho de raiz = categoria de venda (coluna de margem/frete da
-        # aba Contas). Sem posição no pedido, entra no FIM do centro de custo
-        # (antes gravava 0, a mesma da primeira); até 5 (services/categorias_venda).
-        if pai.parent_id is None and "sort_order" not in body.model_fields_set:
+        # aba Contas). Entra SEMPRE no FIM do centro de custo (antes gravava 0,
+        # a mesma da primeira; um sort_order no pedido é ignorado), até 5
+        # (services/categorias_venda).
+        if pai.parent_id is None:
+            raiz = pai
             sort_order = await categorias_venda.conferir_nova(session, pai, body.name)
-    slug = body.slug or _slugify(body.name)
+    if body.slug:
+        slug = body.slug
+    elif raiz is not None:
+        # Slug livre no centro (uma renomeada guarda o slug antigo).
+        slug = await categorias_venda.slug_livre(session, raiz, body.name)
+    else:
+        slug = _slugify(body.name)
     if not slug:
         raise HTTPException(400, detail={"code": "slug_invalid"})
     seg = Segment(
@@ -112,6 +121,10 @@ async def create_segment(
     )
     session.add(seg)
     try:
+        if raiz is not None:
+            # M-75: as contas do centro com o slot{N} vazio passam a apontar
+            # para ela, na mesma transação (frete "Projetado" da Margem).
+            await categorias_venda.preencher_slots(session, raiz, seg)
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
@@ -145,13 +158,26 @@ async def patch_segment(
 
     # M-75: "Apple" e "Queima de estoque" são procuradas pelo nome; e desativar
     # ou reativar uma categoria de venda não pode tirar as outras da coluna de
-    # margem/frete da aba Contas (services/categorias_venda).
+    # margem/frete da aba Contas (services/categorias_venda). A posição e o
+    # centro de custo de uma categoria de venda não mudam (nem um segmento vira
+    # categoria por troca de pai): as colunas sairiam do lugar e o limite de 5
+    # seria furado. A tela não manda esses campos; isto segura a API.
+    raiz = await categorias_venda.raiz_de(session, seg)
+    if raiz is not None and (
+        data.get("parent_id", seg.parent_id) != seg.parent_id
+        or data.get("sort_order", seg.sort_order) != seg.sort_order
+    ):
+        raise categorias_venda.recusar_mudanca_de_lugar()
+    if raiz is None and data.get("parent_id") is not None:
+        novo_pai = await _get_or_404(session, data["parent_id"])
+        if novo_pai.parent_id is None:
+            raise categorias_venda.recusar_mudanca_de_lugar()
     if data.get("name") is not None:
         categorias_venda.conferir_troca_de_nome(seg.name, data["name"])
-    if data.get("active") is not None and data["active"] != seg.active:
-        raiz = await categorias_venda.raiz_de(session, seg)
         if raiz is not None:
-            await categorias_venda.conferir_ativacao(session, seg, raiz, data["active"])
+            await categorias_venda.sem_repetir_no_centro(session, raiz, data["name"], menos=seg.id)
+    if data.get("active") is not None and data["active"] != seg.active and raiz is not None:
+        await categorias_venda.conferir_ativacao(session, seg, raiz, data["active"])
 
     for k, v in data.items():
         setattr(seg, k, v)
@@ -189,15 +215,15 @@ async def delete_segment(
     _u: Annotated[User, Depends(require_permission("segmentos", "delete"))],
 ) -> None:
     seg = await _get_or_404(session, segment_id)
-    # M-75: categoria de venda só sai sem produto e sem conta usando, e só a
-    # última do centro de custo (as outras não mudam de coluna). Antes vinha
-    # um erro genérico do banco quando havia produto.
+    # M-75: categoria de venda só sai sem produto e sem conta apontando direto
+    # para ela, e só a última do centro de custo (as outras não mudam de
+    # coluna). Antes vinha um erro genérico do banco quando havia produto.
+    # Os vínculos slot1..5 das contas não contam como uso e são limpos junto.
     raiz = await categorias_venda.raiz_de(session, seg)
     if raiz is not None:
-        _uso, bloqueio = await categorias_venda.bloqueio_exclusao(session, seg, raiz)
-        if bloqueio is not None:
-            raise categorias_venda.recusa(bloqueio)
-    await session.delete(seg)
+        await categorias_venda.excluir(session, seg, raiz)
+    else:
+        await session.delete(seg)
     await session.commit()
     return None
 
