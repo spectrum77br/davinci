@@ -6,9 +6,13 @@
 // lugar da antiga aba Kit) e a rota antiga /financeiro/suprimentos, que
 // saiu do menu.
 // `embutido` tira o recuo da página quando vem dentro da Importação.
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
-import { Download, ExternalLink, FileDown, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+// M-67 (25/11/2026): barra com Layout ▾ (mostra/esconde Modelo, Número, Valor
+// e Situação oficial) e Excel (.xlsx), no lugar do "Baixar tabela em PDF".
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ChevronDown, Download, ExternalLink, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { createCertificacoesAutosave } from '~/utils/certificacoesAutosave'
+import { gerarXlsx, TIPO_XLSX, type CelulaPlanilha } from '~/lib/planilhaXlsx'
 
 defineProps<{ embutido?: boolean }>()
 
@@ -125,9 +129,64 @@ const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean))
 const canAttach = computed(() => auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.edit))
 const autosave = createCertificacoesAutosave(
   (id, patch) => api(`/api/financeiro/suprimentos/${id}`, { method: 'PATCH', body: patch }),
-  () => { errorText.value = 'Não foi possível salvar as alterações. Tente novamente antes de atualizar ou baixar o PDF.' },
+  () => { errorText.value = 'Não foi possível salvar as alterações. Tente novamente antes de atualizar ou baixar o Excel.' },
 )
 onBeforeUnmount(() => { void autosave.flush().catch(() => {}) })
+
+// Layout ▾ (M-67): caixas para mostrar ou esconder colunas da tabela, como o
+// Layout da Tabela de Preços (marcada = aparece; tudo marcado no começo;
+// lembrado neste navegador). Produto, Nome comercial, Certificado, Início,
+// Fim, Garantia e PDF do certificado ficam sempre à mostra. O menu mostra só a
+// caixa e o nome. O Excel leva só as colunas à mostra.
+const COLUNAS_LAYOUT = [
+  { chave: 'modelo', rotulo: 'Modelo' },
+  { chave: 'numero', rotulo: 'Número' },
+  { chave: 'valor', rotulo: 'Valor' },
+  { chave: 'situacao', rotulo: 'Situação' },
+]
+const CHAVE_COLUNAS_OCULTAS = 'certificacoes.colunasOcultas'
+// Guarda as DESMARCADAS: vazio = tudo à mostra.
+const colunasOcultas = ref<string[]>([])
+
+function mostraColuna(chave: string): boolean {
+  return !colunasOcultas.value.includes(chave)
+}
+
+function alternarColuna(chave: string) {
+  colunasOcultas.value = mostraColuna(chave)
+    ? [...colunasOcultas.value, chave]
+    : colunasOcultas.value.filter((c) => c !== chave)
+}
+
+// O que veio do navegador ("modelo,valor"): só as chaves que existem.
+function lerColunasOcultas(texto: string | null): string[] {
+  const validas = new Set(COLUNAS_LAYOUT.map((c) => c.chave))
+  return [...new Set((texto || '').split(',').map((s) => s.trim()).filter((s) => validas.has(s)))]
+}
+
+// Colunas da tabela (o colspan da linha "Nenhuma certificação"): as 11 menos
+// as escondidas, mais a lixeira de quem pode excluir.
+const totalColunas = computed(() => 11 - colunasOcultas.value.length + (canDelete.value ? 1 : 0))
+
+// Lidas só depois de montar (no servidor não há localStorage).
+function lerPreferencia(chave: string): string | null {
+  try {
+    return localStorage.getItem(chave)
+  } catch {
+    return null
+  }
+}
+function gravarPreferencia(chave: string, valor: string) {
+  try {
+    localStorage.setItem(chave, valor)
+  } catch {
+    /* navegador sem armazenamento: vale só nesta visita */
+  }
+}
+onMounted(() => {
+  colunasOcultas.value = lerColunasOcultas(lerPreferencia(CHAVE_COLUNAS_OCULTAS))
+  watch(colunasOcultas, (v) => gravarPreferencia(CHAVE_COLUNAS_OCULTAS, v.join(',')))
+})
 
 const CERT_OPTIONS = ['', 'anatel', 'inmetro', 'isento']
 const ANATEL_SOURCE_URL = 'https://www.anatel.gov.br/dadosabertos/paineis_de_dados/certificacao_de_produtos/produtos_certificados.zip'
@@ -393,10 +452,7 @@ async function removeRow(row: Row) {
   }
 }
 
-async function downloadPdf(path: string, filename: string) {
-  const response = await fetch(url(path), { credentials: 'include' })
-  if (!response.ok) throw new Error('Não foi possível baixar o PDF. Tente novamente.')
-  const blob = await response.blob()
+function baixarBlob(blob: Blob, filename: string) {
   const objectUrl = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = objectUrl
@@ -407,6 +463,52 @@ async function downloadPdf(path: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
 }
 
+async function downloadPdf(path: string, filename: string) {
+  const response = await fetch(url(path), { credentials: 'include' })
+  if (!response.ok) throw new Error('Não foi possível baixar o PDF. Tente novamente.')
+  baixarBlob(await response.blob(), filename)
+}
+
+// Excel (M-67, no lugar do "Baixar tabela em PDF"): todas as linhas da lista,
+// na ordem da tela, com as colunas à mostra (Layout), na ordem da tabela.
+// Início e Fim vão como data; Valor e Garantia (meses) como número; vazio fica
+// em branco. "PDF do certificado" leva o nome do arquivo anexado.
+function linhasExcel(): CelulaPlanilha[][] {
+  const numero = (v: unknown): number | '' => {
+    if (v == null || v === '') return ''
+    const n = Number(v)
+    return Number.isFinite(n) ? n : ''
+  }
+  const data = (v: string | null): CelulaPlanilha => (v ? { data: v } : '')
+  const cab: CelulaPlanilha[] = ['Produto']
+  if (mostraColuna('modelo')) cab.push('Modelo')
+  cab.push('Nome comercial', 'Certificado')
+  if (mostraColuna('numero')) cab.push('Número')
+  if (mostraColuna('valor')) cab.push('Valor')
+  cab.push('Início', 'Fim', 'Garantia (meses)')
+  if (mostraColuna('situacao')) cab.push('Situação oficial')
+  cab.push('PDF do certificado')
+  const linhas: CelulaPlanilha[][] = [cab]
+  for (const row of rows.value) {
+    const l: CelulaPlanilha[] = [row.produto ?? '']
+    if (mostraColuna('modelo')) l.push(row.modelo ?? '')
+    l.push(row.nome_comercial ?? '', row.certificado ?? '')
+    if (mostraColuna('numero')) l.push(row.numero ?? '')
+    if (mostraColuna('valor')) l.push(numero(row.valor))
+    l.push(data(row.inicio), data(row.fim), numero(row.garantia_meses))
+    if (mostraColuna('situacao')) l.push(officialSituation(row))
+    l.push(row.tem_pdf ? (row.pdf_nome || 'Sim') : '')
+    linhas.push(l)
+  }
+  return linhas
+}
+
+function hojeIso(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// Antes de baixar, salva as edições pendentes (a planilha sai com o que está na tela).
 async function exportTable() {
   if (busy.value || hasBusyRow.value) return
   exporting.value = true
@@ -415,11 +517,12 @@ async function exportTable() {
     try {
       await autosave.flush()
     } catch {
-      throw new Error('As alterações não foram salvas. Tente baixar o PDF novamente.')
+      throw new Error('As alterações não foram salvas. Tente baixar o Excel novamente.')
     }
-    await downloadPdf('/api/financeiro/suprimentos/pdf', 'certificacoes.pdf')
+    const bytes = gerarXlsx(linhasExcel(), 'Certificações')
+    baixarBlob(new Blob([bytes as BlobPart], { type: TIPO_XLSX }), `certificacoes-${hojeIso()}.xlsx`)
   } catch (e: any) {
-    errorText.value = e?.message || 'Não foi possível gerar o PDF.'
+    errorText.value = e?.message || 'Não foi possível gerar o Excel.'
   } finally {
     exporting.value = false
   }
@@ -500,21 +603,55 @@ const totalRows = computed(() => rows.value.length)
         <span class="inline-flex items-center gap-1"><span class="size-2 rounded bg-amber-400"></span> &lt; 30 dias</span>
         <span class="inline-flex items-center gap-1"><span class="size-2 rounded bg-red-500"></span> vencido</span>
       </div>
-      <button
-        class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-        :disabled="busy || hasBusyRow"
-        @click="load"
-      >
-        <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
-        Recarregar
-      </button>
-      <button
-        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-        :disabled="busy || hasBusyRow"
-        @click="exportTable"
-      >
-        <FileDown class="size-3.5" /> {{ exporting ? 'Gerando PDF...' : 'Baixar tabela em PDF' }}
-      </button>
+      <!-- Barra no padrão da Tabela de Preços (M-67): Layout ▾ | Excel | Recarregar. -->
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <!-- Layout ▾: mostra/esconde Modelo, Número, Valor e Situação oficial.
+             Só a caixa e o nome; lembrado neste navegador. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-certificacoes" title="Escolher as colunas que a tabela mostra">
+              Layout
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-layout-certificacoes
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <label
+                v-for="c in COLUNAS_LAYOUT"
+                :key="c.chave"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  class="size-4"
+                  :checked="mostraColuna(c.chave)"
+                  :data-campo="`layout-certificacoes-${c.chave}`"
+                  @change="alternarColuna(c.chave)"
+                />
+                <span>{{ c.rotulo }}</span>
+              </label>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <button class="btn btn-sm h-7 py-0" :disabled="busy || hasBusyRow" data-acao="excel-certificacoes" @click="exportTable">
+          <Download class="h-4 w-4 mr-1" /> {{ exporting ? 'Gerando...' : 'Excel' }}
+        </button>
+        <button
+          class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          :disabled="busy || hasBusyRow"
+          @click="load"
+        >
+          <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
+          Recarregar
+        </button>
+      </div>
       <button
         v-if="canEdit"
         class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
@@ -605,23 +742,23 @@ const totalRows = computed(() => rows.value.length)
         <thead>
           <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
             <th class="text-left">Produto</th>
-            <th class="text-left">Modelo</th>
+            <th v-if="mostraColuna('modelo')" class="text-left">Modelo</th>
             <th class="text-left">Nome comercial</th>
             <th class="text-left">Certificado</th>
-            <th class="text-left">Número</th>
-            <th class="text-right">Valor</th>
+            <th v-if="mostraColuna('numero')" class="text-left">Número</th>
+            <th v-if="mostraColuna('valor')" class="text-right">Valor</th>
             <th class="text-left">Início</th>
             <th class="text-left">Fim</th>
             <th class="text-right" data-col-garantia-meses
               title="Prazo da garantia, em meses (0 = sem garantia). Mudar aqui muda a Garantia (meses) de todos os produtos deste certificado na Tabela de Preços. Vazio = o certificado não define (cada produto fica com o seu).">Garantia (meses)</th>
-            <th class="text-left">Situação oficial</th>
+            <th v-if="mostraColuna('situacao')" class="text-left">Situação oficial</th>
             <th class="text-left">PDF do certificado</th>
             <th v-if="canDelete" class="w-8"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!loading && rows.length === 0">
-            <td :colspan="canDelete ? 12 : 11" class="py-6 text-center text-muted-foreground">
+            <td :colspan="totalColunas" class="py-6 text-center text-muted-foreground">
               Nenhuma certificação. Clique em "Nova certificação" para começar.
             </td>
           </tr>
@@ -632,7 +769,7 @@ const totalRows = computed(() => rows.value.length)
               <input class="cell-input" :value="row.produto ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @input="(e) => scheduleSave(row, 'produto', (e.target as HTMLInputElement).value)" />
             </td>
-            <td>
+            <td v-if="mostraColuna('modelo')">
               <input class="cell-input" :value="row.modelo ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 :title="row.modelo || ''"
                 @input="(e) => scheduleSave(row, 'modelo', (e.target as HTMLInputElement).value)" />
@@ -648,12 +785,12 @@ const totalRows = computed(() => rows.value.length)
                 <option v-for="o in CERT_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
               </select>
             </td>
-            <td>
+            <td v-if="mostraColuna('numero')">
               <input class="cell-input" :value="row.numero ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 :title="fieldSourceTitle(row, 'numero')"
                 @input="(e) => scheduleSave(row, 'numero', (e.target as HTMLInputElement).value)" />
             </td>
-            <td>
+            <td v-if="mostraColuna('valor')">
               <input type="number" step="0.01" class="cell-input text-right"
                 :value="row.valor ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @input="(e) => scheduleSave(row, 'valor', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" />
@@ -675,7 +812,7 @@ const totalRows = computed(() => rows.value.length)
                 data-cert-garantia
                 @change="(e) => salvarGarantia(row, (e.target as HTMLInputElement).value)" />
             </td>
-            <td class="official-status-cell">
+            <td v-if="mostraColuna('situacao')" class="official-status-cell">
               <div class="flex items-center gap-2">
                 <span :class="officialSituationClass(row)">{{ officialSituation(row) }}</span>
                 <button v-if="isLinked(row)" class="shrink-0 text-primary hover:underline" @click="openDetails(row)"

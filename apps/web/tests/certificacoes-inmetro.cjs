@@ -236,7 +236,8 @@ async function run() {
     assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
     for (const control of controls) assert.match(control, /disabled/)
     assert.doesNotMatch(html, /Atualizar Inmetro|Atualizar agora/)
-    assert.match(html, /Baixar tabela em PDF/)
+    assert.match(html, /data-acao="excel-certificacoes"/)
+    assert.doesNotMatch(html, /Baixar tabela em PDF/)
     assert.match(html, /Ver dados de Inmetro/)
   }
   console.log('PASS: Inmetro editing, saved patches, confirmed dates, official data isolation and permission scenarios')

@@ -29,18 +29,28 @@ const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filena
 assert.deepEqual(errors, [])
 assert.deepEqual(compileTemplate({ source: descriptor.template.content, filename, id: 'pdf-check' }).errors, [])
 const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '').replace(/^defineProps.*$/m, '')
+// M-67: o "Baixar tabela em PDF" virou o botão Excel (.xlsx feito no
+// navegador); `downloads` guarda o nome de cada arquivo baixado.
 function page() {
   const { calls, save } = requests()
   const downloads = []
   const api = (url, options) => save(url, options)
   const state = new Function('ref', 'reactive', 'computed', 'onBeforeUnmount', 'definePageMeta',
     'useApi', 'useAuthStore', 'createCertificacoesAutosave', 'fetch', 'document', 'URL', 'setTimeout',
+    'onMounted', 'watch', 'gerarXlsx', 'TIPO_XLSX',
     transpile(pageScript) + '\nreturn { rows, errorText, exporting, scheduleSave, exportTable, attachPdf };')(
       ref, reactive, computed, () => {}, () => {}, () => ({ api, url: v => v }),
       () => ({ isAdmin: true }), utility,
-      async url => { downloads.push(url); return { ok: true, blob: async () => new Blob(['pdf']) } },
-      { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
+      async () => ({ ok: true, blob: async () => new Blob(['pdf']) }),
+      {
+        createElement: () => {
+          const a = { click() { downloads.push(a.download) }, remove() {} }
+          return a
+        },
+        body: { appendChild() {} },
+      },
       { createObjectURL: () => 'blob:test', revokeObjectURL() {} }, () => {},
+      () => {}, () => {}, () => new Uint8Array([1]), 'application/test',
     )
   return { state, calls, downloads }
 }
@@ -99,7 +109,8 @@ async function run() {
     assert.equal(downloads.length, 0, 'export must await saved visible changes')
     calls[0].resolve()
     await download
-    assert.deepEqual(downloads, ['/api/financeiro/suprimentos/pdf'])
+    assert.equal(downloads.length, 1)
+    assert.match(downloads[0], /^certificacoes-\d{4}-\d{2}-\d{2}\.xlsx$/, 'baixa o Excel, não o PDF')
     assert.equal(s.exporting.value, false)
   }
   {
@@ -109,7 +120,7 @@ async function run() {
     const download = s.exportTable()
     calls[0].reject(new Error('offline'))
     await download
-    assert.equal(downloads.length, 0, 'failed save must block stale PDF')
+    assert.equal(downloads.length, 0, 'failed save must block stale Excel')
     assert.match(s.errorText.value, /não foram salvas/)
   }
   {

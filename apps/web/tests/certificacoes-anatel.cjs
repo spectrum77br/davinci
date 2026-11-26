@@ -17,6 +17,9 @@ assert.deepEqual(compiled.errors, [])
 const rendered = {}
 new Function('exports', 'require', transpile(compiled.code))(rendered, require)
 const utilitySource = fs.readFileSync(path.join(__dirname, '../utils/certificacoesAutosave.ts'), 'utf8')
+// A lib do .xlsx de verdade (o Excel da barra, M-67).
+const planilha = {}
+new Function('exports', transpile(fs.readFileSync(path.join(__dirname, '../lib/planilhaXlsx.ts'), 'utf8')))(planilha)
 const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '').replace(/^defineProps.*$/m, '')
 const exportsForTest = `return {
   embutido: false,
@@ -28,12 +31,20 @@ const exportsForTest = `return {
   attachPdf, addRow, removeRow, downloadCertificate, rowStatusClass, officialSituation,
   officialSituationClass, isLinked, isOfficialField, hasManualOfficialFields, officialSource, officialData,
   isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj,
-  GARANTIA_MESES_MAX, lerGarantiaMeses, salvarGarantia
+  GARANTIA_MESES_MAX, lerGarantiaMeses, salvarGarantia,
+  COLUNAS_LAYOUT, CHAVE_COLUNAS_OCULTAS, colunasOcultas, mostraColuna, alternarColuna, lerColunasOcultas,
+  totalColunas, linhasExcel
 }`
 
-function page(auth = { isAdmin: true }) {
+// `opcoes.localStorage`: o armazenamento falso do navegador (Layout, M-67).
+// `mounted`: os onMounted do componente (o teste chama quando quiser).
+// `planilhas`: cada .xlsx gerado ({ linhas, aba, bytes }); `baixados`: os nomes dos arquivos baixados.
+function page(auth = { isAdmin: true }, opcoes = {}) {
   const calls = []
   const downloads = []
+  const mounted = []
+  const planilhas = []
+  const baixados = []
   const timers = new Map()
   let nextId = 0
   const fakeTimeout = fn => { timers.set(++nextId, fn); return nextId }
@@ -44,14 +55,28 @@ function page(auth = { isAdmin: true }) {
   const api = (url, options) => new Promise((resolve, reject) => calls.push({ url, options, resolve, reject }))
   const state = new Function('ref', 'reactive', 'computed', 'onBeforeUnmount', 'definePageMeta',
     'useApi', 'useAuthStore', 'createCertificacoesAutosave', 'fetch', 'document', 'URL', 'setTimeout', 'confirm',
+    'onMounted', 'watch', 'gerarXlsx', 'TIPO_XLSX', 'localStorage',
     transpile(pageScript) + '\n' + exportsForTest)(
     Vue.ref, Vue.reactive, Vue.computed, () => {}, () => {}, () => ({ api, url: v => v }),
     () => auth, util.createCertificacoesAutosave,
     async url => { downloads.push(url); return { ok: true, blob: async () => new Blob(['pdf']) } },
-    { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
+    {
+      createElement: () => {
+        const a = { click() { baixados.push(a.download) }, remove() {} }
+        return a
+      },
+      body: { appendChild() {} },
+    },
     { createObjectURL: () => 'blob:test', revokeObjectURL() {} }, fakeTimeout, () => true,
+    fn => { mounted.push(fn) }, Vue.watch,
+    (linhas, aba) => {
+      const bytes = planilha.gerarXlsx(linhas, aba)
+      planilhas.push({ linhas, aba, bytes })
+      return bytes
+    },
+    planilha.TIPO_XLSX, opcoes.localStorage,
   )
-  return { state, calls, downloads }
+  return { state, calls, downloads, mounted, planilhas, baixados }
 }
 const settle = () => new Promise(setImmediate)
 const row = (values = {}) => ({
@@ -79,8 +104,12 @@ const status = (values = {}) => ({
 
 async function render(state) {
   const app = Vue.createSSRApp({ setup: () => state, render: rendered.render })
-  for (const name of ['Download', 'ExternalLink', 'FileDown', 'Paperclip', 'Plus', 'RefreshCw', 'Trash2', 'X']) {
+  for (const name of ['ChevronDown', 'Download', 'ExternalLink', 'Paperclip', 'Plus', 'RefreshCw', 'Trash2', 'X']) {
     app.component(name, { render: () => Vue.h('span') })
+  }
+  // Popover do Layout (reka-ui): aqui sempre aberto, para conferir as caixas.
+  for (const name of ['PopoverRoot', 'PopoverTrigger', 'PopoverPortal', 'PopoverContent']) {
+    app.component(name, { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) })
   }
   return renderToString(app)
 }
@@ -245,7 +274,8 @@ async function run() {
     assert.deepEqual(current, previous)
     const html = await render(s)
     assert.doesNotMatch(html, /Atualizar agora|Nova certificação|Anexar PDF/)
-    assert.match(html, /Baixar tabela em PDF/)
+    assert.match(html, /data-acao="excel-certificacoes"/, 'quem só vê também baixa o Excel (M-67)')
+    assert.doesNotMatch(html, /Baixar tabela em PDF/)
     assert.match(html, /Baixar PDF de Telefone/)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
     assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
@@ -281,7 +311,7 @@ async function run() {
     assert.match(s.officialSituationClass(emitted), /emerald/)
     assert.match(s.officialSituationClass(pending), /amber/)
     assert.doesNotMatch(s.officialSituationClass({ ...emitted, anatel_encontrado: false }), /emerald/)
-    assert.match(html, /Baixar tabela em PDF/)
+    assert.match(html, /data-acao="excel-certificacoes"/)
     assert.match(html, /PDF do certificado/)
     s.selectedRow.value = { ...emitted, anatel_encontrado: false }
     const details = await render(s)

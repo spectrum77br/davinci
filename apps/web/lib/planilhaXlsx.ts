@@ -2,9 +2,28 @@
 // da aba Contas baixa as contas que estão na tela. Sem biblioteca: o .xlsx é
 // um .zip (aqui sem compressão) com alguns XML dentro. Uma aba só; a primeira
 // linha é o cabeçalho, em negrito. Número vira número no Excel; texto, texto.
+// Data (M-67, Excel das Certificações): { data: 'AAAA-MM-DD' } vira data de
+// verdade no Excel (dd/mm/aaaa); data inválida fica em branco.
 // Sem import (o teste roda a lib solta).
 
-export type CelulaPlanilha = string | number | null | undefined
+export type DataPlanilha = { data: string }
+export type CelulaPlanilha = string | number | DataPlanilha | null | undefined
+
+// 'AAAA-MM-DD' → número de série do Excel (1 = 01/01/1900; 25569 = 01/01/1970).
+// null se não for uma data de verdade (ou anterior a 01/03/1900, onde o Excel
+// conta um 29/02/1900 que não existiu).
+export function serialDaData(iso: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '')
+  if (!m) return null
+  const ano = Number(m[1])
+  const mes = Number(m[2])
+  const dia = Number(m[3])
+  const t = Date.UTC(ano, mes - 1, dia)
+  const d = new Date(t)
+  if (d.getUTCFullYear() !== ano || d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null
+  const serial = t / 86400000 + 25569
+  return serial >= 61 ? serial : null
+}
 
 const TABELA_CRC = (() => {
   const t = new Uint32Array(256)
@@ -52,6 +71,10 @@ export function letraColuna(indice: number): string {
 
 function celulaXml(valor: CelulaPlanilha, ref: string, estilo: string): string {
   if (valor == null || valor === '') return ''
+  if (typeof valor === 'object') {
+    const serial = serialDaData(valor.data)
+    return serial == null ? '' : `<c r="${ref}" s="2"><v>${serial}</v></c>`
+  }
   if (typeof valor === 'number') {
     return Number.isFinite(valor) ? `<c r="${ref}"${estilo}><v>${valor}</v></c>` : ''
   }
@@ -96,15 +119,18 @@ const WORKBOOK_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
   + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
   + '</Relationships>'
 
-// Estilo 0 = normal; estilo 1 = negrito (o cabeçalho).
+// Estilo 0 = normal; estilo 1 = negrito (o cabeçalho); estilo 2 = data
+// dd/mm/aaaa (formato 164, M-67).
 const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
   + '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+  + '<numFmts count="1"><numFmt numFmtId="164" formatCode="dd/mm/yyyy"/></numFmts>'
   + '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
   + '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
   + '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
   + '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-  + '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-  + '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+  + '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+  + '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+  + '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>'
   + '</styleSheet>'
 
 function workbookXml(aba: string): string {
