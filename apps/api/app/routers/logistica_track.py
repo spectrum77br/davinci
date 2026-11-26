@@ -21,9 +21,10 @@ import hmac
 import json
 from datetime import UTC, datetime
 from typing import Annotated, Any
+from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,3 +184,29 @@ async def sonda_temu(
     from app.services import temu_rastreio
 
     return await temu_rastreio.sondar(session, body.pedidos)
+
+
+class SondaTemuApiIn(BaseModel):
+    api: str = Field(min_length=1, max_length=80)
+    params: dict[str, Any] = Field(default_factory=dict)
+    integration_id: UUID | None = None
+
+
+@router.post("/api/logistica/temu/sonda-api")
+async def sonda_temu_api(
+    body: SondaTemuApiIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+) -> dict[str, Any]:
+    """Sonda da Open API da Temu (26/11/2026, piloto da Barbosa): chama UMA
+    consulta (pedido, envio, rastreio, pós-venda) e devolve a resposta sem dado
+    do comprador. Só as APIs de `APIS_LEITURA_PEDIDOS`; não grava nada.
+    POST porque os parâmetros da Temu vão no corpo."""
+    from app.services import temu_sonda
+
+    try:
+        return await temu_sonda.sondar(session, body.api, body.params, body.integration_id)
+    except temu_sonda.SondaRecusada as e:
+        raise HTTPException(
+            422, detail={"code": "sonda_temu_recusada", "mensagem": str(e)}
+        ) from None

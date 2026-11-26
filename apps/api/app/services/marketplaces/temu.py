@@ -91,6 +91,29 @@ API_TOKEN_CREATE = "bg.open.accesstoken.create"  # noqa: S105 — nome de API, n
 API_SKU_LIST = "temu.local.sku.list.retrieve"
 API_STOCK_EDIT = "bg.local.goods.stock.edit"
 
+# Pedido, envio, rastreio e pós-venda (26/11/2026, piloto da Barbosa na
+# Logística/Devoluções): SÓ consultas. Fora de propósito: o endereço do
+# comprador (`bg.order.shippinginfo.v2.get`, `bg.order.decryptshippinginfo.get`)
+# e tudo que muda algo na Temu (reembolso, aceitar cancelamento, confirmar envio).
+APIS_LEITURA_PEDIDOS = frozenset(
+    {
+        "bg.order.list.v2.get",
+        "bg.order.detail.v2.get",
+        "bg.order.combinedshipment.list.get",
+        "bg.logistics.shipment.get",
+        "bg.logistics.shipment.v2.get",
+        "bg.logistics.companies.get",
+        "temu.track.trackinginfo.get",
+        "bg.aftersales.parentaftersales.list.get",
+        "bg.aftersales.aftersales.list.get",
+        "temu.aftersales.parentaftersales.detail.get",
+        "bg.aftersales.parentreturnorder.get",
+        "bg.aftersales.cancel.list.get",
+        "temu.aftersales.carrier.get",
+        "temu.local.mall.settlestatus.get",
+    }
+)
+
 # Só estas saem sem a trava (todas só leem). A `bg.open.accesstoken.create`
 # NÃO é leitura (emite token novo e pode invalidar o que está em uso): sai só
 # pelo caminho explícito do `exchange_authorization_code`.
@@ -103,6 +126,7 @@ _APIS_LEITURA = frozenset(
         "bg.local.goods.sku.list.query",
         "temu.local.goods.sku.stock.query",
     }
+    | APIS_LEITURA_PEDIDOS
 )
 # A única escrita permitida, e só com a trava ligada.
 _APIS_ESCRITA_ESTOQUE = frozenset({API_STOCK_EDIT})
