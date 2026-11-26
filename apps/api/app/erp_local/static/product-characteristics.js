@@ -1,8 +1,4 @@
 'use strict';
-const productDepartments={bebeU:'Bebês Unissex',bebeM:'Bebês Meninos',bebeF:'Bebês Meninas',infanU:'Infantil Unissex',infanM:'Meninos',infanF:'Meninas',adultoU:'Adulto Unissex',adultoM:'Masculino',adultoF:'Feminino'};
-const productConditions={unspecified:'Não Especificado',new:'Novo',used:'Usado',refurbished:'Recondicionado'};
-const dimensionUnits={m:['Metros',2],cm:['Centímetros',0],mm:['Milímetros',-1]};
-const dimensionFields=['width_cm','height_cm','length_cm'];
 const productDetailLabels={unit:'Unidade',gtin:'GTIN/EAN',gtin_tax:'GTIN/EAN tributário',status:'Situação',description:'Descrição complementar',complementary_html:'Descrição complementar',short_description_html:'Descrição curta',brand:'Marca',location:'Localização',weight_kg:'Peso anterior',net_weight_kg:'Peso líquido',gross_weight_kg:'Peso bruto',width_cm:'Largura',height_cm:'Altura',length_cm:'Profundidade',dimension_unit:'Unidade de medida',volumes:'Volumes',items_per_box:'Itens p/ caixa',condition:'Condição',production:'Produção',expiry_date:'Data de validade',free_shipping:'Frete grátis',department:'Departamento',dun:'Código DUN',external_link:'Link externo',video_url:'Vídeo',notes:'Observações',tags:'Tags'};
 function shiftDecimal(value,places){
  const match=/^(\d*)\.?(\d*)$/.exec(String(value??'').trim());
@@ -13,8 +9,6 @@ function shiftDecimal(value,places){
  whole=whole.replace(/^0+(?=\d)/,'')||'0';fraction=fraction.replace(/0+$/,'');
  return fraction?whole+'.'+fraction:whole;
 }
-const dimensionToUnit=(cm,unit)=>cm===null||cm===undefined||cm===''?'':shiftDecimal(cm,-dimensionUnits[unit][1]);
-const dimensionToCm=(value,unit)=>value===''?null:shiftDecimal(value,dimensionUnits[unit][1]);
 const richTags=new Set('a b blockquote br div em h1 h2 h3 h4 h5 h6 hr i li ol p pre span strong sub sup table tbody td tfoot th thead tr u ul'.split(' '));
 const richDropped=new Set('applet base embed frame frameset head iframe link math meta noscript object script select style svg template textarea title'.split(' '));
 function richStyle(el){
@@ -96,43 +90,30 @@ function productPriceListRows(product){
  return rows.length?table(['Lista','Tipo','Ajuste','Situação'],rows.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(priceModes[l.data.mode]||l.data.mode)}</td><td>${l.data.mode==='custom'?'R$ '+esc(l.data.prices[product.sku]):esc(l.data.value??'')}${l.data.mode==='percent'?'%':''}</td><td>${l.data.status==='active'?'Ativa':'Inativa'}</td></tr>`).join('')):'<p class="source-line">Caso você utilize mais de um preço para o mesmo produto, você pode incluir uma lista de preços e vincular este produto a ela.</p>';
 }
 const productFold=(title,body,open=true)=>`<details class="product-fold" ${open?'open':''}><summary>${title}</summary>${body}</details>`;
+// M-70 (26/11/2026): sai a grade dos 16 campos (Marca, Voltagem, Produção, Validade, Frete Grátis,
+// pesos, medidas, Volumes, Itens p/ caixa, Unidade de medida, GTIN, GTIN tributário, Departamento).
+// Os valores continuam guardados e voltam como vieram ao salvar (productSavePayload). Ficam as
+// dobras, as Tags, a Categoria e o Histórico do cadastro.
 function productCharacteristics(product){
- const d=product.details||{},unit=d.dimension_unit||'cm';
+ const d=product.details||{};
  const input=(name,label,value,attrs='')=>`<label>${label}<input name="${name}" value="${esc(value??'')}" ${attrs}></label>`;
- const decimal='type="number" min="0" step="any"',choice=(name,label,value,choices,blank)=>`<label>${label}<select name="${name}">${blank!==undefined&&(value===''||value===null||value===undefined)?`<option value="" selected>${blank}</option>`:''}${Object.entries(choices).map(([id,t])=>`<option value="${id}" ${String(value)===id?'selected':''}>${t}</option>`).join('')}</select></label>`;
  const categories=(state.categories||[]).filter(c=>c.status==='active'||c.id===product.category?.id).sort((a,b)=>a.path.localeCompare(b.path,'pt-BR'));
  const tagOptions=[...new Set(state.products.flatMap(p=>p.details?.tags||[]))].sort().slice(0,300);
  const service=product.kind==='service';
- return `<div class="product-grid" data-physical-only ${service?'hidden':''}>${input('brand','Marca',d.brand,'maxlength="100"')}${choice('voltage','Voltagem',d.voltage||'',{'110V':'110V','220V':'220V',bivolt:'Bivolt'},'Não se aplica')}${choice('production','Produção',d.production,{own:'Própria',third_party:'Terceiros'},'Não informada')}${input('expiry_date','Data de validade',d.expiry_date,'type="date"')}${choice('free_shipping','Frete Grátis',d.free_shipping===null||d.free_shipping===undefined?'':d.free_shipping?'yes':'no',{no:'Não',yes:'Sim'},'Não informado')}${input('net_weight_kg','Peso Líquido (kg)',d.net_weight_kg,decimal)}${input('gross_weight_kg','Peso Bruto (kg)',d.gross_weight_kg,decimal)}${input('width_cm','Largura',dimensionToUnit(d.width_cm,unit),decimal)}${input('height_cm','Altura',dimensionToUnit(d.height_cm,unit),decimal)}${input('length_cm','Profundidade',dimensionToUnit(d.length_cm,unit),decimal)}${input('volumes','Volumes',d.volumes,'type="number" min="0" step="1"')}${input('items_per_box','Itens p/ caixa',d.items_per_box,decimal)}<label>Unidade de medida<select name="dimension_unit" data-previous="${unit}">${Object.entries(dimensionUnits).map(([id,u])=>`<option value="${id}" ${unit===id?'selected':''}>${u[0]}</option>`).join('')}</select></label>${input('gtin','GTIN/EAN',d.gtin,'maxlength="40" placeholder="SEM GTIN"')}${input('gtin_tax','GTIN/EAN tributário',d.gtin_tax,'maxlength="40" placeholder="SEM GTIN"')}${choice('department','Departamento',d.department||'',{'':'Não informado',...productDepartments})}</div>${d.weight_kg&&!d.net_weight_kg&&!d.gross_weight_kg?`<p class="source-line">Peso anterior sem classificação: ${esc(d.weight_kg)} kg. Informe líquido e bruto; o valor antigo fica preservado no histórico.</p>`:''}${productFold('Código DUN','<p class="source-line">Informe o DUN para identificar caixas ou fardos com várias unidades. Uma leitura da caixa conta a quantidade da embalagem, nunca uma unidade.</p><div class="table-wrap"><table><thead><tr><th>Código</th><th>Quantidade</th><th></th></tr></thead><tbody id="product-dun-body">'+((d.dun||[]).length?d.dun:[{}]).map(productDunRow).join('')+'</tbody></table></div><button type="button" class="link-action" data-dun-add>+ Adicionar DUN</button>')}${productFold('Listas de preço',productPriceListRows(product)+'<button type="button" class="secondary" data-product-price-lists>Incluir uma lista de preços</button>')}${productFold('Descrição curta','<p class="field-title">Descrição Curta (Descrição Principal)</p>'+richEditor('short_description_html','Descrição curta',d.short_description_html))}${productFold('Descrição complementar','<p class="field-title">Descrição complementar</p>'+richEditor('complementary_html','Descrição complementar',d.complementary_html))}${productFold('Link Externo',input('external_link','Link Externo',d.external_link,'type="url" maxlength="500"'))}${productFold('Vídeo',input('video_url','Vídeo',d.video_url,'type="url" maxlength="500"'))}${productFold('Observações',`<label>Observações<textarea name="notes" rows="4" maxlength="5000">${esc(d.notes||'')}</textarea></label>`)}${productFold('Tags',`<p class="source-line">As Tags servem para classificar os produtos (Exemplo: Marca, Grupo, Cor, etc...).</p><div id="product-tags" class="product-tags">${(d.tags||[]).map(productTagChip).join('')}</div><label>Adicionar tag<input name="product_tag_input" list="product-tag-options" maxlength="60" placeholder="Digite e pressione Enter"></label><datalist id="product-tag-options">${tagOptions.map(t=>`<option value="${esc(t)}"></option>`).join('')}</datalist>`)}<div class="product-category" data-physical-only ${service?'hidden':''}><label>Categoria<select name="product_category"><option value="">Sem categoria</option>${categories.map(c=>`<option value="${esc(c.id)}" ${product.category?.id===c.id?'selected':''}>${esc(c.path)}</option>`).join('')}</select></label></div><div class="product-history-action"><button type="button" class="secondary" data-product-details-history="${esc(product.sku)}">Histórico do cadastro</button><div id="product-details-history"></div></div>`;
+ return `${productFold('Código DUN','<p class="source-line">Informe o DUN para identificar caixas ou fardos com várias unidades. Uma leitura da caixa conta a quantidade da embalagem, nunca uma unidade.</p><div class="table-wrap"><table><thead><tr><th>Código</th><th>Quantidade</th><th></th></tr></thead><tbody id="product-dun-body">'+((d.dun||[]).length?d.dun:[{}]).map(productDunRow).join('')+'</tbody></table></div><button type="button" class="link-action" data-dun-add>+ Adicionar DUN</button>')}${productFold('Listas de preço',productPriceListRows(product)+'<button type="button" class="secondary" data-product-price-lists>Incluir uma lista de preços</button>')}${productFold('Descrição curta','<p class="field-title">Descrição Curta (Descrição Principal)</p>'+richEditor('short_description_html','Descrição curta',d.short_description_html))}${productFold('Descrição complementar','<p class="field-title">Descrição complementar</p>'+richEditor('complementary_html','Descrição complementar',d.complementary_html))}${productFold('Link Externo',input('external_link','Link Externo',d.external_link,'type="url" maxlength="500"'))}${productFold('Vídeo',input('video_url','Vídeo',d.video_url,'type="url" maxlength="500"'))}${productFold('Observações',`<label>Observações<textarea name="notes" rows="4" maxlength="5000">${esc(d.notes||'')}</textarea></label>`)}${productFold('Tags',`<p class="source-line">As Tags servem para classificar os produtos (Exemplo: Marca, Grupo, Cor, etc...).</p><div id="product-tags" class="product-tags">${(d.tags||[]).map(productTagChip).join('')}</div><label>Adicionar tag<input name="product_tag_input" list="product-tag-options" maxlength="60" placeholder="Digite e pressione Enter"></label><datalist id="product-tag-options">${tagOptions.map(t=>`<option value="${esc(t)}"></option>`).join('')}</datalist>`)}<div class="product-category" data-physical-only ${service?'hidden':''}><label>Categoria<select name="product_category"><option value="">Sem categoria</option>${categories.map(c=>`<option value="${esc(c.id)}" ${product.category?.id===c.id?'selected':''}>${esc(c.path)}</option>`).join('')}</select></label></div><div class="product-history-action"><button type="button" class="secondary" data-product-details-history="${esc(product.sku)}">Histórico do cadastro</button><div id="product-details-history"></div></div>`;
 }
+// Só o que a tela tem; o resto do cadastro sai do produto carregado (productSavePayload).
 function readProductCharacteristics(form){
- const values=new FormData(form),unit=values.get('dimension_unit'),data={};
- for(const name of ['brand','production','expiry_date','department','net_weight_kg','gross_weight_kg','items_per_box','volumes','gtin','gtin_tax','external_link','video_url','notes'])data[name]=String(values.get(name)??'').trim();
- data.dimension_unit=unit;
- for(const name of dimensionFields)data[name]=dimensionToCm(String(values.get(name)??'').trim(),unit);
- const shipping=values.get('free_shipping');data.free_shipping=shipping==='yes'?true:shipping==='no'?false:null;
- data.condition=values.get('condition');data.voltage=String(values.get('voltage')??'');
- data.dun=readProductDun();
- const pending=form.querySelector('[name=product_tag_input]');if(pending.value.trim())addProductTag(pending);
- data.tags=readProductTags();
- data.short_description_html=readRichEditor('short_description_html');
- data.complementary_html=readRichEditor('complementary_html');
+ const values=new FormData(form),data={},has=name=>!!form.querySelector(`[name="${name}"]`);
+ for(const name of ['external_link','video_url','notes'])if(has(name))data[name]=String(values.get(name)??'').trim();
+ if(form.querySelector('#product-dun-body'))data.dun=readProductDun();
+ const pending=form.querySelector('[name=product_tag_input]');
+ if(pending){if(pending.value.trim())addProductTag(pending);data.tags=readProductTags();}
+ for(const name of ['short_description_html','complementary_html'])if(form.querySelector(`[data-rich-editor="${name}"]`))data[name]=readRichEditor(name);
  return data;
 }
 document.addEventListener('change',e=>{
- if(e.target.name==='dimension_unit'&&e.target.closest('#product-edit-form')){
-  const form=e.target.closest('form'),from=e.target.dataset.previous,to=e.target.value;
-  for(const name of dimensionFields){const field=form.querySelector(`[name=${name}]`);if(field.value!=='')field.value=shiftDecimal(field.value,dimensionUnits[from][1]-dimensionUnits[to][1]);}
-  e.target.dataset.previous=to;
- }
  if(e.target.name==='status'&&e.target.type==='checkbox'&&e.target.closest('#product-edit-form'))e.target.closest('label').querySelector('[data-status-label]').textContent=e.target.checked?'Ativado':'Inativo';
-});
-document.addEventListener('change',e=>{
- if(e.target.name!=='product_type')return;
- const service=e.target.value==='service',form=e.target.closest('form');
- for(const el of form.querySelectorAll('[data-physical-only]'))el.hidden=service;
- for(const tab of form.querySelectorAll('[data-product-edit-tab=stock],[data-product-edit-tab=structure]'))tab.hidden=service;
- if(service&&['stock','structure'].includes(productEditTab))form.querySelector('[data-product-edit-tab=characteristics]').click();
 });
 document.addEventListener('keydown',e=>{if(e.target.name==='product_tag_input'&&(e.key==='Enter'||e.key===',')){e.preventDefault();addProductTag(e.target);}});
 document.addEventListener('click',async e=>{

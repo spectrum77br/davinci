@@ -44,6 +44,7 @@ from app.services.bling_situacoes import (
 from app.services.margem_audit import record_margem_audit
 from app.services.margem_xlsx import build_margem_xlsx
 from app.services.marketplaces.bling import BlingClient
+from app.services.produto_regras import sku_base_sql
 from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
@@ -273,7 +274,7 @@ _LUCRO_OFICIAL_SQL = (
 # Texto digitado passa por escape de curinga do ILIKE ('_' e '%') pra casar
 # literal; backslash é o escape padrão.
 _ILIKE_ESC = "replace(replace({col}, '_', '\\_'), '%', '\\%')"
-_MARGEM_DATA_ESPECIAL_SQL = (
+_SEGMENTO_DATA_ESPECIAL_SQL = (
     "EXISTS ("  # noqa: S608 — tabelas de _qualified_table, sem input do usuário
     " WITH RECURSIVE sd_seg AS ("
     "     SELECT sd.segment_id AS seg_id, sd.date_start, sd.date_end,"
@@ -296,6 +297,24 @@ _MARGEM_DATA_ESPECIAL_SQL = (
     f"        OR v.sku ILIKE '%' || {_ILIKE_ESC.format(col='de.sku_contem')} || '%')"
     f"   AND (de.min_margin IS NULL OR {_MARGEM_OFICIAL_SQL} >= de.min_margin)"
     ")"
+)
+# Condição especial do PRODUTO (M-74, 26/11/2026; Produtos 2, migration 0513): período pela data
+# do pedido (fuso SP, inclusivo) e piso, pela numeração sem a tag do SKU vendido (v.sku →
+# sku_base: dg019.ra → dg019; kit dg019.ra+a020.ra → dg019+a020). "A do produto vale primeiro":
+# se o produto tem condição no dia do pedido, decide SÓ ela (com o piso dela); senão, as regras do
+# segmento valem como antes. Tabela vazia (o dia em que foi ao ar) → sempre o ramo do segmento.
+_PRODUTO_CONDICOES_TABLE = _qualified_table("produto_condicoes_especiais")
+_PRODUTO_CONDICAO_NO_DIA_SQL = (
+    f" SELECT 1 FROM {_PRODUTO_CONDICOES_TABLE} pc"  # noqa: S608 — sem input do usuário
+    f" WHERE pc.sku_base = {sku_base_sql('v.sku')}"
+    "   AND (v.data AT TIME ZONE 'America/Sao_Paulo')::date"
+    "       BETWEEN pc.pedido_de AND pc.pedido_ate"
+)
+_MARGEM_DATA_ESPECIAL_SQL = (
+    f"(CASE WHEN EXISTS ({_PRODUTO_CONDICAO_NO_DIA_SQL})"
+    f" THEN EXISTS ({_PRODUTO_CONDICAO_NO_DIA_SQL}"
+    f"      AND (pc.piso IS NULL OR {_MARGEM_OFICIAL_SQL} >= pc.piso))"
+    f" ELSE {_SEGMENTO_DATA_ESPECIAL_SQL} END)"
 )
 
 # Margem baixa = margem abaixo da mínima configurada. Pedidos em "Aguardando

@@ -162,3 +162,29 @@ def test_arquivos_novos_carregam_antes_do_app():
         for nome in ("product-list.js", "xlsx.js", "product-stock.js", "app.js")
     ]
     assert ordem == sorted(ordem)
+
+
+def test_m70_editor_sem_reticencias_e_alto_em_linhas_de_sete_caixas():
+    # M-70 (26/11/2026): o "… ›" sai só do título do cadastro do produto; as outras telas ficam.
+    css = _css()
+    assert "body[data-product-editor=true] header h1:before{content:none}" in css
+    assert "header h1:before{content:'… ›'" in css
+    assert (
+        ".product-head-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:16px;"
+        in css
+    )
+    # A linha só com caixas reservadas (dos pedidos seguintes) não ocupa espaço.
+    assert ".product-head-row:not(:has(label,a,button)){display:none}" in css
+    for velha in (".product-head-image{", ".product-head-grid{", ".product-status-price{"):
+        assert velha not in css, velha
+
+
+def test_m72_fotos_e_embalagem_com_o_selo_da_tabela_de_precos():
+    # Mesmas cores da classeEtiquetaMidia de pages/pricing/[tab].vue.
+    css = _css()
+    assert ".p2-midia.is-vazio{border-style:dashed;border-color:rgba(107,114,128,.4)" in css
+    assert ".p2-midia.is-ok{border-color:rgb(186,230,253);background:rgb(240,249,255)" in css
+    assert ".p2-midia.is-ambar{border-color:rgb(252,211,77);background:rgb(255,251,235)" in css
+    assert (
+        ".p2-midia-cell{grid-template-rows:auto 38px;align-items:center;justify-items:start}" in css
+    )

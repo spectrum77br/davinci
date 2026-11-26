@@ -36,7 +36,8 @@ const pageIcons={inicio:'check',overview:'list',products:'box',inventory:'box',c
 const primaryForms={cash_register:['cash-open-form','Abrir Caixa'],proposals:['proposal-form','Incluir proposta'],returns:['return-open-form','Incluir devolução'],deposits:['depot-settings-form','Incluir depósito'],sellers:['seller-form','Incluir um Vendedor'],price_lists:['price-list-form','Incluir lista de preços'],categories:['category-form','Incluir categoria'],production:['production-form','Incluir ordem'],payment_methods:['payment-method-form','Incluir forma de pagamento'],contacts:['contact-form','Incluir cadastro'],stock:['stock-form','Incluir lançamento'],orders:['order-form','Incluir pedido'],purchases:['purchase-form','Incluir pedido'],accounts:['entry-form','Incluir conta'],costs:['valuation-form','Conferir custo'],fiscal:['xml-form','Importar XML'],channels:['channel-event-form','Testar evento']};
 function railButton(name,label,extra=''){return `<button class="rail-action" ${extra}>${icon(name)}<span>${label}</span></button>`;}
 function railContent(){
-  if(page==='products'&&editingProduct)return `<div class="rail-info"><h3>Cadastro do produto</h3><p>${state.consulta?.active?'Somente consulta: o cadastro continua sendo feito no Bling até a troca.':'Alterações são confirmadas em Salvar produto.'}</p><small>Imagens enviadas ficam disponíveis na biblioteca local.</small></div>`;
+  // M-70: a aba Imagens saiu do cadastro, e com ela a nota sobre a biblioteca de imagens.
+  if(page==='products'&&editingProduct)return `<div class="rail-info"><h3>Cadastro do produto</h3><p>${state.consulta?.active?'Somente consulta: o cadastro continua sendo feito no Bling até a troca.':'Alterações são confirmadas em Salvar produto.'}</p></div>`;
   // Produtos 2 (M-40): a lista e a aba Anúncios ficam sem o painel da direita; o que ele tinha foi
   // para a barra (Excel, Atualizar, Configuração, contagem) ou saiu com o pedido.
   if(page==='products')return '';

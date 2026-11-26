@@ -106,6 +106,8 @@ async function setup(overrides={},address='http://127.0.0.1:8765') {
   const product={sku:'demo.aparelho',name:'Aparelho <img src=x onerror=alert(1)>',kind:'simple',components:[],balances:[{depot:'geral',physical:'8',reserved:'0',available:'8'}]};
   const snapshot={products:[product],deposits:[{id:'geral',name:'Geral'}],orders:[],purchases:[],movements:[],events:[],accounts:[],...overrides};
   dom.window.fetch=async (url,options)=>{
+    // M-74: o cadastro do produto lê a Margem mín/DUIMP do DaVinci; sem resposta, os campos ficam travados.
+    if(String(url).startsWith('/api/produto-regras/'))return {ok:false,status:503,json:async()=>({})};
     assert.ok(url.startsWith('/api/erp-local/'));
     if(options?.method==='POST')requests.push(JSON.parse(options.body));
     return {ok:true,status:200,json:async()=>options?.method==='POST'?(url.endsWith('/price-preview')?snapshot.price_preview:{replayed:false}):url.includes('/reference/')?{items:[],total:0,offset:0,limit:50}:snapshot};
@@ -345,30 +347,85 @@ test('top menu opens navigation without executing business commands',async()=>{
   dom.window.close();
 });
 
-test('the product shows its Tabela de Preços line, warns on a different EAN and keeps voltage',async()=>{
-  const price_table={line:'dg052,dg053,dg054',line_name:'uranyx A17',department:'Celular',ean:'7908855913175',certificate:'Anatel',certificate_number:'07197-26-18234',model:'A17 Pro Max',warranty_months:12,priority:'sp',photos_url:'https://mega.nz/folder/x',packaging_url:''};
-  const p={sku:'dg053.sp',name:'A17',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',price_table,details:{version:1,unit:'UN',status:'active',gtin:'7908855913168',gtin_tax:'',voltage:'bivolt'}};
-  const {dom,document:d,requests}=await setup({products:[p],cost_changes:[{created_at:'2026-11-17T12:00:00+00:00',sku:'dg053.sp',cost_from:'100',cost_to:'120',quantity:'10',result:'200.00',actor:'ana'}]});
+// M-70 (26/11/2026): o cadastro limpo. Sem a foto, Formato, Tipo, Preço venda, Unidade e Condição;
+// no alto, Nome e três linhas de 7 caixas (cada uma com data-campo para o seu pedido); abas só
+// Características, Estoque e Estrutura; em Características a primeira coisa é o Código DUN.
+const fullDetails={version:4,unit:'UN',gtin:'7908855913168',gtin_tax:'7908855913175',status:'active',description:'Texto antigo',brand:'Uranyx',location:'A1-03',weight_kg:'0.500',height_cm:'5.000',width_cm:'9.000',length_cm:'17.000',condition:'new',production:'third_party',expiry_date:'2027-01-31',free_shipping:true,net_weight_kg:'0.400',gross_weight_kg:'0.450',volumes:2,items_per_box:'10.000',dimension_unit:'mm',department:'adultoU',dun:[{code:'17891234567892',quantity:'12'}],short_description_html:'<p>Curta</p>',complementary_html:'<p>Texto antigo</p>',external_link:'https://exemplo.com/p',video_url:'https://exemplo.com/v',notes:'Nota',tags:['Azul'],stock_min:'1.000',stock_max:'9.000',crossdocking:3,voltage:'bivolt'};
+const fullProduct=(extra={})=>({sku:'dg053.sp',name:'A17 Preto',kind:'simple',components:[],balances:[],price:'199.9000',cost_price:'80.0000',details:{...fullDetails},
+ tax:{version:3,data:{origin:'1',ncm:'85171231',cest:'2106400',item_type:'00'}},suppliers:{version:2,rows:[{contact_id:'S1',description:'Fornecedor',code:'F-1',purchase_price:'70',cost_price:'75',warranty_months:12,is_default:true}]},
+ images:{version:5,rows:[{id:'img-1',url:'/api/erp-local/catalog/images/img-1',filename:'a.png',width:8,height:6,alt:'Frente'}]},category:{version:1,id:'c1',path:[{name:'Malas'}]},
+ structure:{version:0,mode:'physical',components:[],expanded:[]},
+ price_table:{line:'dg052,dg053,dg054',line_name:'uranyx A17',department:'Celular',ean:'7908855913175',certificate:'Anatel',certificate_number:'07197-26-18234',model:'A17 Pro Max',warranty_months:12,priority:'sp',photos_url:'https://mega.nz/folder/x',packaging_url:''},...extra});
+
+test('M-70: the product editor shows only the clean head and the three tabs, without the old fields',async()=>{
+  const {dom,document:d}=await setup({products:[fullProduct()],categories:[{id:'c1',path:'Malas',status:'active'}]});
   dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
   d.querySelector('nav [data-page=products]').click();
   d.querySelector('[data-edit-product]').click();
   const form=d.querySelector('#product-edit-form');
-  assert.equal(form.querySelector('[name=voltage]').value,'bivolt');
-  form.querySelector('[data-product-edit-tab=pricetable]').click();
-  const section=form.querySelector('[data-product-section=pricetable]');
-  assert.equal(section.hidden,false);
-  assert.match(section.textContent,/Lido da Tabela de Preços do DaVinci/);
-  assert.equal([...section.querySelectorAll('input')].map(i=>i.value).join('|'),'Celular|7908855913175|Anatel|07197-26-18234|A17 Pro Max|12|.sp');
-  assert.match(section.textContent,/diferente do GTIN do cadastro/);
-  assert.ok(section.querySelector('a[href="https://mega.nz/folder/x"]'));
-  form.querySelector('[name=voltage]').value='220V';
+  assert.equal(d.getElementById('title').textContent,'A17 Preto');
+  assert.equal(d.body.dataset.productEditor,'true');
+  for(const gone of ['[name=unit]','[name=price]','[name=condition]','[name=product_type]','.product-head-image','.product-head-grid','[name=brand]','[name=voltage]','[name=gtin]','[name=department]','[name=dimension_unit]','[name=net_weight_kg]','[name=volumes]','#product-image-gallery','#product-suppliers-body','[name=tax_ncm]','#product-links'])assert.equal(form.querySelector(gone),null,gone);
+  assert.doesNotMatch(form.textContent,/Formato|Preço venda|Lido da Tabela de Preços/);
+  assert.deepEqual([...form.querySelectorAll('[data-product-edit-tab]')].map(b=>b.textContent),['Características','Estoque','Estrutura']);
+  assert.deepEqual([...form.querySelectorAll('[data-product-section]')].map(s=>s.dataset.productSection),['characteristics','stock','structure']);
+  const rows=[...form.querySelectorAll('.product-head-row')];
+  assert.deepEqual(rows.map(r=>[...r.querySelectorAll(':scope>[data-campo]')].map(c=>c.dataset.campo)),[
+    ['codigo','situacao','ean','modelo','certificado','numero','validade'],
+    ['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao'],
+    ['comprimento','largura','altura','peso','fotos','embalagem','vazio']]);
+  assert.equal(form.querySelector('.product-head>label input[name=name]').value,'A17 Preto');
+  assert.match(form.querySelector('[data-campo=codigo]').textContent,/Código \(SKU\)/);assert.equal(form.querySelector('[data-campo=codigo] input').value,'dg053.sp');
+  assert.equal(form.querySelector('[data-campo=situacao] [name=status]').checked,true);
+  // Linha 2: as 4 primeiras ficam reservadas para a M-73; as 3 últimas são da M-74.
+  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio'])assert.equal(form.querySelector(`[data-campo=${campo}]`).innerHTML,'',campo);
+  assert.deepEqual(['margem_min','condicao_especial','duimp_padrao'].map(campo=>form.querySelector(`[data-campo=${campo}] label`).firstChild.textContent),['Margem mín (%)','Condição especial','DUIMP padrão']);
+  const characteristics=form.querySelector('[data-product-section=characteristics]');
+  assert.equal(characteristics.querySelector('.product-grid'),null);
+  assert.deepEqual([...characteristics.querySelectorAll('.product-fold>summary')].map(s=>s.textContent),['Código DUN','Listas de preço','Descrição curta','Descrição complementar','Link Externo','Vídeo','Observações','Tags']);
+  assert.match(d.querySelector('.rail-info').textContent,/Cadastro do produto/);assert.doesNotMatch(d.querySelector('.rail-info').textContent,/Imagens/);
+  form.querySelector('#product-edit-cancel').click();
+  const service={...fullProduct({sku:'srv.1',name:'Conserto',kind:'service'})};
+  const other=await setup({products:[service]});other.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  other.document.querySelector('nav [data-page=products]').click();other.document.querySelector('[data-edit-product]').click();
+  assert.deepEqual([...other.document.querySelectorAll('[data-product-edit-tab]')].map(b=>b.textContent),['Características']);
+});
+
+// M-70: a tela não mostra mais unidade, condição, marca, GTIN, NCM, fornecedores, imagens, preço…
+// Salvar parte do produto carregado: o que não está na tela volta exatamente como veio, e Fiscal,
+// Fornecedores, Imagens, Tipo e o preço de venda nem vão (o servidor guarda os seus).
+test('M-70: saving from the clean screen sends back every hidden field exactly as it was loaded',async()=>{
+  const product=fullProduct();
+  const {dom,document:d,requests}=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-edit-product]').click();
+  const form=d.querySelector('#product-edit-form');
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
   await new Promise(r=>setImmediate(r));
-  const sent=requests.find(r=>r.kind==='product.update');
-  assert.equal(sent.payload.data.voltage,'220V');
-  d.querySelector('nav [data-page=overview]').click();
-  assert.match(d.body.textContent,/Resultado das mudanças de custo/);
-  assert.ok(d.querySelector('a[href="/api/erp-local/cost-changes.csv"]'));
+  assert.deepEqual(requests.map(r=>r.kind),['product.update']);
+  const sent=requests[0].payload;
+  assert.deepEqual(Object.keys(sent).sort(),['data','sku','version']);
+  assert.equal(sent.sku,'dg053.sp');assert.equal(sent.version,4);
+  const expected={...fullDetails,name:'A17 Preto',cost_price:'80.0000'};
+  for(const k of ['version','description','weight_kg'])delete expected[k];
+  // Só o que a tela devolve como texto (o input não guarda tipos): limites do Estoque.
+  Object.assign(expected,{stock_min:'1.000',stock_max:'9.000',crossdocking:'3'});
+  assert.deepEqual(sent.data,expected);
+  assert.ok(!('price' in sent.data)&&!('description' in sent.data)&&!('weight_kg' in sent.data));
+  // Mudanças na tela vão; o resto continua igual ao carregado.
+  requests.length=0;
+  const again=d.querySelector('#product-edit-form');
+  again.querySelector('[name=notes]').value='Nota nova';
+  const status=again.querySelector('[name=status]');status.checked=false;status.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  assert.equal(again.querySelector('[data-status-label]').textContent,'Inativo');
+  again.querySelector('[name=product_category]').value='';
+  again.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const changed=requests[0].payload;
+  assert.deepEqual(changed.data,{...expected,notes:'Nota nova',status:'inactive'});
+  assert.deepEqual(changed.category,{version:1,category_id:null});
+  assert.ok(!changed.tax&&!changed.suppliers&&!changed.images&&!changed.type&&!changed.structure);
 });
 
 test('products list the store listings with Vincular and Organizar, orders take IMEIs and payables a cost split',async()=>{
@@ -394,6 +451,268 @@ test('products list the store listings with Vincular and Organizar, orders take 
   assert.deepEqual(sent.payload,{id:'O1',sku:'demo.aparelho',units:[['490154203237518'],['356938035643809']]});
 });
 
+// M-71 (26/11/2026): EAN, Modelo, Certificado, Número e Validade no alto, só para leitura, lidos da
+// Tabela de Preços (price_table.for_sku). Sem dado = caixa vazia, sem "SEM GTIN"; a cópia antiga
+// (sem a Validade e sem pricing_id) não quebra a tela; nada disso vai na gravação.
+test('M-71: the first row reads EAN, model and certificate from the Tabela de Preços and never writes them',async()=>{
+  const open=async product=>{
+    const ctx=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});
+    ctx.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+    ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+    return ctx;
+  };
+  const row=d=>[...d.querySelectorAll('.product-head-row[data-linha="1"]>[data-campo]')];
+  const values=d=>row(d).slice(2).map(c=>c.querySelector('input').value);
+  const fresh=fullProduct();fresh.price_table={...fresh.price_table,certificate_valid_until:'20/02/2028',pricing_id:'7b0c2c1e-8f0e-4c55-9a51-2f0b8a3c1d10'};
+  const {dom,document:d,requests}=await open(fresh);
+  assert.deepEqual(row(d).map(c=>c.querySelector('label').firstChild.textContent),['Código (SKU)','Situação','EAN','Modelo','Certificado','Número','Validade']);
+  assert.deepEqual(values(d),['7908855913175','A17 Pro Max','Anatel','07197-26-18234','20/02/2028']);
+  for(const input of row(d).slice(2).map(c=>c.querySelector('input'))){assert.equal(input.disabled,true);assert.equal(input.name,'');assert.equal(input.placeholder,'');}
+  // O EAN da Tabela de Preços é outro campo: o GTIN do cadastro (o da nota) aparece na dica.
+  assert.match(d.querySelector('[data-campo=ean] input').title,/GTIN do cadastro, que vai na nota, é 7908855913168/);
+  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const data=requests[0].payload.data;
+  assert.equal(data.gtin,'7908855913168');
+  for(const k of ['ean','model','certificate','certificate_number','certificate_valid_until','pricing_id'])assert.equal(k in data,false,k);
+  // Cópia antiga da Tabela de Preços: sem Validade, a caixa fica vazia.
+  const old=await open(fullProduct());
+  assert.deepEqual(values(old.document),['7908855913175','A17 Pro Max','Anatel','07197-26-18234','']);
+  // Sem linha na Tabela de Preços (ou sem certificado): tudo vazio, sem "SEM GTIN".
+  const none=await open(fullProduct({price_table:null}));
+  assert.deepEqual(values(none.document),['','','','','']);
+  assert.doesNotMatch(none.document.querySelector('.product-head').innerHTML,/SEM GTIN/);
+});
+
+// M-72 (26/11/2026): Comprimento, Largura, Altura e Peso na linha 3 (os campos de sempre, em cm);
+// mexido vai, não mexido volta como veio.
+test('M-72: the third row edits the stored measures in cm and keeps the untouched ones as loaded',async()=>{
+  const {dom,document:d,requests}=await setup({products:[fullProduct()],categories:[{id:'c1',path:'Malas',status:'active'}]});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
+  const cells=[...d.querySelectorAll('.product-head-row[data-linha="3"]>[data-campo]')];
+  assert.deepEqual(cells.slice(0,4).map(c=>[c.querySelector('label').firstChild.textContent,c.querySelector('input').name,c.querySelector('input').value]),
+    [['Comprimento (cm)','length_cm','17'],['Largura (cm)','width_cm','9'],['Altura (cm)','height_cm','5'],['Peso (kg)','gross_weight_kg','0.45']]);
+  assert.deepEqual(cells.slice(4).map(c=>c.dataset.campo),['fotos','embalagem','vazio']);
+  assert.equal(cells[6].innerHTML,'');
+  assert.equal(d.querySelector('[name=net_weight_kg]'),null);
+  const form=d.querySelector('#product-edit-form');
+  form.querySelector('[name=length_cm]').value='18.5';form.querySelector('[name=gross_weight_kg]').value='';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const data=requests[0].payload.data;
+  assert.equal(data.length_cm,'18.5');assert.equal(data.gross_weight_kg,null);
+  assert.equal(data.width_cm,'9.000');assert.equal(data.height_cm,'5.000');assert.equal(data.net_weight_kg,'0.400');assert.equal(data.dimension_unit,'mm');
+  // Modo Consulta: os campos ficam travados como o resto do cadastro.
+  const ro=await setup({products:[fullProduct()],consulta:{active:true}});ro.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  ro.document.querySelector('nav [data-page=products]').click();ro.document.querySelector('[data-edit-product]').click();
+  assert.ok(ro.document.querySelector('#product-edit-form.read-only [name=length_cm]'));
+});
+
+// M-72: Fotos e Embalagem com o selo da Tabela de Preços › Produtos, lido da API do DaVinci pela linha
+// (pricing_id). Dentro da moldura, clicar pede à moldura a mesma janela; o que ela devolve troca o selo.
+const LINHA_ID='7b0c2c1e-8f0e-4c55-9a51-2f0b8a3c1d10';
+const comLinha=(extra={})=>{const p=fullProduct();p.price_table={...p.price_table,pricing_id:LINHA_ID,certificate_valid_until:'20/02/2028',...extra};return p;};
+async function mediaEditor(product,{media,status=200,embedded=true,consulta}={}){
+  const ctx=await setup({products:[product],...(consulta?{consulta}:{})});
+  const w=ctx.dom.window,posted=[],asked=[];w.HTMLElement.prototype.scrollIntoView=()=>{};
+  const parent={postMessage:(m,origin)=>posted.push([m,origin])};
+  if(embedded){Object.defineProperty(w,'parent',{configurable:true,get:()=>parent});w.document.body.classList.add('embedded');}
+  const plain=w.fetch;
+  w.fetch=async(url,options)=>{if(String(url).startsWith('/api/pricing/mega/products/')){asked.push([url,options?.credentials]);return {ok:status<400,status,json:async()=>media};}return plain(url,options);};
+  ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+  for(let i=0;i<4;i++)await new Promise(r=>setImmediate(r));
+  const from=(data,source=parent,origin='http://127.0.0.1:8765')=>{const ev=new w.Event('message');Object.defineProperties(ev,{data:{value:data},source:{value:source},origin:{value:origin}});w.dispatchEvent(ev);};
+  const selo=campo=>ctx.document.querySelector(`[data-campo=${campo}] .p2-midia, [data-campo=${campo}] .p2-midia-none`);
+  return {...ctx,posted,asked,parent,from,selo};
+}
+const mediaRow={id:LINHA_ID,sku:'dg052,dg053,dg054',name:'uranyx A17',department:'celular',fotos_url:'https://mega.nz/folder/x',fotos_path:'/Celular/A17',embalagens_url:null,embalagens_path:null,fotos_count:3,videos_count:1,embalagens_count:null,midias_contadas_em:null,irmaos:[],pode_editar:true};
+
+test('M-72: Fotos and Embalagem show the Tabela de Preços selos and open the same window through the frame',async()=>{
+  const e=await mediaEditor(comLinha(),{media:{...mediaRow}});
+  assert.deepEqual(e.asked,[[`/api/pricing/mega/products/${LINHA_ID}`,'same-origin']]);
+  const fotos=e.selo('fotos'),embalagem=e.selo('embalagem');
+  assert.equal(fotos.tagName,'BUTTON');assert.equal(fotos.type,'button');assert.ok(fotos.classList.contains('is-ok'));
+  assert.equal(fotos.textContent,'3 fotos1 vídeo');assert.equal(fotos.title,'Pasta no MEGA: /Celular/A17');
+  assert.equal(embalagem.tagName,'BUTTON');assert.ok(embalagem.classList.contains('is-vazio'));assert.equal(embalagem.textContent,'+ Adicionar');
+  assert.equal(e.document.querySelector('[data-campo=fotos] label').firstChild.textContent,'Fotos');
+  assert.equal(e.document.querySelector('[data-campo=embalagem] label').firstChild.textContent,'Embalagem');
+  embalagem.click();fotos.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(e.posted)),[[{tipo:'erp-abrir-midias',pricing_id:LINHA_ID,aba:'embalagens'},'http://127.0.0.1:8765'],[{tipo:'erp-abrir-midias',pricing_id:LINHA_ID,aba:'fotos'},'http://127.0.0.1:8765']]);
+  assert.equal(e.requests.length,0,'abrir a janela não salva o produto');
+  // A moldura devolve o que mudou: só dela (mesmo site e o próprio parent) é aceito.
+  e.from({tipo:'erp-midias',pricing_id:LINHA_ID,campos:{embalagens_path:'/Celular/A17/Embalagens',embalagens_count:2}},{postMessage(){}});
+  e.from({tipo:'erp-midias',pricing_id:LINHA_ID,campos:{embalagens_path:'/x',embalagens_count:9}},e.parent,'https://outro.test');
+  assert.equal(e.selo('embalagem').textContent,'+ Adicionar');
+  e.from({tipo:'erp-midias-enviando',pricing_id:LINHA_ID,ativo:true});
+  assert.equal(e.selo('fotos').textContent,'Enviando…');
+  e.from({tipo:'erp-midias',pricing_id:LINHA_ID,campos:{embalagens_path:'/Celular/A17/Embalagens',embalagens_count:2,fotos_count:4}});
+  e.from({tipo:'erp-midias-enviando',pricing_id:LINHA_ID,ativo:false});
+  assert.equal(e.selo('embalagem').textContent,'2 arquivos');assert.equal(e.selo('fotos').textContent,'4 fotos1 vídeo');
+  // Funciona no modo Consulta (é a API do DaVinci, não a trava do ERP).
+  const consulta=await mediaEditor(comLinha(),{media:{...mediaRow},consulta:{active:true}});
+  consulta.selo('fotos').click();assert.equal(consulta.posted.length,1);
+});
+
+test('M-72: without a line, without permission, outside the frame or without the DaVinci the selos only read',async()=>{
+  // Sem linha na Tabela de Preços: os dois apagados, com a dica.
+  const none=await mediaEditor(fullProduct({price_table:null}),{media:mediaRow});
+  for(const campo of ['fotos','embalagem']){const b=none.selo(campo);assert.equal(b.disabled,true);assert.equal(b.title,'Produto sem linha na Tabela de Preços');assert.equal(b.textContent,'+ Adicionar');}
+  assert.deepEqual(none.asked,[]);
+  // Quem não pode editar e não há pasta: "—", como na Tabela de Preços.
+  const viewer=await mediaEditor(comLinha(),{media:{...mediaRow,fotos_url:null,fotos_path:null,fotos_count:null,videos_count:null,pode_editar:false}});
+  assert.equal(viewer.selo('fotos').textContent,'—');assert.equal(viewer.selo('embalagem').textContent,'—');
+  // Fora da moldura (o ERP aberto sozinho): o selo vira link que abre a pasta.
+  const alone=await mediaEditor(comLinha(),{media:{...mediaRow},embedded:false});
+  const link=alone.selo('fotos');assert.equal(link.tagName,'A');assert.equal(link.getAttribute('href'),'https://mega.nz/folder/x');assert.equal(link.target,'_blank');assert.match(link.rel,/noopener/);assert.equal(link.textContent,'3 fotos1 vídeo');
+  assert.equal(alone.selo('embalagem').textContent,'—');
+  link.click();assert.equal(alone.posted.length,0);
+  // DaVinci sem resposta, ou a cópia antiga sem pricing_id: links da cópia da Tabela de Preços.
+  for(const e of [await mediaEditor(comLinha(),{media:{},status:502}),await mediaEditor(fullProduct(),{media:mediaRow})]){
+    const f=e.selo('fotos');assert.equal(f.tagName,'A');assert.equal(f.textContent,'Ver pasta');assert.equal(f.getAttribute('href'),'https://mega.nz/folder/x');
+    assert.equal(e.selo('embalagem').textContent,'—');
+  }
+  // Link que não é https não vira link.
+  const bad=await mediaEditor(comLinha({pricing_id:undefined,photos_url:'javascript:alert(1)'}),{media:mediaRow});
+  assert.equal(bad.selo('fotos').textContent,'—');
+});
+
+// M-74 (26/11/2026): Margem mín (%), Condição especial e DUIMP padrão na linha 2 (colunas 5 a 7), do
+// PRODUTO, lidos e gravados na API do DaVinci (/api/produto-regras) com o login da pessoa. Em branco =
+// o herdado da categoria de venda em cinza. Nada disso vai no "Salvar produto".
+const regrasVazias={sku:'dg053.sp',sku_base:'dg053',margem_min:null,margem_min_herdada:0.18,margem_min_origem:'da categoria de venda Regular (Celular)',duimp_padrao:null,duimp_herdada:'celular importado pela duimp 26BR0003333333-3',duimp_importacao:null,condicoes:[],condicao_resumo:'—',pode_editar:true};
+const ticks=async(n=6)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
+async function rulesEditor(product,{rules=regrasVazias,status=200,consulta}={}){
+  const ctx=await setup({products:[product],...(consulta?{consulta}:{})});
+  const w=ctx.dom.window,calls=[];w.HTMLElement.prototype.scrollIntoView=()=>{};
+  const data=JSON.parse(JSON.stringify(rules)),copia=()=>JSON.parse(JSON.stringify(data));
+  const plain=w.fetch;
+  w.fetch=async(url,options={})=>{
+    url=String(url);
+    if(!url.startsWith('/api/produto-regras/'))return plain(url,options);
+    const method=options.method||'GET',body=options.body?JSON.parse(options.body):undefined;
+    calls.push({url,method,body,credentials:options.credentials});
+    if(status>=400)return {ok:false,status,json:async()=>({})};
+    if(method==='PUT'){
+      if(body.margem_min==='0.5000')return {ok:false,status:400,json:async()=>({detail:{code:'margem_invalida',message:'Recusado pelo DaVinci.'}})};
+      for(const [k,v] of Object.entries(body))data[k]=k==='margem_min'&&v!==null?Number(v):v;
+    }
+    if(method==='POST'){data.condicoes.push({id:'c'+(data.condicoes.length+1),pedido_de:body.pedido_de,pedido_ate:body.pedido_ate,piso:body.piso,vigente:true});data.condicao_resumo='até 30/11 · piso 5%';return {ok:true,status:201,json:async()=>copia()};}
+    if(method==='DELETE'){data.condicoes=data.condicoes.filter(c=>!url.endsWith('/condicoes/'+c.id));if(!data.condicoes.length)data.condicao_resumo='—';return {ok:true,status:204,json:async()=>{throw new Error('sem corpo');}};}
+    return {ok:true,status:200,json:async()=>copia()};
+  };
+  ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+  await ticks();
+  const cell=campo=>ctx.document.querySelector(`[data-campo=${campo}]`);
+  const input=campo=>cell(campo).querySelector('input');
+  const change=(el,value)=>{el.value=value;el.dispatchEvent(new w.Event('change',{bubbles:true}));};
+  return {...ctx,w,calls,data,cell,input,change,notice:()=>ctx.document.getElementById('notice').textContent};
+}
+
+test('M-74: row 2 shows Margem mín, Condição especial and DUIMP padrão from the DaVinci, the inherited value in grey',async()=>{
+  const e=await rulesEditor(fullProduct());
+  assert.deepEqual(e.calls,[{url:'/api/produto-regras/dg053.sp',method:'GET',body:undefined,credentials:'same-origin'}]);
+  const row=[...e.document.querySelectorAll('.product-head-row[data-linha="2"]>[data-campo]')];
+  assert.deepEqual(row.map(c=>c.dataset.campo),['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao']);
+  for(const c of row.slice(0,4))assert.equal(c.innerHTML,'',c.dataset.campo);
+  assert.deepEqual(row.slice(4).map(c=>c.querySelector('label').firstChild.textContent),['Margem mín (%)','Condição especial','DUIMP padrão']);
+  const margem=e.input('margem_min'),duimp=e.input('duimp_padrao'),botao=e.cell('condicao_especial').querySelector('button');
+  // Em branco: o herdado aparece em cinza (placeholder), nunca como valor.
+  assert.equal(margem.value,'');assert.equal(margem.placeholder,'18');assert.equal(margem.disabled,false);
+  assert.match(margem.title,/Em branco, usa 18% \(da categoria de venda Regular \(Celular\)\)/);assert.match(margem.title,/código dg053 em todas as tags/);
+  assert.equal(duimp.value,'');assert.equal(duimp.placeholder,'celular importado pela duimp 26BR0003333333-3');assert.equal(duimp.maxLength,75);
+  assert.equal(botao.textContent,'—');assert.ok(botao.classList.contains('is-vazio'));assert.equal(botao.type,'button');
+  // Sem name: o "Salvar produto" nunca manda esses campos.
+  for(const i of [margem,duimp])assert.equal(i.name,'');
+  // Com valor do produto: o valor aparece; o herdado continua na dica.
+  const cheio=await rulesEditor(fullProduct(),{rules:{...regrasVazias,margem_min:0.125,duimp_padrao:'dg053 pela duimp P',duimp_importacao:'produto importado pela duimp 26BR0001398015-8',condicao_resumo:'até 30/11 · piso 5%'}});
+  assert.equal(cheio.input('margem_min').value,'12,5');assert.equal(cheio.input('duimp_padrao').value,'dg053 pela duimp P');
+  assert.match(cheio.input('duimp_padrao').title,/DUIMP na Importação, que vai na nota no lugar desta: produto importado/);
+  assert.equal(cheio.cell('condicao_especial').querySelector('button').textContent,'até 30/11 · piso 5%');
+});
+
+test('M-74: typing saves through the DaVinci API, blank goes back to inherit and Salvar produto never sends them',async()=>{
+  const e=await rulesEditor(fullProduct());
+  e.change(e.input('margem_min'),'12');await ticks();
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp',method:'PUT',body:{margem_min:'0.1200'},credentials:'same-origin'});
+  assert.equal(e.input('margem_min').value,'12');assert.match(e.notice(),/Margem mín de dg053 gravada/);
+  e.change(e.input('margem_min'),'12,5');await ticks();
+  assert.deepEqual(e.calls.at(-1).body,{margem_min:'0.1250'});
+  // Vazio volta a herdar.
+  e.change(e.input('margem_min'),'');await ticks();
+  assert.deepEqual(e.calls.at(-1).body,{margem_min:null});assert.equal(e.input('margem_min').value,'');assert.match(e.notice(),/volta a usar a da categoria de venda/);
+  // Fora de 0–100 nem vai ao DaVinci; o DaVinci recusando, o campo volta ao gravado.
+  const antes=e.calls.length;
+  e.change(e.input('margem_min'),'150');await ticks();
+  assert.equal(e.calls.length,antes);assert.match(e.notice(),/0 a 100%/);assert.equal(e.input('margem_min').value,'');
+  e.change(e.input('margem_min'),'50');await ticks();
+  assert.equal(e.calls.length,antes+1);assert.match(e.notice(),/Recusado pelo DaVinci/);assert.equal(e.input('margem_min').value,'');
+  // DUIMP: "|" não vai; texto vai; vazio volta a herdar.
+  e.change(e.input('duimp_padrao'),'duimp 1 | duimp 2');await ticks();
+  assert.equal(e.calls.length,antes+1);assert.match(e.notice(),/não pode ter "\|"/);
+  e.change(e.input('duimp_padrao'),'  dg053 pela duimp P  ');await ticks();
+  assert.deepEqual(e.calls.at(-1).body,{duimp_padrao:'dg053 pela duimp P'});assert.equal(e.input('duimp_padrao').value,'dg053 pela duimp P');
+  // Enter grava o campo e não envia o formulário do produto.
+  const enter=new e.w.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});
+  e.input('duimp_padrao').dispatchEvent(enter);assert.equal(enter.defaultPrevented,true);
+  await ticks();assert.equal(e.requests.length,0);
+  // O "Salvar produto" não leva Margem mín, DUIMP nem condição.
+  e.document.querySelector('#product-edit-form').dispatchEvent(new e.w.Event('submit',{bubbles:true,cancelable:true}));await ticks();
+  assert.deepEqual(e.requests.map(r=>r.kind),['product.update']);
+  for(const k of ['margem_min','duimp_padrao','condicao_especial','p2_condicao_de'])assert.equal(k in e.requests[0].payload.data,false,k);
+});
+
+test('M-74: works in modo Consulta, the non-admin sees them locked and without the DaVinci they stay empty',async()=>{
+  // Modo Consulta: o cadastro trava, estes três não (são do DaVinci, não do ERP).
+  const c=await rulesEditor(fullProduct(),{consulta:{active:true}});
+  assert.ok(c.document.querySelector('#product-edit-form.read-only'));
+  assert.equal(c.input('margem_min').disabled,false);assert.equal(c.input('duimp_padrao').disabled,false);
+  c.change(c.input('margem_min'),'7');await ticks();
+  assert.deepEqual(c.calls.at(-1).body,{margem_min:'0.0700'});assert.equal(c.requests.length,0);
+  // Quem não é administrador vê travado (e vê as condições, sem incluir nem remover).
+  const v=await rulesEditor(fullProduct(),{rules:{...regrasVazias,pode_editar:false,condicoes:[{id:'c1',pedido_de:'2026-11-20',pedido_ate:'2026-11-30',piso:'0.0500',vigente:true}],condicao_resumo:'até 30/11 · piso 5%'}});
+  assert.equal(v.input('margem_min').disabled,true);assert.equal(v.input('duimp_padrao').disabled,true);
+  assert.match(v.input('margem_min').title,/Só o administrador altera/);
+  v.change(v.input('margem_min'),'3');await ticks();assert.equal(v.calls.length,1);
+  v.cell('condicao_especial').querySelector('button').click();
+  const janela=v.document.getElementById('p2-condicao-dialog');
+  assert.ok(janela);assert.equal(janela.querySelector('[data-p2-condicao-add]'),null);assert.equal(janela.querySelector('[data-p2-condicao-del]'),null);
+  assert.match(janela.textContent,/20\/11\/2026 até 30\/11\/2026 · margem mínima 5%/);
+  // DaVinci sem resposta: campos vazios e travados, com a dica.
+  const off=await rulesEditor(fullProduct(),{status:502});
+  assert.equal(off.input('margem_min').disabled,true);assert.equal(off.input('margem_min').placeholder,'');
+  assert.match(off.input('margem_min').title,/Não consegui ler do DaVinci/);
+  const b=off.cell('condicao_especial').querySelector('button');assert.equal(b.disabled,true);assert.equal(b.textContent,'—');
+});
+
+test('M-74: the Condição especial window adds and removes the product rule, like the one in Segmentos',async()=>{
+  const e=await rulesEditor(fullProduct());
+  e.cell('condicao_especial').querySelector('button').click();
+  const janela=()=>e.document.getElementById('p2-condicao-dialog');
+  assert.ok(janela());assert.equal(janela().getAttribute('role'),'dialog');assert.equal(janela().parentElement,e.document.body);
+  assert.match(janela().querySelector('h2').textContent,/Condição especial · dg053/);
+  assert.match(janela().textContent,/Nenhuma condição especial vigente/);
+  // Sem o Até: não vai ao DaVinci.
+  const campo=n=>janela().querySelector(`[name=${n}]`);
+  campo('p2_condicao_de').value='2026-11-26';
+  janela().querySelector('[data-p2-condicao-add]').click();await ticks();
+  assert.equal(e.calls.length,1);assert.match(janela().querySelector('[data-p2-condicao-msg]').textContent,/Preencha De e Até/);
+  campo('p2_condicao_ate').value='2026-11-30';campo('p2_condicao_piso').value='5';
+  janela().querySelector('[data-p2-condicao-add]').click();await ticks();
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp/condicoes',method:'POST',body:{pedido_de:'2026-11-26',pedido_ate:'2026-11-30',piso:'0.0500'},credentials:'same-origin'});
+  assert.match(janela().querySelector('[data-p2-condicao-msg]').textContent,/Condição adicionada/);
+  assert.match(janela().textContent,/1 condição vigente/);assert.match(janela().textContent,/26\/11\/2026 até 30\/11\/2026 · margem mínima 5%/);
+  assert.equal(e.cell('condicao_especial').querySelector('button').textContent,'até 30/11 · piso 5%');
+  // Remover: DELETE e relê.
+  janela().querySelector('[data-p2-condicao-del="c1"]').click();await ticks();
+  assert.deepEqual(e.calls.slice(-2).map(c=>[c.method,c.url]),[['DELETE','/api/produto-regras/dg053.sp/condicoes/c1'],['GET','/api/produto-regras/dg053.sp']]);
+  assert.match(janela().textContent,/Nenhuma condição especial vigente/);assert.equal(e.cell('condicao_especial').querySelector('button').textContent,'—');
+  // Abrir a janela não salvou o produto; Fechar tira a janela.
+  assert.equal(e.requests.length,0);
+  janela().querySelector('[data-p2-condicao-fechar]').click();
+  assert.equal(janela(),null);
+});
+
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
   const p={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:7,unit:'UN',status:'active',gtin:'012345678905',gtin_tax:''}};
   const {dom,document:d,requests}=await setup({products:[p]});
@@ -401,13 +720,15 @@ test('product editing sends metadata with the current version and preserves GTIN
   d.querySelector('nav [data-page=products]').click();
   d.querySelector('[data-edit-product]').click();
   const form=d.querySelector('#product-edit-form');
-  form.querySelector('[name=unit]').value='CX';
+  form.querySelector('[name=name]').value='Aparelho novo';
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
   await new Promise(r=>setImmediate(r));
   assert.deepEqual(requests.map(r=>r.kind),['product.update']);
   assert.equal(requests[0].payload.version,7);
   assert.equal(requests[0].payload.data.gtin,'012345678905');
-  assert.equal(requests[0].payload.data.unit,'CX');
+  assert.equal(requests[0].payload.data.unit,'UN');
+  assert.equal(requests[0].payload.data.name,'Aparelho novo');
+  assert.equal('price' in requests[0].payload.data,false);
   dom.window.close();
 });
 
@@ -944,36 +1265,8 @@ test('stock allocation opens read-only, keeps quantities commercial and submits 
  assert.equal(d.querySelector('#stock-allocation-form'),null);
 });
 
-test('product supplier dialog stages separate prices before the atomic product save',async()=>{
- const supplier={id:'S1',code:1,data:{name:'Fornecedor <img src=x>',roles:['supplier'],status:'active'}};
- const {dom,document:d,requests}=await setup({contacts:[supplier]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
- d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();d.querySelector('[data-product-edit-tab=suppliers]').click();d.querySelector('[data-supplier-add]').click();
- const dialog=d.querySelector('#product-supplier-dialog');assert.ok(dialog);dialog.querySelector('[name=product_supplier_contact]').value='S1';dialog.querySelector('[name=product_supplier_code]').value='000-ABC';dialog.querySelector('[name=product_supplier_purchase_price]').value='9.125';dialog.querySelector('[name=product_supplier_cost_price]').value='10';dialog.querySelector('[name=product_supplier_warranty]').value='12';dialog.querySelector('[data-supplier-dialog-ok]').click();
- assert.equal(requests.length,0);assert.equal(d.querySelector('#product-supplier-dialog'),null);assert.equal(d.querySelectorAll('#product-suppliers-body tr').length,1);assert.equal(d.querySelector('#product-suppliers-body img'),null);
- d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests.length,1);assert.equal(requests[0].kind,'product.update');assert.equal(requests[0].payload.suppliers.version,0);
- assert.equal(requests[0].payload.suppliers.rows[0].purchase_price,'9.125');assert.equal(requests[0].payload.suppliers.rows[0].cost_price,'10');assert.equal(requests[0].payload.suppliers.rows[0].code,'000-ABC');assert.equal(requests[0].payload.suppliers.rows[0].warranty_months,12);assert.equal(requests[0].payload.suppliers.rows[0].is_default,true);
-});
 
-test('product tax registration preserves text codes, blank origin and an explicit reason without fiscal transmission',async()=>{
- const {dom,document:d,requests}=await setup();dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
- d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();d.querySelector('[data-product-edit-tab=tax]').click();
- assert.equal(d.querySelector('[name=tax_origin]').value,'');assert.deepEqual([...d.querySelector('[name=tax_item_type]').options].slice(1).map(o=>o.value),['00','01','02','03','04','05','06','07','08','09','10','99']);
- d.querySelector('[name=tax_ncm]').value='0000.00.00';d.querySelector('[name=tax_cest]').value='01.002.03';d.querySelector('[name=tax_tipi_exception]').value='001';d.querySelector('[name=tax_reason]').value='Conferência fiscal local';
- d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests.length,1);assert.equal(requests[0].kind,'product.update');assert.equal(requests[0].payload.tax.version,0);assert.equal(requests[0].payload.tax.data.origin,null);assert.equal(requests[0].payload.tax.data.ncm,'0000.00.00');assert.equal(requests[0].payload.tax.data.tipi_exception,'001');assert.equal(requests[0].payload.tax.reason,'Conferência fiscal local');
-});
 
-test('gallery changes stage primary order and captions before one atomic product save',async()=>{
- const images=[{id:'image-a',url:'/api/erp-local/catalog/images/image-a',filename:'first.png',width:8,height:6,alt:'Primeira'},{id:'image-b',url:'/api/erp-local/catalog/images/image-b',filename:'second.png',width:8,height:6,alt:'Segunda'}];
- const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:0},images:{version:4,rows:images}};
- const {dom,document:d,requests}=await setup({products:[product]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
- d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();d.querySelector('[data-product-edit-tab=images]').click();
- const figures=d.querySelectorAll('#product-image-gallery figure');figures[1].querySelector('[data-image-alt]').value='Descrição preservada';figures[1].querySelector('[data-image-primary]').click();
- assert.equal(requests.length,0);assert.equal(JSON.parse(d.querySelector('#product-image-gallery figure').dataset.imageInfo).id,'image-b');
- d.querySelector('[name=image_reason]').value='Conferir nova principal';d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests.length,1);assert.equal(requests[0].kind,'product.update');assert.equal(requests[0].payload.images.version,4);assert.deepEqual(requests[0].payload.images.rows,[{id:'image-b',alt:'Descrição preservada'},{id:'image-a',alt:'Primeira'}]);
-});
 
 test('opening product details replaces the list and cancel restores the current search without a write',async()=>{
  const {dom,document:d,requests}=await setup();dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
@@ -982,22 +1275,18 @@ test('opening product details replaces the list and cancel restores the current 
  d.querySelector('[name=name]').value='Mudança sem salvar';d.querySelector('#product-edit-cancel').click();assert.ok(d.querySelector('.product-list'));assert.equal(d.querySelector('#catalog-search [name=query]').value,'aparelho');assert.equal(requests.length,0);
 });
 
-test('characteristics form sends every observed field in centimeters and keeps unknown values unknown',async()=>{
- const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:2,status:'active',condition:'unspecified',production:'',free_shipping:null,dimension_unit:'cm',width_cm:'30.000',height_cm:null,length_cm:null,weight_kg:'1.500',dun:[],tags:['Azul'],short_description_html:'',complementary_html:'<p>Texto <img src=x onerror=alert(1)></p>'},category:{version:0,id:null,path:[]}};
+test('characteristics form sends DUN, tags, category and clean rich text, and keeps the hidden measures as loaded',async()=>{
+ const product={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],details:{version:2,status:'active',condition:'unspecified',production:'',free_shipping:null,dimension_unit:'m',width_cm:'30.000',height_cm:null,length_cm:null,weight_kg:'1.500',dun:[],tags:['Azul'],short_description_html:'',complementary_html:'<p>Texto <img src=x onerror=alert(1)></p>'},category:{version:0,id:null,path:[]}};
  const {dom,document:d,requests}=await setup({products:[product],categories:[{id:'c1',path:'Malas',status:'active'}]});dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
- assert.equal(d.querySelector('[data-rich-body] img'),null);assert.match(d.querySelector('#product-edit-form .source-line').textContent,/Peso anterior/);
- assert.equal(d.querySelector('[name=production] option[value=""]').selected,true);assert.equal(d.querySelector('[name=free_shipping] option[value=""]').selected,true);
- assert.equal(d.querySelector('[name=width_cm]').value,'30');
- const unit=d.querySelector('[name=dimension_unit]');unit.value='m';unit.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(d.querySelector('[name=width_cm]').value,'0.3');
- d.querySelector('[name=height_cm]').value='1.25';
- d.querySelector('[name=condition]').value='new';d.querySelector('[name=production]').value='own';d.querySelector('[name=free_shipping]').value='no';d.querySelector('[name=volumes]').value='2';d.querySelector('[name=product_category]').value='c1';
+ assert.equal(d.querySelector('[data-rich-body] img'),null);assert.doesNotMatch(d.querySelector('#product-edit-form').textContent,/Peso anterior/);
+ d.querySelector('[name=product_category]').value='c1';
  d.querySelector('[name=dun_code]').value='17891234567892';d.querySelector('[name=dun_quantity]').value='12';
  const tag=d.querySelector('[name=product_tag_input]');tag.value='Mala, azul';tag.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
  const sent=requests[0];assert.equal(sent.kind,'product.update');const data=sent.payload.data;
- assert.equal(data.width_cm,'30');assert.equal(data.height_cm,'125');assert.equal(data.length_cm,null);assert.equal(data.dimension_unit,'m');assert.equal('weight_kg' in data,false);
- assert.equal(data.condition,'new');assert.equal(data.production,'own');assert.equal(data.free_shipping,false);assert.equal(data.volumes,'2');
+ assert.equal(data.width_cm,'30.000');assert.equal(data.height_cm,null);assert.equal(data.length_cm,null);assert.equal(data.dimension_unit,'m');assert.equal('weight_kg' in data,false);
+ assert.equal(data.condition,'unspecified');assert.equal(data.production,'');assert.equal(data.free_shipping,null);
  assert.deepEqual(data.dun,[{code:'17891234567892',quantity:'12'}]);assert.deepEqual(data.tags,['Azul','Mala']);
  assert.doesNotMatch(data.complementary_html,/img|onerror/);assert.deepEqual(sent.payload.category,{version:0,category_id:'c1'});
 });
@@ -1018,12 +1307,9 @@ test('half filled DUN never reaches the API and source mode cannot inject script
  assert.equal(requests[0].payload.data.short_description_html,'<p style="text-align: center">Oi</p>Link');
 });
 
-test('decimal shift between measure units is exact and price list shortcut refuses to discard edits',async()=>{
+test('price list shortcut refuses to discard edits',async()=>{
  const {dom,document:d}=await setup();dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
- const unit=d.querySelector('[name=dimension_unit]'),width=d.querySelector('[name=width_cm]'),height=d.querySelector('[name=height_cm]'),to=v=>{unit.value=v;unit.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
- width.value='110';height.value='7';to('m');assert.equal(width.value,'1.1');assert.equal(height.value,'0.07');to('mm');assert.equal(width.value,'1100');assert.equal(height.value,'70');
- width.value='15';to('cm');assert.equal(width.value,'1.5');assert.equal(height.value,'7');
  const name=d.querySelector('[name=name]');name.value='Mudou';name.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
  d.querySelector('[data-product-price-lists]').click();
  assert.ok(d.querySelector('#product-edit-form'));assert.match(d.getElementById('notice').textContent,/Salve ou cancele/);
@@ -1935,16 +2221,15 @@ test('M-40: the bar trash sends only the selected products, after confirmation',
  assert.equal(requests[0].kind,'product.delete');assert.deepEqual(requests[0].payload.items,[{sku:'b.zero',version:0}]);
 });
 
-test('service forms hide stock and physical blocks but keep values, and deleted products stay out',async()=>{
+test('service forms show only Características and keep values, and deleted products stay out',async()=>{
  const {dom,document:d,requests}=await catalogPage();
  d.querySelector('[data-edit-product="d.serv"]').click();
- assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('.product-grid[data-physical-only]').hidden,true);
+ assert.equal(d.querySelector('[data-product-edit-tab=stock]'),null);assert.equal(d.querySelector('[data-product-edit-tab=structure]'),null);assert.equal(d.querySelector('.product-category[data-physical-only]').hidden,true);
  d.querySelector('#product-edit-cancel').click();
  d.querySelector('[data-edit-product="a.ativo"]').click();
- const type=d.querySelector('[name=product_type]');d.querySelector('[data-product-edit-tab=stock]').click();type.value='service';type.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
- assert.equal(d.querySelector('[data-product-edit-tab=stock]').hidden,true);assert.equal(d.querySelector('[data-product-section=stock]').hidden,true);assert.equal(d.querySelector('[data-product-section=characteristics]').hidden,false);
+ assert.equal(d.querySelector('[name=product_type]'),null);
  d.querySelector('#product-edit-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setImmediate(r));
- assert.equal(requests[0].payload.type,'service');assert.equal(requests[0].payload.data.brand,'Sorriso');
+ assert.equal('type' in requests[0].payload,false);assert.equal(requests[0].payload.data.brand,'Sorriso');
  d.querySelector('#product-edit-cancel')?.click();
  // M-30: "Excluídos" saiu da Situação; o excluído nunca aparece na lista.
  assert.equal(d.querySelector('[data-product-select="e.del"]'),null);assert.equal(d.querySelector('[data-product-restore]'),null);
@@ -2604,7 +2889,8 @@ test('a light product from the screen state opens in the editor after asking for
   assert.match(d.querySelector('main').textContent,/Abrindo dg053\.sp/);
   for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));
   assert.deepEqual(asked.filter(u=>u.includes('/full')),['/api/erp-local/products/dg053.sp/full']);
-  assert.equal(d.querySelector('#product-edit-form [name=voltage]').value,'bivolt');
+  assert.equal(d.querySelector('#product-edit-form [name=name]').value,'A17');
+  assert.equal(d.querySelector('#product-edit-form [name=voltage]'),null);
   dom.window.close();
 });
 

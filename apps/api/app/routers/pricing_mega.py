@@ -42,7 +42,7 @@ from starlette.background import BackgroundTask
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
-from app.models import PricingProduct, User
+from app.models import PricingProduct, User, UserRole
 from app.services.marketing.anexos import _EXT_IMAGEM, MIMES_IMAGEM, disposicao_segura, mime_seguro
 from app.services.mega_fotos import (
     PASTA_EMBALAGEM_PADRAO,
@@ -573,6 +573,52 @@ async def recontar_produto(
         raise _sidecar_http_error(exc) from exc
     await session.commit()
     return _midias_out(row)
+
+
+@router.get("/products/{product_id}")
+async def midias_do_produto(
+    product_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_produtos", "view"))
+    ],
+) -> dict[str, Any]:
+    """As colunas Fotos e Embalagens de UMA linha da Tabela de Preços (M-72, 26/11/2026).
+
+    O cadastro do produto no Produtos 2 (o ERP dentro do DaVinci) mostra o mesmo selo da
+    tabela ("+ Adicionar", "3 fotos", "Pasta vazia"…) e a moldura abre a mesma janela
+    (MidiasProdutoDrawer) com estes dados. Só leitura; quem envia e troca a pasta continua
+    sendo o resto desta rota, com a permissão de editar. `irmaos` = as linhas que dividem a
+    pasta (a janela avisa que o envio aparece nelas também); `pode_editar` = a mesma regra
+    que a tela usa para mostrar "—" no lugar do "+ Adicionar".
+    """
+    row = await _produto(session, user, product_id)
+    irmaos: list[dict[str, str]] = []
+    if row.fotos_path:
+        outros = (
+            await session.execute(
+                select(PricingProduct.id, PricingProduct.sku, PricingProduct.name)
+                .where(
+                    PricingProduct.fotos_path == row.fotos_path,
+                    PricingProduct.id != row.id,
+                    user_scope(PricingProduct, user),
+                )
+                .order_by(PricingProduct.sku)
+            )
+        ).all()
+        irmaos = [{"id": str(i), "sku": sku, "name": name} for i, sku, name in outros]
+    edita = user.role == UserRole.ADMIN or bool(
+        ((user.permissions or {}).get("tabela_precos_produtos") or {}).get("edit")
+    )
+    return {
+        "id": str(row.id),
+        "sku": row.sku,
+        "name": row.name,
+        "department": row.department.value if row.department else "",
+        **_midias_out(row),
+        "irmaos": irmaos,
+        "pode_editar": edita,
+    }
 
 
 # tipo da tela → tipo do /files do sidecar, e a extensão que cada um aceita.

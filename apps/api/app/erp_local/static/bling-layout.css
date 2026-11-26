@@ -45,36 +45,55 @@ body[data-screen=purchases] button[data-edit-purchase]{border:0;background:none;
 .native-origin-note{display:block;margin:6px 0;line-height:1.45;max-width:260px;color:#8291a6}.native-origin-note.warn{background:#fff0ca;color:#825c18;padding:5px;border-radius:4px}
 .product-supplier-dialog{width:min(680px,calc(100vw - 48px));border:1px solid #d5deea;border-radius:8px;padding:24px;color:#26384c;box-shadow:0 12px 44px #14203333}
 .product-supplier-dialog::backdrop{background:#10203955}
-.panel [data-supplier-default]{width:15px;height:15px;margin:0;vertical-align:middle;accent-color:var(--blue,#2453d4)}
 #product-edit-form [role=tablist]{border-bottom:1px solid #d1dae5;gap:8px}
 #product-edit-form [role=tab]{background:transparent;border:0;border-radius:0;padding:9px 10px;color:#506079;box-shadow:none;border-bottom:3px solid transparent}
 #product-edit-form [role=tab][aria-selected=true]{border-bottom-color:var(--blue,#2453d4);color:#26384c;font-weight:700}
 .product-supplier-dialog h2{font-size:19px;margin:0 0 20px}
 .product-supplier-dialog>label{display:block;margin:12px 0}
-.product-image-drop{border:1px dashed #c7d3e2;border-radius:7px;padding:22px;text-align:center;background:#fff}
-.product-image-drop small{display:block;margin-top:10px;color:#657c92}
-.product-image-drop label{display:inline-block;max-width:340px;margin-right:14px}
-.product-image-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:16px;margin:20px 0}
-.product-image-gallery figure{margin:0;padding:12px;background:#fff;border:1px solid #d1dce8;border-radius:7px}
-.product-image-gallery .image-preview{display:block;width:100%;padding:0;background:#fff;border:0}
-.image-preview img{display:block;width:100%;height:160px;object-fit:contain}
-.product-image-gallery figcaption{font-weight:700;margin:8px 0}
-.product-image-gallery figcaption small{display:block;font-weight:400;overflow-wrap:anywhere}
-.image-controls{display:flex;gap:3px;margin-top:10px;flex-wrap:wrap}
-.image-library-preview{width:64px;height:64px;object-fit:contain}
-.image-library-dialog{width:min(900px,calc(100vw - 48px));max-height:90vh}
-.image-view-dialog{width:min(1000px,calc(100vw - 48px))}
 .image-view-dialog>img{display:block;max-width:100%;max-height:70vh;margin:12px auto;object-fit:contain}
 body[data-product-editor=true] main>.panel>.panel-head{display:none}
 #product-edit-form>.form-footer:first-child{justify-content:flex-end;margin-top:0;margin-bottom:20px}
 body[data-product-editor=true] header h1{font-size:20px;line-height:1.4;white-space:normal}
 .product-head>label{display:block;margin-bottom:16px}
-.product-head-body{display:grid;grid-template-columns:minmax(180px,1fr) 3fr;gap:16px;margin-bottom:20px}
-.product-head-image{display:flex;align-items:center;justify-content:center;min-height:132px;border:1px solid #d1dce8;border-radius:5px;background:#fff;color:#8291a6}
-.product-head-image img{max-width:100%;max-height:132px;object-fit:contain}
-.product-head-image .ui-icon{width:48px;height:48px}
-.product-head-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
-.product-status-price{display:grid;grid-template-columns:minmax(90px,.7fr) 1fr;gap:12px}
+/* M-70 (26/11/2026): o alto do cadastro em linhas de 7 caixas iguais; a linha sem campo nenhum (as
+   reservadas para os pedidos seguintes da série) não ocupa espaço. Sem o "… ›" antes do nome. */
+body[data-product-editor=true] header h1:before{content:none}
+.product-head-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:16px;margin-bottom:16px}
+.product-head-row:not(:has(label,a,button)){display:none}
+.product-head-cell{min-width:0}.product-head-cell>label{display:block}.product-head-cell>label input{width:100%}
+.product-head-cell #product-rename-open{margin-top:6px;padding:3px 8px;font-size:11px}
+/* M-72: Fotos e Embalagem com o selo das colunas da Tabela de Preços › Produtos (classeEtiquetaMidia em
+   pages/pricing/[tab].vue): "+ Adicionar" tracejado, azul-claro quando tem, âmbar na pasta vazia. */
+.p2-midia-cell{grid-template-rows:auto 38px;align-items:center;justify-items:start}
+.p2-midia{display:inline-flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap;min-width:5.5rem;padding:2px 8px;border:1px solid;border-radius:4px;font-size:11px;font-weight:500;line-height:1.25;letter-spacing:0;text-decoration:none;box-shadow:none;cursor:pointer}
+.p2-midia.is-vazio{border-style:dashed;border-color:rgba(107,114,128,.4);background:#fff;color:rgb(107,114,128)}
+.p2-midia.is-vazio:not(:disabled):hover{border-color:rgb(96,165,250);color:rgb(29,78,216)}
+.p2-midia.is-ver{border-color:rgb(226,232,240);background:rgb(241,245,249);color:rgb(51,65,85)}
+.p2-midia.is-ambar{border-color:rgb(252,211,77);background:rgb(255,251,235);color:rgb(146,64,14)}
+.p2-midia.is-enviando{border-color:rgb(191,219,254);background:rgb(239,246,255);color:rgb(29,78,216);cursor:default}
+.p2-midia.is-ok{border-color:rgb(186,230,253);background:rgb(240,249,255);color:rgb(7,89,133)}
+.p2-midia:disabled{opacity:.5;cursor:not-allowed}.p2-midia[aria-busy=true]{cursor:default}
+.p2-midia-sub{font-size:10px;font-weight:400}.p2-midia-none{font-size:12px;font-weight:400;color:rgb(107,114,128)}
+/* M-74 (26/11/2026): Margem mín, Condição especial e DUIMP padrão do produto (linha 2, colunas 5 a 7).
+   Em branco mostram o herdado da categoria de venda em cinza (placeholder). São do DaVinci, então
+   continuam editáveis (para o administrador) no modo Consulta, onde o resto do cadastro trava. */
+.p2-regra input::placeholder{color:#9aa6b8}
+.p2-regra input[aria-busy=true]{opacity:.6}
+#product-edit-form.read-only .p2-regra input:not(:disabled){pointer-events:auto;background:#fff;color:#21314b}
+.p2-regra input:disabled{background:#f6f7f9;color:#4a5568}
+.p2-regra-botao{display:block;width:100%;min-height:32px;padding:7px 10px;border:1px solid #cbd6e6;border-radius:5px;background:#fff;color:#21314b;font-size:12px;font-weight:400;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:none}
+.p2-regra-botao.is-vazio{color:#9aa6b8}
+.p2-regra-botao:not(:disabled):hover{border-color:#93b4f5}
+.p2-regra-botao:disabled{background:#f6f7f9;cursor:default;opacity:1}
+.p2-condicao-dialog h3{margin:18px 0 8px;font-size:13px}
+.p2-condicao-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:end;border:1px solid #d5deea;border-radius:6px;padding:12px}
+.p2-condicao-form button{grid-column:1/-1;justify-self:end;padding:8px 14px}
+.p2-condicao-lista{list-style:none;margin:0;padding:0;display:grid;gap:6px;max-height:16rem;overflow:auto}
+.p2-condicao-lista li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;border:1px solid #fde68a;border-radius:5px;background:#fffbeb;font-size:12px}
+.p2-condicao-lista button{padding:4px 10px;font-size:11px}
+.p2-condicao-msg{margin:8px 0;padding:6px 10px;border-radius:5px;background:#ecfdf3;color:#166534;font-size:12px}
+.p2-condicao-msg.erro{background:#fff0ec;color:#a13a2a}
+@media(max-width:560px){.p2-condicao-form{grid-template-columns:1fr}}
 .product-switch>span{display:flex;align-items:center;gap:8px;min-height:34px}
 .product-switch input{position:absolute;opacity:0;width:1px;height:1px}
 .product-switch i{display:inline-block;position:relative;width:27px;height:16px;border-radius:9px;background:#c1ccd9;transition:background .15s}
@@ -117,8 +136,8 @@ body[data-product-editor=true] header h1{font-size:20px;line-height:1.4;white-sp
 .product-tag button{background:none;border:0;padding:0 2px;color:#5f7186;box-shadow:none;line-height:1}
 .product-category{margin-top:24px;max-width:320px}
 .product-history-action{margin-top:24px}
-@media(max-width:900px){.product-head-body{grid-template-columns:1fr}.product-head-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:560px){.product-head-grid,.product-grid{grid-template-columns:1fr}}
+@media(max-width:900px){.product-head-row{grid-template-columns:repeat(4,minmax(0,1fr))}.product-head-row>[data-campo]:empty{display:none}.product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.product-head-row{grid-template-columns:repeat(2,minmax(0,1fr))}.product-grid{grid-template-columns:1fr}}
 .product-list.with-filter{display:grid;grid-template-columns:190px minmax(0,1fr);gap:18px;align-items:start}
 .catalog-main{min-width:0}
 .catalog-filter{display:grid;gap:10px;position:sticky;top:10px;padding:0 12px 12px 0;border-right:1px solid #e3e9f0}

@@ -50,10 +50,11 @@ const emit = defineEmits<{ (e: 'close'): void }>()
         <section class="space-y-1">
           <h3 class="font-semibold">De onde vem a margem mínima</h3>
           <ul class="list-disc pl-5 space-y-1 text-muted-foreground">
-            <li>Do <span class="font-medium text-foreground">cadastro do produto</span> na Precificação (segmento).</li>
+            <li>Da <span class="font-medium text-foreground">Margem mín do próprio produto</span>, quando ela está preenchida no cadastro do produto (Produtos 2). Vale para todas as tags do mesmo código (dg019.ra, dg019.sp…); o kit tem a dele.</li>
+            <li>Produto em branco → a do <span class="font-medium text-foreground">cadastro do produto</span> na Precificação (segmento / categoria de venda).</li>
             <li>SKU começando com <span class="font-medium text-foreground">"z"</span> sem cadastro = queima de estoque → usa a mínima do segmento <span class="font-medium text-foreground">Queima de estoque</span> (hoje −15%).</li>
             <li>Sem cadastro nenhum → padrão de <span class="font-medium text-foreground">9%</span>.</li>
-            <li><span class="font-medium text-foreground">Condição Especial</span> do segmento ativa (período pela data do pedido, nome do anúncio ou SKU) e margem dentro da regra especial → margem baixa não trava o pedido (aparece o selo na coluna Margem Mín.).</li>
+            <li><span class="font-medium text-foreground">Condição Especial</span> ativa e margem dentro da regra especial → margem baixa não trava o pedido (aparece o selo na coluna Margem Mín.). A do <span class="font-medium text-foreground">produto</span> (Produtos 2, período pela data do pedido) vale primeiro: se o produto tem condição no dia do pedido, vale só a dele; senão, as do segmento (período, nome do anúncio ou SKU).</li>
           </ul>
         </section>
 

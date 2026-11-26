@@ -327,6 +327,7 @@ from app.models.product import (
     ProductLink,
 )
 from app.models.produto_cadastro import ProdutoCadastro, ProdutoCadastroTipo
+from app.models.produto_regras import ProdutoCondicaoEspecial, ProdutoRegra
 from app.models.produto_troca_tag import ProdutoTrocaTag, ProdutoTrocaTagItem
 from app.models.refund import Refund
 from app.models.segment import Segment, SegmentSpecialDate
@@ -584,6 +585,8 @@ __all__ = [
     "OrganizarPrevia",
     "ProdutoCadastro",
     "ProdutoCadastroTipo",
+    "ProdutoCondicaoEspecial",
+    "ProdutoRegra",
     "ProdutoTrocaTag",
     "ProdutoTrocaTagItem",
     "OuvidoriaOcorrencia",
