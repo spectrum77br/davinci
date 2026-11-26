@@ -1,14 +1,15 @@
-"""Margem mín, DUIMP padrão e Condição especial POR PRODUTO (M-74, migration 0513).
+"""Margem mín, DUIMP padrão e Condição especial POR PRODUTO (M-74, migration 0516).
 
 Pedido M-74 do Harry (26/11/2026): os três valores, que eram só do segmento (Cadastros ›
 Segmentos), passam a poder ser preenchidos no cadastro do produto (Produtos 2). Em branco, o
 produto continua usando o do segmento, como sempre: no dia em que for ao ar as duas tabelas estão
 VAZIAS e nada muda (Margem, robô que segura pedido, nota).
 
-A chave é o `sku_base`: cada peça do código sem a tag, em minúsculas
-(services/produto_regras.sku_base): dg019.ra → dg019; dg019.ra+a020.ra → dg019+a020;
-uaf001m1.110 → uaf001m1. O valor vale para todas as tags e cores da mesma numeração, e o kit tem o
-seu próprio valor.
+A chave é o `sku_base`: cada peça do código sem a TAG DE ENVIO do fim (a lista "Tag de envio" de
+Cadastros › Produtos), em minúsculas (services/produto_regras.sku_base): dg019.ra → dg019;
+dg019.ra+a020.ra → dg019+a020; b001.12.sp → b001.12; uaf001m1.110 → uaf001m1.110. O valor vale
+para todas as tags da mesma numeração, e o kit tem o seu próprio valor. Tamanho de mala,
+capacidade e voltagem continuam na chave (b001.12 e b001.24 são produtos diferentes).
 
   • `produto_regras` — uma linha por produto, criada no primeiro valor preenchido:
       - `margem_min`: em FRAÇÃO como `segments.min_margin` (0,12 = 12%), de 0 a 1. Entra na
@@ -49,8 +50,9 @@ from app.models.base import Base
 
 DUIMP_PADRAO_MAX = 75
 
-# FIXOS: a migration 0513 escreve os mesmos textos.
-CHECK_SKU_BASE = "sku_base <> '' AND sku_base = lower(sku_base) AND strpos(sku_base, '.') = 0"
+# FIXOS: a migration 0516 escreve os mesmos textos. A chave pode ter ponto (b001.12): só a tag de
+# envio sai dela.
+CHECK_SKU_BASE = "sku_base <> '' AND sku_base = lower(sku_base)"
 CHECK_MARGEM_MIN = "margem_min BETWEEN 0 AND 1"
 CHECK_DUIMP = "strpos(duimp_padrao, '|') = 0"
 CHECK_PERIODO = "pedido_ate >= pedido_de"

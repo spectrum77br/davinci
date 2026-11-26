@@ -298,9 +298,10 @@ _SEGMENTO_DATA_ESPECIAL_SQL = (
     f"   AND (de.min_margin IS NULL OR {_MARGEM_OFICIAL_SQL} >= de.min_margin)"
     ")"
 )
-# Condição especial do PRODUTO (M-74, 26/11/2026; Produtos 2, migration 0513): período pela data
-# do pedido (fuso SP, inclusivo) e piso, pela numeração sem a tag do SKU vendido (v.sku →
-# sku_base: dg019.ra → dg019; kit dg019.ra+a020.ra → dg019+a020). "A do produto vale primeiro":
+# Condição especial do PRODUTO (M-74, 26/11/2026; Produtos 2, migration 0516): período pela data
+# do pedido (fuso SP, inclusivo) e piso, pela numeração sem a tag de envio do SKU vendido (v.sku →
+# sku_base, com a lista "Tag de envio" lida uma vez por consulta: dg019.ra → dg019; kit
+# dg019.ra+a020.ra → dg019+a020; b001.12.sp → b001.12). "A do produto vale primeiro":
 # se o produto tem condição no dia do pedido, decide SÓ ela (com o piso dela); senão, as regras do
 # segmento valem como antes. Tabela vazia (o dia em que foi ao ar) → sempre o ramo do segmento.
 _PRODUTO_CONDICOES_TABLE = _qualified_table("produto_condicoes_especiais")

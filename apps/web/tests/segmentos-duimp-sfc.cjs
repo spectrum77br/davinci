@@ -37,6 +37,11 @@ const pagina = sfc('pages/admin/segments.vue')
   const ths = tpl.match(/<th\b/g).length
   assert.equal(ths, 10, '10 colunas no cabeçalho')
   assert.ok(tpl.includes('DUIMP / mensagem'), 'cabeçalho da coluna')
+  // M-74: a janela de Condição Especial avisa que a do produto (Produtos 2) vale primeiro.
+  assert.ok(
+    tpl.replace(/\s+/g, ' ').includes('Se o produto tiver Condição especial própria (Produtos 2) no dia do pedido, vale só a dele.'),
+    'ajuda da Condição Especial cita a do produto',
+  )
   for (const m of tpl.matchAll(/colspan="(\d+)"/g)) assert.equal(m[1], String(ths), 'colspan acompanha o cabeçalho')
   // linha "adicionar raiz": uma <td> por coluna
   const addRaiz = tpl.slice(tpl.indexOf('<!-- add new root -->'))

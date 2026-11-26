@@ -558,6 +558,7 @@ async function removeSpecial(sd: SpecialDate) {
           (contém, inclusive em kit); o que estiver preenchido casa junto. Sem
           margem, aprova qualquer margem. Período encerrado some no dia seguinte
           e é apagado sozinho em 30 dias.
+          Se o produto tiver Condição especial própria (Produtos 2) no dia do pedido, vale só a dele.
         </p>
 
         <div v-if="sdError" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-center gap-2">

@@ -6,9 +6,14 @@ Segmentos), passam a poder ser preenchidos no cadastro do produto. Em branco = u
 como hoje. NADA é copiado: as duas tabelas nascem VAZIAS e, com elas vazias, a margem mínima de
 todo pedido, a Condição especial e a nota continuam exatamente iguais.
 
-Chave do produto = `sku_base`: cada peça do código sem a tag, em minúsculas
-(`"+".join(p.split(".")[0].strip().lower() for p in sku.split("+"))`): dg019.ra → dg019;
-dg019.ra+a020.ra → dg019+a020; uaf001m1.110 → uaf001m1.
+Chave do produto = `sku_base`: cada peça do código (separada por "+"), em minúsculas e sem espaços
+em volta, SEM A TAG DE ENVIO do fim (a lista "Tag de envio" de Cadastros › Produtos, tabela da
+0508; hoje .cd .ci .pi .ra .sa .sp). Só uma tag sai, e só se for o fim da peça (regra base/tag da
+M-44/M-46): dg019.ra → dg019; dg019.ra+a020.ra → dg019+a020; b001.12 → b001.12;
+b001.12.sp → b001.12; uaf001m1.110 → uaf001m1.110; uaf001m1.2l → uaf001m1.2l; z2821 → z2821.
+(Correção do coordenador em 26/11: a 1ª versão cortava tudo depois do ponto e juntava tamanhos de
+mala e capacidades/voltagens do Eletro.) Na view, a lista de tags vem da tabela por subconsulta
+NÃO correlacionada, avaliada uma vez por consulta.
 
 1. `produto_regras` (sku_base PK; margem_min em fração 0..1; duimp_padrao até 75, sem "|";
    atualizado_por/atualizado_em). `sku` é uma cópia gerada do sku_base, só para o Histórico achar
@@ -26,8 +31,9 @@ dg019.ra+a020.ra → dg019+a020; uaf001m1.110 → uaf001m1.
 4. O gatilho do Histórico nas duas tabelas novas, se a função do Histórico existir (o worker
    também põe ao subir; aqui é para valer já no primeiro minuto).
 
-Conferência na produção ANTES de publicar (só leitura): `.local/conferir_view_0513.sql`
-(compara a view atual com o SELECT novo, com produto_regras vazia; esperado 0 diferenças).
+Conferência na produção ANTES de publicar (só leitura): `.local/conferir_view_0516.sql`
+(compara a view atual com o SELECT novo, com produto_regras vazia; esperado 0 diferenças; e confere
+a chave dos exemplos do contrato com a lista de tags da produção).
 
 DOWNGRADE: a view volta ao corpo da 0235 e as duas tabelas saem (o que foi preenchido nelas se
 perde; a view e a Margem voltam a usar só o segmento).
@@ -53,20 +59,37 @@ depends_on: str | Sequence[str] | None = None
 # Constante de módulo: o teste troca pelo schema de teste.
 SCHEMA = "davinci"
 
-# FIXOS (não importam o modelo vivo; os mesmos textos de models/produto_regras.py).
-CHECK_SKU_BASE = "sku_base <> '' AND sku_base = lower(sku_base) AND strpos(sku_base, '.') = 0"
+# FIXOS (não importam o modelo vivo; os mesmos textos de models/produto_regras.py). A chave pode
+# ter ponto (b001.12): só a tag de envio sai dela.
+CHECK_SKU_BASE = "sku_base <> '' AND sku_base = lower(sku_base)"
 CHECK_MARGEM_MIN = "margem_min BETWEEN 0 AND 1"
 CHECK_DUIMP = "strpos(duimp_padrao, '|') = 0"
 CHECK_PERIODO = "pedido_ate >= pedido_de"
 CHECK_PISO = "piso BETWEEN -1 AND 1"
 
 
-def sku_base_sql(coluna: str) -> str:
-    """Cópia CONGELADA de services/produto_regras.sku_base_sql (o teste confere que são iguais)."""
+def tags_padrao_sql(schema: str) -> str:
+    """Cópia CONGELADA de services/produto_regras.tags_padrao_sql (o teste confere que são iguais):
+    subconsulta NÃO correlacionada com a lista "Tag de envio" como regex (uma tag no fim da peça,
+    com numeração antes; a mais longa)."""
     return (
-        "regexp_replace(regexp_replace(regexp_replace(lower(" + coluna + "),"
-        r" '\.[^+]*', '', 'g'), '\s*\+\s*', '+', 'g'), '^\s+|\s+$', '', 'g')"
+        r"(SELECT '(?<=[^+])(?:' || string_agg(regexp_replace(t.tag, '([^0-9a-z])', '\\\1', 'g'),"
+        r" '|' ORDER BY length(t.tag) DESC, t.tag) || ')(?=\+|$)'"
+        r" FROM (SELECT DISTINCT lower(regexp_replace(c.nome, '^\s+|\s+$', '', 'g')) AS tag"
+        f' FROM "{schema}".produto_cadastros c'
+        f' JOIN "{schema}".produto_cadastro_tipos tp ON tp.id = c.tipo_id'
+        " WHERE tp.chave = 'tag_envio') t"
+        " WHERE t.tag <> '' AND strpos(t.tag, '+') = 0)"
     )
+
+
+def sku_base_sql(coluna: str, schema: str) -> str:
+    """Cópia CONGELADA de services/produto_regras.sku_base_sql (o teste confere que são iguais)."""
+    n = (
+        "regexp_replace(regexp_replace(lower(" + coluna + r"), '\s*\+\s*', '+', 'g'),"
+        r" '^\s+|\s+$', '', 'g')"
+    )
+    return f"COALESCE(regexp_replace({n}, {tags_padrao_sql(schema)}, '', 'g'), {n})"
 
 
 # ── corpo da view: CTEs, SELECT e cauda da 0235 (vigentes em 26/11/2026, iguais ao
@@ -308,7 +331,7 @@ def tail_novo(tabela_regras: str | None = None) -> str:
     tabela = tabela_regras or f'"{SCHEMA}".produto_regras'
     return (
         _TAIL_ATUAL.rstrip().rstrip(";")
-        + f"\n     LEFT JOIN {tabela} pr ON pr.sku_base = {sku_base_sql('wm.item_codigo')};\n"
+        + f"\n     LEFT JOIN {tabela} pr ON pr.sku_base = {sku_base_sql('wm.item_codigo', SCHEMA)};\n"
     )
 
 

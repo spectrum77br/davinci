@@ -2,8 +2,9 @@
 
 Pedido M-74 do Harry (26/11/2026). Os três valores passam a poder ser POR PRODUTO; em branco, o
 produto usa o do segmento (a categoria de venda), como sempre. Guardados no DaVinci (migration
-0513, models/produto_regras.py), pela numeração sem a tag (`sku_base`): o mesmo valor vale para
-dg019.ra, dg019.sp…; o kit tem o seu.
+0516, models/produto_regras.py), pela numeração sem a tag de envio (`sku_base`; a tag é a da
+lista "Tag de envio" de Cadastros › Produtos): o mesmo valor vale para dg019.ra, dg019.sp…; o kit
+tem o seu; b001.12 e b001.24 (tamanhos) são produtos diferentes.
 
 Quem chama é a tela do ERP (Produtos 2), com o login da pessoa (`credentials: 'same-origin'`).
 São rotas do DaVinci: não passam pela trava do modo Consulta do ERP, então funcionam nele.
@@ -38,6 +39,7 @@ from app.models import ProdutoCondicaoEspecial, ProdutoRegra, User, UserRole
 from app.schemas.segments import _limpar_duimp_padrao
 from app.services import nf_emissao_gerar as nf
 from app.services import produto_regras as svc
+from app.services.sku_tag_envio import tags_de_envio
 
 router = APIRouter(prefix="/api/produto-regras", tags=["produto_regras"])
 
@@ -60,10 +62,14 @@ def _erro(code: str, message: str, status_code: int = 400) -> HTTPException:
     return HTTPException(status_code, detail={"code": code, "message": message})
 
 
-def _base(sku: str) -> str:
+async def _base(session: AsyncSession, sku: str) -> str:
+    """A chave do produto (sem a tag de envio). Recusa código vazio, longo demais, com peça vazia
+    ("a++b") ou com peça que é só a tag (".ra")."""
     texto = (sku or "").strip()
-    base = svc.sku_base(texto)
-    if not texto or len(texto) > svc.SKU_MAX or not base or any(not p for p in base.split("+")):
+    tags = await tags_de_envio(session)
+    base = svc.sku_base(texto, tags)
+    pecas = base.split("+")
+    if not texto or len(texto) > svc.SKU_MAX or not base or any(not p or p in tags for p in pecas):
         raise _erro("sku_invalido", "Código do produto inválido.")
     return base
 
@@ -145,7 +151,7 @@ async def ler(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_active_user)],
 ) -> dict:
-    return await _saida(session, sku, _base(sku), user)
+    return await _saida(session, sku, await _base(session, sku), user)
 
 
 @router.put("/{sku}")
@@ -155,7 +161,7 @@ async def gravar(
     user: Annotated[User, Depends(require_admin)],
     corpo: Annotated[dict[str, Any], Body()],
 ) -> dict:
-    base = _base(sku)
+    base = await _base(session, sku)
     sobra = set(corpo) - {"margem_min", "duimp_padrao"}
     if sobra:
         raise _erro("campo_desconhecido", f"Campo que não existe aqui: {', '.join(sorted(sobra))}.")
@@ -188,7 +194,7 @@ async def criar_condicao(
     user: Annotated[User, Depends(require_admin)],
     corpo: Annotated[dict[str, Any], Body()],
 ) -> dict:
-    base = _base(sku)
+    base = await _base(session, sku)
     de = _data(corpo.get("pedido_de"), "inicial")
     ate = _data(corpo.get("pedido_ate"), "final")
     if ate < de:
@@ -213,7 +219,7 @@ async def apagar_condicao(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_admin)],
 ) -> Response:
-    base = _base(sku)
+    base = await _base(session, sku)
     cond = (
         await session.execute(
             select(ProdutoCondicaoEspecial).where(

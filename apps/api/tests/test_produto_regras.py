@@ -1,10 +1,13 @@
 """M-74 (26/11/2026): Margem mín, Condição especial e DUIMP padrão POR PRODUTO (Produtos 2).
 
-- A chave do produto (`sku_base`) em Python e em SQL dá o mesmo resultado; a migration tem uma
+- A chave do produto (`sku_base`) = cada peça sem a TAG DE ENVIO do fim (lista de Cadastros ›
+  Produtos; correção do coordenador de 26/11): os exemplos do contrato; Python e SQL dão o mesmo
+  resultado nas amostras e nos SKUs REAIS da cópia previa70 (só leitura); a migration tem uma
   cópia congelada igual.
-- A view vw_bling_pedidos da 0513, num schema de teste: com produto_regras VAZIA é igual à da
-  0235, linha a linha; o valor do produto vence (SKU simples, outra tag, kit, SKU "z"); apagar o
-  valor volta a herdar; pedido com vários itens: cada item com a sua; o downgrade volta tudo.
+- A view vw_bling_pedidos da 0516, num schema de teste: com produto_regras VAZIA é igual à da
+  0235, linha a linha; o valor do produto vence (SKU simples, outra tag, kit, SKU "z"); tamanho de
+  mala e voltagem são produtos diferentes; apagar o valor volta a herdar; pedido com vários itens:
+  cada item com a sua; o downgrade volta tudo.
 - A API: GET mostra o herdado; PUT grava e vazio volta a herdar; só administrador grava (403);
   Condição especial do produto (criar, resumo, apagar); Histórico com os nomes certos.
 - Margem: a Condição especial do produto vale antes da do segmento.
@@ -15,12 +18,14 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from alembic.migration import MigrationContext
@@ -37,16 +42,20 @@ from app.models import (
     HistoricoAlteracao,
     ImportProduct,
     Product,
+    ProdutoCadastro,
+    ProdutoCadastroTipo,
     ProdutoCondicaoEspecial,
     ProdutoRegra,
     Segment,
     SegmentSpecialDate,
     UserRole,
 )
+from app.models.produto_cadastro import CHAVE_TAG_ENVIO
 from app.routers import produto_regras as rotas
 from app.security.jwt import issue_session_token
 from app.services import nf_emissao_gerar as nf
 from app.services import produto_regras as svc
+from app.services.sku_tag_envio import tags_de_envio
 from tests.conftest import TEST_SCHEMA
 
 _MIGRATION = (
@@ -62,7 +71,7 @@ _DUIMP_IMPORT = "produto importado pela duimp 26BR0001398015-8"
 
 
 def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0513", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0516", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -70,44 +79,167 @@ def _carregar():
 
 # =========================================================== chave do produto
 
-_AMOSTRAS = [
+# A lista "Tag de envio" da 0508 (Cadastros › Produtos), como está na produção.
+TAGS_0508 = (".cd", ".ci", ".pi", ".ra", ".sa", ".sp")
+
+
+async def _semear_tags(db: AsyncSession, nomes: tuple[str, ...] = TAGS_0508) -> None:
+    """A lista "Tag de envio" no schema de teste (troca a que houver)."""
+    tipo = (
+        await db.execute(
+            select(ProdutoCadastroTipo).where(ProdutoCadastroTipo.chave == CHAVE_TAG_ENVIO)
+        )
+    ).scalar_one_or_none()
+    if tipo is None:
+        tipo = ProdutoCadastroTipo(nome="Tag de envio", chave=CHAVE_TAG_ENVIO)
+        db.add(tipo)
+        await db.flush()
+    await db.execute(ProdutoCadastro.__table__.delete().where(ProdutoCadastro.tipo_id == tipo.id))
+    db.add_all(ProdutoCadastro(tipo_id=tipo.id, nome=t) for t in nomes)
+    await db.commit()
+
+
+@pytest_asyncio.fixture
+async def tags_envio(db: AsyncSession) -> tuple[str, ...]:
+    await _semear_tags(db)
+    return TAGS_0508
+
+
+# Os exemplos do contrato (seção "Correção da regra da chave do produto") e casos de borda.
+_EXEMPLOS_DO_CONTRATO = [
     ("dg019.ra", "dg019"),
     ("dg019.ra+a020.ra", "dg019+a020"),
-    ("uaf001m1.110", "uaf001m1"),
+    ("b001.12", "b001.12"),
+    ("b001.12.sp", "b001.12"),
+    ("uaf001m1.110", "uaf001m1.110"),
+    ("uaf001m1.2l", "uaf001m1.2l"),
+    ("z2821", "z2821"),
+]
+_AMOSTRAS = [
+    *_EXEMPLOS_DO_CONTRATO,
+    ("b001.24.sp", "b001.24"),  # outro tamanho: outro produto
+    ("uaf001m1.6l", "uaf001m1.6l"),
     ("DG019.RA + A020.RA", "dg019+a020"),
     ("  dg019.sp  ", "dg019"),
-    ("z2821", "z2821"),
-    ("b001.12.18", "b001"),
-    ("b001.18us", "b001"),
-    ("b057.8+18", "b057+18"),
-    ("z0207.mala.us", "z0207"),
-    ("dg001.kit2", "dg001"),
-    ("caixa 10", "caixa 10"),
-    ("a .b+c", "a+c"),
-    ("a+ c.d", "a+c"),
-    ("b089.20+a075+bp003+a076", "b089+a075+bp003+a076"),
-    ("i074.usB", "i074"),
+    ("dg019.ra.ra", "dg019.ra"),  # só UMA tag sai
+    ("dg019.rax", "dg019.rax"),  # .ra no meio não é o fim da peça
+    ("dg019.ra+a020", "dg019+a020"),
+    ("b089.20+a075+bp003+a076.sp", "b089.20+a075+bp003+a076"),
+    ("z0207.mala.us", "z0207.mala.us"),  # .us não está na lista
+    ("dg001.kit2", "dg001.kit2"),
+    ("0002.usado", "0002.usado"),
+    (".ra", ".ra"),  # a peça é só a tag: nada sobra, nada sai
+    ("dg019.ra+.sp", "dg019+.sp"),
+    ("caixa 10.ci", "caixa 10"),
+    ("x .ra", "x "),  # o que sobra fica como está (mesma regra da M-44/M-46)
+    ("a++b.sp", "a++b"),
+    ("a+ c.cd", "a+c"),
+    ("", ""),
 ]
 
 
-def test_sku_base_regra_do_coordenador():
+def test_sku_base_exemplos_do_contrato():
     for sku, base in _AMOSTRAS:
-        assert svc.sku_base(sku) == base, sku
-        # A regra literal do contrato.
-        assert base == "+".join(p.split(".")[0].strip().lower() for p in sku.split("+"))
+        assert svc.sku_base(sku, TAGS_0508) == base, sku
+    # Sem lista de tags (lista vazia): só minúsculas e espaços; nada sai do código.
+    assert svc.sku_base(" DG019.RA + A020.RA ", []) == "dg019.ra+a020.ra"
+    # A tag mais longa que casa vence (como tag_do_sku da M-44/M-46).
+    assert svc.sku_base("ab.x.sp", [".sp", ".x.sp"]) == "ab"
+    assert svc.sku_base(".x.sp", [".sp", ".x.sp"]) == ".x"
 
 
-async def test_sku_base_em_sql_igual_ao_python_e_a_copia_da_migration(db: AsyncSession):
+async def _sql_da_chave(db: AsyncSession, skus: list[str]) -> dict[str, str | None]:
+    rows = await db.execute(
+        text(f"SELECT u.s, {svc.sku_base_sql('u.s')} FROM unnest(CAST(:skus AS text[])) AS u(s)"),
+        {"skus": skus},
+    )
+    return {r[0]: r[1] for r in rows}
+
+
+async def test_sku_base_em_sql_igual_ao_python_e_a_copia_da_migration(db: AsyncSession, tags_envio):
     mod = _carregar()
-    assert mod.sku_base_sql("x") == svc.sku_base_sql("x")
+    assert mod.sku_base_sql("x", "s") == svc.sku_base_sql("x", "s")
+    assert mod.tags_padrao_sql("s") == svc.tags_padrao_sql("s")
+    # A lista é lida por subconsulta NÃO correlacionada (não cita a coluna do SKU).
+    assert "u.s" not in svc.tags_padrao_sql() and "tag_envio" in svc.tags_padrao_sql()
+    skus = [s for s, _ in _AMOSTRAS]
+    sql = await _sql_da_chave(db, skus)
     for sku, base in _AMOSTRAS:
-        got = (
-            await db.execute(text(f"SELECT {svc.sku_base_sql('CAST(:s AS text)')}"), {"s": sku})
-        ).scalar_one()
-        assert got == base, sku
+        assert sql[sku] == base, sku
+    assert await svc.sku_base_de(db, "b001.12.sp") == "b001.12"
+    # Lista vazia: o SQL não tira nada (igual ao Python com lista vazia).
+    await _semear_tags(db, ())
+    sql = await _sql_da_chave(db, skus)
+    for sku in skus:
+        assert sql[sku] == svc.sku_base(sku, []), sku
+    # Tags com caracteres especiais do regex: escapadas, iguais ao Python.
+    estranhas = (".ra", ".sp", " .US ", "[x]", "a-b", "(?)", "\\d", ".x.sp", "a+b", "é")
+    await _semear_tags(db, estranhas)
+    tags = await tags_de_envio(db)
+    assert "a+b" in tags and " .US " not in tags and ".us" in tags
+    extras = ["q[x]", "qa-b", "r(?)", "s\\d", "ab.x.sp", "zé", "c.us", "ka+b", "[x]", "x+y[x]"]
+    sql = await _sql_da_chave(db, skus + extras)
+    for sku in skus + extras:
+        assert sql[sku] == svc.sku_base(sku, tags), sku
 
 
-# =========================================================== view vw_bling_pedidos (0513)
+# Os SKUs REAIS: a cópia mascarada da produção (Postgres local 54400, banco previa70), SÓ LEITURA.
+# Fora da máquina que tem a cópia, o teste é pulado.
+_URL_SKUS_REAIS = os.environ.get(
+    "DAVINCI_SKUS_REAIS_URL", "postgresql://teste:teste@127.0.0.1:54400/previa70"
+)
+_SQL_SKUS_REAIS = """
+    SELECT s FROM (
+        SELECT sku AS s FROM davinci.products
+        UNION SELECT item_codigo FROM davinci.bling_orders
+        UNION SELECT external_sku FROM davinci.product_links
+        UNION SELECT btrim(x) FROM davinci.pricing_products, unnest(string_to_array(sku, ',')) x
+        UNION SELECT variant_norm FROM davinci.pricing_product_variant
+    ) t WHERE s IS NOT NULL ORDER BY s
+"""
+
+
+async def _skus_reais() -> list[str]:
+    try:
+        conn = await asyncpg.connect(
+            _URL_SKUS_REAIS,
+            timeout=5,
+            server_settings={"default_transaction_read_only": "on"},
+        )
+    except (OSError, TimeoutError, asyncpg.PostgresError) as e:
+        pytest.skip(f"sem a cópia com os SKUs reais ({_URL_SKUS_REAIS}): {e}")
+    try:
+        return [r["s"] for r in await conn.fetch(_SQL_SKUS_REAIS)]
+    finally:
+        await conn.close()
+
+
+async def test_sku_base_python_igual_ao_sql_com_os_skus_reais(db: AsyncSession, tags_envio):
+    skus = await _skus_reais()
+    assert len(skus) > 5000, len(skus)
+    assert sum("+" in s for s in skus) > 1000  # kits
+    # A lista da produção, uma lista maior (com tags que pedem escape no regex) e lista vazia.
+    for lista in (TAGS_0508, (*TAGS_0508, ".us", ".mala", "[x]", "a-b"), ()):
+        await _semear_tags(db, lista)
+        tags = await tags_de_envio(db)
+        sql = await _sql_da_chave(db, skus)
+        py = {s: svc.sku_base(s, tags) for s in skus}
+        diferentes = [(s, py[s], sql[s]) for s in skus if py[s] != sql[s]]
+        assert diferentes == [], (lista, len(diferentes), diferentes[:20])
+    # Com a lista da produção: tamanhos de mala e voltagens/capacidades não se juntam; a tag sai.
+    bases = {s: svc.sku_base(s, TAGS_0508) for s in skus}
+    for sku, base in (
+        ("b001.12", "b001.12"),
+        ("b001.24", "b001.24"),
+        ("uaf001m1.110", "uaf001m1.110"),
+        ("uaf001m1.2l", "uaf001m1.2l"),
+    ):
+        if sku in bases:
+            assert bases[sku] == base, sku
+    assert any(s.endswith(".sp") and not b.endswith(".sp") for s, b in bases.items())
+
+
+# =========================================================== view vw_bling_pedidos (0516)
 
 
 async def _arvore(db: AsyncSession) -> SimpleNamespace:
@@ -241,7 +373,7 @@ async def _estrutura(db: AsyncSession, schema: str, tabela: str) -> dict[str, li
     }
 
 
-async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db: AsyncSession):
+async def test_migration_0516_view_igual_com_tabela_vazia_e_produto_na_frente(db: AsyncSession):
     mod = _carregar()
     assert (mod.revision, mod.down_revision) == (
         "0516_produto_regras_margem_duimp",
@@ -256,13 +388,17 @@ async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db
             _item("700003", 0, "dg019.ra+a020.ra"),  # kit
             _item("700004", 0, "z2821"),  # "z" sem cadastro → Queima
             _item("700005", 0, "x999"),  # nada → 9%
-            _item("700006", 0, "z0093.mala"),  # "z" com valor do produto
+            _item("700006", 0, "z0093.mala"),  # "z" com valor do produto (.mala não é tag)
             _item("700007", 0, "DG019.RA"),  # maiúsculas
+            _item("700008", 0, "b001.12.sp"),  # mala 12": a chave é b001.12
+            _item("700009", 0, "b001.24.sp"),  # mala 24": outro produto
+            _item("700010", 0, "uaf001m1.110"),  # voltagem fica na chave
+            _item("700011", 0, "uaf001m1.2l"),
         ]
     )
     await db.commit()
 
-    rascunho = f"{TEST_SCHEMA}_m0513"
+    rascunho = f"{TEST_SCHEMA}_m0516"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
     # Só o que a view e a 0513 precisam além das tabelas do ORM (que ficam no schema de teste).
@@ -280,6 +416,23 @@ async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db
             f' FROM "{TEST_SCHEMA}".bling_orders bo'
         )
     )
+    # A lista "Tag de envio" (0508) no schema da migration: a view lê dali.
+    await db.execute(
+        text(f'CREATE TABLE "{rascunho}".produto_cadastro_tipos (id uuid PRIMARY KEY, chave text)')
+    )
+    await db.execute(
+        text(f'CREATE TABLE "{rascunho}".produto_cadastros (tipo_id uuid NOT NULL, nome text)')
+    )
+    tipo_tag = uuid.uuid4()
+    await db.execute(
+        text(f"INSERT INTO \"{rascunho}\".produto_cadastro_tipos VALUES (:id, 'tag_envio')"),
+        {"id": tipo_tag},
+    )
+    for tag in TAGS_0508:
+        await db.execute(
+            text(f'INSERT INTO "{rascunho}".produto_cadastros VALUES (:t, :n)'),
+            {"t": tipo_tag, "n": tag},
+        )
     for variante, folha in (("dg019", seg.regular), ("a020", seg.acess)):
         await db.execute(
             text(
@@ -307,13 +460,13 @@ async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db
         def_antes = (
             await db.execute(text(f"SELECT pg_get_viewdef('\"{rascunho}\".vw_bling_pedidos')"))
         ).scalar_one()
-        assert len(antes) == 8
+        assert len(antes) == 12
         minimas = await _minimas(db, rascunho)
         assert minimas[("700001", "dg019.ra")][0] == Decimal("0.1800")
         assert minimas[("700004", "z2821")][0] == Decimal("-0.1500")
         assert minimas[("700005", "x999")][0] == Decimal("0.0900")
 
-        # A 0513, com produto_regras vazia: as mesmas colunas e as mesmas linhas.
+        # A 0516, com produto_regras vazia: as mesmas colunas e as mesmas linhas.
         await db.execute(text(caminho))
         conn = await db.connection()
         await conn.run_sync(_passo, "upgrade")
@@ -329,7 +482,8 @@ async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db
         await db.execute(
             text(
                 f'INSERT INTO "{rascunho}".produto_regras (sku_base, margem_min) VALUES'
-                " ('dg019', 0.12), ('dg019+a020', 0.05), ('z0093', 0.30)"
+                " ('dg019', 0.12), ('dg019+a020', 0.05), ('z0093.mala', 0.30),"
+                " ('b001.12', 0.07), ('uaf001m1.110', 0.11)"
             )
         )
         await db.commit()
@@ -343,6 +497,11 @@ async def test_migration_0513_view_igual_com_tabela_vazia_e_produto_na_frente(db
         assert m[("700004", "z2821")][0] == Decimal("-0.1500")
         assert m[("700006", "z0093.mala")][0] == Decimal("0.3000")
         assert m[("700005", "x999")][0] == Decimal("0.0900")
+        # Tamanho de mala e voltagem são produtos diferentes (a chave só perde a tag de envio).
+        assert m[("700008", "b001.12.sp")][0] == Decimal("0.0700")
+        assert m[("700009", "b001.24.sp")][0] == Decimal("0.0900")
+        assert m[("700010", "uaf001m1.110")][0] == Decimal("0.1100")
+        assert m[("700011", "uaf001m1.2l")][0] == Decimal("0.0900")
         margem, diff = m[("700001", "dg019.ra")][2], m[("700001", "dg019.ra")][1]
         assert diff == margem - Decimal("0.12")
 
@@ -392,13 +551,15 @@ def test_conferencia_le_um_cte_vazio_e_nao_a_tabela_nova():
     assert "pr_vazia AS (SELECT NULL::text AS sku_base" in sql
     assert "produto_regras" not in sql
     assert sql.count("COALESCE(pr.margem_min, leaf.min_margin,") == 2
+    # A chave lê a lista de tags da produção (tabela da 0508, já no ar).
+    assert '"davinci".produto_cadastros' in sql and "tp.chave = 'tag_envio'" in sql
 
 
 # =========================================================== API
 
 
 @pytest_asyncio.fixture
-async def cenario(db: AsyncSession, make_user):
+async def cenario(db: AsyncSession, make_user, tags_envio):
     admin = await make_user(role=UserRole.ADMIN)
     vendedor = await make_user()
     seg = await _arvore(db)
@@ -469,8 +630,13 @@ async def test_get_sem_valor_mostra_o_herdado_em_cada_caso(client, auth_as, cena
     nada = (await _get(client, "x999")).json()
     assert (nada["margem_min_herdada"], nada["margem_min_origem"]) == (0.09, "padrão do sistema")
     assert (await _get(client, "a020.ra")).json()["duimp_herdada"] == _DUIMP_ACESS
-    # Código que não vira chave: recusado.
-    assert (await _get(client, ".ra")).status_code == 400
+    # Código que não vira chave (peça vazia ou que é só a tag): recusado.
+    for ruim in (".ra", "dg019.ra+.sp", "a++b"):
+        assert (await _get(client, ruim)).status_code == 400, ruim
+    # Só a tag de envio sai: o tamanho e a voltagem ficam na chave.
+    assert (await _get(client, "b001.12.sp")).json()["sku_base"] == "b001.12"
+    assert (await _get(client, "uaf001m1.110")).json()["sku_base"] == "uaf001m1.110"
+    assert (await _get(client, "z0207.mala.us")).json()["sku_base"] == "z0207.mala.us"
 
 
 async def test_put_grava_vale_para_as_outras_tags_e_vazio_volta_a_herdar(
@@ -502,6 +668,13 @@ async def test_put_grava_vale_para_as_outras_tags_e_vazio_volta_a_herdar(
     r = await _put(client, "dg019.ra+a020.ra", margem_min="0,125")
     assert (r.json()["sku_base"], r.json()["margem_min"]) == ("dg019+a020", 0.125)
     assert (await _get(client, "dg019.ra")).json()["margem_min"] is None
+    # Mala de 12" e de 24" são produtos diferentes; a de 12" vale em todas as tags.
+    r = await _put(client, "b001.12.sp", margem_min=0.07)
+    assert (r.json()["sku_base"], r.json()["margem_min"]) == ("b001.12", 0.07)
+    assert (await _get(client, "b001.12.ci")).json()["margem_min"] == 0.07
+    assert (await _get(client, "b001.12")).json()["margem_min"] == 0.07
+    assert (await _get(client, "b001.24.sp")).json()["margem_min"] is None
+    assert await db.get(ProdutoRegra, "b001") is None
 
 
 async def test_put_recusa_valor_fora_da_regra(client, auth_as, cenario, db: AsyncSession):
@@ -670,7 +843,7 @@ def _margem_permissions() -> dict:
 
 
 async def test_condicao_do_produto_vale_antes_da_do_segmento(
-    client, db: AsyncSession, make_user, auth_as
+    client, db: AsyncSession, make_user, auth_as, tags_envio
 ):
     """Segmento com Condição especial de 01 a 30/09 SEM piso (aprova tudo). O produto dg019 tem
     a dele de 01 a 10/09 com piso de 5%:
@@ -696,6 +869,13 @@ async def test_condicao_do_produto_vale_antes_da_do_segmento(
             ),
             ProdutoCondicaoEspecial(
                 sku_base="dg019",
+                pedido_de=date(2026, 9, 1),
+                pedido_ate=date(2026, 9, 10),
+                piso=Decimal("0.05"),
+            ),
+            # Mala de 12": vale para b001.12 em qualquer tag, não para a de 24".
+            ProdutoCondicaoEspecial(
+                sku_base="b001.12",
                 pedido_de=date(2026, 9, 1),
                 pedido_ate=date(2026, 9, 10),
                 piso=Decimal("0.05"),
@@ -733,6 +913,8 @@ async def test_condicao_do_produto_vale_antes_da_do_segmento(
     await seed("740002", "dg019.sp", 5, "0.08")
     await seed("740003", "a001.sp", 5, "0.03")
     await seed("740004", "dg019.ra", 20, "0.03")
+    await seed("740005", "b001.12.sp", 5, "0.03")
+    await seed("740006", "b001.24.sp", 5, "0.03")
 
     async def presos() -> set[str]:
         r = await client.get(
@@ -741,10 +923,17 @@ async def test_condicao_do_produto_vale_antes_da_do_segmento(
         assert r.status_code == 200
         return {it["pedido_bling"] for it in r.json()["items"]}
 
-    assert await presos() == {"740001"}
+    assert await presos() == {"740001", "740005"}
     todos = await client.get("/api/margens/marketplace?situacao=all")
     especial = {it["pedido_bling"]: it["data_especial"] for it in todos.json()["items"]}
-    assert especial == {"740001": False, "740002": True, "740003": True, "740004": True}
+    assert especial == {
+        "740001": False,
+        "740002": True,
+        "740003": True,
+        "740004": True,
+        "740005": False,  # b001.12.sp → a do produto b001.12 (3% < 5%)
+        "740006": True,  # b001.24.sp é outro produto: a do segmento aprova
+    }
 
     await db.execute(text("DELETE FROM produto_condicoes_especiais"))
     await db.commit()
@@ -754,7 +943,7 @@ async def test_condicao_do_produto_vale_antes_da_do_segmento(
 # =========================================================== Nota: DUIMP
 
 
-async def test_duimp_da_nota_importacao_produto_segmento(db: AsyncSession, make_user):
+async def test_duimp_da_nota_importacao_produto_segmento(db: AsyncSession, make_user, tags_envio):
     admin = await make_user(role=UserRole.ADMIN)
     seg = await _arvore(db)
     db.add_all(
@@ -803,7 +992,7 @@ async def test_duimp_da_nota_importacao_produto_segmento(db: AsyncSession, make_
     }
 
 
-async def test_nota_leva_a_duimp_padrao_do_produto(db: AsyncSession, make_user):
+async def test_nota_leva_a_duimp_padrao_do_produto(db: AsyncSession, make_user, tags_envio):
     """Ponta a ponta: a observação da nota (faturador com observacao_duimp)."""
     from app.models import NfFaturador, StoreInfo
 
@@ -864,6 +1053,16 @@ async def test_nota_leva_a_duimp_padrao_do_produto(db: AsyncSession, make_user):
     )
     obs = linhas[1][linhas[0].index("Observações")]
     assert obs == f"dg019 pela duimp P | {_DUIMP_ACESS}"
+
+
+async def test_duimp_padrao_pela_chave_sem_a_tag(db: AsyncSession, tags_envio):
+    db.add(ProdutoRegra(sku_base="b001.12", duimp_padrao="mala 12 pela duimp M"))
+    await db.commit()
+    got = await svc.duimp_padrao_dos_produtos(
+        db, {"b001.12.sp", "B001.12", "b001.24.sp", "b001.12.18", ""}
+    )
+    assert got == {"b001.12.sp": "mala 12 pela duimp M", "B001.12": "mala 12 pela duimp M"}
+    assert await svc.duimp_padrao_dos_produtos(db, set()) == {}
 
 
 @pytest.mark.parametrize("valor", [None, ""])
