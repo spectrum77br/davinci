@@ -165,7 +165,8 @@ async function commitEdit() {
     flash(id, field)
     await load()
   } catch (e: any) {
-    error.value = erroDuimp(e) || e?.data?.detail?.code || e?.message || 'erro'
+    // M-75: as recusas das categorias de venda (nome fixo etc.) vêm com a frase em `mensagem`.
+    error.value = erroDuimp(e) || e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     cancelEdit()
   }
@@ -199,7 +200,8 @@ async function toggleActive(seg: Segment) {
     flash(seg.id, 'active')
     await load()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    // M-75: desativar/reativar fora de ordem é recusado com a frase em `mensagem`.
+    error.value = e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
   }
 }
 
@@ -235,7 +237,8 @@ async function submitAdd() {
     closeAdd()
     await load()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    // M-75: o limite de 5 por centro de custo vem com a frase em `mensagem`.
+    error.value = e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     adding.value = false
   }
@@ -252,7 +255,8 @@ async function remove(seg: Segment, depth: number) {
     await api(`/api/segments/${seg.id}`, { method: 'DELETE' })
     await load()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    // M-75: em uso / do meio vem com a frase (quantos produtos e contas usam) em `mensagem`.
+    error.value = e?.data?.detail?.mensagem || e?.data?.detail?.code || e?.message || 'erro'
   }
 }
 

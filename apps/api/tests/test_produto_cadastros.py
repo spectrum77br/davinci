@@ -111,10 +111,14 @@ async def test_lista_em_ordem_de_tipo_e_nome(client, make_user, auth_as, base):
         ("Tag de envio", ".sa"),
         ("Tag de envio", ".sp"),
     ]
+    # M-75: "Categoria de venda" (os segmentos filhos) entre Categoria e Tag de envio.
     assert [(t["nome"], t["chave"]) for t in corpo["tipos"]] == [
         ("Categoria", "categoria"),
+        ("Categoria de venda", "categoria_venda"),
         ("Tag de envio", "tag_envio"),
     ]
+    assert all(c["centro_custo"] is None and c["ativa"] is True for c in corpo["cadastros"])
+    assert corpo["centros_custo"] == []
 
 
 async def test_ver_exige_a_permissao_da_aba(client, make_user, auth_as, base):
@@ -190,6 +194,9 @@ async def test_cria_tipo_e_cadastro_e_recusa_nome_repetido(client, make_user, au
     cor = r.json()
     assert cor["nome"] == "Cor do produto" and cor["chave"] is None
     r = await client.post("/api/produto-cadastros/tipos", json={"nome": "cor do PRODUTO"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "tipo_repetido"
+    # M-75: "Categoria de venda" já existe (é o tipo dos segmentos filhos).
+    r = await client.post("/api/produto-cadastros/tipos", json={"nome": "categoria de VENDA"})
     assert r.status_code == 409 and r.json()["detail"]["code"] == "tipo_repetido"
 
     r = await client.post(

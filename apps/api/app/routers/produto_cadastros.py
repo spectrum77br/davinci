@@ -16,6 +16,12 @@ Regras do pedido:
 - Tag de envio com produto (SKU que termina com ela): excluir/renomear/trocar de tipo pede
   confirmação (409 `tag_em_uso` com a contagem); com `confirmar=true`, vai;
 - renomear TIPO é permitido (a regra segue a `chave` do tipo, não o nome).
+
+M-75 (25/11/2026): o tipo "Categoria de venda" são os segmentos filhos das raízes de
+Cadastros › Segmentos (tabela `segments`, NÃO um cadastro novo), com a raiz como "Centro de
+custo". Aparecem na mesma lista (GET "") e são incluídos, renomeados e excluídos pelas rotas
+/categorias-venda (só administrador). As regras que seguram as colunas de margem/frete estão em
+services/categorias_venda.py (as mesmas da aba Segmentos).
 """
 
 from __future__ import annotations
@@ -31,8 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, is_unique_violation
 from app.deps.auth import require_active_user, require_admin, require_permission
-from app.models import ProdutoCadastro, ProdutoCadastroTipo, User
+from app.models import ProdutoCadastro, ProdutoCadastroTipo, Segment, User
 from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO, NOME_MAX
+from app.schemas.segments import _slugify
+from app.services import categorias_venda as cv
 from app.services import produto_cadastros as svc
 
 router = APIRouter(prefix="/api/produto-cadastros", tags=["produto_cadastros"])
@@ -55,11 +63,21 @@ class CadastroOut(BaseModel):
     tipo_nome: str
     tipo_chave: str | None
     nome: str
+    # M-75: só nas linhas de Categoria de venda (nas outras: None / True).
+    centro_custo: str | None = None
+    ativa: bool = True
+
+
+class CentroCustoOut(BaseModel):
+    id: UUID
+    nome: str
 
 
 class ListaOut(BaseModel):
     tipos: list[TipoOut]
     cadastros: list[CadastroOut]
+    # M-75: as raízes de Cadastros › Segmentos, para o "Novo cadastro" de Categoria de venda.
+    centros_custo: list[CentroCustoOut] = []
 
 
 class ListasFiltroOut(BaseModel):
@@ -89,6 +107,15 @@ class CadastroPatch(BaseModel):
     confirmar: bool = False
 
 
+class VendaIn(BaseModel):
+    centro_custo_id: UUID
+    nome: str = Field(min_length=1, max_length=200)
+
+
+class VendaPatch(BaseModel):
+    nome: str = Field(min_length=1, max_length=200)
+
+
 # ---------------------------------------------------------------- ajudantes
 
 
@@ -114,6 +141,43 @@ def _cadastro_out(c: ProdutoCadastro, t: ProdutoCadastroTipo) -> CadastroOut:
     return CadastroOut(id=c.id, tipo_id=t.id, tipo_nome=t.nome, tipo_chave=t.chave, nome=c.nome)
 
 
+def _venda_out(seg: Segment, raiz: Segment) -> CadastroOut:
+    """Categoria de venda (M-75): a linha é o próprio segmento filho (id = segments.id)."""
+    return CadastroOut(
+        id=seg.id,
+        tipo_id=cv.TIPO_ID,
+        tipo_nome=cv.TIPO_NOME,
+        tipo_chave=cv.CHAVE,
+        nome=seg.name,
+        centro_custo=raiz.name,
+        ativa=seg.active,
+    )
+
+
+async def _centro(session: AsyncSession, centro_id: UUID) -> Segment:
+    raiz = await session.get(Segment, centro_id)
+    if raiz is None or raiz.parent_id is not None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "centro_nao_encontrado", "mensagem": "Centro de custo não encontrado."},
+        )
+    return raiz
+
+
+async def _venda(session: AsyncSession, venda_id: UUID) -> tuple[Segment, Segment]:
+    seg = await session.get(Segment, venda_id)
+    raiz = await cv.raiz_de(session, seg) if seg is not None else None
+    if seg is None or raiz is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "categoria_venda_nao_encontrada",
+                "mensagem": "Categoria de venda não encontrada.",
+            },
+        )
+    return seg, raiz
+
+
 async def _tipo(session: AsyncSession, tipo_id: UUID) -> ProdutoCadastroTipo:
     tipo = await session.get(ProdutoCadastroTipo, tipo_id)
     if tipo is None:
@@ -135,6 +199,11 @@ async def _cadastro(session: AsyncSession, cadastro_id: UUID) -> ProdutoCadastro
 
 
 async def _sem_repetir_tipo(session: AsyncSession, nome: str, menos: UUID | None = None) -> None:
+    if svc.igual(nome, cv.TIPO_NOME):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "tipo_repetido", "mensagem": f"Já existe o tipo “{cv.TIPO_NOME}”."},
+        )
     q = select(ProdutoCadastroTipo.id).where(func.lower(ProdutoCadastroTipo.nome) == nome.lower())
     if menos is not None:
         q = q.where(ProdutoCadastroTipo.id != menos)
@@ -261,10 +330,23 @@ async def listar(
         for c in (await session.execute(select(ProdutoCadastro))).scalars()
     ]
     cadastros.sort(key=lambda c: (svc.ordem(c.tipo_nome), svc.ordem(c.nome)))
-    tipos.sort(key=lambda t: svc.ordem(t.nome))
+    # M-75: Categoria de venda = os segmentos filhos, por centro de custo (alfabético) e na
+    # ordem das colunas de margem/frete; o sort estável só encaixa o tipo entre os outros.
+    centros, vendas = await cv.listar(session)
+    centros.sort(key=lambda r: svc.ordem(r.name))
+    ordem_centro = {r.id: i for i, r in enumerate(centros)}
+    vendas.sort(
+        key=lambda par: (ordem_centro[par[1].id], par[0].sort_order, svc.ordem(par[0].name))
+    )
+    cadastros += [_venda_out(s, raiz) for s, raiz in vendas]
+    cadastros.sort(key=lambda c: svc.ordem(c.tipo_nome))
+    tipos_out = [TipoOut(id=t.id, nome=t.nome, chave=t.chave) for t in tipos]
+    tipos_out.append(TipoOut(id=cv.TIPO_ID, nome=cv.TIPO_NOME, chave=cv.CHAVE))
+    tipos_out.sort(key=lambda t: svc.ordem(t.nome))
     return ListaOut(
-        tipos=[TipoOut(id=t.id, nome=t.nome, chave=t.chave) for t in tipos],
+        tipos=tipos_out,
         cadastros=cadastros,
+        centros_custo=[CentroCustoOut(id=r.id, nome=r.name) for r in centros],
     )
 
 
@@ -398,5 +480,105 @@ async def excluir(
     cad = await _cadastro(session, cadastro_id)
     await _pode_tirar(await _tipo(session, cad.tipo_id), cad.nome, confirmar)
     await session.delete(cad)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------- categorias de venda (M-75)
+# O mesmo dado da aba Segmentos (segments): o que muda aqui aparece lá, na aba Contas e na
+# coluna Tabela da Tabela de Preços › Produtos. Margem Mín, Condição Especial e DUIMP/mensagem
+# continuam só na aba Segmentos.
+
+
+@router.post("/categorias-venda", response_model=CadastroOut, status_code=status.HTTP_201_CREATED)
+async def criar_categoria_venda(
+    body: VendaIn,
+    admin: Annotated[User, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CadastroOut:
+    raiz = await _centro(session, body.centro_custo_id)
+    nome = _nome(body.nome, "cadastro")
+    posicao = await cv.conferir_nova(session, raiz, nome)
+    slug = _slugify(nome)
+    if not slug:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "nome_sem_letras", "mensagem": "O nome precisa ter letras ou números."},
+        )
+    seg = Segment(
+        user_id=admin.id,
+        parent_id=raiz.id,
+        name=nome,
+        slug=slug,
+        sort_order=posicao,
+        active=True,
+    )
+    nome_centro = raiz.name  # o rollback abaixo expira os objetos da sessão
+    session.add(seg)
+    try:
+        await session.commit()
+    except IntegrityError as e:
+        await session.rollback()
+        if is_unique_violation(e):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "nome_repetido",
+                    "mensagem": (
+                        f"Já existe uma categoria de venda com nome parecido em {nome_centro}."
+                    ),
+                },
+            ) from e
+        raise
+    return _venda_out(seg, raiz)
+
+
+@router.patch("/categorias-venda/{venda_id}", response_model=CadastroOut)
+async def renomear_categoria_venda(
+    venda_id: UUID,
+    body: VendaPatch,
+    _admin: Annotated[User, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CadastroOut:
+    """Só o nome (o centro de custo e a posição não mudam por aqui)."""
+    seg, raiz = await _venda(session, venda_id)
+    nome = _nome(body.nome, "cadastro")
+    if nome == seg.name:
+        return _venda_out(seg, raiz)
+    cv.conferir_troca_de_nome(seg.name, nome)
+    await cv.sem_repetir_no_centro(session, raiz, nome, menos=seg.id)
+    seg.name = nome
+    await session.commit()
+    return _venda_out(seg, raiz)
+
+
+@router.get("/categorias-venda/{venda_id}/uso", response_model=UsoOut)
+async def uso_categoria_venda(
+    venda_id: UUID,
+    _admin: Annotated[User, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> UsoOut:
+    """Para a lixeira avisar antes: quantos produtos usam e se a exclusão é barrada."""
+    seg, raiz = await _venda(session, venda_id)
+    uso, bloqueio = await cv.bloqueio_exclusao(session, seg, raiz)
+    return UsoOut(
+        regra=cv.CHAVE,
+        produtos=uso.produtos,
+        bloqueia=bloqueio is not None,
+        mensagem=bloqueio.mensagem if bloqueio else None,
+    )
+
+
+@router.delete("/categorias-venda/{venda_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def excluir_categoria_venda(
+    venda_id: UUID,
+    _admin: Annotated[User, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    seg, raiz = await _venda(session, venda_id)
+    _uso, bloqueio = await cv.bloqueio_exclusao(session, seg, raiz)
+    if bloqueio is not None:
+        raise cv.recusa(bloqueio)
+    await session.delete(seg)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

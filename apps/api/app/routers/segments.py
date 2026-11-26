@@ -19,6 +19,7 @@ from app.schemas.segments import (
     SegmentTreeNode,
     _slugify,
 )
+from app.services import categorias_venda
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/segments", tags=["segments"])
@@ -89,8 +90,14 @@ async def create_segment(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("segmentos", "edit"))],
 ) -> SegmentOut:
+    sort_order = body.sort_order
     if body.parent_id is not None:
-        await _get_or_404(session, body.parent_id)
+        pai = await _get_or_404(session, body.parent_id)
+        # M-75: filho de raiz = categoria de venda (coluna de margem/frete da
+        # aba Contas). Sem posição no pedido, entra no FIM do centro de custo
+        # (antes gravava 0, a mesma da primeira); até 5 (services/categorias_venda).
+        if pai.parent_id is None and "sort_order" not in body.model_fields_set:
+            sort_order = await categorias_venda.conferir_nova(session, pai, body.name)
     slug = body.slug or _slugify(body.name)
     if not slug:
         raise HTTPException(400, detail={"code": "slug_invalid"})
@@ -99,7 +106,7 @@ async def create_segment(
         parent_id=body.parent_id,
         name=body.name,
         slug=slug,
-        sort_order=body.sort_order,
+        sort_order=sort_order,
         active=body.active,
         duimp_padrao=body.duimp_padrao,
     )
@@ -135,6 +142,16 @@ async def patch_segment(
             descendants = await _descendants(session, segment_id)
             if new_parent in descendants:
                 raise HTTPException(400, detail={"code": "segment_parent_cycle"})
+
+    # M-75: "Apple" e "Queima de estoque" são procuradas pelo nome; e desativar
+    # ou reativar uma categoria de venda não pode tirar as outras da coluna de
+    # margem/frete da aba Contas (services/categorias_venda).
+    if data.get("name") is not None:
+        categorias_venda.conferir_troca_de_nome(seg.name, data["name"])
+    if data.get("active") is not None and data["active"] != seg.active:
+        raiz = await categorias_venda.raiz_de(session, seg)
+        if raiz is not None:
+            await categorias_venda.conferir_ativacao(session, seg, raiz, data["active"])
 
     for k, v in data.items():
         setattr(seg, k, v)
@@ -172,6 +189,14 @@ async def delete_segment(
     _u: Annotated[User, Depends(require_permission("segmentos", "delete"))],
 ) -> None:
     seg = await _get_or_404(session, segment_id)
+    # M-75: categoria de venda só sai sem produto e sem conta usando, e só a
+    # última do centro de custo (as outras não mudam de coluna). Antes vinha
+    # um erro genérico do banco quando havia produto.
+    raiz = await categorias_venda.raiz_de(session, seg)
+    if raiz is not None:
+        _uso, bloqueio = await categorias_venda.bloqueio_exclusao(session, seg, raiz)
+        if bloqueio is not None:
+            raise categorias_venda.recusa(bloqueio)
     await session.delete(seg)
     await session.commit()
     return None
