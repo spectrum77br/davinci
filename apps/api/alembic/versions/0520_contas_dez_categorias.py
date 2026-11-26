@@ -138,11 +138,39 @@ def _estender(m: re.Match) -> str:
     return m.group("cinco") + novas
 
 
+# JOIN na forma ANINHADA, como o pg_get_viewdef da PRODUÇÃO devolve (achado em 26/11, antes de
+# publicar): "((((a OR b) OR c) OR d) OR e)", com cada comparação entre parênteses — a forma
+# corrida "a OR b OR c OR d OR e" (_OU_5) não casa ali. Aqui só a comparação da posição 5 é
+# trocada por "(5 OR 6 OR … OR 10)": parênteses a mais nunca mudam o resultado, e vale para
+# qualquer aninhamento. Exige as posições 1..4 no texto (sanidade) e não estende duas vezes.
+_CMP_5_ANINHADA = re.compile(
+    rf"\(\s*leaf\.id\s*=\s*pa\.slot{ANTES}_segment_id\s*\)"
+    rf"(?!\s*OR\s*\(\s*leaf\.id\s*=\s*pa\.slot{ANTES + 1}_segment_id)"
+)
+
+
+def _envolver(m: re.Match) -> str:
+    novas = "".join(f" OR (leaf.id = pa.slot{n}_segment_id)" for n in NOVAS)
+    return f"({m.group(0)}{novas})"
+
+
+# O inverso EXATO de _envolver (downgrade logo depois do upgrade, sem o banco reescrever o texto).
+_ENVOLVIDO = re.compile(
+    rf"\((?P<cmp>\(leaf\.id = pa\.slot{ANTES}_segment_id\))"
+    + "".join(rf" OR \(leaf\.id = pa\.slot{n}_segment_id\)" for n in NOVAS)
+    + r"\)"
+)
+
+
 def _subir_texto(nome: str, texto: str) -> str:
     """O texto com as posições 6..10 no CASE e no JOIN. Para (RuntimeError) se não achar os dois
     trechos, ou se acharem quantidades diferentes."""
     novo, n_case = _CASE_5.subn(_estender, texto)
     novo, n_ou = _OU_5.subn(_estender, novo)
+    if n_ou == 0 and all(
+        re.search(rf"leaf\.id\s*=\s*pa\.slot{i}_segment_id\b", novo) for i in range(1, ANTES)
+    ):
+        novo, n_ou = _CMP_5_ANINHADA.subn(_envolver, novo)
     if n_case == 0 or n_ou == 0 or n_case != n_ou:
         raise RuntimeError(
             f"0520: {nome} não tem o trecho esperado do frete projetado (slot1..5): "
@@ -154,6 +182,12 @@ def _subir_texto(nome: str, texto: str) -> str:
 def _descer_texto(nome: str, texto: str) -> str:
     novo, n_case = _CASE_10.subn(lambda m: m.group("cinco"), texto)
     novo, n_ou = _OU_10.subn(lambda m: m.group("cinco"), novo)
+    novo = _ENVOLVIDO.sub(lambda m: m.group("cmp"), novo)
+    # O banco pode devolver o texto re-escrito (outro aninhamento) e aí nenhuma forma acima casa:
+    # trocar as posições 6..10 por NULL dá o MESMO resultado (vínculo NULL nunca casa, e o CASE
+    # cai no ELSE como antes) e solta a view das colunas que o downgrade vai apagar.
+    novo = re.sub(rf"\bpa\.slot(?:{'|'.join(map(str, NOVAS))})_segment_id\b", "NULL::uuid", novo)
+    novo = re.sub(rf"\bpa\.shipping(?:{'|'.join(map(str, NOVAS))})\b", "NULL::numeric", novo)
     if re.search(r"slot(?:6|7|8|9|10)_segment_id|shipping(?:6|7|8|9|10)\b", novo):
         raise RuntimeError(
             f"0520 (downgrade): {nome} ainda usa as posições 6..10 fora do trecho do frete "

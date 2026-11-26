@@ -683,3 +683,179 @@ def test_migration_0520_texto_com_e_sem_parenteses():
     assert "leaf.id = pa.slot10_segment_id) AND y" in mod._subir_texto("t", sem)
     with pytest.raises(RuntimeError, match="trecho esperado"):
         mod._subir_texto("t", "SELECT 1")
+
+
+def test_migration_0520_join_aninhado_como_na_producao():
+    """26/11: o pg_get_viewdef da PRODUÇÃO devolve o JOIN aninhado "((((a OR b) OR c) OR d) OR e)".
+    A 0520 tem de estender esse formato também (antes parava com "não tem o trecho esperado")."""
+    mod = _carregar()
+    case = "\n".join(
+        f"  WHEN (pa.slot{i}_segment_id = leaf.id) THEN pa.shipping{i}" for i in range(1, 6)
+    )
+    join = "(leaf.id = pa.slot1_segment_id)"
+    for i in range(2, 6):
+        join = f"({join} OR (leaf.id = pa.slot{i}_segment_id))"
+    texto = f"CASE\n{case}\n ELSE NULL END ... ON ((x) AND {join} AND (y))"
+    novo = mod._subir_texto("t", texto)
+    assert novo.count("slot10_segment_id") == 2 and novo.count("shipping10") == 1
+    assert "((leaf.id = pa.slot5_segment_id) OR (leaf.id = pa.slot6_segment_id)" in novo
+    # Já estendido: não estende de novo; o downgrade volta exatamente ao texto de antes.
+    assert mod._CMP_5_ANINHADA.search(novo) is None
+    assert mod._descer_texto("t", novo) == texto
+    # Se o banco reescrever o texto (outro aninhamento), o downgrade troca 6..10 por NULL.
+    reescrito = novo.replace(
+        "((leaf.id = pa.slot5_segment_id) OR (leaf.id = pa.slot6_segment_id)",
+        "(((leaf.id = pa.slot5_segment_id) OR (leaf.id = pa.slot6_segment_id))",
+    ).replace("(leaf.id = pa.slot10_segment_id))", "(leaf.id = pa.slot10_segment_id)))")
+    descido = mod._descer_texto("t", reescrito)
+    assert "slot6_segment_id" not in descido and "shipping6" not in descido
+    assert "NULL::uuid" in descido
+
+
+def _aninhar(texto: str) -> str:
+    """O JOIN corrido "(a OR b OR c OR d OR e)" do pg_get_viewdef local na forma da produção,
+    "((((a OR b) OR c) OR d) OR e)". Só no texto de antes da 0520 (sem a 6ª)."""
+    if "slot6_segment_id" in texto:
+        return texto
+    cmp = [f"(leaf.id = pa.slot{i}_segment_id)" for i in range(1, 6)]
+    corrido = " OR ".join(cmp)
+    assert texto.count(corrido) == 1, texto
+    join = cmp[0]
+    for c in cmp[1:4]:
+        join = f"({join} OR {c})"
+    return texto.replace(corrido, f"{join} OR {cmp[4]}")
+
+
+async def test_migration_0520_join_aninhado_no_banco(db: AsyncSession, monkeypatch):
+    """O caminho do JOIN aninhado da produção de ponta a ponta no Postgres. O Postgres local
+    achata "((a OR b) OR c)" ao gravar a view, então o pg_get_viewdef que a 0520 lê é trocado
+    pelo texto aninhado; o CREATE OR REPLACE que ela manda é o de verdade. Sobe, desce (volta ao
+    texto exato de antes) e sobe de novo, com o frete projetado igual e a posição 7 casando."""
+    import alembic.op as op_real
+
+    mod = _carregar()
+    modelo = Base.metadata.schema
+    r = f"{modelo}_mig0520an"
+    await db.execute(text(f'DROP SCHEMA IF EXISTS "{r}" CASCADE'))
+    await db.execute(text(f'CREATE SCHEMA "{r}"'))
+    for t in ("segments", "pricing_products", "pricing_accounts"):
+        await db.execute(text(f'CREATE TABLE "{r}".{t} (LIKE "{modelo}".{t} INCLUDING ALL)'))
+    for c in _NOVAS:
+        await db.execute(text(f'ALTER TABLE "{r}".pricing_accounts DROP COLUMN {c}'))
+    raiz_id, f1, f7 = uuid4(), uuid4(), uuid4()
+    await db.execute(
+        text(
+            f'INSERT INTO "{r}".segments (id, name, slug, sort_order, parent_id) VALUES '
+            "(:raiz, 'Eletro', 'eletro', 0, NULL), (:f1, 'Acessórios', 'e1', 0, :raiz), "
+            "(:f7, 'cooktop', 'e7', 6, :raiz)"
+        ),
+        {"raiz": raiz_id, "f1": f1, "f7": f7},
+    )
+    dono = uuid4()
+    await db.execute(
+        text(
+            f'INSERT INTO "{r}".pricing_products (id, user_id, sku, name, segment_id) VALUES '
+            "(gen_random_uuid(), :u, 'ue001', 'a', :f1), (gen_random_uuid(), :u, 'ue007', 'b', :f7)"
+        ),
+        {"u": dono, "f1": f1, "f7": f7},
+    )
+    await db.execute(
+        text(
+            f'INSERT INTO "{r}".pricing_accounts (id, user_id, name, platform, segment_id, '
+            "margin1, shipping1, slot1_segment_id, commission) VALUES "
+            "(gen_random_uuid(), :u, 'atlas', 'amazon', :raiz, 0.53, 30, :f1, 0.14)"
+        ),
+        {"u": dono, "raiz": raiz_id, "f1": f1},
+    )
+    for v in mod.VIEWS:
+        await db.execute(text(f'CREATE VIEW "{r}".{v} AS {_sql_frete(r)}'))
+    await db.commit()
+
+    class _Bind:
+        """A conexão de verdade; só o pg_get_viewdef volta na forma aninhada."""
+
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, stmt, params=None):
+            res = self._conn.execute(stmt, params)
+            if "pg_get_viewdef" in str(stmt):
+                definicao = _aninhar(res.scalar_one())
+                return SimpleNamespace(scalar_one=lambda: definicao)
+            return res
+
+        def exec_driver_sql(self, sql):
+            return self._conn.exec_driver_sql(sql)
+
+    class _Op:
+        def __getattr__(self, nome):
+            return getattr(op_real, nome)
+
+        def get_bind(self):
+            return _Bind(op_real.get_bind())
+
+    async def _definicoes() -> dict[str, str]:
+        return {
+            v: (
+                await db.execute(
+                    text("SELECT pg_get_viewdef(to_regclass(:q), false)"), {"q": f'"{r}".{v}'}
+                )
+            ).scalar_one()
+            for v in mod.VIEWS
+        }
+
+    async def _fretes() -> list[list[tuple]]:
+        return [
+            [
+                tuple(x)
+                for x in (
+                    await db.execute(
+                        text(f'SELECT sku, conta, frete_projetado_unit FROM "{r}".{v} ORDER BY sku')
+                    )
+                ).all()
+            ]
+            for v in mod.VIEWS
+        ]
+
+    def _rodar(conn, passo: str) -> None:
+        with Operations.context(MigrationContext.configure(conn)):
+            getattr(mod, passo)()
+
+    async def _passo(passo: str) -> None:
+        conn = await db.connection()
+        await conn.run_sync(_rodar, passo)
+        await db.commit()
+
+    defs_antes, fretes_antes = await _definicoes(), await _fretes()
+    assert all(_aninhar(d) != d for d in defs_antes.values())  # o texto lido é mesmo o aninhado
+    assert fretes_antes == [[("ue001", "atlas", D("30.00")), ("ue007", None, None)]] * 2
+    mod.SCHEMA = r
+    monkeypatch.setattr(mod, "op", _Op())
+    try:
+        await _passo("upgrade")
+        for d in (await _definicoes()).values():
+            assert d.count("slot10_segment_id") == 2 and d.count("shipping10") == 1, d
+        assert await _fretes() == fretes_antes
+        await db.execute(
+            text(f'UPDATE "{r}".pricing_accounts SET slot7_segment_id = :f7, shipping7 = 44'),
+            {"f7": f7},
+        )
+        await db.commit()
+        assert (
+            await _fretes()
+            == [[("ue001", "atlas", D("30.00")), ("ue007", "atlas", D("44.00"))]] * 2
+        )
+
+        await _passo("downgrade")
+        assert await _definicoes() == defs_antes
+        assert await _fretes() == fretes_antes
+        assert await _colunas(db, r) == []
+
+        await _passo("upgrade")
+        for d in (await _definicoes()).values():
+            assert d.count("slot10_segment_id") == 2, d
+        assert await _fretes() == fretes_antes
+    finally:
+        await db.rollback()
+        await db.execute(text(f'DROP SCHEMA IF EXISTS "{r}" CASCADE'))
+        await db.commit()
