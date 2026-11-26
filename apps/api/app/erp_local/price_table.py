@@ -4,7 +4,16 @@ Novos procedimentos 11 (15/11/2026): the stock control holds, beside name, code,
 measures, the Tabela de Preços information: department, EAN, model and certificate (Anatel or
 Inmetro), warranty, product and packaging photos and the stock priority. While DaVinci keeps that
 table it is read from its copy (`reference_rows`, kind `pricing`, one row per product line such as
-"dg052,dg053,dg054"); a SKU finds its line by its family code (dg053.sp → dg053).
+"dg052,dg053,dg054"); a SKU finds the most specific line that lists it: its whole code (a
+kit line), its code before "+" (Mala's size "b005.20", Eletro's voltage "uaf001m1.110") or
+else its family code (dg053.sp → dg053). M-71 (26/11/2026): before, only the family was
+tried, so "b005.20" showed the EAN of the "b005" line and "uaf001m1.110" found no line.
+
+M-69/M-71 (26/11/2026): the certificate is linked to products by the SKU column of DaVinci's
+Importação › Certificações (`certificate_skus`, one row per family). A product shows the
+certificate of its family there and, when the family is not listed, the one stored on its
+Tabela de Preços line. It also shows the certificate's end date ("Validade", dd/mm/aaaa) and
+the line id (`pricing_id`).
 
 Every cost change of a simple product is kept with its result: (new cost − previous cost) × the
 physical quantity in all depots at that moment (item 5: 10 units from 100 to 120 = +200,00).
@@ -44,16 +53,32 @@ def _ean_for(raw, code):
     return ""
 
 
+class Lines(dict):
+    """code → Tabela de Preços line, plus `certificates`: family → the certificate of DaVinci's
+    Certificações SKU column (M-69). A plain dict still works with `for_sku` (no SKU column)."""
+
+    def __init__(self, *args, certificates=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.certificates = certificates or {}
+
+
 def index(db):
     try:
-        rows = db.execute("SELECT data FROM reference_rows WHERE kind='pricing'").fetchall()
+        rows = db.execute(
+            "SELECT kind,data FROM reference_rows WHERE kind IN ('pricing','certificate_skus')"
+        ).fetchall()
     except sqlite3.OperationalError:
-        return {}
-    out = {}
-    for row in rows:
-        line = json.loads(row[0])
-        for code in _codes(line.get("sku")):
-            out[code] = line
+        return Lines()
+    out = Lines()
+    for kind, data in rows:
+        item = json.loads(data)
+        if kind == "certificate_skus":
+            code = family(item.get("sku"))
+            if code:
+                out.certificates[code] = item
+            continue
+        for code in _codes(item.get("sku")):
+            out[code] = item
     return out
 
 
@@ -67,20 +92,42 @@ CERTIFICATE_NAMES = {
 }
 
 
+def _br_date(value):
+    """ "2028-02-20" (or a timestamp starting with it) → "20/02/2028"; anything else → ""."""
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(value or ""))
+    return f"{match[3]}/{match[2]}/{match[1]}" if match else ""
+
+
+def _line_code(lines, sku):
+    """The most specific code a line lists: the whole SKU (a kit line lists
+    "b005.20+a075+bp003+a076"), then the SKU before "+" ("b005.20", Mala's size line;
+    "uaf001m1.110", Eletro's voltage), then the family ("dg053.sp" → dg053, as before)."""
+    whole = str(sku or "").strip().lower()
+    for code in (whole, whole.split("+")[0].strip()):
+        if code in lines:
+            return code
+    return family(sku)
+
+
 def for_sku(lines, sku):
-    code = family(sku)
+    code = _line_code(lines, sku)
     line = lines.get(code)
     if not line:
         return None
-    certificate = str(line.get("certificate") or "").strip().lower()
+    # M-69: the Certificações SKU column first (by family: the certificate covers every tag and
+    # voltage); else the certificate stored on the line.
+    source = getattr(lines, "certificates", {}).get(family(sku)) or line
+    certificate = str(source.get("certificate") or "").strip().lower()
     return {
         "line": line.get("sku"),
         "line_name": line.get("name"),
+        "pricing_id": line.get("id") or "",
         "department": DEPARTMENTS.get(str(line.get("department") or ""), ""),
         "ean": _ean_for(line.get("ean"), code),
         "certificate": CERTIFICATE_NAMES.get(certificate, certificate),
-        "certificate_number": line.get("certificate_number") or "",
-        "model": line.get("certificate_model") or line.get("model") or "",
+        "certificate_number": source.get("certificate_number") or "",
+        "certificate_valid_until": _br_date(source.get("certificate_valid_until")),
+        "model": source.get("certificate_model") or line.get("model") or "",
         "warranty_months": line.get("warranty_months"),
         "priority": line.get("priority") or "",
         "photos_url": _safe_url(line.get("photos_url")),

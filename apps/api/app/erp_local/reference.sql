@@ -61,9 +61,15 @@ SELECT json_build_object(
    p.garantia_meses AS warranty_months,p.prioridade_estoque::text AS priority,
    p.fotos_url AS photos_url,p.embalagens_url AS packaging_url,
    s.certificado AS certificate,s.numero AS certificate_number,s.modelo AS certificate_model,
+   to_char(s.fim,'YYYY-MM-DD') AS certificate_valid_until,
    p.updated_at
    FROM davinci.pricing_products p
    LEFT JOIN davinci.financeiro_suprimentos s ON s.id=p.certificacao_id ORDER BY p.id) t),
+ 'certificate_skus',(SELECT coalesce(json_agg(t),'[]') FROM (
+   SELECT k.sku AS id,k.sku,s.certificado AS certificate,s.numero AS certificate_number,
+   s.modelo AS certificate_model,to_char(s.fim,'YYYY-MM-DD') AS certificate_valid_until
+   FROM davinci.financeiro_suprimento_skus k
+   JOIN davinci.financeiro_suprimentos s ON s.id=k.suprimento_id ORDER BY k.sku) t),
  'situations',(SELECT coalesce(json_agg(t),'[]') FROM (
    SELECT id::text,nome AS name,ativo AS active FROM davinci.situacao_bling ORDER BY id) t)
 );
