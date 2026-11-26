@@ -53,6 +53,98 @@ function productReferenceCells(product){
   validade:read('Validade',t.certificate_valid_until),
  };
 }
+// M-72 (26/11/2026): Comprimento, Largura, Altura e Peso na linha 3. São os campos de sempre, sem
+// campo novo: Comprimento = Profundidade (length_cm), Largura (width_cm), Altura (height_cm) e Peso =
+// Peso Bruto (gross_weight_kg). As medidas aparecem em cm, como o cadastro guarda (a unidade de
+// medida que veio do Bling continua guardada). Travadas no modo Consulta, como o resto do cadastro;
+// o Peso Líquido continua guardado, sem aparecer. Campo não mexido volta como veio (productSavePayload).
+const productMeasures=[['comprimento','length_cm','Comprimento (cm)'],['largura','width_cm','Largura (cm)'],['altura','height_cm','Altura (cm)'],['peso','gross_weight_kg','Peso (kg)']];
+const measureText=value=>value===null||value===undefined||value===''?'':shiftDecimal(value,0);
+function productMeasureCells(product){
+ if(product.kind==='service')return {};
+ const d=product.details||{};
+ return Object.fromEntries(productMeasures.map(([campo,name,label])=>[campo,`<label>${label}<input name="${name}" type="number" min="0" step="any" value="${esc(measureText(d[name]))}"></label>`]));
+}
+// M-72: Fotos e Embalagem com o mesmo botão, visual e regra das colunas "Fotos" e "Embalagens" da
+// Tabela de Preços › Produtos (rotuloFotos, rotuloEmbalagens e classeEtiquetaMidia em
+// pages/pricing/[tab].vue). É o mesmo dado: a linha da Tabela de Preços do produto (pricing_id, pelo
+// SKU sem a tag), lida da API do DaVinci com o login da pessoa. Dentro do DaVinci (Produtos 2),
+// clicar pede à moldura (ErpTelas.vue) que abra a MESMA janela da Tabela de Preços (enviar fotos,
+// escolher a pasta do MEGA); a moldura só aceita a mensagem deste quadro e devolve o que mudou, e o
+// selo troca na hora. Fora da moldura, ou sem resposta do DaVinci, os selos viram links só para
+// leitura que abrem a pasta. Sem linha na Tabela de Preços: os dois apagados, com a dica.
+const productMediaKeys=['fotos_url','fotos_path','embalagens_url','embalagens_path','fotos_count','videos_count','embalagens_count','midias_contadas_em'];
+const productMediaData={};
+const productMediaFrame=()=>document.body.classList.contains('embedded')&&window.parent!==window;
+function loadProductMedia(id){
+ if(productMediaData[id])return;
+ productMediaData[id]={state:'loading'};
+ fetch('/api/pricing/mega/products/'+encodeURIComponent(id),{credentials:'same-origin',headers:{Accept:'application/json'}})
+  .then(r=>r.ok?r.json():Promise.reject(new Error(String(r.status))))
+  .then(data=>{productMediaData[id]=data&&data.id===id?{state:'ok',data}:{state:'erro'};},()=>{productMediaData[id]={state:'erro'};})
+  .finally(refreshProductMediaCells);
+}
+const mediaWithoutFolder=p=>!p.fotos_path&&!p.fotos_url;
+function mediaPhotosLabel(p){
+ if(mediaWithoutFolder(p))return {text:'+ Adicionar',tone:'vazio'};
+ if(p.fotos_count===null||p.fotos_count===undefined)return {text:'Ver pasta',tone:'ver'};
+ const f=p.fotos_count,v=p.videos_count??0;
+ if(f===0&&v===0)return {text:'Pasta vazia',tone:'ambar'};
+ return {text:`${f} ${f===1?'foto':'fotos'}`,sub:v>0?`${v} ${v===1?'vídeo':'vídeos'}`:'',tone:'ok'};
+}
+function mediaPackagingLabel(p){
+ if(!p.embalagens_path)return {text:'+ Adicionar',tone:'vazio'};
+ const n=p.embalagens_count;
+ if(n===null||n===undefined)return {text:'Ver pasta',tone:'ver'};
+ if(n===0)return {text:'Pasta vazia',tone:'ambar'};
+ return {text:`${n} ${n===1?'arquivo':'arquivos'}`,tone:'ok'};
+}
+function productMediaSelo(product,kind){
+ const t=product.price_table,photos=kind==='fotos',none='<span class="p2-midia-none">—</span>';
+ if(!t)return `<button type="button" class="p2-midia is-vazio" disabled title="Produto sem linha na Tabela de Preços">+ Adicionar</button>`;
+ const id=t.pricing_id?String(t.pricing_id):'';
+ if(id)loadProductMedia(id);
+ const media=id?productMediaData[id]:null;
+ if(media?.state==='loading')return '<span class="p2-midia is-ver" aria-busy="true">…</span>';
+ if(media?.state==='ok'){
+  const p=media.data,label=photos?mediaPhotosLabel(p):mediaPackagingLabel(p),text=`<span>${esc(label.text)}</span>${label.sub?`<span class="p2-midia-sub">${esc(label.sub)}</span>`:''}`;
+  if(photos&&media.sending)return '<span class="p2-midia is-enviando">Enviando…</span>';
+  if((photos?mediaWithoutFolder(p):!p.embalagens_path)&&!p.pode_editar)return none;
+  if(productMediaFrame()){
+   const title=photos?(p.fotos_path?`Pasta no MEGA: ${p.fotos_path}`:mediaWithoutFolder(p)?'Enviar as primeiras fotos ou escolher uma pasta do MEGA':'Abrir as fotos deste produto'):(p.embalagens_path?`Pasta no MEGA: ${p.embalagens_path}`:'Enviar fotos da caixa, PDF da arte etc.');
+   return `<button type="button" class="p2-midia is-${label.tone}" data-p2-midia="${photos?'fotos':'embalagens'}" data-pricing-id="${esc(id)}" title="${esc(title)}">${text}</button>`;
+  }
+  const url=safeFolderUrl(photos?p.fotos_url:p.embalagens_url);
+  return url&&label.tone!=='vazio'?`<a class="p2-midia is-${label.tone}" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abrir a pasta">${text}</a>`:none;
+ }
+ const url=safeFolderUrl(photos?t.photos_url:t.packaging_url);
+ return url?`<a class="p2-midia is-ver" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abrir a pasta">Ver pasta</a>`:none;
+}
+const safeFolderUrl=value=>/^https:\/\//.test(String(value||'').trim())?String(value).trim():'';
+function productMediaCells(product){
+ return {fotos:`<label class="p2-midia-cell">Fotos${productMediaSelo(product,'fotos')}</label>`,embalagem:`<label class="p2-midia-cell">Embalagem${productMediaSelo(product,'embalagens')}</label>`};
+}
+function refreshProductMediaCells(){
+ const form=document.getElementById('product-edit-form'),product=state?.products?.find(p=>p.sku===editingProduct);
+ if(!form||!product)return;
+ const cells=productMediaCells(product);
+ for(const campo of ['fotos','embalagem']){const box=form.querySelector(`[data-campo=${campo}]`);if(box)box.innerHTML=cells[campo];}
+}
+document.addEventListener('click',e=>{
+ const selo=e.target.closest('[data-p2-midia]');if(!selo)return;
+ e.preventDefault();if(!productMediaFrame())return;
+ window.parent.postMessage({tipo:'erp-abrir-midias',pricing_id:selo.dataset.pricingId,aba:selo.dataset.p2Midia},location.origin);
+});
+// O que a janela da moldura mudou (envio, recontagem, troca de pasta): só da própria moldura.
+window.addEventListener('message',e=>{
+ if(e.origin!==location.origin||window.parent===window||e.source!==window.parent)return;
+ const m=e.data||{},kept=productMediaData[String(m.pricing_id||'')];
+ if(!kept||kept.state!=='ok')return;
+ if(m.tipo==='erp-midias'&&m.campos&&typeof m.campos==='object'){for(const k of productMediaKeys)if(k in m.campos)kept.data[k]=m.campos[k];}
+ else if(m.tipo==='erp-midias-enviando')kept.sending=!!m.ativo;
+ else return;
+ refreshProductMediaCells();
+});
 function productDetailsForm(){
  if(!ensureFullProduct(editingProduct))return `<section class="panel"><p class="source-line">Abrindo ${esc(editingProduct)}…</p></section>`;
  const product=state.products.find(p=>p.sku===editingProduct);
@@ -63,12 +155,14 @@ function productDetailsForm(){
   codigo:`<label>Código (SKU)<input value="${esc(product.sku)}" disabled></label>${consulta?'':'<button type="button" class="secondary" id="product-rename-open">Trocar código</button>'}`,
   situacao:`<label class="product-switch">Situação<span><input type="checkbox" name="status" value="active" ${d.status==='inactive'?'':'checked'}><i></i><small data-status-label>${d.status==='inactive'?'Inativo':'Ativado'}</small></span></label>`,
   ...productReferenceCells(product),
+  ...productMeasureCells(product),
+  ...productMediaCells(product),
  };
  return panel(`Produto · ${esc(product.sku)}`,'',`<form id="product-edit-form"${consulta?' class="read-only"':''}><div class="form-footer">${consulta?'<span class="consulta-note">Somente consulta: o cadastro continua sendo feito no Bling até a troca.</span><button type="button" class="secondary" id="product-edit-cancel">Fechar</button>':'<button type="button" class="secondary" id="product-edit-cancel">Cancelar</button><button>Salvar produto</button>'}</div><div class="product-head">${field('name','Nome *',product.name)}${productHead(cells)}</div><div class="reference-tabs" role="tablist" aria-label="Dados do produto">${tabs.map(([id,label])=>`<button type="button" role="tab" data-product-edit-tab="${id}" aria-selected="${productEditTab===id}" class="${productEditTab===id?'active':''}">${label}</button>`).join('')}</div><section data-product-section="characteristics" ${productEditTab==='characteristics'?'':'hidden'}>${productCharacteristics(product)}</section><section data-product-section="stock" ${productEditTab==='stock'?'':'hidden'}><div class="product-grid">${field('stock_min','Mínimo',d.stock_min,'number')}${field('stock_max','Máximo',d.stock_max,'number')}<label>Crossdocking<input name="crossdocking" type="number" min="0" max="9999" step="1" value="${esc(d.crossdocking??'')}"></label>${field('location','Localização',d.location)}</div><p class="source-line">Para gerenciar o estoque acesse o módulo de <button type="button" class="link-action inline" data-stock-product="${esc(product.sku)}">Controle de Estoques</button>. Crossdocking é o prazo adicional, em dias, para despachar o produto.</p><div class="forms">${field('cost_price','Preço de custo do cadastro (R$)',product.cost_price,'number')}</div><p class="source-line">O custo do cadastro não recalcula o custo médio físico. Controle por lote ainda não disponível no núcleo próprio; quando homologado, será ativado produto a produto.</p></section><section data-product-section="structure" ${productEditTab==='structure'?'':'hidden'}>${productStructureEditor(product)}</section><div class="form-footer"><span>Pedidos registrados preservam o cadastro e a composição usados na venda.</span>${consulta?'':'<button>Salvar alterações do produto</button>'}</div></form>`);
 }
 document.addEventListener('click',e=>{
  const edit=e.target.closest('[data-edit-product]'),tab=e.target.closest('[data-product-edit-tab]');
- if(edit){editingProduct=edit.dataset.editProduct;productEditTab='characteristics';render();document.getElementById('product-edit-form')?.scrollIntoView({behavior:'smooth'});}
+ if(edit){editingProduct=edit.dataset.editProduct;productEditTab='characteristics';for(const id in productMediaData)delete productMediaData[id];render();document.getElementById('product-edit-form')?.scrollIntoView({behavior:'smooth'});}
  if(tab){productEditTab=tab.dataset.productEditTab;const f=document.getElementById('product-edit-form');for(const n of f.querySelectorAll('[data-product-section]'))n.hidden=n.dataset.productSection!==productEditTab;for(const b of f.querySelectorAll('[data-product-edit-tab]')){const active=b===tab;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}}
  if(e.target.closest('#product-edit-cancel')){editingProduct='';render();}
  if(e.target.closest('#product-rename-open'))openProductRename();
@@ -103,6 +197,8 @@ function productSavePayload(product,form){
  for(const name of ['cost_price','location'])if(has(name))data[name]=values.get(name);
  for(const name of ['stock_min','stock_max','crossdocking'])if(has(name))data[name]=String(values.get(name)??'').trim();
  Object.assign(data,readProductCharacteristics(form));
+ // M-72: medida mexida vai (apagada = sem medida); a não mexida fica com o valor carregado.
+ for(const [,name] of productMeasures){const input=form.querySelector(`[name="${name}"]`);if(!input)continue;const typed=input.value.trim();if(typed!==input.defaultValue.trim())data[name]=typed===''?null:typed;}
  const payload={sku:product.sku,version:product.details?.version||0,data},structure=productStructureOf(product);
  if(form.querySelector('[data-product-section=structure]')){
   const components=[...form.querySelectorAll('[data-product-section=structure] .item-line')].map(r=>({sku:r.querySelector('[name=sku]').value,quantity:r.querySelector('[name=quantity]').value}));

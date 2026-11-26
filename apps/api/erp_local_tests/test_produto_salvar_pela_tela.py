@@ -196,8 +196,17 @@ def test_salvar_com_mudanca_na_tela_muda_so_o_que_foi_mexido(tmp_path, monkeypat
         erp = c.app.state.erp
         run(erp, "demo.seed", {})
         _preencher(erp, monkeypatch)
+        # M-72: o Peso (o Peso Bruto de sempre) mexido na linha 3 também vai.
         before, payload, after = _salvar_pela_tela(
-            c, [["[name=notes]", "Nota nova"], ["[name=status]", False]]
+            c,
+            [
+                ["[name=notes]", "Nota nova"],
+                ["[name=status]", False],
+                ["[name=gross_weight_kg]", "0.5"],
+            ],
         )
         assert payload["data"]["notes"] == "Nota nova"
-        _igual_menos(before, after, {"notes": "Nota nova", "status": "inactive"})
+        assert payload["data"]["gross_weight_kg"] == "0.5"
+        _igual_menos(
+            before, after, {"notes": "Nota nova", "status": "inactive", "gross_weight_kg": "0.500"}
+        )

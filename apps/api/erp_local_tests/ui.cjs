@@ -480,6 +480,99 @@ test('M-71: the first row reads EAN, model and certificate from the Tabela de Pr
   assert.doesNotMatch(none.document.querySelector('.product-head').innerHTML,/SEM GTIN/);
 });
 
+// M-72 (26/11/2026): Comprimento, Largura, Altura e Peso na linha 3 (os campos de sempre, em cm);
+// mexido vai, não mexido volta como veio.
+test('M-72: the third row edits the stored measures in cm and keeps the untouched ones as loaded',async()=>{
+  const {dom,document:d,requests}=await setup({products:[fullProduct()],categories:[{id:'c1',path:'Malas',status:'active'}]});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();d.querySelector('[data-edit-product]').click();
+  const cells=[...d.querySelectorAll('.product-head-row[data-linha="3"]>[data-campo]')];
+  assert.deepEqual(cells.slice(0,4).map(c=>[c.querySelector('label').firstChild.textContent,c.querySelector('input').name,c.querySelector('input').value]),
+    [['Comprimento (cm)','length_cm','17'],['Largura (cm)','width_cm','9'],['Altura (cm)','height_cm','5'],['Peso (kg)','gross_weight_kg','0.45']]);
+  assert.deepEqual(cells.slice(4).map(c=>c.dataset.campo),['fotos','embalagem','vazio']);
+  assert.equal(cells[6].innerHTML,'');
+  assert.equal(d.querySelector('[name=net_weight_kg]'),null);
+  const form=d.querySelector('#product-edit-form');
+  form.querySelector('[name=length_cm]').value='18.5';form.querySelector('[name=gross_weight_kg]').value='';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const data=requests[0].payload.data;
+  assert.equal(data.length_cm,'18.5');assert.equal(data.gross_weight_kg,null);
+  assert.equal(data.width_cm,'9.000');assert.equal(data.height_cm,'5.000');assert.equal(data.net_weight_kg,'0.400');assert.equal(data.dimension_unit,'mm');
+  // Modo Consulta: os campos ficam travados como o resto do cadastro.
+  const ro=await setup({products:[fullProduct()],consulta:{active:true}});ro.dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  ro.document.querySelector('nav [data-page=products]').click();ro.document.querySelector('[data-edit-product]').click();
+  assert.ok(ro.document.querySelector('#product-edit-form.read-only [name=length_cm]'));
+});
+
+// M-72: Fotos e Embalagem com o selo da Tabela de Preços › Produtos, lido da API do DaVinci pela linha
+// (pricing_id). Dentro da moldura, clicar pede à moldura a mesma janela; o que ela devolve troca o selo.
+const LINHA_ID='7b0c2c1e-8f0e-4c55-9a51-2f0b8a3c1d10';
+const comLinha=(extra={})=>{const p=fullProduct();p.price_table={...p.price_table,pricing_id:LINHA_ID,certificate_valid_until:'20/02/2028',...extra};return p;};
+async function mediaEditor(product,{media,status=200,embedded=true,consulta}={}){
+  const ctx=await setup({products:[product],...(consulta?{consulta}:{})});
+  const w=ctx.dom.window,posted=[],asked=[];w.HTMLElement.prototype.scrollIntoView=()=>{};
+  const parent={postMessage:(m,origin)=>posted.push([m,origin])};
+  if(embedded){Object.defineProperty(w,'parent',{configurable:true,get:()=>parent});w.document.body.classList.add('embedded');}
+  const plain=w.fetch;
+  w.fetch=async(url,options)=>{if(String(url).startsWith('/api/pricing/mega/products/')){asked.push([url,options?.credentials]);return {ok:status<400,status,json:async()=>media};}return plain(url,options);};
+  ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+  for(let i=0;i<4;i++)await new Promise(r=>setImmediate(r));
+  const from=(data,source=parent,origin='http://127.0.0.1:8765')=>{const ev=new w.Event('message');Object.defineProperties(ev,{data:{value:data},source:{value:source},origin:{value:origin}});w.dispatchEvent(ev);};
+  const selo=campo=>ctx.document.querySelector(`[data-campo=${campo}] .p2-midia, [data-campo=${campo}] .p2-midia-none`);
+  return {...ctx,posted,asked,parent,from,selo};
+}
+const mediaRow={id:LINHA_ID,sku:'dg052,dg053,dg054',name:'uranyx A17',department:'celular',fotos_url:'https://mega.nz/folder/x',fotos_path:'/Celular/A17',embalagens_url:null,embalagens_path:null,fotos_count:3,videos_count:1,embalagens_count:null,midias_contadas_em:null,irmaos:[],pode_editar:true};
+
+test('M-72: Fotos and Embalagem show the Tabela de Preços selos and open the same window through the frame',async()=>{
+  const e=await mediaEditor(comLinha(),{media:{...mediaRow}});
+  assert.deepEqual(e.asked,[[`/api/pricing/mega/products/${LINHA_ID}`,'same-origin']]);
+  const fotos=e.selo('fotos'),embalagem=e.selo('embalagem');
+  assert.equal(fotos.tagName,'BUTTON');assert.equal(fotos.type,'button');assert.ok(fotos.classList.contains('is-ok'));
+  assert.equal(fotos.textContent,'3 fotos1 vídeo');assert.equal(fotos.title,'Pasta no MEGA: /Celular/A17');
+  assert.equal(embalagem.tagName,'BUTTON');assert.ok(embalagem.classList.contains('is-vazio'));assert.equal(embalagem.textContent,'+ Adicionar');
+  assert.equal(e.document.querySelector('[data-campo=fotos] label').firstChild.textContent,'Fotos');
+  assert.equal(e.document.querySelector('[data-campo=embalagem] label').firstChild.textContent,'Embalagem');
+  embalagem.click();fotos.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(e.posted)),[[{tipo:'erp-abrir-midias',pricing_id:LINHA_ID,aba:'embalagens'},'http://127.0.0.1:8765'],[{tipo:'erp-abrir-midias',pricing_id:LINHA_ID,aba:'fotos'},'http://127.0.0.1:8765']]);
+  assert.equal(e.requests.length,0,'abrir a janela não salva o produto');
+  // A moldura devolve o que mudou: só dela (mesmo site e o próprio parent) é aceito.
+  e.from({tipo:'erp-midias',pricing_id:LINHA_ID,campos:{embalagens_path:'/Celular/A17/Embalagens',embalagens_count:2}},{postMessage(){}});
+  e.from({tipo:'erp-midias',pricing_id:LINHA_ID,campos:{embalagens_path:'/x',embalagens_count:9}},e.parent,'https://outro.test');
+  assert.equal(e.selo('embalagem').textContent,'+ Adicionar');
+  e.from({tipo:'erp-midias-enviando',pricing_id:LINHA_ID,ativo:true});
+  assert.equal(e.selo('fotos').textContent,'Enviando…');
+  e.from({tipo:'erp-midias',pricing_id:LINHA_ID,campos:{embalagens_path:'/Celular/A17/Embalagens',embalagens_count:2,fotos_count:4}});
+  e.from({tipo:'erp-midias-enviando',pricing_id:LINHA_ID,ativo:false});
+  assert.equal(e.selo('embalagem').textContent,'2 arquivos');assert.equal(e.selo('fotos').textContent,'4 fotos1 vídeo');
+  // Funciona no modo Consulta (é a API do DaVinci, não a trava do ERP).
+  const consulta=await mediaEditor(comLinha(),{media:{...mediaRow},consulta:{active:true}});
+  consulta.selo('fotos').click();assert.equal(consulta.posted.length,1);
+});
+
+test('M-72: without a line, without permission, outside the frame or without the DaVinci the selos only read',async()=>{
+  // Sem linha na Tabela de Preços: os dois apagados, com a dica.
+  const none=await mediaEditor(fullProduct({price_table:null}),{media:mediaRow});
+  for(const campo of ['fotos','embalagem']){const b=none.selo(campo);assert.equal(b.disabled,true);assert.equal(b.title,'Produto sem linha na Tabela de Preços');assert.equal(b.textContent,'+ Adicionar');}
+  assert.deepEqual(none.asked,[]);
+  // Quem não pode editar e não há pasta: "—", como na Tabela de Preços.
+  const viewer=await mediaEditor(comLinha(),{media:{...mediaRow,fotos_url:null,fotos_path:null,fotos_count:null,videos_count:null,pode_editar:false}});
+  assert.equal(viewer.selo('fotos').textContent,'—');assert.equal(viewer.selo('embalagem').textContent,'—');
+  // Fora da moldura (o ERP aberto sozinho): o selo vira link que abre a pasta.
+  const alone=await mediaEditor(comLinha(),{media:{...mediaRow},embedded:false});
+  const link=alone.selo('fotos');assert.equal(link.tagName,'A');assert.equal(link.getAttribute('href'),'https://mega.nz/folder/x');assert.equal(link.target,'_blank');assert.match(link.rel,/noopener/);assert.equal(link.textContent,'3 fotos1 vídeo');
+  assert.equal(alone.selo('embalagem').textContent,'—');
+  link.click();assert.equal(alone.posted.length,0);
+  // DaVinci sem resposta, ou a cópia antiga sem pricing_id: links da cópia da Tabela de Preços.
+  for(const e of [await mediaEditor(comLinha(),{media:{},status:502}),await mediaEditor(fullProduct(),{media:mediaRow})]){
+    const f=e.selo('fotos');assert.equal(f.tagName,'A');assert.equal(f.textContent,'Ver pasta');assert.equal(f.getAttribute('href'),'https://mega.nz/folder/x');
+    assert.equal(e.selo('embalagem').textContent,'—');
+  }
+  // Link que não é https não vira link.
+  const bad=await mediaEditor(comLinha({pricing_id:undefined,photos_url:'javascript:alert(1)'}),{media:mediaRow});
+  assert.equal(bad.selo('fotos').textContent,'—');
+});
+
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
   const p={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:7,unit:'UN',status:'active',gtin:'012345678905',gtin_tax:''}};
   const {dom,document:d,requests}=await setup({products:[p]});
