@@ -145,6 +145,129 @@ window.addEventListener('message',e=>{
  else return;
  refreshProductMediaCells();
 });
+// M-74 (26/11/2026): Margem mín (%), Condição especial e DUIMP padrão na linha 2 (colunas 5 a 7).
+// São do PRODUTO e moram no DaVinci (/api/produto-regras, com o login da pessoa; rota do DaVinci, então
+// funcionam no modo Consulta). Valem para o código sem a tag (dg019 = dg019.ra, dg019.sp…); o kit tem
+// os seus. Em branco = usa o da categoria de venda (segmento): o valor herdado aparece em cinza. Só o
+// administrador grava (o servidor devolve pode_editar). Nada disto vai no "Salvar produto" (sem name).
+const productRulesData={};
+const rulesUrl=sku=>'/api/produto-regras/'+encodeURIComponent(sku);
+function loadProductRules(sku,force=false){
+ if(productRulesData[sku]&&!force)return;
+ if(!productRulesData[sku])productRulesData[sku]={state:'loading'};
+ fetch(rulesUrl(sku),{credentials:'same-origin',headers:{Accept:'application/json'}})
+  .then(r=>r.ok?r.json():Promise.reject(new Error(String(r.status))))
+  .then(data=>{productRulesData[sku]=data&&data.sku_base?{state:'ok',data}:{state:'erro'};},()=>{if(productRulesData[sku]?.state!=='ok')productRulesData[sku]={state:'erro'};})
+  .finally(()=>{refreshProductRulesCells();refreshProductConditions();});
+}
+// 0,125 → "12,5"; vazio → "".
+const rulePct=frac=>frac===null||frac===undefined||frac===''?'':String(Math.round(Number(frac)*10000)/100).replace('.',',');
+const ruleDate=iso=>{const [y,m,d]=String(iso||'').split('-');return d?`${d}/${m}/${y}`:'';};
+function productRulesCells(product){
+ const sku=product.sku;loadProductRules(sku);
+ const kept=productRulesData[sku],ok=kept?.state==='ok',d=ok?kept.data:null,edit=!!d?.pode_editar;
+ const off=!edit?' disabled':'',busy=kept?.state==='loading';
+ const naoLeu='Não consegui ler do DaVinci agora. Feche e abra o produto de novo.',todas=d?`Vale para o código ${d.sku_base} em todas as tags.`:'',so=d&&!edit?'\nSó o administrador altera.':'';
+ const margemTitle=!d?(busy?'':naoLeu):`Em branco, usa ${rulePct(d.margem_min_herdada)}% (${d.margem_min_origem}).\n${todas}${so}`;
+ const duimpTitle=!d?(busy?'':naoLeu):`${d.duimp_herdada?`Em branco, vai na nota a da categoria de venda: ${d.duimp_herdada}`:'Em branco, a nota não leva DUIMP padrão.'}${d.duimp_importacao?`\nEste produto tem DUIMP na Importação, que vai na nota no lugar desta: ${d.duimp_importacao}`:''}\n${todas}${so}`;
+ const resumo=d?d.condicao_resumo:(busy?'…':'—');
+ return {
+  margem_min:`<label class="p2-regra">Margem mín (%)<input data-p2-regra="margem_min" inputmode="decimal" autocomplete="off" maxlength="7" value="${esc(d?rulePct(d.margem_min):'')}" placeholder="${esc(d?rulePct(d.margem_min_herdada):busy?'…':'')}" title="${esc(margemTitle)}"${off}${busy?' aria-busy="true"':''}></label>`,
+  condicao_especial:`<label class="p2-regra">Condição especial<button type="button" class="p2-regra-botao${resumo==='—'?' is-vazio':''}" data-p2-condicao title="${esc(d?`${edit?'Clique para ver, incluir ou remover':'Clique para ver'} a condição especial deste produto.\n${todas}`:busy?'':naoLeu)}"${d?'':' disabled'}>${esc(resumo)}</button></label>`,
+  duimp_padrao:`<label class="p2-regra">DUIMP padrão<input data-p2-regra="duimp_padrao" maxlength="75" autocomplete="off" value="${esc(d?.duimp_padrao||'')}" placeholder="${esc(d?d.duimp_herdada||'':busy?'…':'')}" title="${esc(duimpTitle)}"${off}${busy?' aria-busy="true"':''}></label>`,
+ };
+}
+function refreshProductRulesCells(){
+ const form=document.getElementById('product-edit-form'),product=state?.products?.find(p=>p.sku===editingProduct);
+ if(!form||!product)return;
+ const cells=productRulesCells(product);
+ for(const campo of ['margem_min','condicao_especial','duimp_padrao']){const box=form.querySelector(`[data-campo=${campo}]`);if(box)box.innerHTML=cells[campo];}
+}
+async function rulesRequest(method,url,body){
+ const r=await fetch(url,{method,credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+ const data=r.status===204?null:await r.json().catch(()=>null);
+ if(!r.ok)throw new Error(data?.detail?.message||(r.status===403?'Só o administrador altera este campo.':'Não consegui gravar no DaVinci agora. Tente de novo.'));
+ return data;
+}
+function saveProductRule(input){
+ const sku=editingProduct,kept=productRulesData[sku];
+ if(kept?.state!=='ok'||!kept.data.pode_editar)return;
+ const campo=input.dataset.p2Regra,typed=input.value.trim(),d=kept.data;let value;
+ if(campo==='margem_min'){
+  const atual=rulePct(d.margem_min);if(typed===atual)return;
+  if(typed===''){value=null;}else{
+   const n=Number(typed.replace(',','.'));
+   if(!Number.isFinite(n)||n<0||n>100){message('A margem mínima vai de 0 a 100%.',true);input.value=atual;return;}
+   value=(n/100).toFixed(4);
+  }
+ }else{
+  if(typed===(d.duimp_padrao||''))return;
+  if(typed.includes('|')){message('A DUIMP padrão não pode ter "|" (ele separa as linhas da etiqueta).',true);input.value=d.duimp_padrao||'';return;}
+  value=typed||null;
+ }
+ input.setAttribute('aria-busy','true');
+ rulesRequest('PUT',rulesUrl(sku),{[campo]:value})
+  .then(data=>{productRulesData[sku]={state:'ok',data};message(campo==='margem_min'?(value===null?`Margem mín de ${data.sku_base} em branco: volta a usar a da categoria de venda.`:`Margem mín de ${data.sku_base} gravada.`):(value===null?`DUIMP padrão de ${data.sku_base} em branco: volta a usar a da categoria de venda.`:`DUIMP padrão de ${data.sku_base} gravada.`));})
+  .catch(e=>message(e.message,true))
+  .finally(refreshProductRulesCells);
+}
+document.addEventListener('change',e=>{const input=e.target.closest?.('[data-p2-regra]');if(input)saveProductRule(input);});
+document.addEventListener('keydown',e=>{
+ const input=e.target.closest?.('[data-p2-regra]');if(!input)return;
+ if(e.key==='Enter'){e.preventDefault();input.blur();}
+ if(e.key==='Escape'){const d=productRulesData[editingProduct]?.data;if(d)input.value=input.dataset.p2Regra==='margem_min'?rulePct(d.margem_min):(d.duimp_padrao||'');input.blur();}
+});
+// A janela da Condição especial: no padrão da de Cadastros › Segmentos (período e margem mínima especial),
+// só para este produto. Quem não é administrador só vê as vigentes.
+function productConditionsHtml(d){
+ const vig=d.condicoes.filter(c=>c.vigente),edit=d.pode_editar;
+ return `<h2>Condição especial · ${esc(d.sku_base)}</h2><p class="source-line">Pedidos deste produto (o código ${esc(d.sku_base)} em todas as tags) feitos no período não ficam travados por margem baixa na Margem, nem pelo robô. Sem margem, aprova qualquer margem; com margem (ex.: 5), aprova enquanto a margem do pedido for maior ou igual a 5%. Se o produto tem condição no dia do pedido, vale só a dele; senão, valem as do segmento.</p><p class="p2-condicao-msg" data-p2-condicao-msg role="status" hidden></p>${edit?`<div class="p2-condicao-form"><label>De (data do pedido)<input type="date" name="p2_condicao_de"></label><label>Até (data do pedido)<input type="date" name="p2_condicao_ate"></label><label>Margem mínima especial (%) — opcional<input name="p2_condicao_piso" inputmode="decimal" autocomplete="off" placeholder="ex.: 5"></label><button type="button" data-p2-condicao-add>Adicionar condição</button></div>`:''}<h3>${vig.length} ${vig.length===1?'condição vigente':'condições vigentes'}</h3>${vig.length?`<ul class="p2-condicao-lista">${vig.map(c=>`<li><span>${ruleDate(c.pedido_de)} até ${ruleDate(c.pedido_ate)} · ${c.piso===null?'aprova qualquer margem':`margem mínima ${rulePct(c.piso)}%`}</span>${edit?`<button type="button" class="secondary" data-p2-condicao-del="${esc(c.id)}">Remover</button>`:''}</li>`).join('')}</ul>`:'<p class="source-line">Nenhuma condição especial vigente.</p>'}<div class="form-footer"><button type="button" class="secondary" data-p2-condicao-fechar>Fechar</button></div>`;
+}
+function openProductConditions(){
+ const kept=productRulesData[editingProduct];if(kept?.state!=='ok')return;
+ document.getElementById('p2-condicao-dialog')?.remove();
+ const dialog=document.createElement('dialog');dialog.id='p2-condicao-dialog';dialog.className='product-supplier-dialog p2-condicao-dialog';
+ dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label','Condição especial do produto');dialog.dataset.sku=editingProduct;
+ dialog.innerHTML=productConditionsHtml(kept.data);
+ dialog.addEventListener('close',()=>dialog.remove());
+ document.body.append(dialog);if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');
+}
+// Relê a janela aberta com o que veio do DaVinci, sem perder o que estava digitado no formulário.
+function refreshProductConditions(note='',error=false){
+ const dialog=document.getElementById('p2-condicao-dialog'),kept=productRulesData[dialog?.dataset.sku];
+ if(!dialog||kept?.state!=='ok')return;
+ const typed=Object.fromEntries([...dialog.querySelectorAll('input[name]')].map(i=>[i.name,i.value]));
+ dialog.innerHTML=productConditionsHtml(kept.data);
+ for(const [name,value] of Object.entries(typed)){const i=dialog.querySelector(`[name=${name}]`);if(i)i.value=value;}
+ if(note)conditionsNote(dialog,note,error);
+}
+function conditionsNote(dialog,text,error){const p=dialog.querySelector('[data-p2-condicao-msg]');if(!p)return;p.textContent=text;p.hidden=false;p.classList.toggle('erro',!!error);}
+function addProductCondition(dialog){
+ const sku=dialog.dataset.sku,value=name=>dialog.querySelector(`[name=${name}]`).value.trim();
+ const de=value('p2_condicao_de'),ate=value('p2_condicao_ate'),piso=value('p2_condicao_piso');
+ if(!de||!ate){conditionsNote(dialog,'Preencha De e Até: a condição do produto vale por período.',true);return;}
+ if(ate<de){conditionsNote(dialog,'A data final não pode ser antes da inicial.',true);return;}
+ let fracao=null;
+ if(piso){const n=Number(piso.replace(',','.'));if(!Number.isFinite(n)||n<-100||n>100){conditionsNote(dialog,'Margem inválida: use um número de -100 a 100, ex.: 5.',true);return;}fracao=(n/100).toFixed(4);}
+ const button=dialog.querySelector('[data-p2-condicao-add]');if(button)button.disabled=true;
+ rulesRequest('POST',rulesUrl(sku)+'/condicoes',{pedido_de:de,pedido_ate:ate,piso:fracao})
+  .then(data=>{productRulesData[sku]={state:'ok',data};refreshProductRulesCells();refreshProductConditions('Condição adicionada.');})
+  .catch(e=>{if(button)button.disabled=false;conditionsNote(dialog,e.message,true);});
+}
+function removeProductCondition(dialog,id){
+ const sku=dialog.dataset.sku;
+ rulesRequest('DELETE',rulesUrl(sku)+'/condicoes/'+encodeURIComponent(id))
+  .then(()=>rulesRequest('GET',rulesUrl(sku)))
+  .then(data=>{productRulesData[sku]={state:'ok',data};refreshProductRulesCells();refreshProductConditions('Condição removida.');})
+  .catch(e=>conditionsNote(dialog,e.message,true));
+}
+document.addEventListener('click',e=>{
+ if(e.target.closest('[data-p2-condicao]')){e.preventDefault();openProductConditions();return;}
+ const dialog=e.target.closest('#p2-condicao-dialog');if(!dialog)return;
+ if(e.target.closest('[data-p2-condicao-fechar]')){if(dialog.open&&dialog.close)dialog.close();else dialog.remove();return;}
+ if(e.target.closest('[data-p2-condicao-add]')){addProductCondition(dialog);return;}
+ const del=e.target.closest('[data-p2-condicao-del]');if(del)removeProductCondition(dialog,del.dataset.p2CondicaoDel);
+});
 function productDetailsForm(){
  if(!ensureFullProduct(editingProduct))return `<section class="panel"><p class="source-line">Abrindo ${esc(editingProduct)}…</p></section>`;
  const product=state.products.find(p=>p.sku===editingProduct);
@@ -157,12 +280,13 @@ function productDetailsForm(){
   ...productReferenceCells(product),
   ...productMeasureCells(product),
   ...productMediaCells(product),
+  ...productRulesCells(product),
  };
  return panel(`Produto · ${esc(product.sku)}`,'',`<form id="product-edit-form"${consulta?' class="read-only"':''}><div class="form-footer">${consulta?'<span class="consulta-note">Somente consulta: o cadastro continua sendo feito no Bling até a troca.</span><button type="button" class="secondary" id="product-edit-cancel">Fechar</button>':'<button type="button" class="secondary" id="product-edit-cancel">Cancelar</button><button>Salvar produto</button>'}</div><div class="product-head">${field('name','Nome *',product.name)}${productHead(cells)}</div><div class="reference-tabs" role="tablist" aria-label="Dados do produto">${tabs.map(([id,label])=>`<button type="button" role="tab" data-product-edit-tab="${id}" aria-selected="${productEditTab===id}" class="${productEditTab===id?'active':''}">${label}</button>`).join('')}</div><section data-product-section="characteristics" ${productEditTab==='characteristics'?'':'hidden'}>${productCharacteristics(product)}</section><section data-product-section="stock" ${productEditTab==='stock'?'':'hidden'}><div class="product-grid">${field('stock_min','Mínimo',d.stock_min,'number')}${field('stock_max','Máximo',d.stock_max,'number')}<label>Crossdocking<input name="crossdocking" type="number" min="0" max="9999" step="1" value="${esc(d.crossdocking??'')}"></label>${field('location','Localização',d.location)}</div><p class="source-line">Para gerenciar o estoque acesse o módulo de <button type="button" class="link-action inline" data-stock-product="${esc(product.sku)}">Controle de Estoques</button>. Crossdocking é o prazo adicional, em dias, para despachar o produto.</p><div class="forms">${field('cost_price','Preço de custo do cadastro (R$)',product.cost_price,'number')}</div><p class="source-line">O custo do cadastro não recalcula o custo médio físico. Controle por lote ainda não disponível no núcleo próprio; quando homologado, será ativado produto a produto.</p></section><section data-product-section="structure" ${productEditTab==='structure'?'':'hidden'}>${productStructureEditor(product)}</section><div class="form-footer"><span>Pedidos registrados preservam o cadastro e a composição usados na venda.</span>${consulta?'':'<button>Salvar alterações do produto</button>'}</div></form>`);
 }
 document.addEventListener('click',e=>{
  const edit=e.target.closest('[data-edit-product]'),tab=e.target.closest('[data-product-edit-tab]');
- if(edit){editingProduct=edit.dataset.editProduct;productEditTab='characteristics';for(const id in productMediaData)delete productMediaData[id];render();document.getElementById('product-edit-form')?.scrollIntoView({behavior:'smooth'});}
+ if(edit){editingProduct=edit.dataset.editProduct;productEditTab='characteristics';for(const id in productMediaData)delete productMediaData[id];for(const sku in productRulesData)delete productRulesData[sku];render();document.getElementById('product-edit-form')?.scrollIntoView({behavior:'smooth'});}
  if(tab){productEditTab=tab.dataset.productEditTab;const f=document.getElementById('product-edit-form');for(const n of f.querySelectorAll('[data-product-section]'))n.hidden=n.dataset.productSection!==productEditTab;for(const b of f.querySelectorAll('[data-product-edit-tab]')){const active=b===tab;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}}
  if(e.target.closest('#product-edit-cancel')){editingProduct='';render();}
  if(e.target.closest('#product-rename-open'))openProductRename();

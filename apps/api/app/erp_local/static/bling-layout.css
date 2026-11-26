@@ -74,6 +74,26 @@ body[data-product-editor=true] header h1:before{content:none}
 .p2-midia.is-ok{border-color:rgb(186,230,253);background:rgb(240,249,255);color:rgb(7,89,133)}
 .p2-midia:disabled{opacity:.5;cursor:not-allowed}.p2-midia[aria-busy=true]{cursor:default}
 .p2-midia-sub{font-size:10px;font-weight:400}.p2-midia-none{font-size:12px;font-weight:400;color:rgb(107,114,128)}
+/* M-74 (26/11/2026): Margem mín, Condição especial e DUIMP padrão do produto (linha 2, colunas 5 a 7).
+   Em branco mostram o herdado da categoria de venda em cinza (placeholder). São do DaVinci, então
+   continuam editáveis (para o administrador) no modo Consulta, onde o resto do cadastro trava. */
+.p2-regra input::placeholder{color:#9aa6b8}
+.p2-regra input[aria-busy=true]{opacity:.6}
+#product-edit-form.read-only .p2-regra input:not(:disabled){pointer-events:auto;background:#fff;color:#21314b}
+.p2-regra input:disabled{background:#f6f7f9;color:#4a5568}
+.p2-regra-botao{display:block;width:100%;min-height:32px;padding:7px 10px;border:1px solid #cbd6e6;border-radius:5px;background:#fff;color:#21314b;font-size:12px;font-weight:400;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:none}
+.p2-regra-botao.is-vazio{color:#9aa6b8}
+.p2-regra-botao:not(:disabled):hover{border-color:#93b4f5}
+.p2-regra-botao:disabled{background:#f6f7f9;cursor:default;opacity:1}
+.p2-condicao-dialog h3{margin:18px 0 8px;font-size:13px}
+.p2-condicao-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:end;border:1px solid #d5deea;border-radius:6px;padding:12px}
+.p2-condicao-form button{grid-column:1/-1;justify-self:end;padding:8px 14px}
+.p2-condicao-lista{list-style:none;margin:0;padding:0;display:grid;gap:6px;max-height:16rem;overflow:auto}
+.p2-condicao-lista li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;border:1px solid #fde68a;border-radius:5px;background:#fffbeb;font-size:12px}
+.p2-condicao-lista button{padding:4px 10px;font-size:11px}
+.p2-condicao-msg{margin:8px 0;padding:6px 10px;border-radius:5px;background:#ecfdf3;color:#166534;font-size:12px}
+.p2-condicao-msg.erro{background:#fff0ec;color:#a13a2a}
+@media(max-width:560px){.p2-condicao-form{grid-template-columns:1fr}}
 .product-switch>span{display:flex;align-items:center;gap:8px;min-height:34px}
 .product-switch input{position:absolute;opacity:0;width:1px;height:1px}
 .product-switch i{display:inline-block;position:relative;width:27px;height:16px;border-radius:9px;background:#c1ccd9;transition:background .15s}

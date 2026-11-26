@@ -106,6 +106,8 @@ async function setup(overrides={},address='http://127.0.0.1:8765') {
   const product={sku:'demo.aparelho',name:'Aparelho <img src=x onerror=alert(1)>',kind:'simple',components:[],balances:[{depot:'geral',physical:'8',reserved:'0',available:'8'}]};
   const snapshot={products:[product],deposits:[{id:'geral',name:'Geral'}],orders:[],purchases:[],movements:[],events:[],accounts:[],...overrides};
   dom.window.fetch=async (url,options)=>{
+    // M-74: o cadastro do produto lê a Margem mín/DUIMP do DaVinci; sem resposta, os campos ficam travados.
+    if(String(url).startsWith('/api/produto-regras/'))return {ok:false,status:503,json:async()=>({})};
     assert.ok(url.startsWith('/api/erp-local/'));
     if(options?.method==='POST')requests.push(JSON.parse(options.body));
     return {ok:true,status:200,json:async()=>options?.method==='POST'?(url.endsWith('/price-preview')?snapshot.price_preview:{replayed:false}):url.includes('/reference/')?{items:[],total:0,offset:0,limit:50}:snapshot};
@@ -375,7 +377,9 @@ test('M-70: the product editor shows only the clean head and the three tabs, wit
   assert.equal(form.querySelector('.product-head>label input[name=name]').value,'A17 Preto');
   assert.match(form.querySelector('[data-campo=codigo]').textContent,/Código \(SKU\)/);assert.equal(form.querySelector('[data-campo=codigo] input').value,'dg053.sp');
   assert.equal(form.querySelector('[data-campo=situacao] [name=status]').checked,true);
-  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao'])assert.equal(form.querySelector(`[data-campo=${campo}]`).innerHTML,'',campo);
+  // Linha 2: as 4 primeiras ficam reservadas para a M-73; as 3 últimas são da M-74.
+  for(const campo of ['centro_custo','categoria','categoria_venda','tag_envio'])assert.equal(form.querySelector(`[data-campo=${campo}]`).innerHTML,'',campo);
+  assert.deepEqual(['margem_min','condicao_especial','duimp_padrao'].map(campo=>form.querySelector(`[data-campo=${campo}] label`).firstChild.textContent),['Margem mín (%)','Condição especial','DUIMP padrão']);
   const characteristics=form.querySelector('[data-product-section=characteristics]');
   assert.equal(characteristics.querySelector('.product-grid'),null);
   assert.deepEqual([...characteristics.querySelectorAll('.product-fold>summary')].map(s=>s.textContent),['Código DUN','Listas de preço','Descrição curta','Descrição complementar','Link Externo','Vídeo','Observações','Tags']);
@@ -571,6 +575,142 @@ test('M-72: without a line, without permission, outside the frame or without the
   // Link que não é https não vira link.
   const bad=await mediaEditor(comLinha({pricing_id:undefined,photos_url:'javascript:alert(1)'}),{media:mediaRow});
   assert.equal(bad.selo('fotos').textContent,'—');
+});
+
+// M-74 (26/11/2026): Margem mín (%), Condição especial e DUIMP padrão na linha 2 (colunas 5 a 7), do
+// PRODUTO, lidos e gravados na API do DaVinci (/api/produto-regras) com o login da pessoa. Em branco =
+// o herdado da categoria de venda em cinza. Nada disso vai no "Salvar produto".
+const regrasVazias={sku:'dg053.sp',sku_base:'dg053',margem_min:null,margem_min_herdada:0.18,margem_min_origem:'da categoria de venda Regular (Celular)',duimp_padrao:null,duimp_herdada:'celular importado pela duimp 26BR0003333333-3',duimp_importacao:null,condicoes:[],condicao_resumo:'—',pode_editar:true};
+const ticks=async(n=6)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
+async function rulesEditor(product,{rules=regrasVazias,status=200,consulta}={}){
+  const ctx=await setup({products:[product],...(consulta?{consulta}:{})});
+  const w=ctx.dom.window,calls=[];w.HTMLElement.prototype.scrollIntoView=()=>{};
+  const data=JSON.parse(JSON.stringify(rules)),copia=()=>JSON.parse(JSON.stringify(data));
+  const plain=w.fetch;
+  w.fetch=async(url,options={})=>{
+    url=String(url);
+    if(!url.startsWith('/api/produto-regras/'))return plain(url,options);
+    const method=options.method||'GET',body=options.body?JSON.parse(options.body):undefined;
+    calls.push({url,method,body,credentials:options.credentials});
+    if(status>=400)return {ok:false,status,json:async()=>({})};
+    if(method==='PUT'){
+      if(body.margem_min==='0.5000')return {ok:false,status:400,json:async()=>({detail:{code:'margem_invalida',message:'Recusado pelo DaVinci.'}})};
+      for(const [k,v] of Object.entries(body))data[k]=k==='margem_min'&&v!==null?Number(v):v;
+    }
+    if(method==='POST'){data.condicoes.push({id:'c'+(data.condicoes.length+1),pedido_de:body.pedido_de,pedido_ate:body.pedido_ate,piso:body.piso,vigente:true});data.condicao_resumo='até 30/11 · piso 5%';return {ok:true,status:201,json:async()=>copia()};}
+    if(method==='DELETE'){data.condicoes=data.condicoes.filter(c=>!url.endsWith('/condicoes/'+c.id));if(!data.condicoes.length)data.condicao_resumo='—';return {ok:true,status:204,json:async()=>{throw new Error('sem corpo');}};}
+    return {ok:true,status:200,json:async()=>copia()};
+  };
+  ctx.document.querySelector('nav [data-page=products]').click();ctx.document.querySelector('[data-edit-product]').click();
+  await ticks();
+  const cell=campo=>ctx.document.querySelector(`[data-campo=${campo}]`);
+  const input=campo=>cell(campo).querySelector('input');
+  const change=(el,value)=>{el.value=value;el.dispatchEvent(new w.Event('change',{bubbles:true}));};
+  return {...ctx,w,calls,data,cell,input,change,notice:()=>ctx.document.getElementById('notice').textContent};
+}
+
+test('M-74: row 2 shows Margem mín, Condição especial and DUIMP padrão from the DaVinci, the inherited value in grey',async()=>{
+  const e=await rulesEditor(fullProduct());
+  assert.deepEqual(e.calls,[{url:'/api/produto-regras/dg053.sp',method:'GET',body:undefined,credentials:'same-origin'}]);
+  const row=[...e.document.querySelectorAll('.product-head-row[data-linha="2"]>[data-campo]')];
+  assert.deepEqual(row.map(c=>c.dataset.campo),['centro_custo','categoria','categoria_venda','tag_envio','margem_min','condicao_especial','duimp_padrao']);
+  for(const c of row.slice(0,4))assert.equal(c.innerHTML,'',c.dataset.campo);
+  assert.deepEqual(row.slice(4).map(c=>c.querySelector('label').firstChild.textContent),['Margem mín (%)','Condição especial','DUIMP padrão']);
+  const margem=e.input('margem_min'),duimp=e.input('duimp_padrao'),botao=e.cell('condicao_especial').querySelector('button');
+  // Em branco: o herdado aparece em cinza (placeholder), nunca como valor.
+  assert.equal(margem.value,'');assert.equal(margem.placeholder,'18');assert.equal(margem.disabled,false);
+  assert.match(margem.title,/Em branco, usa 18% \(da categoria de venda Regular \(Celular\)\)/);assert.match(margem.title,/código dg053 em todas as tags/);
+  assert.equal(duimp.value,'');assert.equal(duimp.placeholder,'celular importado pela duimp 26BR0003333333-3');assert.equal(duimp.maxLength,75);
+  assert.equal(botao.textContent,'—');assert.ok(botao.classList.contains('is-vazio'));assert.equal(botao.type,'button');
+  // Sem name: o "Salvar produto" nunca manda esses campos.
+  for(const i of [margem,duimp])assert.equal(i.name,'');
+  // Com valor do produto: o valor aparece; o herdado continua na dica.
+  const cheio=await rulesEditor(fullProduct(),{rules:{...regrasVazias,margem_min:0.125,duimp_padrao:'dg053 pela duimp P',duimp_importacao:'produto importado pela duimp 26BR0001398015-8',condicao_resumo:'até 30/11 · piso 5%'}});
+  assert.equal(cheio.input('margem_min').value,'12,5');assert.equal(cheio.input('duimp_padrao').value,'dg053 pela duimp P');
+  assert.match(cheio.input('duimp_padrao').title,/DUIMP na Importação, que vai na nota no lugar desta: produto importado/);
+  assert.equal(cheio.cell('condicao_especial').querySelector('button').textContent,'até 30/11 · piso 5%');
+});
+
+test('M-74: typing saves through the DaVinci API, blank goes back to inherit and Salvar produto never sends them',async()=>{
+  const e=await rulesEditor(fullProduct());
+  e.change(e.input('margem_min'),'12');await ticks();
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp',method:'PUT',body:{margem_min:'0.1200'},credentials:'same-origin'});
+  assert.equal(e.input('margem_min').value,'12');assert.match(e.notice(),/Margem mín de dg053 gravada/);
+  e.change(e.input('margem_min'),'12,5');await ticks();
+  assert.deepEqual(e.calls.at(-1).body,{margem_min:'0.1250'});
+  // Vazio volta a herdar.
+  e.change(e.input('margem_min'),'');await ticks();
+  assert.deepEqual(e.calls.at(-1).body,{margem_min:null});assert.equal(e.input('margem_min').value,'');assert.match(e.notice(),/volta a usar a da categoria de venda/);
+  // Fora de 0–100 nem vai ao DaVinci; o DaVinci recusando, o campo volta ao gravado.
+  const antes=e.calls.length;
+  e.change(e.input('margem_min'),'150');await ticks();
+  assert.equal(e.calls.length,antes);assert.match(e.notice(),/0 a 100%/);assert.equal(e.input('margem_min').value,'');
+  e.change(e.input('margem_min'),'50');await ticks();
+  assert.equal(e.calls.length,antes+1);assert.match(e.notice(),/Recusado pelo DaVinci/);assert.equal(e.input('margem_min').value,'');
+  // DUIMP: "|" não vai; texto vai; vazio volta a herdar.
+  e.change(e.input('duimp_padrao'),'duimp 1 | duimp 2');await ticks();
+  assert.equal(e.calls.length,antes+1);assert.match(e.notice(),/não pode ter "\|"/);
+  e.change(e.input('duimp_padrao'),'  dg053 pela duimp P  ');await ticks();
+  assert.deepEqual(e.calls.at(-1).body,{duimp_padrao:'dg053 pela duimp P'});assert.equal(e.input('duimp_padrao').value,'dg053 pela duimp P');
+  // Enter grava o campo e não envia o formulário do produto.
+  const enter=new e.w.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});
+  e.input('duimp_padrao').dispatchEvent(enter);assert.equal(enter.defaultPrevented,true);
+  await ticks();assert.equal(e.requests.length,0);
+  // O "Salvar produto" não leva Margem mín, DUIMP nem condição.
+  e.document.querySelector('#product-edit-form').dispatchEvent(new e.w.Event('submit',{bubbles:true,cancelable:true}));await ticks();
+  assert.deepEqual(e.requests.map(r=>r.kind),['product.update']);
+  for(const k of ['margem_min','duimp_padrao','condicao_especial','p2_condicao_de'])assert.equal(k in e.requests[0].payload.data,false,k);
+});
+
+test('M-74: works in modo Consulta, the non-admin sees them locked and without the DaVinci they stay empty',async()=>{
+  // Modo Consulta: o cadastro trava, estes três não (são do DaVinci, não do ERP).
+  const c=await rulesEditor(fullProduct(),{consulta:{active:true}});
+  assert.ok(c.document.querySelector('#product-edit-form.read-only'));
+  assert.equal(c.input('margem_min').disabled,false);assert.equal(c.input('duimp_padrao').disabled,false);
+  c.change(c.input('margem_min'),'7');await ticks();
+  assert.deepEqual(c.calls.at(-1).body,{margem_min:'0.0700'});assert.equal(c.requests.length,0);
+  // Quem não é administrador vê travado (e vê as condições, sem incluir nem remover).
+  const v=await rulesEditor(fullProduct(),{rules:{...regrasVazias,pode_editar:false,condicoes:[{id:'c1',pedido_de:'2026-11-20',pedido_ate:'2026-11-30',piso:'0.0500',vigente:true}],condicao_resumo:'até 30/11 · piso 5%'}});
+  assert.equal(v.input('margem_min').disabled,true);assert.equal(v.input('duimp_padrao').disabled,true);
+  assert.match(v.input('margem_min').title,/Só o administrador altera/);
+  v.change(v.input('margem_min'),'3');await ticks();assert.equal(v.calls.length,1);
+  v.cell('condicao_especial').querySelector('button').click();
+  const janela=v.document.getElementById('p2-condicao-dialog');
+  assert.ok(janela);assert.equal(janela.querySelector('[data-p2-condicao-add]'),null);assert.equal(janela.querySelector('[data-p2-condicao-del]'),null);
+  assert.match(janela.textContent,/20\/11\/2026 até 30\/11\/2026 · margem mínima 5%/);
+  // DaVinci sem resposta: campos vazios e travados, com a dica.
+  const off=await rulesEditor(fullProduct(),{status:502});
+  assert.equal(off.input('margem_min').disabled,true);assert.equal(off.input('margem_min').placeholder,'');
+  assert.match(off.input('margem_min').title,/Não consegui ler do DaVinci/);
+  const b=off.cell('condicao_especial').querySelector('button');assert.equal(b.disabled,true);assert.equal(b.textContent,'—');
+});
+
+test('M-74: the Condição especial window adds and removes the product rule, like the one in Segmentos',async()=>{
+  const e=await rulesEditor(fullProduct());
+  e.cell('condicao_especial').querySelector('button').click();
+  const janela=()=>e.document.getElementById('p2-condicao-dialog');
+  assert.ok(janela());assert.equal(janela().getAttribute('role'),'dialog');assert.equal(janela().parentElement,e.document.body);
+  assert.match(janela().querySelector('h2').textContent,/Condição especial · dg053/);
+  assert.match(janela().textContent,/Nenhuma condição especial vigente/);
+  // Sem o Até: não vai ao DaVinci.
+  const campo=n=>janela().querySelector(`[name=${n}]`);
+  campo('p2_condicao_de').value='2026-11-26';
+  janela().querySelector('[data-p2-condicao-add]').click();await ticks();
+  assert.equal(e.calls.length,1);assert.match(janela().querySelector('[data-p2-condicao-msg]').textContent,/Preencha De e Até/);
+  campo('p2_condicao_ate').value='2026-11-30';campo('p2_condicao_piso').value='5';
+  janela().querySelector('[data-p2-condicao-add]').click();await ticks();
+  assert.deepEqual(e.calls.at(-1),{url:'/api/produto-regras/dg053.sp/condicoes',method:'POST',body:{pedido_de:'2026-11-26',pedido_ate:'2026-11-30',piso:'0.0500'},credentials:'same-origin'});
+  assert.match(janela().querySelector('[data-p2-condicao-msg]').textContent,/Condição adicionada/);
+  assert.match(janela().textContent,/1 condição vigente/);assert.match(janela().textContent,/26\/11\/2026 até 30\/11\/2026 · margem mínima 5%/);
+  assert.equal(e.cell('condicao_especial').querySelector('button').textContent,'até 30/11 · piso 5%');
+  // Remover: DELETE e relê.
+  janela().querySelector('[data-p2-condicao-del="c1"]').click();await ticks();
+  assert.deepEqual(e.calls.slice(-2).map(c=>[c.method,c.url]),[['DELETE','/api/produto-regras/dg053.sp/condicoes/c1'],['GET','/api/produto-regras/dg053.sp']]);
+  assert.match(janela().textContent,/Nenhuma condição especial vigente/);assert.equal(e.cell('condicao_especial').querySelector('button').textContent,'—');
+  // Abrir a janela não salvou o produto; Fechar tira a janela.
+  assert.equal(e.requests.length,0);
+  janela().querySelector('[data-p2-condicao-fechar]').click();
+  assert.equal(janela(),null);
 });
 
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
