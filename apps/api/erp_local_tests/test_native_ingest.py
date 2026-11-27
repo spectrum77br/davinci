@@ -80,7 +80,7 @@ def test_complete_window_moves_cursor_and_next_window_overlaps(account):
     )
     assert go(account, provider)["state"] == "complete"
     state = state_of(account)
-    end = NOW - native_ingest.SAFETY_LAG
+    end = NOW - native_ingest.safety_lag(CHANNEL)
     assert state["cursor"] == end.isoformat() and state["last_ok_at"] == NOW.isoformat()
     assert provider.calls[0] == (NOW - native_ingest.FIRST_WINDOW, end)
     later = NOW + timedelta(minutes=5)
@@ -159,8 +159,8 @@ def test_long_window_continues_next_round_with_the_same_end(account, monkeypatch
     assert state["window_from"] == second.isoformat() and state["cursor"] is None
     assert state["failures"] == 0
     assert go(account, provider, NOW + timedelta(minutes=1))["state"] == "complete"
-    assert provider.calls[2] == (second, NOW - native_ingest.SAFETY_LAG)
-    assert state_of(account)["cursor"] == (NOW - native_ingest.SAFETY_LAG).isoformat()
+    assert provider.calls[2] == (second, NOW - native_ingest.safety_lag(CHANNEL))
+    assert state_of(account)["cursor"] == (NOW - native_ingest.safety_lag(CHANNEL)).isoformat()
 
 
 def test_lease_blocks_a_second_worker_and_expires(account):
@@ -195,6 +195,42 @@ def test_lookback_reads_recent_days_daily_without_moving_the_cursor(account):
     later, daily = NOW + timedelta(days=1), Provider(*[fake_read()] * 8)
     run_lookback(account, CHANNEL, ACCOUNT, daily, now=later, importer=importer)
     assert daily.calls[0][0] == later - native_ingest.LOOKBACK_WINDOW
+
+
+def test_amazon_readings_end_at_least_two_minutes_back(account):
+    """Amazon refuses a reading that ends less than two minutes before it is asked for (with one
+    minute, every first try failed from 18 to 27/11/2026)."""
+    assert native_ingest.safety_lag("shopee") == native_ingest.SAFETY_LAG
+    provider = Provider(fake_read())
+    go(account, provider)
+    assert NOW - provider.calls[0][1] >= timedelta(minutes=2)
+    days = native_ingest.first_lookback(CHANNEL).days + 1
+    lookback = Provider(*[fake_read()] * days)
+    native_ingest.run_lookback(account, CHANNEL, ACCOUNT, lookback, now=NOW, importer=importer)
+    assert lookback.calls and all(NOW - end >= timedelta(minutes=2) for _, end in lookback.calls)
+
+
+def test_failed_re_read_waits_an_hour_instead_of_every_round(account):
+    go(account, Provider(fake_read()))
+    days = native_ingest.first_lookback(CHANNEL).days + 1
+    native_ingest.run_lookback(
+        account, CHANNEL, ACCOUNT, Provider(*[fake_read()] * days), now=NOW, importer=importer
+    )
+    later = NOW + timedelta(days=1)
+    failing = Provider(fake_read(), fake_read(state="provider_unavailable"))
+    result = native_ingest.run_lookback(
+        account, CHANNEL, ACCOUNT, failing, now=later, importer=importer
+    )
+    assert result["state"] == "provider_unavailable" and len(failing.calls) == 2
+    soon = later + timedelta(minutes=30)
+    assert native_ingest.run_lookback(account, CHANNEL, ACCOUNT, Provider(), now=soon) == {
+        "state": "not_due"
+    }
+    retry = Provider(*[fake_read()] * 8)
+    native_ingest.run_lookback(
+        account, CHANNEL, ACCOUNT, retry, now=later + timedelta(minutes=61), importer=importer
+    )
+    assert retry.calls
 
 
 def test_one_failing_account_does_not_stop_the_pass(account):

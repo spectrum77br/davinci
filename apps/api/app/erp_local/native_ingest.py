@@ -31,6 +31,11 @@ OVERLAP = timedelta(minutes=15)
 # A new order shows about a minute after the store has it (18/11/2026: was 2). Late reports are
 # still caught: each window goes back OVERLAP, and the 7-day lookback runs daily.
 SAFETY_LAG = timedelta(minutes=1)
+# Amazon refuses a reading that ends less than two minutes before it is asked for. With the
+# minute above (05bb0136, 18/11/2026) every first try failed and only its retry worked, a round
+# later, and the 7-day re-read failed on its last day until 27/11. Three minutes, like the
+# reader's own plan (amazon_order_probe.plan).
+CHANNEL_LAG = {"amazon": timedelta(minutes=3)}
 FIRST_WINDOW = timedelta(days=1)
 MAX_WINDOW = timedelta(hours=24)
 LOOKBACK_EVERY = timedelta(hours=24)
@@ -176,6 +181,10 @@ def _record(erp, channel, store, kind, started, state, reads, observed, added, s
         )
 
 
+def safety_lag(channel):
+    return CHANNEL_LAG.get(channel, SAFETY_LAG)
+
+
 def _backoff(failures, retry_after=None):
     wait = min(BACKOFF_BASE * 2 ** max(failures - 1, 0), BACKOFF_CAP)
     return timedelta(seconds=max(wait, retry_after or 0))
@@ -231,7 +240,7 @@ def run_account(erp, channel, store, provider, *, now=None, importer=None):
         return {"state": "busy"}
     cursor = _when(row["cursor"])
     start = _when(row["window_from"]) or ((cursor - OVERLAP) if cursor else now - FIRST_WINDOW)
-    end = _when(row["window_to"]) or min(now - SAFETY_LAG, start + MAX_WINDOW)
+    end = _when(row["window_to"]) or min(now - safety_lag(channel), start + MAX_WINDOW)
     state, position, (reads, observed, added), retry_after = (
         "provider_unavailable",
         start,
@@ -297,7 +306,7 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
             (channel, store),
         ).fetchone()
     back = first_lookback(channel, store) if first else LOOKBACK_WINDOW
-    start, end = now - back, now - SAFETY_LAG
+    start, end = now - back, now - safety_lag(channel)
     # One day per read, like the reception: the store readers refuse longer windows.
     state, reads, observed, added, position, kept = "complete", 0, 0, 0, start, False
     while position < end:
@@ -316,8 +325,9 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
     if state in {"complete", "partial_kept"}:
         state = "partial_kept" if kept else "complete"
         _save(erp, channel, store, lookback_at=_iso(now))
-    elif first:
-        # A failed first re-read waits an hour instead of starting over every round.
+    else:
+        # A failed re-read waits an hour instead of starting over every round (27/11/2026: the
+        # Amazon one, failing on its last day, asked the store 17,700 times in two days).
         _save(erp, channel, store, lookback_at=_iso(now - LOOKBACK_EVERY + timedelta(hours=1)))
     _record(erp, channel, store, "lookback", now, state, reads, observed, added, start, end)
     return {"state": state, "reads": reads, "observed": observed, "added": added}
