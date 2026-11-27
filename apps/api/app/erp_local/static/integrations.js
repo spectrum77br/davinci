@@ -96,14 +96,14 @@ function ingestPanel(){
 }
 // UpSeller (27/11/2026): Temu e o comprador da Amazon sem o Bling. O robô do outro PC manda a
 // exportação a cada ~10 min (docs/robo-upseller); se ele parar, alguém importa a mesma planilha aqui.
-const upsellerNames={temu:'Temu',amazon:'Amazon',shein:'Shein',aliexpress:'AliExpress'};
+const upsellerNames={temu:'Temu',amazon:'Amazon',shein:'Shein',aliexpress:'AliExpress',shopee:'Shopee (Eron, Sal MG)',ml:'Mercado Livre (Eron 2)'};
 function upsellerPanel(){
   const last=state.upseller_imports||{};
   const rows=Object.keys(upsellerNames).map(p=>{
     const s=last[p];
     if(!s)return `<tr><td>${upsellerNames[p]}</td><td><span class="badge warn">Nunca importado</span></td><td>—</td><td>—</td></tr>`;
     const at=s.importado_em||s.at,late=Date.now()-new Date(at).getTime()>30*60*1000;
-    const done=[`${s.pedidos} pedidos`,s.novos?`${s.novos} novos`:'',s.atualizados?`${s.atualizados} atualizados`:'',s.conferidos?`${s.conferidos} conferidos com o Bling`:'',s.compradores?`${s.compradores} compradores`:'',s.compradores_conferidos?`${s.compradores_conferidos} compradores conferidos`:''].filter(Boolean).join(' · ');
+    const done=s.rodada_vazia?'Sem pedidos na janela (o robô conferiu)':[`${s.pedidos} pedidos`,s.novos?`${s.novos} novos`:'',s.atualizados?`${s.atualizados} atualizados`:'',s.conferidos?`${s.conferidos} conferidos com o Bling`:'',s.compradores?`${s.compradores} compradores`:'',s.compradores_conferidos?`${s.compradores_conferidos} compradores conferidos`:''].filter(Boolean).join(' · ');
     const n=k=>s[k+'_total']??(s[k]||[]).length;
     const issues=[...(s.sem_loja||[]).map(x=>'Loja sem cadastro: '+x),n('divergencias')?`${n('divergencias')} pedidos diferentes do Bling`:'',n('compradores_divergentes')?`${n('compradores_divergentes')} compradores diferentes do Bling`:'',n('sem_endereco_completo')?`${n('sem_endereco_completo')} com endereço a conferir`:''].filter(Boolean);
     return `<tr><td>${upsellerNames[p]}</td><td><span class="badge ${late?'warn':'good'}">${late?'Atrasado':'Em dia'}</span><small>${esc(when(at))}</small></td><td>${esc(done)}</td><td>${issues.length?esc(issues.join(' · ')):'—'}</td></tr>`;

@@ -1065,6 +1065,14 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         content = arquivo.file.read(upseller_import.MAX_BYTES + 1)
         return upseller_import.import_sheet(erp, content, plataforma.strip().casefold(), filtro)
 
+    @app.post("/api/erp-local/upseller-import/rodada-vazia")
+    def upseller_empty_round(plataforma: str = Form(...), filtro: str = Form("")):
+        """The robot's round found no order of this platform in its window: Integrações shows the
+        platform up to date instead of late."""
+        from app.erp_local import upseller_import
+
+        return upseller_import.empty_round(erp, plataforma.strip().casefold(), filtro)
+
     @app.post("/api/erp-local/channels/prepare-policies")
     def prepare_policies():
         from app.erp_local.integration_registry import prepare

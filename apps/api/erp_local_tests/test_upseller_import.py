@@ -481,3 +481,24 @@ def test_upseller_names_as_they_come_nexus_and_shoppe(erp):
             "e5d6306b-d18f-47fe-af02-54cd26c5361d"
         )
         assert upseller_import.store_for(db, "shopee", "Shoppe Barbosa") == "uuid-barbosa"
+
+
+def test_an_empty_round_keeps_a_quiet_platform_up_to_date(tmp_path):
+    """AliExpress, ML Eron 2 and the Shopee stores sell rarely: the robot says it looked."""
+    with app_client(tmp_path) as c:
+        mirrored(c.app.state.erp)
+        reply = c.post(
+            "/api/erp-local/upseller-import/rodada-vazia",
+            data={"plataforma": "aliexpress", "filtro": "AliExpress 3 dias · total na tela 0"},
+            headers=LOCAL,
+        )
+        assert reply.status_code == 200, reply.text
+        assert reply.json()["pedidos"] == 0 and reply.json()["rodada_vazia"] is True
+        last = c.get("/api/erp-local/state").json()["upseller_imports"]["aliexpress"]
+        assert last["rodada_vazia"] is True and last["sem_loja_total"] == 0
+        wrong = c.post(
+            "/api/erp-local/upseller-import/rodada-vazia",
+            data={"plataforma": "magalu"},
+            headers=LOCAL,
+        )
+        assert wrong.json()["code"] == "upseller_platform"

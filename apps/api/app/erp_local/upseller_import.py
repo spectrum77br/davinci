@@ -999,6 +999,43 @@ def import_sheet(erp, content, platform, filtro="", now=None):
         summary["compradores"] += not done.get("kept") and not done.get("state")
     for name in LISTS:
         summary[name + "_total"] = len(summary[name])
+    return _record(erp, platform, summary)
+
+
+def empty_round(erp, platform, filtro="", now=None):
+    """The robot looked and the platform had no order in its window (AliExpress, ML Eron 2 and
+    the Shopee stores sell rarely): recorded like an import with no order, so Integrações tells a
+    quiet platform from a robot that stopped (27/11/2026)."""
+    if platform not in PLATFORMS:
+        raise ERPError(
+            "upseller_platform",
+            "Plataforma do UpSeller: temu, amazon, shein, aliexpress, shopee ou ml.",
+        )
+    summary = {
+        "plataforma": platform,
+        "rodada_vazia": True,
+        "linhas": 0,
+        "outras_plataformas": 0,
+        "pedidos": 0,
+        "novos": 0,
+        "atualizados": 0,
+        "iguais": 0,
+        "conferidos": 0,
+        "cancelados": 0,
+        "dados_gravados": 0,
+        "compradores": 0,
+        "compradores_conferidos": 0,
+        "lidos_direto": 0,
+        "filtro": _text(filtro)[:200],
+        "importado_em": (now or datetime.now(UTC)).replace(microsecond=0).isoformat(),
+    }
+    for name in LISTS:
+        summary[name] = []
+        summary[name + "_total"] = 0
+    return _record(erp, platform, summary)
+
+
+def _record(erp, platform, summary):
     with erp.connection() as db:
         db.executescript(SCHEMA)
         db.execute(

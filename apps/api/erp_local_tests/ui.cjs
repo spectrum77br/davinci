@@ -101,6 +101,7 @@ test('UpSeller: the last import of Temu and Amazon shows late or on time, and th
   const {dom,document:d}=await setup({upseller_imports:{
     temu:{at:now,importado_em:now,pedidos:9,novos:2,atualizados:1,conferidos:6,compradores:2,compradores_conferidos:7,divergencias:[{pedido:'PO-029-1',campos:['itens']}],compradores_divergentes:[],sem_loja:[],sem_endereco_completo:[]},
     amazon:{at:old,importado_em:old,pedidos:30,novos:0,atualizados:0,conferidos:0,compradores:5,compradores_conferidos:25,divergencias:[],compradores_divergentes:[],sem_loja:['Amazon Nova'],sem_endereco_completo:['701-1']},
+    shopee:{at:now,importado_em:now,pedidos:0,rodada_vazia:true,novos:0,atualizados:0,conferidos:0,compradores:0,compradores_conferidos:0,divergencias:[],compradores_divergentes:[],sem_loja:[],sem_endereco_completo:[]},
   }});
   d.querySelector('nav [data-page=integrations]').click();
   const panel=[...d.querySelectorAll('section.panel')].find(p=>p.textContent.includes('UpSeller: Temu, Shein, AliExpress e compradores da Amazon'));
@@ -109,6 +110,7 @@ test('UpSeller: the last import of Temu and Amazon shows late or on time, and th
   assert.match(rows[0],/Temu.*Em dia.*9 pedidos · 2 novos · 1 atualizados · 6 conferidos com o Bling.*1 pedidos diferentes do Bling/);
   assert.match(rows[1],/Amazon.*Atrasado.*Loja sem cadastro: Amazon Nova · 1 com endereço a conferir/);
   assert.match(rows[2],/Shein.*Nunca importado/);
+  assert.match(rows[4],/Shopee \(Eron, Sal MG\).*Em dia.*Sem pedidos na janela/);
   const sent=[];
   dom.window.fetch=async (url,options)=>{
     if(options?.method==='POST'){sent.push({url,options});return {ok:true,status:200,json:async()=>({pedidos:3,novos:1,atualizados:0,compradores:1})};}

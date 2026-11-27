@@ -28,6 +28,7 @@ READ_POSTS = (
     "/api/erp-local/reference-refresh",
     # Orders and buyers from UpSeller's export (Temu, Amazon): intake, nothing goes to Bling.
     "/api/erp-local/upseller-import",
+    "/api/erp-local/upseller-import/rodada-vazia",
 )
 READ_PREFIXES = ("/api/erp-local/store-sales/papers/",)
 # The only changes accepted while Bling owns the base, by exact path (M-45 and M-47, asked by the
