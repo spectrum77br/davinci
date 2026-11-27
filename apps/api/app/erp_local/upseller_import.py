@@ -38,8 +38,16 @@ SOURCE = "upseller_copy_v1_read"
 LIMIT = 2000
 MAX_BYTES = 10 * 1024 * 1024
 BRT = ZoneInfo("America/Sao_Paulo")
-PLATFORMS = {"temu": "Temu", "amazon": "Amazon", "shein": "Shein", "aliexpress": "AliExpress"}
-# The ones whose orders come in from here; Amazon's come from Amazon itself.
+PLATFORMS = {
+    "temu": "Temu",
+    "amazon": "Amazon",
+    "shein": "Shein",
+    "aliexpress": "AliExpress",
+    "shopee": "Shopee",
+    "ml": "Mercado Livre",
+}
+# The ones whose orders come in from here; Amazon's, Shopee's and ML's come from the stores
+# themselves, save the stores the ERP does not read (UPSELLER_ONLY).
 ORDER_PLATFORMS = {"temu", "shein", "aliexpress"}
 NUMBERS = {
     "temu": bling_copy_order_probe.NUMBERS["temu"],
@@ -47,6 +55,8 @@ NUMBERS = {
     # GSH + 12 letters and digits (27/11/2026: KFA's orders); AliExpress: 16 digits.
     "shein": re.compile(r"[A-Za-z]{3}[A-Za-z0-9]{12}"),
     "aliexpress": re.compile(r"\d{16}"),
+    "shopee": re.compile(r"\d{6}[A-Za-z0-9]{8}"),
+    "ml": re.compile(r"\d{16}"),
 }
 # UpSeller's store name → the ERP store. Temu, Shein, AliExpress: by Bling store code (no
 # integration in DaVinci; Temu shares the stores of the copy of Bling). Amazon: DaVinci's
@@ -65,6 +75,9 @@ STORES = {
         "amazon poofy": "45790f1b-3972-48db-a43b-ca8ac13efbf8",
         "amazon vr": "049acd9a-3b98-479c-8419-fbffbf574cd0",
         "amazon nexus": "e5d6306b-d18f-47fe-af02-54cd26c5361d",
+        # No integration in DaVinci: the whole order comes from here (UPSELLER_ONLY).
+        "amazon inova": "204438130",
+        "amazon jlas": "205050265",
     },
     "shein": {
         "kfa": "204808793",
@@ -77,6 +90,30 @@ STORES = {
         "aliexpress vita": "205295441",
         "vita": "205295441",
     },
+    # Shopee and ML: only the stores the ERP does not read (UPSELLER_ONLY); the others are read
+    # straight from Shopee and ML and are left alone here, never doubled.
+    "shopee": {
+        "shopee eron": "206356882",
+        "eron": "206356882",
+        "shopee vr": "206378665",
+        "vr": "206378665",
+        "shopee sal mg": "206081909",
+        "sal mg": "206081909",
+        "sal": "206081909",
+    },
+    "ml": {
+        "ml eron 2": "206356887",
+        "mercado livre eron 2": "206356887",
+        "eron 2": "206356887",
+        "eron2": "206356887",
+    },
+}
+# Stores of read platforms that no integration in DaVinci reads (27/11/2026): their whole orders
+# come from UpSeller, by Bling store code, like Temu.
+UPSELLER_ONLY = {
+    "amazon": {"204438130", "205050265"},
+    "shopee": {"206356882", "206378665", "206081909"},
+    "ml": {"206356887"},
 }
 STORE_NAMES = {
     "205925390": "Temu Barbosa",
@@ -86,7 +123,22 @@ STORE_NAMES = {
     "204808793": "Shein KFA",
     "206080480": "Shein Kia",
     "205295441": "AliExpress Vita",
+    "204438130": "Amazon Inova",
+    "205050265": "Amazon Jlas",
+    "206356882": "Shopee Eron",
+    "206378665": "Shopee VR",
+    "206081909": "Shopee Sal MG",
+    "206356887": "ML Eron 2",
 }
+
+
+def order_stores(platform):
+    """The stores whose whole orders come from UpSeller."""
+    if platform in ORDER_PLATFORMS:
+        return set(STORES[platform].values())
+    return UPSELLER_ONLY.get(platform, set())
+
+
 ORDER = "Nº de Pedido da Plataforma"
 REQUIRED = {
     ORDER,
@@ -728,8 +780,8 @@ def validate(read):
                     "orders",
                     "has_more",
                 }
-                or platform not in ORDER_PLATFORMS
-                or account["integration_id"] not in STORES[platform].values()
+                or platform not in PLATFORMS
+                or account["integration_id"] not in order_stores(platform)
                 or account["state"] != "read_ok"
                 or account["has_more"] is not False
                 or not isinstance(account["orders"], list)
@@ -822,6 +874,7 @@ def import_sheet(erp, content, platform, filtro="", now=None):
         "sem_loja": [],
         "sem_endereco_completo": [],
         "sem_dados_no_upseller": [],
+        "lidos_direto": 0,
         "filtro": _text(filtro)[:200],
         "importado_em": stamp,
     }
@@ -833,13 +886,23 @@ def import_sheet(erp, content, platform, filtro="", now=None):
             store = store_for(db, platform, name)
             if platform in ORDER_PLATFORMS and store not in STORES[platform].values():
                 store = None  # only the known stores: one sale per order, never a guessed store
+            if platform in {"shopee", "ml"} and store and store not in UPSELLER_ONLY[platform]:
+                # Read straight from Shopee or ML with their own buyer: nothing to do here.
+                summary["lidos_direto"] += 1
+                continue
             if store is None:
                 if name not in summary["sem_loja"]:
                     summary["sem_loja"].append(name)
                 continue
             order["store"] = store
-            if platform not in ORDER_PLATFORMS:
+            if store not in order_stores(platform):
                 continue
+            missing = sorted(REQUIRED_ORDERS - set(head))
+            if missing:
+                raise ERPError(
+                    "upseller_columns",
+                    "Faltam colunas na exportação do UpSeller: " + ", ".join(missing),
+                )
             _ensure_store(db, platform, store, stamp)
             read = _order_read(number, order["rows"])
             summary["cancelados"] += read["status"] == "CANCELLED"

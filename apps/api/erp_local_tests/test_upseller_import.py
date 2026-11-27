@@ -402,3 +402,66 @@ def test_the_route_takes_the_file_in_read_only_mode_and_answers_nothing_personal
         assert last["novos"] == 1 and last["filtro"] == "Temu, 3 dias, total 1"
         sales = c.get("/api/erp-local/store-sales", params={"q": PO}).json()["items"]
         assert [(s["number"], s["status"]) for s in sales] == [(PO, "Cópia do UpSeller")]
+
+
+def test_stores_no_integration_reads_bring_their_whole_orders_and_the_others_are_left_alone(erp):
+    """27/11/2026: Amazon Inova and Jlas, Shopee Eron, VR and Sal MG, ML Eron 2 have no
+    integration in DaVinci; their whole orders come from UpSeller. Stores read straight from the
+    platform are left alone (never doubled)."""
+    inova = sale("701-0000010-0000010", platform="Amazon", store="Amazon Inova", sku="b111")
+    kfa = sale("701-0000011-0000011", platform="Amazon", store="Amazon KFA", sku="b111")
+    got = upseller_import.import_sheet(erp, sheet([inova, kfa]), "amazon")
+    assert (got["novos"], got["compradores"]) == (1, 2)
+    ((source, _, order),) = observations(erp, "701-0000010-0000010")
+    assert source == upseller_import.SOURCE and order["items"][0]["seller_sku"] == "b111"
+    assert observations(erp, "701-0000011-0000011") == []  # KFA comes from Amazon itself
+    assert buyer(erp, "amazon", "204438130", "701-0000010-0000010")["ready"]
+    with erp.connection() as db:
+        db.execute(
+            "INSERT INTO store_policies VALUES ('shopee','uuid-mega','shadow',?,"
+            "'2026-11-27T10:00:00+00:00')",
+            (dumps({"name": "mega"}),),
+        )
+        db.commit()
+    eron = sale("261127ABCDEFGH", platform="Shopee", store="Shopee Eron", sku="dg054.sp")
+    mega = sale("261127HGFEDCBA", platform="Shopee", store="Shopee Mega", sku="dg054.sp")
+    got = upseller_import.import_sheet(erp, sheet([eron, mega]), "shopee")
+    assert (got["novos"], got["lidos_direto"], got["sem_loja"]) == (1, 1, [])
+    assert observations(erp, "261127HGFEDCBA") == []
+    assert buyer(erp, "shopee", "206356882", "261127ABCDEFGH")["ready"]
+    ml = sale("2000016291374029", platform="Mercado Livre", store="ML Eron 2", sku="b112.16.24")
+    got = upseller_import.import_sheet(erp, sheet([ml]), "ml")
+    assert got["novos"] == 1 and got["sem_loja"] == []
+    with erp.connection() as db:
+        names = dict(
+            db.execute(
+                "SELECT store,json_extract(data,'$.name') FROM store_policies "
+                "WHERE store IN ('204438130','206356882','206356887')"
+            ).fetchall()
+        )
+    assert names == {
+        "204438130": "Amazon Inova",
+        "206356882": "Shopee Eron",
+        "206356887": "ML Eron 2",
+    }
+
+
+def test_a_store_kept_by_its_bling_code_never_doubles_the_same_order_read_straight(erp):
+    order = {
+        "id": "261127ABCDEFGH",
+        "status": "READY_TO_SHIP",
+        "created_at": "2026-11-27T10:00:00+00:00",
+    }
+    with erp.connection() as db:
+        db.execute(
+            "INSERT INTO native_order_reads VALUES ('r1','x','2026-11-27T10:00:00+00:00','{}')"
+        )
+        for i, store in enumerate(("206356882", "uuid-eron")):
+            db.execute(
+                "INSERT INTO native_order_observations VALUES (?,'r1','shopee',?,?,"
+                "'2026-11-27T09:00:00+00:00','2026-11-27T10:00:00+00:00',?)",
+                (f"o{i}", store, order["id"], dumps(order)),
+            )
+        db.commit()
+        sales = store_sales.listing(db, order["id"])["items"]
+    assert [s["store_id"] for s in sales] == ["uuid-eron"]

@@ -253,7 +253,11 @@ READERS = {
 
 def project(channel, raw, store=None):
     # A store read from the copy of Bling (ML Fioree) has its buyer as Bling keeps it.
-    if store is not None and bling_copy_order_probe.copied(channel, store):
+    # Stores kept by their Bling store code (the copy of Bling, UpSeller's export) have their buyer
+    # as the copy of Bling shapes it; the stores read straight are DaVinci integrations (uuid).
+    if store is not None and (
+        bling_copy_order_probe.copied(channel, store) or str(store).isdigit()
+    ):
         return from_bling_copy(raw)
     if channel not in READERS:
         raise ERPError("recipient_channel", "Canal sem leitor de destinatário.", 409)
