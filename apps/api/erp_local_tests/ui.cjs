@@ -96,6 +96,35 @@ test('integration rule submission targets only the selected exact account and ne
   dom.window.close();
 });
 
+test('UpSeller: the last import of Temu and Amazon shows late or on time, and the manual import sends the spreadsheet',async()=>{
+  const now=new Date().toISOString(),old=new Date(Date.now()-45*60*1000).toISOString();
+  const {dom,document:d}=await setup({upseller_imports:{
+    temu:{at:now,importado_em:now,pedidos:9,novos:2,atualizados:1,conferidos:6,compradores:2,compradores_conferidos:7,divergencias:[{pedido:'PO-029-1',campos:['itens']}],compradores_divergentes:[],sem_loja:[],sem_endereco_completo:[]},
+    amazon:{at:old,importado_em:old,pedidos:30,novos:0,atualizados:0,conferidos:0,compradores:5,compradores_conferidos:25,divergencias:[],compradores_divergentes:[],sem_loja:['Amazon Nova'],sem_endereco_completo:['701-1']},
+  }});
+  d.querySelector('nav [data-page=integrations]').click();
+  const panel=[...d.querySelectorAll('section.panel')].find(p=>p.textContent.includes('UpSeller: Temu e compradores da Amazon'));
+  assert.ok(panel,'painel do UpSeller em Integrações');
+  const rows=[...panel.querySelectorAll('tbody tr')].map(tr=>tr.textContent);
+  assert.match(rows[0],/Temu.*Em dia.*9 pedidos · 2 novos · 1 atualizados · 6 conferidos com o Bling.*1 pedidos diferentes do Bling/);
+  assert.match(rows[1],/Amazon.*Atrasado.*Loja sem cadastro: Amazon Nova · 1 sem endereço completo/);
+  const sent=[];
+  dom.window.fetch=async (url,options)=>{
+    if(options?.method==='POST'){sent.push({url,options});return {ok:true,status:200,json:async()=>({pedidos:3,novos:1,atualizados:0,compradores:1})};}
+    return {ok:true,status:200,json:async()=>({products:[],deposits:[],orders:[],purchases:[],movements:[],events:[],accounts:[]})};
+  };
+  const form=d.querySelector('#upseller-import');
+  form.querySelector('[name=plataforma]').value='amazon';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setTimeout(r,20));
+  assert.equal(sent.length,1);
+  assert.equal(sent[0].url,'/api/erp-local/upseller-import');
+  assert.equal(sent[0].options.headers['X-ERP-Local'],'1');
+  assert.equal(sent[0].options.body.get('plataforma'),'amazon');
+  assert.match(d.getElementById('notice').textContent,/UpSeller: 3 pedidos, 1 novos/);
+  dom.window.close();
+});
+
 async function setup(overrides={},address='http://127.0.0.1:8765') {
   const dom = new JSDOM(fs.readFileSync(path.join(assets,'index.html'),'utf8'), {
     url:address,runScripts:'outside-only',

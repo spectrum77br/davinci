@@ -79,6 +79,7 @@ STATE_AREAS = {
     "ingest": "integracoes",
     "integration_registry": "integracoes",
     "production": "estoque",
+    "upseller_imports": "integracoes",
 }
 ROUTE_AREAS = {
     "/api/erp-local/fiscal": "fiscal",
@@ -93,6 +94,7 @@ ROUTE_AREAS = {
     "/api/erp-local/contacts": "cadastros",
     "/api/erp-local/logistics": "expedicao",
     "/api/erp-local/price-preview": "vendas",
+    "/api/erp-local/upseller-import": "integracoes",
 }
 
 

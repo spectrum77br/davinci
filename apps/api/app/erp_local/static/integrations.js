@@ -94,4 +94,33 @@ function ingestPanel(){
   const names=Object.fromEntries((state.bling_coverage?.stores||[]).filter(s=>s.store).map(s=>[s.store,s.name]));
   return panel('Recepção contínua de pedidos',on.length?`${on.length} contas ligadas.`:'Desligada em todas as contas. O motor está pronto e testado, mas nada lê as lojas nem cria pedidos até a troca de autoridade autorizada.',table(['Conta','Situação','Cursor','Última leitura completa','Falhas'],v.accounts.map(a=>`<tr><td>${esc(names[a.store]||a.channel)}<small>${esc(platformNames[a.channel]||a.channel)}${names[a.store]?'':' · '+esc(a.store)}</small></td><td>${a.enabled?'Ligada':'Desligada'}<small>${esc(a.last_state||'—')}</small></td><td>${a.cursor?when(a.cursor):'—'}</td><td>${a.last_ok_at?when(a.last_ok_at):'—'}</td><td>${esc(a.failures)}</td></tr>`).join('')||empty(5,'Nenhuma conta configurada para recepção.')));
 }
-function integrationsWithIngest(){return (window.erpConsulta?.active?blingEqualityPanel():'')+integrationPage()+ingestPanel();}
+// UpSeller (27/11/2026): Temu e o comprador da Amazon sem o Bling. O robô do outro PC manda a
+// exportação a cada ~10 min (docs/robo-upseller); se ele parar, alguém importa a mesma planilha aqui.
+const upsellerNames={temu:'Temu',amazon:'Amazon'};
+function upsellerPanel(){
+  const last=state.upseller_imports||{};
+  const rows=Object.keys(upsellerNames).map(p=>{
+    const s=last[p];
+    if(!s)return `<tr><td>${upsellerNames[p]}</td><td><span class="badge warn">Nunca importado</span></td><td>—</td><td>—</td></tr>`;
+    const at=s.importado_em||s.at,late=Date.now()-new Date(at).getTime()>30*60*1000;
+    const done=[`${s.pedidos} pedidos`,s.novos?`${s.novos} novos`:'',s.atualizados?`${s.atualizados} atualizados`:'',s.conferidos?`${s.conferidos} conferidos com o Bling`:'',s.compradores?`${s.compradores} compradores`:'',s.compradores_conferidos?`${s.compradores_conferidos} compradores conferidos`:''].filter(Boolean).join(' · ');
+    const issues=[...(s.sem_loja||[]).map(n=>'Loja sem cadastro: '+n),(s.divergencias||[]).length?`${s.divergencias.length} pedidos diferentes do Bling`:'',(s.compradores_divergentes||[]).length?`${s.compradores_divergentes.length} compradores diferentes do Bling`:'',(s.sem_endereco_completo||[]).length?`${s.sem_endereco_completo.length} sem endereço completo`:''].filter(Boolean);
+    return `<tr><td>${upsellerNames[p]}</td><td><span class="badge ${late?'warn':'good'}">${late?'Atrasado':'Em dia'}</span><small>${esc(when(at))}</small></td><td>${esc(done)}</td><td>${issues.length?esc(issues.join(' · ')):'—'}</td></tr>`;
+  }).join('');
+  const form=`<form id="upseller-import" class="forms"><label>Plataforma<select name="plataforma"><option value="temu">Temu</option><option value="amazon">Amazon</option></select></label><label>Planilha exportada do UpSeller<input type="file" name="arquivo" accept=".xlsx" required></label><button>Importar planilha do UpSeller</button></form>`;
+  return panel('UpSeller: Temu e compradores da Amazon','O robô do outro PC manda a exportação do UpSeller a cada 10 minutos. "Atrasado": mais de 30 minutos sem importar. Se o robô parar, exporte no UpSeller (Exportar › Pedidos, com Comprador, Envio e Nota Fiscal) e importe aqui.',table(['Plataforma','Última importação','Resultado','Atenção'],rows)+form);
+}
+document.addEventListener('submit',async e=>{
+  if(e.target.getAttribute('id')!=='upseller-import')return;
+  e.preventDefault();
+  const form=e.target,button=form.querySelector('button');button.disabled=true;
+  message('Importando a planilha do UpSeller…');
+  try{
+    const response=await fetch('/api/erp-local/upseller-import',{method:'POST',headers:{'X-ERP-Local':'1'},body:new FormData(form)});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.message||'A importação não foi feita.');
+    await refresh();
+    message(`UpSeller: ${result.pedidos} pedidos, ${result.novos} novos, ${result.atualizados} atualizados, ${result.compradores} compradores.`);
+  }catch(err){message(err.message,true);}finally{button.disabled=false;}
+});
+function integrationsWithIngest(){return (window.erpConsulta?.active?blingEqualityPanel():'')+upsellerPanel()+integrationPage()+ingestPanel();}

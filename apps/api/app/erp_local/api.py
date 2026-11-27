@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import Body, FastAPI, Query, Request
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -87,6 +87,7 @@ def _plain(value):
 
 
 STATE_MODULES = (
+    "upseller_import",
     "bank_statements",
     "bling_compat",
     "bling_coverage",
@@ -298,6 +299,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             returns,
             sellers,
             stock_priority,
+            upseller_import,
             would,
         )
 
@@ -332,6 +334,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "logistics": logistics.snapshot(db),
                 "integration_registry": integration_registry.snapshot(db),
                 "ingest": native_ingest.snapshot(db),
+                "upseller_imports": upseller_import.latest(db),
                 "stock_priority": stock_priority.snapshot(db),
                 "access": access.snapshot(db),
                 "inbound": inbound_invoices.snapshot(db),
@@ -1048,6 +1051,19 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
     @app.post("/api/erp-local/channels/prepare-routes")
     def prepare_routes():
         return channels.prepare_routes(reference)
+
+    @app.post("/api/erp-local/upseller-import")
+    def upseller_intake(
+        arquivo: UploadFile = File(...),  # noqa: B008 - FastAPI's way to take a file
+        plataforma: str = Form(...),
+        filtro: str = Form(""),
+    ):
+        """UpSeller's export (Temu orders, Temu and Amazon buyers): the robot on the other PC or
+        a person from Integrações. Answers counts and order numbers only, nothing personal."""
+        from app.erp_local import upseller_import
+
+        content = arquivo.file.read(upseller_import.MAX_BYTES + 1)
+        return upseller_import.import_sheet(erp, content, plataforma.strip().casefold(), filtro)
 
     @app.post("/api/erp-local/channels/prepare-policies")
     def prepare_policies():

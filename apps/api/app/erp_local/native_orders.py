@@ -60,6 +60,10 @@ def validate(read):
         from app.erp_local.carrefour_orders import validate as validate_carrefour
 
         return validate_carrefour(read)
+    if isinstance(read, dict) and read.get("source") == "upseller_copy_v1_read":
+        from app.erp_local.upseller_import import validate as validate_upseller
+
+        return validate_upseller(read)
     if isinstance(read, dict) and read.get("source") == "bling_copy_v1_read":
         from app.erp_local.bling_copy_orders import validate as validate_copy
 

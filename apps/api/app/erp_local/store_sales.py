@@ -28,7 +28,7 @@ SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
 # the switch each store's own app is authorized and its key stays on the ERP server (Bling's key
 # belongs to Bling's app and leaves with it).
 COPY_NOTE = "Pela cópia do Bling: o ERP ainda não lê esta loja direto"
-STATUS_NAMES = {"BLING_COPY": "Cópia do Bling"}
+STATUS_NAMES = {"BLING_COPY": "Cópia do Bling", "UPSELLER_COPY": "Cópia do UpSeller"}
 
 
 def _copy_channel(store, number):
