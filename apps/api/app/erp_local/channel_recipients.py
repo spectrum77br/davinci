@@ -216,7 +216,7 @@ def from_bling_copy(row):
     since Amazon only opens the buyer to approved restricted roles. Bling keeps one name, the
     recipient's, which is also the buyer on the invoice."""
     name = _clean(row.get("name"))
-    return _finish(
+    result = _finish(
         {"name": name, "document": _digits(row.get("document"))},
         {
             "name": name,
@@ -230,6 +230,12 @@ def from_bling_copy(row):
             "phone": "",
         },
     )
+    # UpSeller's export (upseller_import): an address whose district could not be told apart is
+    # kept, but checked by a person before any invoice.
+    if row.get("address_review"):
+        result["missing"].append("endereço a conferir")
+        result["ready"] = False
+    return result
 
 
 READERS = {
@@ -239,6 +245,9 @@ READERS = {
     "magalu": from_magalu,
     "amazon": from_bling_copy,
     "temu": from_bling_copy,
+    # Shein and AliExpress come only from UpSeller's export, shaped as the copy of Bling.
+    "shein": from_bling_copy,
+    "aliexpress": from_bling_copy,
 }
 
 

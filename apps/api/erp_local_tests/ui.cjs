@@ -103,11 +103,12 @@ test('UpSeller: the last import of Temu and Amazon shows late or on time, and th
     amazon:{at:old,importado_em:old,pedidos:30,novos:0,atualizados:0,conferidos:0,compradores:5,compradores_conferidos:25,divergencias:[],compradores_divergentes:[],sem_loja:['Amazon Nova'],sem_endereco_completo:['701-1']},
   }});
   d.querySelector('nav [data-page=integrations]').click();
-  const panel=[...d.querySelectorAll('section.panel')].find(p=>p.textContent.includes('UpSeller: Temu e compradores da Amazon'));
+  const panel=[...d.querySelectorAll('section.panel')].find(p=>p.textContent.includes('UpSeller: Temu, Shein, AliExpress e compradores da Amazon'));
   assert.ok(panel,'painel do UpSeller em Integrações');
   const rows=[...panel.querySelectorAll('tbody tr')].map(tr=>tr.textContent);
   assert.match(rows[0],/Temu.*Em dia.*9 pedidos · 2 novos · 1 atualizados · 6 conferidos com o Bling.*1 pedidos diferentes do Bling/);
-  assert.match(rows[1],/Amazon.*Atrasado.*Loja sem cadastro: Amazon Nova · 1 sem endereço completo/);
+  assert.match(rows[1],/Amazon.*Atrasado.*Loja sem cadastro: Amazon Nova · 1 com endereço a conferir/);
+  assert.match(rows[2],/Shein.*Nunca importado/);
   const sent=[];
   dom.window.fetch=async (url,options)=>{
     if(options?.method==='POST'){sent.push({url,options});return {ok:true,status:200,json:async()=>({pedidos:3,novos:1,atualizados:0,compradores:1})};}

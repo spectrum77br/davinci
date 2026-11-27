@@ -156,6 +156,18 @@ def listing(db, query="", offset=0, limit=50, situation=None):
                     "bling_situation": _situation_id((bling.get(key) or {}).get("situation")),
                 }
             )
+    # 27/11/2026: ML Fioree is read straight since 25/11 and by the copy of Bling too; one sale.
+    direct = {
+        (s["channel"], s["number"])
+        for s in sales
+        if not bling_copy_order_probe.copied(s["channel"], s["store_id"])
+    }
+    sales = [
+        s
+        for s in sales
+        if not bling_copy_order_probe.copied(s["channel"], s["store_id"])
+        or (s["channel"], s["number"]) not in direct
+    ]
     sales.extend(_copied(db, bling))
     text = (query or "").strip().casefold()
     if text:

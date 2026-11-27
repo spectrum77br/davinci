@@ -96,7 +96,7 @@ function ingestPanel(){
 }
 // UpSeller (27/11/2026): Temu e o comprador da Amazon sem o Bling. O robô do outro PC manda a
 // exportação a cada ~10 min (docs/robo-upseller); se ele parar, alguém importa a mesma planilha aqui.
-const upsellerNames={temu:'Temu',amazon:'Amazon'};
+const upsellerNames={temu:'Temu',amazon:'Amazon',shein:'Shein',aliexpress:'AliExpress'};
 function upsellerPanel(){
   const last=state.upseller_imports||{};
   const rows=Object.keys(upsellerNames).map(p=>{
@@ -104,11 +104,12 @@ function upsellerPanel(){
     if(!s)return `<tr><td>${upsellerNames[p]}</td><td><span class="badge warn">Nunca importado</span></td><td>—</td><td>—</td></tr>`;
     const at=s.importado_em||s.at,late=Date.now()-new Date(at).getTime()>30*60*1000;
     const done=[`${s.pedidos} pedidos`,s.novos?`${s.novos} novos`:'',s.atualizados?`${s.atualizados} atualizados`:'',s.conferidos?`${s.conferidos} conferidos com o Bling`:'',s.compradores?`${s.compradores} compradores`:'',s.compradores_conferidos?`${s.compradores_conferidos} compradores conferidos`:''].filter(Boolean).join(' · ');
-    const issues=[...(s.sem_loja||[]).map(n=>'Loja sem cadastro: '+n),(s.divergencias||[]).length?`${s.divergencias.length} pedidos diferentes do Bling`:'',(s.compradores_divergentes||[]).length?`${s.compradores_divergentes.length} compradores diferentes do Bling`:'',(s.sem_endereco_completo||[]).length?`${s.sem_endereco_completo.length} sem endereço completo`:''].filter(Boolean);
+    const n=k=>s[k+'_total']??(s[k]||[]).length;
+    const issues=[...(s.sem_loja||[]).map(x=>'Loja sem cadastro: '+x),n('divergencias')?`${n('divergencias')} pedidos diferentes do Bling`:'',n('compradores_divergentes')?`${n('compradores_divergentes')} compradores diferentes do Bling`:'',n('sem_endereco_completo')?`${n('sem_endereco_completo')} com endereço a conferir`:''].filter(Boolean);
     return `<tr><td>${upsellerNames[p]}</td><td><span class="badge ${late?'warn':'good'}">${late?'Atrasado':'Em dia'}</span><small>${esc(when(at))}</small></td><td>${esc(done)}</td><td>${issues.length?esc(issues.join(' · ')):'—'}</td></tr>`;
   }).join('');
-  const form=`<form id="upseller-import" class="forms"><label>Plataforma<select name="plataforma"><option value="temu">Temu</option><option value="amazon">Amazon</option></select></label><label>Planilha exportada do UpSeller<input type="file" name="arquivo" accept=".xlsx" required></label><button>Importar planilha do UpSeller</button></form>`;
-  return panel('UpSeller: Temu e compradores da Amazon','O robô do outro PC manda a exportação do UpSeller a cada 10 minutos. "Atrasado": mais de 30 minutos sem importar. Se o robô parar, exporte no UpSeller (Exportar › Pedidos, com Comprador, Envio e Nota Fiscal) e importe aqui.',table(['Plataforma','Última importação','Resultado','Atenção'],rows)+form);
+  const form=`<form id="upseller-import" class="forms"><label>Plataforma<select name="plataforma"><option value="temu">Temu</option><option value="amazon">Amazon</option><option value="shein">Shein</option><option value="aliexpress">AliExpress</option></select></label><label>Planilha exportada do UpSeller<input type="file" name="arquivo" accept=".xlsx" required></label><button>Importar planilha do UpSeller</button></form>`;
+  return panel('UpSeller: Temu, Shein, AliExpress e compradores da Amazon','O robô do outro PC manda a exportação do UpSeller a cada 10 minutos. "Atrasado": mais de 30 minutos sem importar. Se o robô parar, exporte no UpSeller (Exportar › Pedidos, com Comprador, Envio e Nota Fiscal) e importe aqui.',table(['Plataforma','Última importação','Resultado','Atenção'],rows)+form);
 }
 document.addEventListener('submit',async e=>{
   if(e.target.getAttribute('id')!=='upseller-import')return;

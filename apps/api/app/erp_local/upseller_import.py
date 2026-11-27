@@ -1,20 +1,25 @@
-"""Orders and buyers from UpSeller's export, so Temu and Amazon stop depending on Bling.
+"""Orders and buyers from UpSeller's export, so Temu, Shein, AliExpress and Amazon stop depending on
+Bling.
 
-UpSeller already has the four Temu stores and the Amazon stores connected, with the buyer whole
-(tested 27/11/2026 against DaVinci's copy of Bling: name, CPF, CEP, house number and district
-equal on 3 Temu and 3 Amazon orders). A robot on another PC exports from UpSeller every few
-minutes and sends the spreadsheet here (docs/robo-upseller/PROMPT_ROBO_UPSELLER.md); a person can
-send the same file from Integrações when the robot is down.
+UpSeller already has these stores connected, with the buyer whole (tested 27/11/2026 against
+DaVinci's copy of Bling: name, CPF, CEP, house number and district equal on 3 Temu and 3 Amazon
+orders). A robot on another PC (Mac mini de Jesse) exports from UpSeller every 10 minutes and sends
+the spreadsheet here (docs/robo-upseller/PROMPT_ROBO_UPSELLER.md); a person can send the same file
+from Integrações when the robot is down.
 
-- Temu: an order the ERP does not have comes in as a read of its own source, in the same stores
-  the copy of Bling uses, so the two never make two sales of one order. While Bling still owns
-  the stores, an order the copy already brought is only compared.
+- Temu, Shein, AliExpress: an order the ERP does not have comes in as a read of its own source.
+  Temu goes in the same stores the copy of Bling uses, so the two never make two sales of one
+  order; while Bling still owns the stores, an order the copy already brought is only compared.
+  Shein and AliExpress only come from here.
 - Amazon: the orders come straight from Amazon; only the buyer comes from here.
-- The buyer goes through recipient_capture, sealed like any other. One already captured (from
-  Bling) is compared, field by field, never overwritten here.
+- Everything UpSeller sends about each order, every column exactly as it came, is kept sealed
+  (pii.seal, with the channel's retention: Amazon 30 days), owner's request of 27/11/2026.
+- The buyer goes through recipient_capture, sealed like any other, always: when the address could
+  not be split for sure it is kept marked "endereço a conferir" (not ready for an invoice). One
+  already captured (from Bling) is compared, field by field, never overwritten here.
 
 The spreadsheet is read in memory and never written to disk; nothing personal is logged or
-returned, only order numbers and field names.
+returned, only order numbers, product codes and field names.
 """
 
 import hashlib
@@ -26,18 +31,27 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from app.erp_local import bling_copy_order_probe, channel_recipients, recipient_capture
+from app.erp_local import bling_copy_order_probe, channel_recipients, pii, recipient_capture
 from app.erp_local.core import ERPError, dumps
 
 SOURCE = "upseller_copy_v1_read"
 LIMIT = 2000
 MAX_BYTES = 10 * 1024 * 1024
 BRT = ZoneInfo("America/Sao_Paulo")
-PLATFORMS = {"temu": "Temu", "amazon": "Amazon"}
-NUMBERS = {"temu": bling_copy_order_probe.NUMBERS["temu"], "amazon": recipient_capture.AMAZON_ID}
-# UpSeller's store name → the ERP store. Temu: the stores of the copy of Bling (Bling store
-# codes); Amazon: DaVinci's integrations. A name not here is matched by the store register's own
-# name ("Temu Barbosa" ↔ "Temu Barbosa", "Amazon KFA" ↔ "kfa"), else it is reported, not guessed.
+PLATFORMS = {"temu": "Temu", "amazon": "Amazon", "shein": "Shein", "aliexpress": "AliExpress"}
+# The ones whose orders come in from here; Amazon's come from Amazon itself.
+ORDER_PLATFORMS = {"temu", "shein", "aliexpress"}
+NUMBERS = {
+    "temu": bling_copy_order_probe.NUMBERS["temu"],
+    "amazon": recipient_capture.AMAZON_ID,
+    # GSH + 12 letters and digits (27/11/2026: KFA's orders); AliExpress: 16 digits.
+    "shein": re.compile(r"[A-Za-z]{3}[A-Za-z0-9]{12}"),
+    "aliexpress": re.compile(r"\d{16}"),
+}
+# UpSeller's store name → the ERP store. Temu, Shein, AliExpress: by Bling store code (no
+# integration in DaVinci; Temu shares the stores of the copy of Bling). Amazon: DaVinci's
+# integrations. A name not here is matched by the store register's own name, else it is reported,
+# never guessed. UpSeller calls the Shein store "KFA" and the AliExpress one "Shopee VIta".
 STORES = {
     "temu": {
         "temu barbosa": "205925390",
@@ -52,6 +66,26 @@ STORES = {
         "amazon vr": "049acd9a-3b98-479c-8419-fbffbf574cd0",
         "amazon nexus": "e5d6306b-d18f-47fe-af02-54cd26c5361d",
     },
+    "shein": {
+        "kfa": "204808793",
+        "shein kfa": "204808793",
+        "kia": "206080480",
+        "shein kia": "206080480",
+    },
+    "aliexpress": {
+        "shopee vita": "205295441",
+        "aliexpress vita": "205295441",
+        "vita": "205295441",
+    },
+}
+STORE_NAMES = {
+    "205925390": "Temu Barbosa",
+    "206288651": "Temu JLAS",
+    "206288703": "Temu Atv",
+    "206288707": "Temu Eron",
+    "204808793": "Shein KFA",
+    "206080480": "Shein Kia",
+    "205295441": "AliExpress Vita",
 }
 ORDER = "Nº de Pedido da Plataforma"
 REQUIRED = {
@@ -78,17 +112,81 @@ TIMES = (
     "Hora de Envio",
     "Horário da Retirada",
 )
-COMPLEMENT = re.compile(
-    r"\b(ap|apt|apto|apartamento|casa|cs|bl|bloco|sala|sl|lote|lt|quadra|qd|fundos|fds|"
-    r"andar|conj|conjunto|cond|condominio|km|loja|galpao|box|torre|edificio|ed)\b",
-    re.IGNORECASE,
-)
+# Words that open a complement ("apto 12", "bl 3", "qd 4 lt 9", "casa", "fundos"). District words
+# (jardim, vila, conjunto, residencial…) are not here: in Brazil they name the district.
+COMPLEMENT_WORDS = {
+    "ap",
+    "apt",
+    "apto",
+    "apartamento",
+    "casa",
+    "cs",
+    "bl",
+    "bloco",
+    "sobrado",
+    "qd",
+    "quadra",
+    "lt",
+    "lote",
+    "torre",
+    "sala",
+    "sl",
+    "loja",
+    "fundos",
+    "fds",
+    "andar",
+    "cond",
+    "condominio",
+    "ed",
+    "edificio",
+    "km",
+    "box",
+    "galpao",
+}
+NUMBER_WORDS = {"n", "no", "nº", "n°", "nro", "numero"}
+VALUE = re.compile(r"^(\d{1,6}[a-z]?|[a-z]|º|°|\d{1,4}º|\d{1,4}°)$")
+HOUSE = re.compile(r"^\d{1,6}[a-z]?$")
+# Whatever UpSeller sends about an order that is not personal, kept on the order read too.
+SHIPPING = {"method": "Método de Envio", "tracking": "Nº de Rastreio", "label": "Etiqueta"}
+INVOICE = {
+    "key": "Chave da Nota Fiscal",
+    "number": "Número da NF-e",
+    "series": "Número da Série",
+}
+VALUES = {
+    "commission": "Comissão Total",
+    "buyer_freight": "Frete do Comprador",
+    "discounts": "Descontos e Cupons",
+}
+LISTING = {
+    "name": "Nome do Anúncio",
+    "id": "ID do Anúncio",
+    "sku": "SKU",
+    "variation": "Variação",
+    "variant_id": "ID da Variante",
+    "price": "Preço de Produto",
+    "quantity": "Qtd. do Produto",
+    "ncm": "NCM",
+    "origin": "Origem",
+    "unit": "Unidade",
+}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS upseller_imports (
  id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, imported_at TEXT NOT NULL,
  summary TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS upseller_orders (
+ platform TEXT NOT NULL, store TEXT NOT NULL, number TEXT NOT NULL, digest TEXT NOT NULL,
+ sealed TEXT NOT NULL, state TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+ PRIMARY KEY (platform, store, number));
 """
 KEEP_IMPORTS = 500
+LISTS = (
+    "divergencias",
+    "compradores_divergentes",
+    "sem_endereco_completo",
+    "sem_dados_no_upseller",
+    "sem_loja",
+)
 
 
 def _text(value):
@@ -98,6 +196,27 @@ def _text(value):
 def _key(value):
     plain = unicodedata.normalize("NFKD", _text(value)).encode("ascii", "ignore").decode()
     return plain.casefold()
+
+
+def _word(token):
+    return _key(token).strip(".,;:()-/'\"")
+
+
+def _column(row, name):
+    """A column by its name, with or without UpSeller's trailing asterisk ("NCM*")."""
+    value = row.get(name)
+    return row.get(name + "*") if value in (None, "") else value
+
+
+def _cell(value):
+    """A cell as UpSeller shows it."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%d/%m/%Y %H:%M:%S")
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _money(value):
@@ -168,65 +287,145 @@ def read_sheet(content):
     return head, out
 
 
+def _complements(tokens):
+    """Pull "apto 12", "bl 3", "qd 4 lt 9", "casa" out of tokens; what is left is the rest."""
+    found, rest, index, joined = [], [], 0, False
+    while index < len(tokens):
+        if _word(tokens[index]) in COMPLEMENT_WORDS:
+            group = [tokens[index]]
+            index += 1
+            while index < len(tokens) and VALUE.match(_word(tokens[index]) or "-"):
+                group.append(tokens[index])
+                index += 1
+            # "bl 3 ap 4", "qd 9 lt 9": side by side they are one complement.
+            if joined:
+                found[-1] += " " + " ".join(group)
+            else:
+                found.append(" ".join(group))
+            joined = True
+            continue
+        rest.append(tokens[index])
+        joined = False
+        index += 1
+    return found, rest
+
+
+def _clean_tokens(tokens):
+    text = " ".join(tokens).strip(" ,;:-/")
+    return re.sub(r"\s+([,;])", r"\1", text)
+
+
 def split_address(platform, row):
     """Street, number, complement and district apart, as the invoice needs them.
 
     Temu: the district comes in its column; the number column is masked, the number is in
-    "Endereço 1" ("Rua X, 123"). Amazon: number and district columns come empty; the number is in
-    "Endereço 1" or alone in "Endereço 2", and the district in the address lines.
+    "Endereço 1". Amazon: number and district columns come empty (608 orders of 27/11/2026); the
+    number is at the end of "Endereço 1" ("rua X 120", sometimes "rua X, 120" or "numero 120") or
+    alone in "Endereço 2", and "Endereço 2" carries the complement and the district together
+    ("apto 12 centro", "casa vila nova", "bl 3 ap 4 jardim X"). "certain" is false when no district
+    could be told apart: the buyer is kept, marked to be checked.
     """
     line1, line2 = _text(row.get("Endereço 1")), _text(row.get("Endereço 2"))
-    given_number = _text(row.get("Número"))
+    given = _text(row.get("Número"))
     district = _text(row.get("Bairro"))
-    complement_parts = []
-    street, number = line1, ""
-    if (
-        given_number
-        and "*" not in given_number
-        and re.fullmatch(r"\d{1,6}[A-Za-z]?|S/?N", given_number, re.I)
-    ):
-        number = given_number.upper() if given_number.casefold() in {"s/n", "sn"} else given_number
-    # "Rua X, 123 - Centro" / "Rua X, 123, apto 4"
-    if not district and " - " in street:
-        street, _, tail = street.rpartition(" - ")
-        if tail and not re.search(r"\d", tail) and not COMPLEMENT.search(tail):
-            district = tail
+    number, complements, tails = "", [], []
+    if given and "*" not in given and re.fullmatch(r"\d{1,6}[A-Za-z]?", given):
+        number = given
+    elif _key(given) in {"s/n", "sn"}:
+        number = "S/N"
+    # "bairro: X" anywhere names the district.
+    for line in (line1, line2):
+        named = re.search(r"\bbairro\s*:?\s*([^,;]+)", line, re.IGNORECASE)
+        if named and not district:
+            district = named.group(1).strip(" -")
+    line1 = re.sub(r",?\s*\bbairro\s*:?\s*[^,;]+", "", line1, flags=re.IGNORECASE).strip()
+    line2 = re.sub(r",?\s*\bbairro\s*:?\s*[^,;]+", "", line2, flags=re.IGNORECASE).strip()
+    # "Rua X - Vila Nova": a last part with no digit and no complement word is the district.
+    if not district and " - " in line1:
+        head_part, _, tail_part = line1.rpartition(" - ")
+        words = tail_part.split()
+        if (
+            words
+            and not re.search(r"\d", tail_part)
+            and not any(_word(w) in COMPLEMENT_WORDS for w in words)
+        ):
+            district, line1 = tail_part.strip(), head_part.strip()
+    # "s/n", "sn", "x / n" say there is no number.
+    no_number = re.search(r"(^|\s)(s\s*/\s*n|sn|/\s*n)(\s|,|$)", line1, re.IGNORECASE)
+    if no_number:
+        line1 = (line1[: no_number.start()] + " " + line1[no_number.end() :]).strip(" ,")
+        number = number or "S/N"
+    street = line1
+    comma = re.search(r",\s*(?:(?:n[º°o.]?|numero|número|nro)\s*)?(\d{1,6}[A-Za-z]?)\b(.*)$", line1)
+    marked = re.search(r"\b(?:n[º°o.]|numero|número|nro)\s*(\d{1,6}[A-Za-z]?)\b(.*)$", line1, re.I)
+    if comma:
+        number = number or comma.group(1)
+        street = line1[: comma.start()]
+        tails.extend(p for p in comma.group(2).split(",") if p.strip())
+    elif marked:
+        number = number or marked.group(1)
+        street = line1[: marked.start()]
+        if marked.group(2).strip():
+            tails.append(marked.group(2))
+    else:
+        tokens = line1.split()
+        chosen = None
+        for index, token in enumerate(tokens):
+            if (
+                index
+                and HOUSE.match(_word(token))
+                and _word(tokens[index - 1]) not in COMPLEMENT_WORDS
+                and any(re.search(r"[A-Za-z]", t) for t in tokens[:index])
+            ):
+                chosen = index
+        if chosen is not None:
+            number = number or tokens[chosen]
+            street = " ".join(tokens[:chosen])
+            if tokens[chosen + 1 :]:
+                tails.append(" ".join(tokens[chosen + 1 :]))
         else:
-            street = f"{street} - {tail}"
-    found = re.search(r",\s*(\d{1,6}[A-Za-z]?)\b(.*)$", street)
-    if found:
-        if not number:
-            number = found.group(1)
-        rest = found.group(2).strip(" ,-")
-        street = street[: found.start()].strip(" ,-")
-        if rest:
-            complement_parts.append(rest)
-    elif not number:
-        trailing = re.search(r"\s(\d{1,6}[A-Za-z]?)$", street)
-        if trailing and re.search(r"[A-Za-z]", street[: trailing.start()]):
-            number = trailing.group(1)
-            street = street[: trailing.start()].strip(" ,-")
+            found, rest = _complements(tokens)
+            complements.extend(found)
+            street = " ".join(rest)
+    for tail in tails:
+        found, rest = _complements(tail.split())
+        complements.extend(found)
+        if rest and not district:
+            district = _clean_tokens(rest)
+        elif rest:
+            complements.append(_clean_tokens(rest))
     if line2:
-        if re.fullmatch(r"\d{1,6}[A-Za-z]?", line2) and not number:
-            number = line2
-        elif district or COMPLEMENT.search(line2) or re.search(r"\d", line2):
-            complement_parts.append(line2)
+        tokens = line2.split()
+        if len(tokens) == 1 and HOUSE.match(_word(tokens[0])) and not number:
+            number = tokens[0]
         else:
-            district = line2
-    complete = bool(street and district)
+            found, rest = _complements(tokens)
+            complements.extend(found)
+            # A number opening what is left is an apartment or the house, never the district.
+            while rest and HOUSE.match(_word(rest[0])):
+                if number:
+                    complements.append(rest.pop(0))
+                else:
+                    number = rest.pop(0)
+            rest_text = _clean_tokens(rest)
+            if rest_text and not district:
+                district = rest_text
+            elif rest_text:
+                complements.append(rest_text)
+    street = street.strip(" ,;-")
     return {
         "street": street,
         "number": number or "S/N",
-        "complement": ", ".join(p for p in complement_parts if p),
-        "district": district,
-        "complete": complete,
+        "complement": ", ".join(c.strip(" ,;-") for c in complements if c.strip(" ,;-")),
+        "district": district.strip(" ,;-"),
+        "certain": bool(street and district.strip(" ,;-")),
     }
 
 
 def buyer_row(platform, row):
     """The buyer as DaVinci's copy of Bling shapes it (channel_recipients.from_bling_copy)."""
     address = split_address(platform, row)
-    return {
+    data = {
         "name": _text(row.get("Nome do Destinatário")),
         "document": re.sub(r"\D", "", _text(row.get("ID da Taxa"))),
         "street": address["street"],
@@ -236,7 +435,17 @@ def buyer_row(platform, row):
         "city": _text(row.get("Cidade")),
         "state": _text(row.get("Estado")),
         "postal_code": re.sub(r"\D", "", _text(row.get("CEP"))),
-    }, address["complete"]
+    }
+    if not address["certain"]:
+        data["address_review"] = True
+    return data, address
+
+
+def _has_buyer(row):
+    return any(
+        _text(row.get(c))
+        for c in ("Nome do Destinatário", "ID da Taxa", "Endereço 1", "Endereço 2", "CEP")
+    )
 
 
 def _cancelled(row):
@@ -273,6 +482,27 @@ def store_for(db, platform, name):
     return None
 
 
+def _ensure_store(db, platform, store, now):
+    """Stores read only from here (Shein, AliExpress; Temu if the copy has not adopted it yet)
+    enter the store register in review, like a store DaVinci connects (adopt_new_stores)."""
+    db.execute(
+        "INSERT INTO store_policies VALUES (?,?,'identity_review',?,?) "
+        "ON CONFLICT(channel,store) DO UPDATE SET status='identity_review',updated_at=? "
+        "WHERE store_policies.status='inactive'",
+        (
+            platform,
+            store,
+            dumps({"adopted_from_upseller": True, "name": STORE_NAMES.get(store, store)}),
+            now,
+            now,
+        ),
+    )
+
+
+def _strings(row, columns):
+    return {key: _cell(_column(row, column))[:500] for key, column in columns.items()}
+
+
 def _order_read(number, rows):
     """The order in the strict shape of a native read (validate)."""
     first = rows[0]
@@ -281,27 +511,41 @@ def _order_read(number, rows):
     if created is None:
         raise ERPError("upseller_order", f"Pedido {number} sem hora do pedido.")
     lines = []
-    quantities = []
     for row in rows:
-        sku = _text(row.get("SKU (Armazém)")) or None
+        sku = _text(row.get("SKU (Armazém)")) or _text(_column(row, "SKU")) or None
+        raw_quantity = row.get("Quantidade de Produtos")
+        if raw_quantity in (None, ""):
+            raw_quantity = _column(row, "Qtd. do Produto")
         try:
-            quantity = int(Decimal(str(row.get("Quantidade de Produtos") or 0)))
+            quantity = max(int(Decimal(str(raw_quantity or 0))), 0)
         except InvalidOperation:
             raise ERPError("upseller_order", f"Pedido {number} com quantidade ilegível.") from None
-        quantities.append(max(quantity, 0))
-        lines.append({"seller_sku": sku[:120] if sku else None, "quantity": max(quantity, 0)})
+        price = _column(row, "Preço de Produto")
+        lines.append(
+            {
+                "seller_sku": sku[:120] if sku else None,
+                "quantity": quantity,
+                "price": _money(price) if price not in (None, "") else None,
+                "listing": _strings(row, LISTING),
+            }
+        )
     products = _money(first.get("Valor Total de Produtos"))
     shared = [_money(r.get("Valor rateado por produto")) for r in rows]
-    total_quantity = sum(quantities) or 1
+    total_quantity = sum(line["quantity"] for line in lines) or 1
     items = []
     for index, line in enumerate(lines):
-        if any(shared):
-            value = shared[index]
-        elif len(lines) == 1:
-            value = products
+        if line["price"] is not None:
+            unit = line["price"]
         else:
-            value = (products * line["quantity"] / total_quantity).quantize(Decimal("0.01"))
-        unit = (value / line["quantity"]).quantize(Decimal("0.01")) if line["quantity"] else value
+            if any(shared):
+                value = shared[index]
+            elif len(lines) == 1:
+                value = products
+            else:
+                value = (products * line["quantity"] / total_quantity).quantize(Decimal("0.01"))
+            unit = (
+                (value / line["quantity"]).quantize(Decimal("0.01")) if line["quantity"] else value
+            )
         items.append(
             {
                 "line_id": str(index + 1),
@@ -309,6 +553,7 @@ def _order_read(number, rows):
                 "quantity": line["quantity"],
                 "unit_price": _amount(unit),
                 "discount": _amount(Decimal("0.00")),
+                "listing": line["listing"],
             }
         )
     return {
@@ -320,6 +565,9 @@ def _order_read(number, rows):
         "upseller_status": _text(first.get("Estado do Pedido"))[:60],
         "total": _amount(_money(first.get("Valor do Pedido"))),
         "products_total": _amount(products),
+        "values": {k: f"{_money(first.get(c)):.2f}" for k, c in VALUES.items()},
+        "shipping": _strings(first, SHIPPING),
+        "invoice": _strings(first, INVOICE),
         "items": items,
     }
 
@@ -341,19 +589,23 @@ def _known(db, platform, store, number):
     return known
 
 
-def _same_order(a, b):
-    def skus(order):
-        return sorted(
-            (str(i.get("seller_sku") or ""), int(i.get("quantity") or 0))
-            for i in order.get("items") or []
-        )
+def _skus(order):
+    from app.erp_local.bling_mirror import family
 
+    out = {}
+    for item in order.get("items") or []:
+        code = family(str(item.get("seller_sku") or "").strip()) or "?"
+        out[code] = out.get(code, 0) + int(item.get("quantity") or 0)
+    return sorted(out.items())
+
+
+def _same_order(mine, theirs):
+    """Fields that differ from the copy of Bling, with both item lists (product codes only)."""
     fields = []
-    if (str(a.get("status")).upper() == "CANCELLED") != (
-        str(b.get("status")).upper() == "CANCELLED"
-    ):
+    cancelled = str(mine.get("status")).upper() == "CANCELLED"
+    if cancelled != (str(theirs.get("status")).upper() == "CANCELLED"):
         fields.append("cancelamento")
-    if skus(a) != skus(b):
+    if _skus(mine) != _skus(theirs):
         fields.append("itens")
     return fields
 
@@ -365,17 +617,69 @@ def _compare_buyer(stored, projection):
         ("recipient", ("street", "number", "district", "city", "state", "postal_code")),
     ):
         for key in keys:
-            mine = _key((projection.get(part) or {}).get(key))
-            theirs = _key((stored.get(part) or {}).get(key))
-            if key in {"number"}:
-                mine, theirs = mine.replace(" ", ""), theirs.replace(" ", "")
+            mine = _key((projection.get(part) or {}).get(key)).replace(" ", "")
+            theirs = _key((stored.get(part) or {}).get(key)).replace(" ", "")
             if mine != theirs:
                 fields.append(f"{part}.{key}")
     return fields
 
 
+def _keep_raw(erp, platform, store, number, head, rows, moment):
+    """Every column UpSeller sent about this order, as it came, sealed. True when new or changed."""
+    value = {"columns": head, "rows": [[_cell(r.get(c)) for c in head] for r in rows]}
+    digest = hashlib.sha256(dumps(value).encode()).hexdigest()
+    state = _text(rows[0].get("Estado do Pedido"))[:60]
+    with erp.connection() as db:
+        db.executescript(SCHEMA)
+        old = db.execute(
+            "SELECT digest FROM upseller_orders WHERE platform=? AND store=? AND number=?",
+            (platform, store, number),
+        ).fetchone()
+        if old and old[0] == digest:
+            db.execute(
+                "UPDATE upseller_orders SET last_seen=? WHERE platform=? AND store=? AND number=?",
+                (moment, platform, store, number),
+            )
+            db.commit()
+            return False
+        sealed = pii.seal(db, f"upseller:{platform}:{store}:{number}", platform, value)
+        db.execute(
+            "INSERT INTO upseller_orders VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(platform,store,number) DO UPDATE SET digest=excluded.digest,"
+            "sealed=excluded.sealed,state=excluded.state,last_seen=excluded.last_seen",
+            (platform, store, number, digest, dumps(sealed), state, moment, moment),
+        )
+        db.commit()
+    return True
+
+
+def raw_order(db, platform, store, number):
+    """The order as UpSeller sent it ({columns, rows}), opened; None when absent or purged."""
+    try:
+        row = db.execute(
+            "SELECT sealed FROM upseller_orders WHERE platform=? AND store=? AND number=?",
+            (platform, store, number),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - table appears with the first import
+        return None
+    if not row:
+        return None
+    try:
+        return pii.open_value(db, json.loads(row[0]))
+    except ERPError:
+        return None
+
+
 def validate(read):
-    """Strict shape of a read made from UpSeller's export (Temu orders)."""
+    """Strict shape of a read made from UpSeller's export (Temu, Shein, AliExpress orders)."""
+
+    def strings(value, keys):
+        if not isinstance(value, dict) or set(value) != set(keys):
+            raise ValueError
+        for item in value.values():
+            if not isinstance(item, str) or len(item) > 500:
+                raise ValueError
+
     try:
         if (
             not isinstance(read, dict)
@@ -397,13 +701,14 @@ def validate(read):
             or read["external_business_writes"] is not False
             or read["limit_per_account"] != LIMIT
             or not isinstance(read["accounts"], list)
-            or not 1 <= len(read["accounts"]) <= 4
+            or not 1 <= len(read["accounts"]) <= 12
         ):
             raise ValueError
         captured = datetime.fromisoformat(read["captured_at"])
         if captured.tzinfo is None or captured > datetime.now(UTC) + timedelta(minutes=5):
             raise ValueError
         for account in read["accounts"]:
+            platform = account.get("platform")
             if (
                 set(account)
                 != {
@@ -416,8 +721,8 @@ def validate(read):
                     "orders",
                     "has_more",
                 }
-                or account["platform"] != "temu"
-                or account["integration_id"] not in STORES["temu"].values()
+                or platform not in ORDER_PLATFORMS
+                or account["integration_id"] not in STORES[platform].values()
                 or account["state"] != "read_ok"
                 or account["has_more"] is not False
                 or not isinstance(account["orders"], list)
@@ -435,10 +740,13 @@ def validate(read):
                     "upseller_status",
                     "total",
                     "products_total",
+                    "values",
+                    "shipping",
+                    "invoice",
                     "items",
                 }:
                     raise ValueError
-                if not NUMBERS["temu"].fullmatch(order["id"]) or order["id"] in seen:
+                if not NUMBERS[platform].fullmatch(order["id"]) or order["id"] in seen:
                     raise ValueError
                 seen.add(order["id"])
                 if order["status"] not in {"UPSELLER_COPY", "CANCELLED"}:
@@ -447,13 +755,24 @@ def validate(read):
                 updated = datetime.fromisoformat(order["updated_at"])
                 if created.tzinfo is None or created > updated:
                     raise ValueError
+                strings(order["values"], VALUES)
+                strings(order["shipping"], SHIPPING)
+                strings(order["invoice"], INVOICE)
                 if not isinstance(order["items"], list) or not 0 < len(order["items"]) <= 200:
                     raise ValueError
                 for item in order["items"]:
-                    if set(item) != {"line_id", "seller_sku", "quantity", "unit_price", "discount"}:
+                    if set(item) != {
+                        "line_id",
+                        "seller_sku",
+                        "quantity",
+                        "unit_price",
+                        "discount",
+                        "listing",
+                    }:
                         raise ValueError
                     if type(item["quantity"]) is not int or not 0 <= item["quantity"] <= 1000000:
                         raise ValueError
+                    strings(item["listing"], LISTING)
     except (ValueError, KeyError, TypeError, AttributeError):
         raise ERPError(
             "native_read_invalid", "Leitura nativa fora da projeção permitida."
@@ -464,9 +783,11 @@ def import_sheet(erp, content, platform, filtro="", now=None):
     from app.erp_local import bling_mirror, native_orders
 
     if platform not in PLATFORMS:
-        raise ERPError("upseller_platform", "Plataforma do UpSeller: temu ou amazon.")
+        raise ERPError(
+            "upseller_platform", "Plataforma do UpSeller: temu, amazon, shein ou aliexpress."
+        )
     head, rows = read_sheet(content)
-    if platform == "temu":
+    if platform in ORDER_PLATFORMS:
         missing = sorted(REQUIRED_ORDERS - set(head))
         if missing:
             raise ERPError(
@@ -474,6 +795,7 @@ def import_sheet(erp, content, platform, filtro="", now=None):
                 "Faltam colunas na exportação do UpSeller: " + ", ".join(missing),
             )
     moment = (now or datetime.now(UTC)).replace(microsecond=0)
+    stamp = moment.isoformat()
     orders, others = group(platform, rows)
     summary = {
         "plataforma": platform,
@@ -486,13 +808,15 @@ def import_sheet(erp, content, platform, filtro="", now=None):
         "conferidos": 0,
         "divergencias": [],
         "cancelados": 0,
+        "dados_gravados": 0,
         "compradores": 0,
         "compradores_conferidos": 0,
         "compradores_divergentes": [],
         "sem_loja": [],
         "sem_endereco_completo": [],
+        "sem_dados_no_upseller": [],
         "filtro": _text(filtro)[:200],
-        "importado_em": moment.isoformat(),
+        "importado_em": stamp,
     }
     accounts = {}
     with erp.connection() as db:
@@ -500,23 +824,32 @@ def import_sheet(erp, content, platform, filtro="", now=None):
         for number, order in sorted(orders.items()):
             name = _text(order["rows"][0].get("Nome da Loja no UpSeller"))
             store = store_for(db, platform, name)
-            if platform == "temu" and store not in STORES["temu"].values():
-                store = None  # Temu only in the stores of the copy of Bling (one sale per order)
+            if platform in ORDER_PLATFORMS and store not in STORES[platform].values():
+                store = None  # only the known stores: one sale per order, never a guessed store
             if store is None:
                 if name not in summary["sem_loja"]:
                     summary["sem_loja"].append(name)
                 continue
             order["store"] = store
-            if platform != "temu":
+            if platform not in ORDER_PLATFORMS:
                 continue
+            _ensure_store(db, platform, store, stamp)
             read = _order_read(number, order["rows"])
             summary["cancelados"] += read["status"] == "CANCELLED"
             known = _known(db, platform, store, number)
             if "bling_copy_v1_read" in known and not switched:
                 summary["conferidos"] += 1
-                fields = _same_order(read, known["bling_copy_v1_read"][1])
+                theirs = known["bling_copy_v1_read"][1]
+                fields = _same_order(read, theirs)
                 if fields:
-                    summary["divergencias"].append({"pedido": number, "campos": fields})
+                    summary["divergencias"].append(
+                        {
+                            "pedido": number,
+                            "campos": fields,
+                            "upseller": _skus(read),
+                            "bling": _skus(theirs),
+                        }
+                    )
                 continue
             previous = known.get(SOURCE)
             if previous:
@@ -525,14 +858,15 @@ def import_sheet(erp, content, platform, filtro="", now=None):
                     summary["iguais"] += 1
                     continue
                 last = datetime.fromisoformat(previous[0])
-                stamp = datetime.fromisoformat(read["updated_at"])
-                read["updated_at"] = max(stamp, last + timedelta(seconds=1)).isoformat()
+                changed = datetime.fromisoformat(read["updated_at"])
+                read["updated_at"] = max(changed, last + timedelta(seconds=1)).isoformat()
                 if datetime.fromisoformat(read["updated_at"]) > moment:
                     moment = datetime.fromisoformat(read["updated_at"])
                 summary["atualizados"] += 1
             else:
                 summary["novos"] += 1
-            accounts.setdefault(store, []).append(read)
+            accounts.setdefault((platform, store), []).append(read)
+        db.commit()
     if accounts:
         captured = moment.isoformat()
         native_orders.import_read(
@@ -548,7 +882,7 @@ def import_sheet(erp, content, platform, filtro="", now=None):
                 "accounts": [
                     {
                         "integration_id": store,
-                        "platform": "temu",
+                        "platform": channel,
                         "checked_at": captured,
                         "date_from": min(o["created_at"] for o in found),
                         "date_to": captured,
@@ -556,7 +890,7 @@ def import_sheet(erp, content, platform, filtro="", now=None):
                         "orders": found,
                         "has_more": False,
                     }
-                    for store, found in sorted(accounts.items())
+                    for (channel, store), found in sorted(accounts.items())
                 ],
             },
         )
@@ -564,8 +898,20 @@ def import_sheet(erp, content, platform, filtro="", now=None):
         store = order.get("store")
         if not store:
             continue
-        row, complete = buyer_row(platform, order["rows"][0])
-        if not complete:
+        try:
+            summary["dados_gravados"] += _keep_raw(
+                erp, platform, store, number, head, order["rows"], stamp
+            )
+        except ERPError as error:
+            if error.code not in {"pii_key_missing", "pii_purged"}:
+                raise
+        first = order["rows"][0]
+        if not _has_buyer(first):
+            # Amazon keeps the buyer of unpaid and cancelled sales from everyone (UpSeller too).
+            summary["sem_dados_no_upseller"].append(number)
+            continue
+        row, address = buyer_row(platform, first)
+        if not address["certain"]:
             summary["sem_endereco_completo"].append(number)
         projection = channel_recipients.from_bling_copy(row)
         with erp.connection() as db:
@@ -576,13 +922,10 @@ def import_sheet(erp, content, platform, filtro="", now=None):
             if fields:
                 summary["compradores_divergentes"].append({"pedido": number, "campos": fields})
             continue
-        if not complete:
-            continue
         done = recipient_capture.capture(erp, platform, store, number, row, status="UPSELLER")
-        summary["compradores"] += bool(done.get("ready"))
-    summary["divergencias"] = summary["divergencias"][:100]
-    summary["compradores_divergentes"] = summary["compradores_divergentes"][:100]
-    summary["sem_endereco_completo"] = summary["sem_endereco_completo"][:100]
+        summary["compradores"] += not done.get("kept") and not done.get("state")
+    for name in LISTS:
+        summary[name + "_total"] = len(summary[name])
     with erp.connection() as db:
         db.executescript(SCHEMA)
         db.execute(
@@ -608,4 +951,11 @@ def latest(db):
         ).fetchall()
     except Exception:  # noqa: BLE001 - table appears with the first import
         return {}
-    return {r["platform"]: {"at": r["imported_at"], **json.loads(r["summary"])} for r in rows}
+    out = {}
+    for r in rows:
+        summary = json.loads(r["summary"])
+        # Integrações shows counts and a few numbers; the robot gets the full lists in the reply.
+        for name in LISTS:
+            summary[name] = summary.get(name, [])[:20]
+        out[r["platform"]] = {"at": r["imported_at"], **summary}
+    return out
