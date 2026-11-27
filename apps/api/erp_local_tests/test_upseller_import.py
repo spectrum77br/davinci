@@ -191,6 +191,30 @@ def plain(value):
          ("Rua das Flores", "120", "apartamento 4", "", False)),
         ("Rua Alfa quadra 9 lote 9", "", "", "", ("Rua Alfa", "S/N", "quadra 9 lote 9", "", False)),
         ("Rua das Flores", "120", "", "", ("Rua das Flores", "120", "", "", False)),
+        # Differences from Bling on 27/11/2026: the district starts at its word after the
+        # complement, a place word or a lone letter opens "Endereço 2", the dash continues the
+        # complement, "Endereço 2" comes before the rest of "Endereço 1".
+        ("Rua Augusto Lima 456", "ao lado mercado Jardim Santo André", "", "",
+         ("Rua Augusto Lima", "456", "ao lado mercado", "Jardim Santo André", True)),
+        ("Av Paulo Faria 789", "apt 101 - B/2 Jardim Europa", "", "",
+         ("Av Paulo Faria", "789", "apt 101, B/2", "Jardim Europa", True)),
+        ("Rua Dois 5", "qd 5 esquina Residencial Bela Vista", "", "",
+         ("Rua Dois", "5", "qd 5, esquina", "Residencial Bela Vista", True)),
+        ("Rua Três Irmãos 321", "Comércio Boqueirão", "", "",
+         ("Rua Três Irmãos", "321", "Comércio", "Boqueirão", True)),
+        ("Rua Três Irmãos 321", "Comércio", "", "", ("Rua Três Irmãos", "321", "", "Comércio", True)),
+        ("Rua Sete Lagoas 45", "casa térreo. Novo Horizonte", "", "",
+         ("Rua Sete Lagoas", "45", "casa térreo.", "Novo Horizonte", True)),
+        ("Vila das Palmeiras 210", "F Itaquera", "", "",
+         ("Vila das Palmeiras", "210", "F", "Itaquera", True)),
+        ("Rua 10 - Vila Boa SN", "qd D lote 12 Morada Nova 2", "", "",
+         ("Rua 10 - Vila Boa", "S/N", "qd D lote 12", "Morada Nova 2", True)),
+        ("Rua 12 n 345", "apto 1101 - L'Acqua Bella", "", "",
+         ("Rua 12", "345", "apto 1101, L'Acqua Bella", "", False)),
+        ("Av Brasil 1000 Torre Norte", "Jardim América", "", "",
+         ("Av Brasil", "1000", "Torre Norte", "Jardim América", True)),
+        # Temu: "Rua da Quadra" is a name.
+        ("Rua da Quadra 210", "", "", "", ("Rua da Quadra", "210", "", "", False)),
     ],
 )  # fmt: skip
 def test_the_address_is_split_as_the_invoice_needs_it(line1, line2, number, district, expected):
@@ -199,6 +223,42 @@ def test_the_address_is_split_as_the_invoice_needs_it(line1, line2, number, dist
     assert (got["street"], got["number"], got["complement"], got["district"], got["certain"]) == (
         expected
     )
+
+
+def test_in_the_federal_district_the_city_is_brasilia_and_the_region_the_district():
+    row = {
+        "Endereço 1": "QNM 36 Conjunto M",
+        "Endereço 2": "casa 9",
+        "Cidade": "Ceilândia Sul",
+        "Estado": "DF",
+        "CEP": "72215-000",
+    }
+    data, address = upseller_import.buyer_row("amazon", row)
+    assert (data["city"], data["district"], data["number"], address["certain"]) == (
+        "Brasília",
+        "Ceilândia Sul",
+        "36",
+        True,
+    )
+    assert "Conjunto M" in data["complement"] and "casa 9" in data["complement"]
+    elsewhere, _ = upseller_import.buyer_row("amazon", {**row, "Estado": "GO"})
+    # Outside the Federal District the city stays as given and is never taken for the district.
+    assert elsewhere["city"] == "Ceilândia Sul" and elsewhere["district"] != "Ceilândia Sul"
+    plano, _ = upseller_import.buyer_row(
+        "amazon", {**row, "Cidade": "Brasília", "Endereço 2": "casa 9  Asa Sul"}
+    )
+    assert (plano["city"], plano["district"]) == ("Brasília", "Asa Sul")
+
+
+def test_no_number_written_either_way_is_not_a_difference():
+    stored = {"recipient": {"number": "SN", "street": "Rua A"}}
+    assert (
+        upseller_import._compare_buyer(stored, {"recipient": {"number": "S/N", "street": "Rua A"}})
+        == []
+    )
+    assert upseller_import._compare_buyer(
+        stored, {"recipient": {"number": "12", "street": "Rua A"}}
+    ) == ["recipient.number"]
 
 
 def test_a_temu_order_the_erp_lacks_comes_in_once_with_everything_and_its_cancellation_follows(

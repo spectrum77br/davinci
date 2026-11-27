@@ -197,6 +197,53 @@ COMPLEMENT_WORDS = {
     "galpao",
 }
 NUMBER_WORDS = {"n", "no", "nº", "n°", "nro", "numero"}
+# Words that open a district name. In "Endereço 2", after the complement, the district starts at
+# the first of them ("apto 12 bl B Jardim X", "qd 9 casa Residencial Y"): 3 of the 17 Amazon
+# buyers that differed from Bling on 27/11/2026.
+DISTRICT_WORDS = {
+    "jardim",
+    "jd",
+    "jardins",
+    "vila",
+    "vl",
+    "parque",
+    "pq",
+    "residencial",
+    "bairro",
+    "setor",
+    "nucleo",
+    "recanto",
+    "loteamento",
+    "centro",
+    "conjunto",
+    "cidade",
+    "distrito",
+    "chacara",
+}
+# What the place is ("Comércio Centro", "casa térreo"): opens a complement only at the start of
+# "Endereço 2", since elsewhere it may name a district ("Comércio", in Salvador); after a
+# complement word it continues it.
+PLACE_WORDS = {
+    "comercio",
+    "terreo",
+    "frente",
+    "fundo",
+    "superior",
+    "inferior",
+    "sobreloja",
+    "portaria",
+    "kitnet",
+    "kit",
+    "predio",
+    "escritorio",
+    "anexo",
+    "edicula",
+    "cobertura",
+    "subsolo",
+}
+# A building or condominium name follows these and belongs to the complement.
+NAME_WORDS = {"ed", "edificio", "cond", "condominio"}
+PREPOSITIONS = {"de", "da", "do", "das", "dos"}
 VALUE = re.compile(r"^(\d{1,6}[a-z]?|[a-z]|º|°|\d{1,4}º|\d{1,4}°)$")
 HOUSE = re.compile(r"^\d{1,6}[a-z]?$")
 # Whatever UpSeller sends about an order that is not personal, kept on the order read too.
@@ -340,15 +387,29 @@ def read_sheet(content):
     return head, out
 
 
-def _complements(tokens):
-    """Pull "apto 12", "bl 3", "qd 4 lt 9", "casa" out of tokens; what is left is the rest."""
+def _complements(tokens, *, leading=False):
+    """Pull "apto 12", "bl 3", "qd 4 lt 9", "casa térreo", "Ed. Solar" out of tokens; what is left
+    is the rest. `leading`: the tokens open "Endereço 2", where a place word ("Comércio Centro")
+    opens a complement too."""
     found, rest, index, joined = [], [], 0, False
     while index < len(tokens):
-        if _word(tokens[index]) in COMPLEMENT_WORDS:
+        word = _word(tokens[index])
+        # "Rua da Quadra", "Travessa do Lote": part of a name.
+        named = index and _word(tokens[index - 1]) in PREPOSITIONS
+        place = leading and index == 0 and word in PLACE_WORDS and len(tokens) > 1
+        if (word in COMPLEMENT_WORDS or place) and not named:
             group = [tokens[index]]
             index += 1
-            while index < len(tokens) and VALUE.match(_word(tokens[index]) or "-"):
-                group.append(tokens[index])
+            while index < len(tokens):
+                after = _word(tokens[index])
+                if VALUE.match(after or "-") or after in PLACE_WORDS:
+                    group.append(tokens[index])
+                elif word in NAME_WORDS and after not in COMPLEMENT_WORDS:
+                    # "Ed. Bella Vista", "Cond Alpha": the name is the complement's, never the
+                    # district (Amazon, 27/11/2026).
+                    group.append(tokens[index])
+                else:
+                    break
                 index += 1
             # "bl 3 ap 4", "qd 9 lt 9": side by side they are one complement.
             if joined:
@@ -364,8 +425,33 @@ def _complements(tokens):
 
 
 def _clean_tokens(tokens):
-    text = " ".join(tokens).strip(" ,;:-/")
+    text = " ".join(tokens).strip(" ,;:-/").lstrip(". ")
     return re.sub(r"\s+([,;])", r"\1", text)
+
+
+def _district_start(tokens):
+    """Where a district name begins in "Endereço 2" after the complement ("apto 12 bl B Jardim X",
+    "qd 9 casa Residencial Y"), or None."""
+    for index in range(1, len(tokens)):
+        word = _word(tokens[index])
+        if word not in DISTRICT_WORDS or _word(tokens[index - 1]) in PREPOSITIONS:
+            continue
+        after = tokens[index + 1 :]
+        if word != "centro" and (not after or VALUE.match(_word(after[0]) or "-")):
+            continue  # "Vila" alone, "conjunto 5", "setor B": not a name
+        if any(_word(t) in COMPLEMENT_WORDS for t in after):
+            continue
+        return index
+    return None
+
+
+def _df_region(row):
+    """The Federal District is one municipality, Brasília: what a buyer there gives as the city
+    (Ceilândia, Taguatinga…) is the administrative region, which Bling keeps as the district."""
+    if _key(row.get("Estado")) not in {"df", "distrito federal"}:
+        return ""
+    city = _text(row.get("Cidade"))
+    return "" if _key(city) in {"", "brasilia"} else city
 
 
 def split_address(platform, row):
@@ -375,8 +461,10 @@ def split_address(platform, row):
     "Endereço 1". Amazon: number and district columns come empty (608 orders of 27/11/2026); the
     number is at the end of "Endereço 1" ("rua X 120", sometimes "rua X, 120" or "numero 120") or
     alone in "Endereço 2", and "Endereço 2" carries the complement and the district together
-    ("apto 12 centro", "casa vila nova", "bl 3 ap 4 jardim X"). "certain" is false when no district
-    could be told apart: the buyer is kept, marked to be checked.
+    ("apto 12 centro", "casa vila nova", "bl 3 ap 4 jardim X"). Where the district is, in this
+    order: its column, after two spaces in "Endereço 2", "bairro: X", the rest of "Endereço 2", the
+    region of the Federal District, after the number in "Endereço 1", after " - " in the street.
+    "certain" is false when no district could be told apart: the buyer is kept, to be checked.
     """
     line1, line2 = _text(row.get("Endereço 1")), _text(row.get("Endereço 2"))
     given = _text(row.get("Número"))
@@ -398,16 +486,6 @@ def split_address(platform, row):
             district = named.group(1).strip(" -")
     line1 = re.sub(r",?\s*\bbairro\s*:?\s*[^,;]+", "", line1, flags=re.IGNORECASE).strip()
     line2 = re.sub(r",?\s*\bbairro\s*:?\s*[^,;]+", "", line2, flags=re.IGNORECASE).strip()
-    # "Rua X - Vila Nova": a last part with no digit and no complement word is the district.
-    if not district and " - " in line1:
-        head_part, _, tail_part = line1.rpartition(" - ")
-        words = tail_part.split()
-        if (
-            words
-            and not re.search(r"\d", tail_part)
-            and not any(_word(w) in COMPLEMENT_WORDS for w in words)
-        ):
-            district, line1 = tail_part.strip(), head_part.strip()
     # "s/n", "sn", "x / n" say there is no number.
     no_number = re.search(r"(^|\s)(s\s*/\s*n|sn|/\s*n)(\s|,|$)", line1, re.IGNORECASE)
     if no_number:
@@ -416,6 +494,19 @@ def split_address(platform, row):
     street = line1
     comma = re.search(r",\s*(?:(?:n[º°o.]?|numero|número|nro)\s*)?(\d{1,6}[A-Za-z]?)\b(.*)$", line1)
     marked = re.search(r"\b(?:n[º°o.]|numero|número|nro)\s*(\d{1,6}[A-Za-z]?)\b(.*)$", line1, re.I)
+    tokens = line1.split()
+    chosen = None
+    for index, token in enumerate(tokens):
+        if (
+            index
+            and HOUSE.match(_word(token))
+            and (
+                _word(tokens[index - 1]) not in COMPLEMENT_WORDS
+                or (index > 1 and _word(tokens[index - 2]) in PREPOSITIONS)
+            )
+            and any(re.search(r"[A-Za-z]", t) for t in tokens[:index])
+        ):
+            chosen = index
     if comma:
         number = number or comma.group(1)
         street = line1[: comma.start()]
@@ -425,43 +516,43 @@ def split_address(platform, row):
         street = line1[: marked.start()]
         if marked.group(2).strip():
             tails.append(marked.group(2))
+    elif chosen is not None and not number:
+        number = tokens[chosen]
+        head = tokens[:chosen]
+        # "rua 12 n 345": the number word is not the street's.
+        if len(head) > 2 and _word(head[-1]) in NUMBER_WORDS:
+            head.pop()
+        street = " ".join(head)
+        if tokens[chosen + 1 :]:
+            tails.append(" ".join(tokens[chosen + 1 :]))
     else:
-        tokens = line1.split()
-        chosen = None
-        for index, token in enumerate(tokens):
-            if (
-                index
-                and HOUSE.match(_word(token))
-                and _word(tokens[index - 1]) not in COMPLEMENT_WORDS
-                and any(re.search(r"[A-Za-z]", t) for t in tokens[:index])
-            ):
-                chosen = index
-        if chosen is not None:
-            number = number or tokens[chosen]
-            street = " ".join(tokens[:chosen])
-            if tokens[chosen + 1 :]:
-                tails.append(" ".join(tokens[chosen + 1 :]))
-        else:
-            found, rest = _complements(tokens)
-            complements.extend(found)
-            street = " ".join(rest)
-    for tail in tails:
-        found, rest = _complements(tail.split())
+        # No number, or "s/n" already said so: "Rua 10 - Vila Boa s/n" keeps its 10.
+        found, rest = _complements(tokens)
         complements.extend(found)
-        if rest and not district:
-            district = _clean_tokens(rest)
-        elif rest:
-            complements.append(_clean_tokens(rest))
+        street = " ".join(rest)
+    # "Endereço 2" before the rest of "Endereço 1": it is where Amazon puts the district ("Rua 10 -
+    # Vila X sn" + "qd D lote 12 Y": the district is Y, the street keeps "- Vila X", like Bling).
     if line2:
         tokens = line2.split()
+        cut = None if district else _district_start(tokens)
+        if cut is not None:
+            district = _clean_tokens(tokens[cut:])
+            tokens = tokens[:cut]
+        # "apto 1101 - L'Acqua Bella", "apt 12 - B/2": what follows the dash after a complement
+        # is the complement's (2 of 2 at Bling on 27/11/2026), not the district.
+        pieces = re.split(r"\s+-\s*|\s*-\s+", " ".join(tokens), maxsplit=1)
+        after_dash = ""
+        if len(pieces) == 2 and any(_word(t) in COMPLEMENT_WORDS for t in pieces[0].split()):
+            tokens, after_dash = pieces[0].split(), _clean_tokens(pieces[1].split())
         if len(tokens) == 1 and HOUSE.match(_word(tokens[0])) and not number:
             number = tokens[0]
-        else:
-            found, rest = _complements(tokens)
+        elif tokens:
+            found, rest = _complements(tokens, leading=True)
             complements.extend(found)
-            # A number opening what is left is an apartment or the house, never the district.
-            while rest and HOUSE.match(_word(rest[0])):
-                if number:
+            # A number or a lone letter opening what is left is an apartment or the house, never
+            # the district.
+            while rest and (HOUSE.match(_word(rest[0])) or re.fullmatch(r"[a-z]", _word(rest[0]))):
+                if number or not HOUSE.match(_word(rest[0])):
                     complements.append(rest.pop(0))
                 else:
                     number = rest.pop(0)
@@ -470,6 +561,28 @@ def split_address(platform, row):
                 district = rest_text
             elif rest_text:
                 complements.append(rest_text)
+        if after_dash:
+            complements.append(after_dash)
+    district = district or _df_region(row)
+    for tail in tails:
+        if district:
+            # "Av Brasil 1000 Torre Norte" + "Jardim América": all of it is the complement.
+            complements.append(_clean_tokens(tail.split()))
+            continue
+        found, rest = _complements(tail.split())
+        complements.extend(found)
+        district = _clean_tokens(rest)
+    # "Rua X - Vila Nova": a last part with no digit and no complement word is the district.
+    if not district and " - " in street:
+        head_part, _, tail_part = street.rpartition(" - ")
+        words = tail_part.split()
+        if (
+            words
+            and head_part.strip()
+            and not re.search(r"\d", tail_part)
+            and not any(_word(w) in COMPLEMENT_WORDS for w in words)
+        ):
+            district, street = tail_part.strip(), head_part.strip()
     street = street.strip(" ,;-")
     return {
         "street": street,
@@ -490,7 +603,7 @@ def buyer_row(platform, row):
         "number": address["number"],
         "complement": address["complement"],
         "district": address["district"],
-        "city": _text(row.get("Cidade")),
+        "city": "Brasília" if _df_region(row) else _text(row.get("Cidade")),
         "state": _text(row.get("Estado")),
         "postal_code": re.sub(r"\D", "", _text(row.get("CEP"))),
     }
@@ -672,6 +785,14 @@ def _same_order(mine, theirs):
     return fields
 
 
+def _compared(key, value):
+    plain = _key(value).replace(" ", "")
+    # "SN", "S/N", "s/nº", "sem número": all say the same.
+    if key == "number" and re.sub(r"[^a-z0-9]", "", plain) in {"sn", "sno", "semnumero"}:
+        return "s/n"
+    return plain
+
+
 def _compare_buyer(stored, projection):
     fields = []
     for part, keys in (
@@ -679,8 +800,8 @@ def _compare_buyer(stored, projection):
         ("recipient", ("street", "number", "district", "city", "state", "postal_code")),
     ):
         for key in keys:
-            mine = _key((projection.get(part) or {}).get(key)).replace(" ", "")
-            theirs = _key((stored.get(part) or {}).get(key)).replace(" ", "")
+            mine = _compared(key, (projection.get(part) or {}).get(key))
+            theirs = _compared(key, (stored.get(part) or {}).get(key))
             if mine != theirs:
                 fields.append(f"{part}.{key}")
     return fields
