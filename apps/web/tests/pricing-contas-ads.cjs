@@ -9,7 +9,9 @@
 // busca e a lista (sem herdar o % Geral). M-79 + M-80 (26/11/2026): com
 // Produto marcado, a mesma linha ganha o filtro "Categoria de venda ▾" e a
 // caixinha "Ads" (só da tela), e a lista a coluna "Categoria de venda" depois
-// do nome. Executa as funções reais da página e confere o template.
+// do nome. M-99 (27/11/2026): conta em Produto mostra "(!)" vermelho e
+// negrito na caixinha da célula. Executa as funções reais da página e confere
+// o template.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -490,8 +492,10 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     // ficar na mesma altura das vizinhas (e a linha não crescer).
     'class="flex w-full items-center justify-center gap-0.5"',
     // M-55: a caixinha de 34×24px com o % Geral e o "%" ao lado; vazia sem %.
+    // M-99: conta em Produto mostra "(!)" vermelho e negrito no lugar do número.
     'class="inline-flex h-6 w-[34px] items-center justify-center rounded border bg-background text-xs hover:bg-muted"',
-    "{{ ads && pctGeralAds(adsDa(acc.id)) != null ? fmtPct(pctGeralAds(adsDa(acc.id))!) : '' }}",
+    ":class=\"{ 'font-bold text-red-600 dark:text-red-400': ads && modoAds(adsDa(acc.id)) === 'produto' }\"",
+    "{{ ads && modoAds(adsDa(acc.id)) === 'produto' ? '(!)' : ads && pctGeralAds(adsDa(acc.id)) != null ? fmtPct(pctGeralAds(adsDa(acc.id))!) : '' }}",
     '<span class="text-xs text-muted-foreground">%</span>',
     'data-menu-ads',
     // M-57: "Amazon kfa", 12px negrito.
@@ -535,6 +539,51 @@ const campo = (valor, dados) => ({ target: { value: valor, dataset: dados } })
     '{{ textoListaAdsVazia(c) }}',
   ]) assert.ok(celula.includes(trecho), `célula Ads tem ${trecho}`)
   assert.ok(!celula.includes('w-[30rem]'), 'a janela de 30rem saiu')
+  // M-99: executa o :class e o texto da caixinha. Produto = "(!)" vermelho e
+  // negrito (mesmo sem produto preenchido e com % Geral guardado de antes);
+  // Geral = o % Geral (vazia sem %); sem Ads ou Ads não carregado = vazia.
+  const caixa = /<span\s+class="([^"]*)"\s+:class="([^"]*)"\s+data-ads-caixa\s*>\{\{ ([\s\S]*?) \}\}<\/span>/.exec(celula)
+  assert.ok(caixa, 'caixinha Ads: class, :class e o texto (sem title próprio)')
+  assert.equal(caixa[1], 'inline-flex h-6 w-[34px] items-center justify-center rounded border bg-background text-xs hover:bg-muted',
+    'tamanho, borda, fundo e letra da caixinha não mudam')
+  for (const fora of ['data-divergencia', 'divergenciaDe', 'tituloDivergencia', 'cursor-help', 'absolute', 'text-[9px]', 'ads_por_produto_ligada']) {
+    assert.ok(!caixa[0].includes(fora), `caixinha Ads sem ${fora}`)
+  }
+  const caixaDe = new Function('ads', 'acc', 'adsDa', 'modoAds', 'pctGeralAds', js([
+    constante('fmtPct'),
+    `return { classe: (${caixa[2]}), texto: (${caixa[3]}) }`,
+  ].join('\n')))
+  const antesCaixa = ads.value
+  ads.value = {
+    ...antesCaixa,
+    contas: {
+      // Shopee atlas: Produto, com um % Geral guardado de antes (não aparece).
+      atlas: { ...f.ADS_PADRAO, ads_geral_ligada: false, ads_por_produto_ligada: true, pode_gastar_pct: 7, produtos: { p1: { pode_gastar_pct: 5, gasto_dia: null } } },
+      semProduto: { ...f.ADS_PADRAO, ads_geral_ligada: false, ads_por_produto_ligada: true, pode_gastar_pct: null, produtos: {} },
+      geral: { ...f.ADS_PADRAO, ads_geral_ligada: true, ads_por_produto_ligada: false, pode_gastar_pct: 2.5, produtos: {} },
+      geralSemPct: { ...f.ADS_PADRAO, ads_geral_ligada: true, ads_por_produto_ligada: false, pode_gastar_pct: null, produtos: {} },
+      semAds: { ...f.ADS_PADRAO, ads_geral_ligada: false, ads_por_produto_ligada: false, pode_gastar_pct: 3, produtos: {} },
+    },
+  }
+  const verCaixa = (id, carregado = true) => {
+    const r = caixaDe(carregado ? ads.value : null, { id }, f.adsDa, f.modoAds, f.pctGeralAds)
+    return { texto: r.texto, classes: Object.entries(r.classe).filter(([, v]) => v).flatMap(([k]) => k.split(' ')) }
+  }
+  for (const id of ['atlas', 'semProduto']) {
+    const v = verCaixa(id)
+    assert.equal(v.texto, '(!)', `${id}: Produto mostra (!)`)
+    for (const c of ['font-bold', 'text-red-600', 'dark:text-red-400']) assert.ok(v.classes.includes(c), `${id}: ${c}`)
+  }
+  assert.deepEqual(verCaixa('geral'), { texto: '2,5', classes: [] }, 'Geral: o % Geral, sem (!) nem vermelho')
+  assert.deepEqual(verCaixa('geralSemPct'), { texto: '', classes: [] }, 'Geral sem %: vazia')
+  assert.deepEqual(verCaixa('semAds'), { texto: '', classes: [] }, 'sem Ads: vazia')
+  assert.deepEqual(verCaixa('atlas', false), { texto: '', classes: [] }, 'Ads não carregado: sem (!)')
+  // A janela troca o modo: a célula acompanha (mesmo estado).
+  ads.value.contas.atlas = { ...ads.value.contas.atlas, ads_geral_ligada: true, ads_por_produto_ligada: false }
+  assert.deepEqual(verCaixa('atlas'), { texto: '7', classes: [] }, 'voltou para Geral: some o (!) e volta o % Geral')
+  ads.value.contas.atlas = { ...ads.value.contas.atlas, ads_geral_ligada: false }
+  assert.deepEqual(verCaixa('atlas'), { texto: '', classes: [] }, 'desmarcou os dois: vazia')
+  ads.value = antesCaixa
   for (const cab of ['<span>Produto</span>', '<span>Categoria de venda</span>', 'Pode gastar (%)', 'ROAS mínimo</span>', 'Gasto por dia (R$)']) {
     assert.ok(celula.includes(cab), `lista tem a coluna ${cab}`)
   }

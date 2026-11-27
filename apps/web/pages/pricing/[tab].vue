@@ -6679,7 +6679,9 @@ watch(department, async () => {
                      painel da conta; não se digita na tabela. Quem não edita Contas
                      abre e só vê. O botão é "flex" com a largura da célula (M-60),
                      igual ao invólucro dos outros campos: assim a caixinha vazia não
-                     sobe nem deixa a linha mais alta. -->
+                     sobe nem deixa a linha mais alta. M-99: conta em Produto
+                     mostra "(!)" vermelho e negrito na caixinha (pelo modoAds,
+                     o mesmo da janela); só o texto muda de cor. -->
                 <td
                   v-else-if="f.key === 'ads'"
                   class="border border-border px-1 py-1 text-center w-[62px] min-w-[62px]"
@@ -6696,8 +6698,9 @@ watch(department, async () => {
                       >
                         <span
                           class="inline-flex h-6 w-[34px] items-center justify-center rounded border bg-background text-xs hover:bg-muted"
+                          :class="{ 'font-bold text-red-600 dark:text-red-400': ads && modoAds(adsDa(acc.id)) === 'produto' }"
                           data-ads-caixa
-                        >{{ ads && pctGeralAds(adsDa(acc.id)) != null ? fmtPct(pctGeralAds(adsDa(acc.id))!) : '' }}</span>
+                        >{{ ads && modoAds(adsDa(acc.id)) === 'produto' ? '(!)' : ads && pctGeralAds(adsDa(acc.id)) != null ? fmtPct(pctGeralAds(adsDa(acc.id))!) : '' }}</span>
                         <span class="text-xs text-muted-foreground">%</span>
                       </button>
                     </PopoverTrigger>
