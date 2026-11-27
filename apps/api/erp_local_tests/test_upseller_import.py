@@ -14,8 +14,30 @@ import pytest
 from openpyxl import Workbook
 from test_consulta import LOCAL, app_client, mirrored
 
-from app.erp_local import recipient_capture, service_loop, store_sales, upseller_import
+from app.erp_local import (
+    cep_bairros,
+    recipient_capture,
+    service_loop,
+    store_sales,
+    upseller_import,
+)
 from app.erp_local.core import ERPError, dumps
+
+
+@pytest.fixture(autouse=True)
+def no_cep_table(monkeypatch, tmp_path):
+    """The IBGE CEP table stays out unless a test brings its own."""
+    monkeypatch.setattr(cep_bairros, "PATH", tmp_path / "sem-tabela.tsv.gz")
+
+
+def cep_table(tmp_path, monkeypatch, rows):
+    import gzip
+
+    path = tmp_path / "cep_bairros.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as out:
+        out.writelines(f"{cep}\t{city}\t{name}\n" for cep, city, name in sorted(rows))
+    monkeypatch.setattr(cep_bairros, "PATH", path)
+
 
 HEAD = [
     "Nº de Pedido da Plataforma",
@@ -248,6 +270,59 @@ def test_in_the_federal_district_the_city_is_brasilia_and_the_region_the_distric
         "amazon", {**row, "Cidade": "Brasília", "Endereço 2": "casa 9  Asa Sul"}
     )
     assert (plano["city"], plano["district"]) == ("Brasília", "Asa Sul")
+
+
+def test_the_cep_gives_the_neighborhood_only_when_none_was_written_and_the_city_matches(
+    tmp_path, monkeypatch
+):
+    cep_table(
+        tmp_path,
+        monkeypatch,
+        [("01310100", "3550308", "Bela Vista"), ("13010001", "3509502", "Centro")],
+    )
+    row = {
+        "Endereço 1": "Avenida Paulista 1000",
+        "Endereço 2": "apto 12",
+        "Cidade": "São Paulo",
+        "Estado": "SP",
+        "CEP": "01310-100",
+    }
+    data, address = upseller_import.buyer_row("amazon", row)
+    assert (data["district"], data["complement"], address["certain"]) == (
+        "Bela Vista",
+        "apto 12",
+        True,
+    )
+    assert "address_review" not in data and address["district_from"] == "cep"
+    # Written by the buyer: stays, even if the register says otherwise.
+    typed, _ = upseller_import.buyer_row("amazon", {**row, "Endereço 2": "apto 12 Centro"})
+    assert typed["district"] == "Centro"
+    # A CEP of another city, or one the register lacks: nothing is guessed.
+    other, _ = upseller_import.buyer_row("amazon", {**row, "Cidade": "Campinas"})
+    unknown, _ = upseller_import.buyer_row("amazon", {**row, "CEP": "01310-999"})
+    assert other["district"] == unknown["district"] == "" and other["address_review"]
+    # What the buyer wrote before the CEP's neighborhood is the complement.
+    shop, _ = upseller_import.buyer_row("amazon", {**row, "Endereço 2": "Mercadinho Bela Vista"})
+    assert (shop["district"], shop["complement"]) == ("Bela Vista", "Mercadinho")
+    short, _ = upseller_import.buyer_row(
+        "amazon", {**row, "CEP": "13010-001", "Cidade": "Campinas", "Endereço 2": "fundos Centro"}
+    )
+    assert (short["district"], short["complement"]) == ("Centro", "fundos")
+
+
+def test_the_ibge_table_ships_with_the_erp():
+    from pathlib import Path
+
+    shipped = Path(cep_bairros.__file__).with_name("cep_bairros.tsv.gz")
+    # Praça da Sé, São Paulo: a CEP of one street in one neighborhood.
+    assert cep_bairros.lookup("01002-001", shipped) == ("Centro", "3550308")
+
+
+def test_the_cep_register_answers_only_for_a_full_cep(tmp_path, monkeypatch):
+    cep_table(tmp_path, monkeypatch, [("69318240", "1400100", "Murilo Teixeira Cidade")])
+    assert cep_bairros.lookup("69318-240") == ("Murilo Teixeira Cidade", "1400100")
+    assert cep_bairros.lookup("6931824") is None and cep_bairros.lookup(None) is None
+    assert cep_bairros.lookup("69318241") is None
 
 
 def test_no_number_written_either_way_is_not_a_difference():

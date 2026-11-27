@@ -593,9 +593,43 @@ def split_address(platform, row):
     }
 
 
+# How buyers shorten the first word of a neighborhood.
+SHORT_WORDS = {"jd": "jardim", "vl": "vila", "pq": "parque", "res": "residencial", "cj": "conjunto"}
+
+
+def _place_key(tokens):
+    return [SHORT_WORDS.get(_word(t), _word(t)) for t in tokens]
+
+
+def _neighborhood_from_cep(address, postal_code, city, state):
+    """The CEP's neighborhood (cep_bairros, IBGE) where "Endereço 2" brings none, or to tell it
+    from what the buyer wrote before it ("Mercadinho Bela Vista"). Only for a CEP of the buyer's
+    own city; a neighborhood the buyer wrote otherwise stays."""
+    from app.erp_local import cep_bairros
+    from app.erp_local.channel_recipients import _uf
+    from app.erp_local.cutover import city_code
+
+    found = cep_bairros.lookup(postal_code)
+    if not found or city_code(city, _uf(state)) != found[1]:
+        return
+    name = found[0]
+    if not address["district"]:
+        address.update(district=name, certain=bool(address["street"]), district_from="cep")
+        return
+    tokens, wanted = address["district"].split(), _place_key(name.split())
+    size = len(wanted)
+    if len(tokens) > size and _place_key(tokens[-size:]) == wanted:
+        before = _clean_tokens(tokens[:-size])
+        address["district"] = " ".join(tokens[-size:])
+        address["complement"] = ", ".join(c for c in (address["complement"], before) if c)
+
+
 def buyer_row(platform, row):
     """The buyer as DaVinci's copy of Bling shapes it (channel_recipients.from_bling_copy)."""
     address = split_address(platform, row)
+    city = "Brasília" if _df_region(row) else _text(row.get("Cidade"))
+    postal_code = re.sub(r"\D", "", _text(row.get("CEP")))
+    _neighborhood_from_cep(address, postal_code, city, _text(row.get("Estado")))
     data = {
         "name": _text(row.get("Nome do Destinatário")),
         "document": re.sub(r"\D", "", _text(row.get("ID da Taxa"))),
@@ -603,9 +637,9 @@ def buyer_row(platform, row):
         "number": address["number"],
         "complement": address["complement"],
         "district": address["district"],
-        "city": "Brasília" if _df_region(row) else _text(row.get("Cidade")),
+        "city": city,
         "state": _text(row.get("Estado")),
-        "postal_code": re.sub(r"\D", "", _text(row.get("CEP"))),
+        "postal_code": postal_code,
     }
     if not address["certain"]:
         data["address_review"] = True
@@ -994,6 +1028,7 @@ def import_sheet(erp, content, platform, filtro="", now=None):
         "dados_gravados": 0,
         "compradores": 0,
         "compradores_conferidos": 0,
+        "bairros_pelo_cep": 0,
         "compradores_divergentes": [],
         "sem_loja": [],
         "sem_endereco_completo": [],
@@ -1105,6 +1140,7 @@ def import_sheet(erp, content, platform, filtro="", now=None):
             summary["sem_dados_no_upseller"].append(number)
             continue
         row, address = buyer_row(platform, first)
+        summary["bairros_pelo_cep"] += address.get("district_from") == "cep"
         if not address["certain"]:
             summary["sem_endereco_completo"].append(number)
         projection = channel_recipients.from_bling_copy(row)
@@ -1146,6 +1182,7 @@ def empty_round(erp, platform, filtro="", now=None):
         "dados_gravados": 0,
         "compradores": 0,
         "compradores_conferidos": 0,
+        "bairros_pelo_cep": 0,
         "lidos_direto": 0,
         "filtro": _text(filtro)[:200],
         "importado_em": (now or datetime.now(UTC)).replace(microsecond=0).isoformat(),
