@@ -90,7 +90,7 @@ def sale(number=PO, *, platform="Temu", store="Temu Barbosa", state="Para Retira
         "Quantidade de Produtos": quantity,
         "Nome do Produto": "Produto de teste",
         "Nome do Anúncio": "Anúncio de teste",
-        "SKU": sku.upper(),
+        "SKU": sku,
         "Preço de Produto": "42,79",
         "NCM*": "85167920",
         "ID da Taxa": "12345678909",
@@ -179,6 +179,11 @@ def plain(value):
         ("Rua 9 de Julho 450", "Bairro: Centro", "", "", ("Rua 9 de Julho", "450", "", "Centro", True)),
         ("Alameda dos Anjos - Setor - Norte 9", "residencial Lago", "", "",
          ("Alameda dos Anjos - Setor - Norte", "9", "", "residencial Lago", True)),
+        # Two spaces split Amazon's complement from the district.
+        ("Rua das Flores 120", "apto 12  Jardim América", "", "",
+         ("Rua das Flores", "120", "apto 12", "Jardim América", True)),
+        ("Rua das Flores 120", "sobrado fundos  Vila Nova", "", "",
+         ("Rua das Flores", "120", "sobrado fundos", "Vila Nova", True)),
         # No district to tell apart: kept, marked to be checked.
         ("Rua das Flores, 120", "apt 12", "", "", ("Rua das Flores", "120", "apt 12", "", False)),
         ("Rua das Flores 120", "qd 9 lt 9", "", "", ("Rua das Flores", "120", "qd 9 lt 9", "", False)),
@@ -259,7 +264,9 @@ def test_an_order_the_copy_of_bling_brought_is_compared_not_kept_twice(erp):
             (PO, dumps(copy)),
         )
         db.commit()
-    result = upseller_import.import_sheet(erp, sheet([sale(quantity=1, sku="A076")]), "temu")
+    unmapped = sale(quantity=1, sku="A076")
+    unmapped["SKU (Armazém)"] = "e3"  # UpSeller's warehouse SKU, unmapped (27/11/2026)
+    result = upseller_import.import_sheet(erp, sheet([unmapped]), "temu")
     assert (result["novos"], result["conferidos"], result["divergencias_total"]) == (0, 1, 1)
     # Product codes are compared without case or lot; the lists say what differs.
     assert plain(result["divergencias"]) == [

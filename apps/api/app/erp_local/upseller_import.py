@@ -328,6 +328,11 @@ def split_address(platform, row):
     line1, line2 = _text(row.get("Endereço 1")), _text(row.get("Endereço 2"))
     given = _text(row.get("Número"))
     district = _text(row.get("Bairro"))
+    # UpSeller joins Amazon's complement and district with two spaces ("apto 12  Centro"): the
+    # last part is the district (5 of 5 equal to Bling on 27/11/2026).
+    parts = [p for p in re.split(r"\s{2,}", str(row.get("Endereço 2") or "").strip()) if p.strip()]
+    if len(parts) > 1 and not district:
+        district, line2 = _text(parts[-1]), _text(" ".join(parts[:-1]))
     number, complements, tails = "", [], []
     if given and "*" not in given and re.fullmatch(r"\d{1,6}[A-Za-z]?", given):
         number = given
@@ -512,7 +517,9 @@ def _order_read(number, rows):
         raise ERPError("upseller_order", f"Pedido {number} sem hora do pedido.")
     lines = []
     for row in rows:
-        sku = _text(row.get("SKU (Armazém)")) or _text(_column(row, "SKU")) or None
+        # The listing's SKU first: UpSeller's warehouse SKU came as "e3" on every Temu order of
+        # 27/11/2026, while the listing's (a076, a015) is the product, as Bling has it.
+        sku = _text(_column(row, "SKU")) or _text(row.get("SKU (Armazém)")) or None
         raw_quantity = row.get("Quantidade de Produtos")
         if raw_quantity in (None, ""):
             raw_quantity = _column(row, "Qtd. do Produto")
