@@ -75,6 +75,7 @@ STORES = {
         "amazon poofy": "45790f1b-3972-48db-a43b-ca8ac13efbf8",
         "amazon vr": "049acd9a-3b98-479c-8419-fbffbf574cd0",
         "amazon nexus": "e5d6306b-d18f-47fe-af02-54cd26c5361d",
+        "nexus": "e5d6306b-d18f-47fe-af02-54cd26c5361d",  # UpSeller calls it "Nexus" (27/11)
         # No integration in DaVinci: the whole order comes from here (UPSELLER_ONLY).
         "amazon inova": "204438130",
         "amazon jlas": "205050265",
@@ -529,7 +530,9 @@ def store_for(db, platform, name):
     key = _key(name)
     if key in STORES[platform]:
         return STORES[platform][key]
-    bare = key.removeprefix(_key(PLATFORMS[platform])).strip()
+    # UpSeller writes three Shopee stores "Shoppe" (Barbosa, Vitor Mei, Atv).
+    bare = re.sub(r"^shoppe\b", "shopee", key)
+    bare = bare.removeprefix(_key(PLATFORMS[platform])).strip()
     for store, data in db.execute(
         "SELECT store,data FROM store_policies WHERE channel=?", (platform,)
     ):

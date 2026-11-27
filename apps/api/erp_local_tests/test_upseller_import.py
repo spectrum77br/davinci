@@ -465,3 +465,19 @@ def test_a_store_kept_by_its_bling_code_never_doubles_the_same_order_read_straig
         db.commit()
         sales = store_sales.listing(db, order["id"])["items"]
     assert [s["store_id"] for s in sales] == ["uuid-eron"]
+
+
+def test_upseller_names_as_they_come_nexus_and_shoppe(erp):
+    """27/11/2026: UpSeller names the Amazon Nexus store "Nexus" and writes three Shopee stores
+    "Shoppe" (Barbosa, Vitor Mei, Atv)."""
+    with erp.connection() as db:
+        db.execute(
+            "INSERT INTO store_policies VALUES ('shopee','uuid-barbosa','shadow',?,"
+            "'2026-11-27T10:00:00+00:00')",
+            (dumps({"name": " Barbosa"}),),
+        )
+        db.commit()
+        assert upseller_import.store_for(db, "amazon", "Nexus") == (
+            "e5d6306b-d18f-47fe-af02-54cd26c5361d"
+        )
+        assert upseller_import.store_for(db, "shopee", "Shoppe Barbosa") == "uuid-barbosa"
