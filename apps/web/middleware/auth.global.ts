@@ -50,27 +50,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
     return navigateTo('/controle-estoque')
   }
 
-  // Redirect to onboarding if no integrations yet. Only on the root page —
-  // we don't trap users inside other pages they navigated to deliberately.
-  if (
-    auth.isAuthenticated
-    && auth.user?.status === 'active'
-    && to.path === '/'
-  ) {
-    const config = useRuntimeConfig()
-    const base = (import.meta.server
-      ? (config as any).apiUrlInternal
-      : '') as string
-    try {
-      const r = await $fetch<{ needs_onboarding: boolean }>(`${base}/api/dashboard`, {
-        credentials: 'include',
-        headers: import.meta.server ? useRequestHeaders(['cookie']) : undefined,
-      })
-      if (r.needs_onboarding) {
-        return navigateTo('/onboarding')
-      }
-    } catch {
-      // Ignore — dashboard not reachable shouldn't block landing.
-    }
-  }
+  // 27/11/2026 (M-118): saiu o desvio de primeiro acesso para /onboarding
+  // (e a consulta ao Dashboard que ele fazia). A página / agora só redireciona para
+  // /tarefas (pages/index.vue), depois das regras acima.
 })

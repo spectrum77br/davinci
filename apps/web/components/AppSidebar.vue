@@ -179,8 +179,8 @@ function groupItem(
 
 const sections = computed<Section[]>(() => [
   // 27/11/2026 (M-117): o bloco sem título com "Dashboard" (/) e "Primeiros
-  // passos" (/onboarding) saiu do menu — o menu começa em Operação. As
-  // telas / e /onboarding continuam existindo por enquanto.
+  // passos" (/onboarding) saiu do menu — o menu começa em Operação. Desde a
+  // M-118, / e /onboarding só redirecionam para /tarefas.
   {
     label: 'Operação',
     items: [
