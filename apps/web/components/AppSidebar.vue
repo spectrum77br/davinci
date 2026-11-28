@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
-  LayoutDashboard, Rocket, ContactRound,
+  ContactRound,
   Package, DollarSign, Undo2,
   Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
@@ -178,12 +178,9 @@ function groupItem(
 }
 
 const sections = computed<Section[]>(() => [
-  {
-    items: [
-      { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-      { to: '/onboarding', label: 'Primeiros passos', icon: Rocket },
-    ],
-  },
+  // 27/11/2026 (M-117): o bloco sem título com "Dashboard" (/) e "Primeiros
+  // passos" (/onboarding) saiu do menu — o menu começa em Operação. As
+  // telas / e /onboarding continuam existindo por enquanto.
   {
     label: 'Operação',
     items: [

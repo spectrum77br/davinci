@@ -152,6 +152,19 @@ const rotas = (m) => m.visibleSections.value.flatMap((s) => s.items.map((i) => i
   assert.deepEqual(itens(com, 'Cadastros'), ['Imobilizado'], 'sem Integrações, o Cadastros dele não muda')
   assert.deepEqual(montarMenu(OPERADOR).visibleSections.value.flatMap((s) => s.items.map((i) => i.to)), ['/controle-estoque'])
 
+  // M-117: "Dashboard" e "Primeiros passos" saíram do menu; ele começa em Operação › Produtos,
+  // sem bloco sem título no alto.
+  for (const u of [ADMIN, GESTOR, COMUM]) {
+    const m = montarMenu(u)
+    for (const r of ['/', '/onboarding']) assert.ok(!rotas(m).includes(r), `${r} não é mais item do menu`)
+    const labels = m.visibleSections.value.flatMap((s) => s.items.map((i) => i.label))
+    assert.ok(!labels.includes('Dashboard') && !labels.includes('Primeiros passos'))
+    assert.ok(m.visibleSections.value.every((s) => s.label), 'nenhum bloco sem título')
+    assert.equal(m.visibleSections.value[0].label, 'Operação')
+    assert.equal(m.visibleSections.value[0].items[0].to, '/produtos')
+  }
+  assert.doesNotMatch(ler('../components/AppSidebar.vue'), /\b(LayoutDashboard|Rocket)\b/, 'os ícones sem uso saíram do import')
+
   // Bolinha: uma só no item, com as duas contagens.
   const comPend = montarMenu(ADMIN, { tarefas: 2, faturas: 1 })
   assert.equal(comPend.pontoDe(secao(comPend, 'Admin').items[0]), '2 tarefas pendentes · 1 fatura vencendo')
