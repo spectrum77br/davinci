@@ -8,6 +8,7 @@
 // M-40/M-41/M-45…M-47 (25/11/2026): a barra ganha, depois de Situação, Excel ▾, Atualizar e
 // Configuração ▾ e, no fim, "Selecionar todos", a lixeira e "N produtos · N selecionados" (o que
 // morava na linha de ferramentas e no painel da direita, que saíram da tela).
+// M-115/M-116 (27/11/2026): Layout ▾ logo antes do Excel — escolhe as colunas e filtra por coluna.
 let catalogUnchecked={stock:new Set(),tag:new Set(),category:new Set(),situation:new Set()},catalogMenu='';
 const CATALOG_NONE='__sem';
 const catalogFilterLabels={stock:'Estoque',tag:'Tags',category:'Categoria',situation:'Situação'};
@@ -73,7 +74,8 @@ function productPassesSlices(p,off,categoryNames){
  for(const key of Object.keys(off))if(off[key].size&&!productFilterKeys(p,key,categoryNames).some(k=>!off[key].has(k)))return false;
  return true;
 }
-function productFilterMatches(p,categoryNames=catalogCategoryNamesOf()){return productPassesSlices(p,catalogUnchecked,categoryNames);}
+// M-116: e nos filtros por coluna do menu Layout (p2LayoutPasses), junto com a busca e a barra.
+function productFilterMatches(p,categoryNames=catalogCategoryNamesOf()){return productPassesSlices(p,catalogUnchecked,categoryNames)&&p2LayoutPasses(p);}
 function sortCatalog(rows){return [...rows].sort((a,b)=>(b.position||0)-(a.position||0));}
 const lucide=(size,paths)=>`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const catalogBarIcons={search:'<svg class="catalog-bar-lupa" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',down:lucide(12,'<path d="m6 9 6 6 6-6"/>'),
@@ -96,7 +98,7 @@ let productBarMenu='';
 const plural=(n,one,many)=>`${qty(n)} ${n===1?one:many}`;
 function productFilterBar(matches=catalogMatches()){
  if(catalogListsFor!==stateAt)loadCatalogLists();
- return `<form id="catalog-search" class="catalog-bar" role="search"><label class="catalog-bar-search">${catalogBarIcons.search}<input name="query" value="${esc(catalogQuery)}" placeholder="Buscar por SKU ou nome..." aria-label="Buscar por SKU ou nome" autocomplete="off"></label>${['stock','tag','category','situation'].map(catalogFilterMenu).join('')}${productExcelMenu()}<button type="button" class="catalog-bar-button catalog-bar-primary" data-products-refresh title="Ler de novo os produtos e o estoque">${catalogBarIcons.refresh}Atualizar</button>${productConfigMenu()}${productSelectionTools(matches)}</form>`;
+ return `<form id="catalog-search" class="catalog-bar" role="search"><label class="catalog-bar-search">${catalogBarIcons.search}<input name="query" value="${esc(catalogQuery)}" placeholder="Buscar por SKU ou nome..." aria-label="Buscar por SKU ou nome" autocomplete="off"></label>${['stock','tag','category','situation'].map(catalogFilterMenu).join('')}${productLayoutMenu()}${productExcelMenu()}<button type="button" class="catalog-bar-button catalog-bar-primary" data-products-refresh title="Ler de novo os produtos e o estoque">${catalogBarIcons.refresh}Atualizar</button>${productConfigMenu()}${productSelectionTools(matches)}</form>`;
 }
 // "Selecionar todos" marca os da página (como a caixa da linha de ferramentas que saiu); a seleção
 // vale entre páginas e o × da contagem tira tudo de uma vez.
@@ -146,6 +148,201 @@ function excelDownload(){
  const sheet=rows.map(p=>[p.sku,p.name,names.get(p.category?.id)||'',productFilterKeys(p,'tag',names).filter(t=>t!==CATALOG_NONE).join(' '),productStatusOf(p)==='inactive'?'Inativo':'Ativo',number(p.price),p.kind==='service'?null:number(productAvailable(p))]);
  xlsxDownload(`produtos-${localDay()}.xlsx`,xlsxWorkbook('Produtos',['Código','Descrição','Categoria','Tag','Situação','Preço','Estoque'],sheet,{widths:[18,60,16,8,10,12,10],money:[5]}));
  closeProductBarMenu();message(`Planilha com ${plural(rows.length,'produto','produtos')} baixada.`);
+}
+
+// M-113…M-116 (27/11/2026): as colunas da lista e o menu Layout ▾ (logo antes do Excel), no jeito
+// do Layout da Tabela de Preços: uma caixa por coluna (marcada = aparece), "Marcar todas · Limpar"
+// no alto (só para as colunas), a escolha lembrada neste navegador e, nas colunas de texto, o link
+// "Filtrar" com o filtro daquela coluna logo abaixo. Seleção e Descrição aparecem sempre.
+// Colunas na ordem do menu (a ordem da tabela depois da Descrição): chave, nome no menu, cabeçalho
+// e largura (px; a mesma do .p2-col-<chave> do bling-layout.css). A Descrição fica com o resto, nunca
+// menos de 280px: com muitas colunas a tabela rola para o lado dentro da moldura (p2ListSize).
+const p2ListColumns=[
+ ['cor','Cor','Cor',90],['code','Código (SKU)','Código',130],['model','Modelo','Modelo',90],['number','Número','Número',130],
+ ['category','Categoria','Categoria',120],['sale_category','Categoria de venda','Categoria de venda',140],['tag','Tag de envio','Tag de envio',90],
+ ['cost_center','Centro de custo','Centro de custo',110],['min_margin','Margem mínima','Margem mínima',110],['special','Condição especial','Condição especial',170],
+ ['cost','Custo','Custo',110],['photo','Foto','Foto',70],['packaging','Embalagem','Embalagem',90],['stock','Estoque','Estoque',110],
+].map(([key,label,head,width])=>({key,label,head,width}));
+const p2ListDefault=new Set(['cor','code','cost','stock']),P2_CHECK_COL=32,P2_DESC_MIN=280;
+// Guardado como {chave: true/false} das opções que existiam ao gravar: opção nova (ou nunca gravada)
+// segue o padrão. Lido na primeira vez que a lista desenha; sem navegador que guarde, vale o padrão.
+const P2_COLUMNS_KEY='erp.produtos2.colunas';
+let p2ColumnChoice=null;
+function p2ColumnShown(key){
+ if(!p2ColumnChoice){p2ColumnChoice={};try{const saved=JSON.parse(localStorage.getItem(P2_COLUMNS_KEY)||'{}');if(saved&&typeof saved==='object')for(const c of p2ListColumns)if(typeof saved[c.key]==='boolean')p2ColumnChoice[c.key]=saved[c.key];}catch(_){}}
+ return p2ColumnChoice[key]??p2ListDefault.has(key);
+}
+function p2ColumnSet(keys,shown){
+ p2ColumnShown('');for(const key of keys)p2ColumnChoice[key]=shown;
+ try{localStorage.setItem(P2_COLUMNS_KEY,JSON.stringify(Object.fromEntries(p2ListColumns.map(c=>[c.key,p2ColumnShown(c.key)]))));}catch(_){}
+}
+const p2VisibleColumns=()=>p2ListColumns.filter(c=>p2ColumnShown(c.key));
+// Depois de cada desenho (app.js render): a largura mínima da tabela = seleção + 280px de Descrição +
+// as colunas à vista. Pelo CSSOM (a política do ERP não aceita style="" no HTML).
+function p2ListSize(){
+ const table=document.querySelector('.product-list table.p2-list');if(!table)return;
+ table.style.minWidth=`${P2_CHECK_COL+P2_DESC_MIN+p2VisibleColumns().reduce((n,c)=>n+c.width,0)}px`;
+}
+// Cor, Centro de custo, Categoria de venda, Margem mínima, Condição especial, Foto e Embalagem moram no
+// DaVinci: POST /api/produto-regras/lista com TODOS os produtos da lista (todas as páginas) de uma
+// vez, com a linha da Tabela de Preços e a categoria de cada um (as mesmas do GET do cadastro). Lido
+// ao abrir a lista, no Atualizar, ao voltar do cadastro que gravou Cor/Margem/DUIMP/Centro/Condição
+// (productRulesChanged, product-details.js) e quando a lista de produtos mudou (o state de cada
+// minuto só relê se mudou o que vai na chamada). Sem resposta, sem permissão ou produto ignorado:
+// as células ficam vazias.
+let p2Rules={key:null,state:'',produtos:{},seq:0,stale:false},p2RulesSeen=null;
+const P2_RULES_MAX=20000;
+function p2RulesItems(){
+ const out=[];
+ for(const p of state?.products||[]){
+  const sku=String(p.sku??'');if(!sku||sku.length>120||productStatusOf(p)==='deleted')continue;
+  const item={sku},linha=String(p.price_table?.pricing_id??''),categoria=productCategoryName(p);
+  if(linha&&linha.length<=64)item.linha=linha;
+  if(categoria&&categoria.length<=120)item.categoria=categoria;
+  out.push(item);
+ }
+ return out;
+}
+function p2RulesEnsure(){
+ if(typeof productRulesChanged!=='undefined'&&productRulesChanged){productRulesChanged=false;p2Rules.stale=true;}
+ if(p2RulesSeen===state&&!p2Rules.stale)return;
+ p2RulesSeen=state;
+ const items=p2RulesItems(),key=JSON.stringify(items);
+ if(key===p2Rules.key&&!p2Rules.stale)return;
+ p2Rules.stale=false;p2Rules.key=key;
+ const seq=++p2Rules.seq;p2Rules.state=p2Rules.state==='ok'?'ok':'loading';
+ const chunks=[];for(let i=0;i<items.length;i+=P2_RULES_MAX)chunks.push(items.slice(i,i+P2_RULES_MAX));
+ Promise.all(chunks.map(async produtos=>{
+  const r=await fetch('/api/produto-regras/lista',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({produtos})});
+  const d=r.ok?await r.json():null;if(!d||typeof d.produtos!=='object'||!d.produtos)throw new Error(String(r.status));
+  return d.produtos;
+ })).then(parts=>{if(seq===p2Rules.seq)p2Rules={...p2Rules,state:'ok',produtos:Object.assign({},...parts)};},
+  ()=>{if(seq===p2Rules.seq)p2Rules={...p2Rules,state:'erro',produtos:{}};})
+  .finally(()=>{
+   if(seq!==p2Rules.seq||page!=='products'||editingProduct||productsView!=='products')return;
+   // Quem digita na busca ou no número de um filtro não perde o que digita: o próximo desenho mostra.
+   if(document.activeElement?.matches?.('#catalog-search [name=query],[data-bar-menu-box] input:not([type=checkbox]):not([type=radio])'))return;
+   render();
+  });
+}
+// O texto de cada célula (o mesmo que o cadastro do produto mostra), guardado por produto até mudar
+// o state, a resposta do DaVinci, as listas de Cadastros › Produtos ou as categorias do ERP: os
+// filtros e as opções deles passam pela lista inteira. Vazio = '' (o "(em branco)" dos filtros).
+let p2CellsCache=new Map(),p2CellsFrom=[];
+const p2CellsInputs=()=>[state?.products,p2Rules.produtos,catalogLists,state?.categories];
+// 0,18 → 18 (como a Margem mín do cadastro: duas casas, sem a sobra de 0,18 × 100 = 18,000…04).
+const p2Pct=frac=>Math.round(Number(frac)*10000)/100;
+const p2PctText=frac=>String(p2Pct(frac)).replace('.',',');
+function p2CellsOf(p){
+ const from=p2CellsInputs();
+ if(from.some((v,i)=>v!==p2CellsFrom[i])){p2CellsCache=new Map();p2CellsFrom=from;}
+ let c=p2CellsCache.get(p);if(c)return c;
+ const r=p2Rules.produtos[p.sku],has=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
+ const own=r&&has(r.margem_min),inherited=r&&!own&&has(r.margem_min_herdada),margin=own?r.margem_min:inherited?r.margem_min_herdada:null;
+ c={
+  cor:r?.cor?String(r.cor):'',
+  category:productCategoryName(p)||'Sem categoria',
+  sale_category:r?(r.tem_linha&&r.categoria_venda?(r.categoria_venda_ativa===false?`${r.categoria_venda} (inativa)`:String(r.categoria_venda)):'—'):'',
+  tag:p2TagOf(p.sku,catalogListOf('tags_envio'))||'—',
+  cost_center:r?String(r.centro_custo??r.centro_custo_herdado??'—'):'',
+  min_margin:margin===null?'':`${p2PctText(margin)}%`,marginGrey:!!inherited,marginValue:margin===null?null:p2Pct(margin),
+  special:r?String(r.condicao_resumo||'—'):'',specialOn:!!r?.condicao_vigente,specialFloor:r&&has(r.condicao_piso)?p2Pct(r.condicao_piso):null,
+  photo:r?(r.foto?'Sim':'Não'):'',packaging:r?(r.embalagem?'Sim':'Não'):'',
+ };
+ p2CellsCache.set(p,c);return c;
+}
+// Custo como o Preço escrevia (vírgula e 2 casas); sem custo, "—" como o Preço sem preço.
+const p2Cost=v=>v===null||v===undefined||v===''||!Number.isFinite(Number(v))?'—':brl(v).replace(/^R\$\s*/,'');
+// Uma célula da lista: texto centralizado como o Código, em uma linha e sem clique (o Estoque
+// continua o botão do painel de estoque, agora na letra das outras células).
+function p2ListCell(column,p){
+ const key=column.key,text=t=>`<td class="p2-num"${t&&t!=='—'?` title="${esc(t)}"`:''}>${esc(t)}</td>`;
+ if(key==='code')return `<td class="p2-num">${esc(p.sku)}</td>`;
+ if(key==='model')return text(p.price_table?.model||'');
+ if(key==='number')return text(p.price_table?.certificate_number||'');
+ if(key==='cost')return `<td class="p2-num">${p2Cost(p.cost_price)}</td>`;
+ if(key==='stock'){
+  const stock=p.kind==='service'?'—':`<button type="button" class="p2-stock" data-stock-side="${esc(p.sku)}" title="Ver o estoque de ${esc(p.sku)}">${qty(productAvailable(p))}</button>`;
+  return `<td class="p2-num p2-stock-cell${p.sku===sideStockSku?' is-open':''}">${stock}</td>`;
+ }
+ const c=p2CellsOf(p);
+ if(key==='min_margin')return `<td class="p2-num${c.marginGrey?' p2-herdada':''}"${c.marginGrey?' title="Herdada da categoria de venda (o produto não tem a dele)."':''}>${esc(c.min_margin)}</td>`;
+ return text(c[key]);
+}
+
+// M-116: filtros por coluna no menu Layout. Cor, Categoria, Categoria de venda, Tag de envio e Centro
+// de custo: caixas com os textos da coluna na lista inteira (sem busca nem filtros), guardando o que
+// foi DESMARCADO (tudo marcado = sem filtro; nada marcado = nenhum produto; '' = "(em branco)").
+// Margem mínima: ≥ ou ≤ um número (a margem que a coluna mostra: a do produto ou a herdada; sem
+// nenhuma não passa). Condição especial: só quem tem condição vigente com piso ≥ o número ("sem piso"
+// não tem número: não passa). Valem para a lista inteira, com a busca e a barra; não são gravados
+// (zeram ao recarregar) e, como os da barra, continuam no Atualizar e na volta do cadastro.
+const P2_CHECK_FILTERS=['cor','category','sale_category','tag','cost_center'],P2_NUMBER_FILTERS=['min_margin','special'];
+let p2LayoutOff=Object.fromEntries(P2_CHECK_FILTERS.map(k=>[k,new Set()])),p2LayoutNumbers={min_margin:'',special:''},p2LayoutMarginOp='gte';
+let p2LayoutOpen=new Set(),p2LayoutVersion=0;
+const p2LayoutLabel=key=>p2ListColumns.find(c=>c.key===key)?.label||key;
+// "18", "18,5", "18.5", "18%" → número; vazio ou outra coisa = sem filtro.
+function p2LayoutNumber(key){
+ const t=String(p2LayoutNumbers[key]||'').trim().replace(/%$/,'').trim().replace(',','.');
+ if(!t)return null;const n=Number(t);return Number.isFinite(n)?n:null;
+}
+// Os valores de cada filtro de caixas, guardados até mudar o que muda as células (p2CellsInputs).
+let p2ValuesCache={},p2ValuesFrom=[];
+function p2FilterValues(key){
+ const from=p2CellsInputs();
+ if(from.some((v,i)=>v!==p2ValuesFrom[i])){p2ValuesCache={};p2ValuesFrom=from;}
+ if(p2ValuesCache[key])return p2ValuesCache[key];
+ const seen=new Set();let blank=false;
+ for(const p of state?.products||[]){if(productStatusOf(p)==='deleted')continue;const v=p2CellsOf(p)[key];if(v==='')blank=true;else seen.add(v);}
+ return p2ValuesCache[key]=[...[...seen].sort((a,b)=>a.localeCompare(b,'pt-BR')),...(blank?['']:[])];
+}
+function p2FilterOn(key){
+ if(P2_NUMBER_FILTERS.includes(key))return p2LayoutNumber(key)!==null;
+ const off=p2LayoutOff[key];return off.size>0&&p2FilterValues(key).some(v=>off.has(v));
+}
+const p2LayoutFiltered=()=>[...P2_CHECK_FILTERS,...P2_NUMBER_FILTERS].some(p2FilterOn);
+let p2Plan=null,p2PlanVersion=-1;
+function p2LayoutPasses(p){
+ if(p2PlanVersion!==p2LayoutVersion){
+  p2PlanVersion=p2LayoutVersion;
+  const checks=P2_CHECK_FILTERS.filter(k=>p2LayoutOff[k].size).map(k=>[k,p2LayoutOff[k]]),margin=p2LayoutNumber('min_margin'),special=p2LayoutNumber('special');
+  p2Plan=checks.length||margin!==null||special!==null?{checks,margin,special,op:p2LayoutMarginOp}:null;
+ }
+ if(!p2Plan)return true;
+ const c=p2CellsOf(p);
+ for(const [key,off] of p2Plan.checks)if(off.has(c[key]))return false;
+ if(p2Plan.margin!==null&&(c.marginValue===null||(p2Plan.op==='lte'?c.marginValue>p2Plan.margin:c.marginValue<p2Plan.margin)))return false;
+ if(p2Plan.special!==null&&!(c.specialOn&&c.specialFloor!==null&&c.specialFloor>=p2Plan.special))return false;
+ return true;
+}
+// Filtro mudou: a lista inteira, de novo da primeira página (como os filtros da barra).
+function p2LayoutChanged(focus){p2LayoutVersion++;catalogOffset=0;productSelection.clear();render();p2Refocus(focus);}
+function p2Refocus(selector){
+ if(!selector)return;
+ const el=document.querySelector(selector);if(!el)return;
+ el.focus();if(el.type==='text'||el.matches('[data-layout-number]'))el.setSelectionRange?.(el.value.length,el.value.length);
+}
+const p2Sel=(attr,key,value)=>`[${attr}="${key}"]${value===undefined?'':`[value="${String(value).replace(/["\\]/g,'\\$&')}"]`}`;
+function p2FilterBox(key){
+ const label=p2LayoutLabel(key),number=(text,unit='%')=>`<label class="p2-layout-number">${text?`<span>${text}</span>`:''}<input data-layout-number="${key}" value="${esc(p2LayoutNumbers[key])}" inputmode="decimal" maxlength="8" placeholder="0" autocomplete="off" aria-label="${esc(label)} em %"><span>${unit}</span></label>`;
+ let body;
+ if(key==='min_margin')body=[['gte','maior ou igual a'],['lte','menor ou igual a']].map(([v,t])=>`<label class="p2-layout-radio"><input type="radio" name="p2-layout-margem" value="${v}" data-layout-margin-op ${p2LayoutMarginOp===v?'checked':''}>${t}</label>`).join('')+number('');
+ else if(key==='special')body=number('margem a partir de');
+ else{
+  const off=p2LayoutOff[key],values=p2FilterValues(key);
+  body=`<div class="catalog-bar-menu-head"><button type="button" data-layout-filter-all="${key}">Marcar todas</button><span aria-hidden="true">·</span><button type="button" data-layout-filter-none="${key}">Limpar</button></div><div class="p2-layout-values">${values.length?values.map(v=>`<label><input type="checkbox" data-layout-value="${key}" value="${esc(v)}" ${off.has(v)?'':'checked'}>${esc(v===''?'(em branco)':v)}</label>`).join(''):'<p class="catalog-bar-note">Nenhum produto na lista.</p>'}</div>`;
+ }
+ return `<div class="p2-layout-filter" data-layout-filter-box="${key}" role="group" aria-label="Filtrar ${esc(label)}">${body}</div>`;
+}
+function productLayoutMenu(){
+ const open=productBarMenu==='layout';
+ const row=c=>{
+  const filter=P2_CHECK_FILTERS.includes(c.key)||P2_NUMBER_FILTERS.includes(c.key),on=filter&&p2FilterOn(c.key),expanded=filter&&p2LayoutOpen.has(c.key);
+  const link=filter?`<button type="button" class="p2-layout-link${on?' is-on':''}" data-layout-filter="${c.key}" aria-expanded="${expanded}" aria-label="${on?'Filtro ligado':'Filtrar'}: ${esc(c.label)}">${on?'Filtro ligado':'Filtrar'}</button>`:'';
+  return `<div class="p2-layout-row" data-layout-row="${c.key}"><label><input type="checkbox" data-layout-column="${c.key}" ${p2ColumnShown(c.key)?'checked':''}>${esc(c.label)}</label>${link}</div>${expanded?p2FilterBox(c.key):''}`;
+ };
+ const menu=open?`<div class="catalog-bar-menu p2-layout-menu" data-bar-menu-box="layout" role="group" aria-label="Layout"><div class="catalog-bar-menu-head"><button type="button" data-layout-all>Marcar todas</button><span aria-hidden="true">·</span><button type="button" data-layout-none>Limpar</button></div><div class="p2-layout-options">${p2ListColumns.map(row).join('')}</div></div>`:'';
+ return `<div class="catalog-bar-filter" data-bar-menu-wrap><button type="button" class="catalog-bar-button${p2LayoutFiltered()?' is-filtered':''}" data-bar-menu="layout" aria-haspopup="true" aria-expanded="${open}" title="Escolher as colunas que a lista mostra">Layout${catalogBarIcons.down}</button>${menu}</div>`;
 }
 
 // M-45/M-46/M-47: Configuração ▾ → "Alterar em massa" nos itens marcados. Abre sempre sem nada
@@ -290,7 +487,8 @@ document.addEventListener('click',async e=>{
  if(barMenu){
   const key=barMenu.dataset.barMenu;catalogMenu='';
   if(productBarMenu===key)productBarMenu='';
-  else{productBarMenu=key;if(key==='excel'){excelOnlySelected=false;excelOff={category:new Set(),tag:new Set(),stock:new Set()};}else{bulkEdit=bulkDefaults();bulkScope=actionUuid();}}
+  // Layout abre com os filtros recolhidos (os ligados continuam ligados).
+  else{productBarMenu=key;if(key==='excel'){excelOnlySelected=false;excelOff={category:new Set(),tag:new Set(),stock:new Set()};}else if(key==='layout')p2LayoutOpen=new Set();else{bulkEdit=bulkDefaults();bulkScope=actionUuid();}}
   render();actionKeysPrune();return;
  }
  const all=e.target.closest('[data-catalog-all]');
@@ -299,11 +497,20 @@ document.addEventListener('click',async e=>{
  if(none){catalogUnchecked[none.dataset.catalogNone]=new Set(catalogFilterOptions(none.dataset.catalogNone).map(([v])=>v));catalogFilterChanged();return;}
  if(catalogMenu&&!e.target.closest('.catalog-bar-filter'))closeCatalogMenu();
  if(productBarMenu&&!e.target.closest('[data-bar-menu-wrap]'))closeProductBarMenu();
+ // Layout: os atalhos do alto ligam ou desligam todas as COLUNAS (não mexem nos filtros).
+ const layoutAll=e.target.closest('[data-layout-all],[data-layout-none]');
+ if(layoutAll){p2ColumnSet(p2ListColumns.map(c=>c.key),layoutAll.matches('[data-layout-all]'));render();p2Refocus(layoutAll.matches('[data-layout-all]')?'[data-layout-all]':'[data-layout-none]');return;}
+ // "Filtrar" abre o filtro logo abaixo da opção; de novo, recolhe (o filtro continua ligado).
+ const layoutFilter=e.target.closest('[data-layout-filter]');
+ if(layoutFilter){const key=layoutFilter.dataset.layoutFilter;if(p2LayoutOpen.has(key))p2LayoutOpen.delete(key);else p2LayoutOpen.add(key);render();p2Refocus(p2Sel('data-layout-filter',key));return;}
+ const valuesAll=e.target.closest('[data-layout-filter-all],[data-layout-filter-none]');
+ if(valuesAll){const key=valuesAll.dataset.layoutFilterAll||valuesAll.dataset.layoutFilterNone,all=!!valuesAll.dataset.layoutFilterAll;p2LayoutOff[key]=all?new Set():new Set(p2FilterValues(key));p2LayoutChanged(p2Sel(all?'data-layout-filter-all':'data-layout-filter-none',key));return;}
  const excelAll=e.target.closest('[data-excel-all],[data-excel-none]');
  if(excelAll){const key=excelAll.dataset.excelAll||excelAll.dataset.excelNone;excelOff[key]=excelAll.dataset.excelAll?new Set():new Set(catalogFilterOptions(key).map(([v])=>v));document.querySelectorAll(`[data-excel-option="${key}"]`).forEach(i=>{i.checked=!excelOff[key].has(i.value);});return;}
  if(e.target.closest('[data-excel-download]')){excelDownload();return;}
  if(e.target.closest('[data-bulk-apply]')){applyBulk();return;}
- if(e.target.closest('[data-products-refresh]')){refresh().catch(error=>message(error.message,true));return;}
+ // Atualizar relê o state e, no próximo desenho, as colunas que moram no DaVinci (M-114 item 8).
+ if(e.target.closest('[data-products-refresh]')){p2Rules.stale=true;refresh().catch(error=>message(error.message,true));return;}
  if(e.target.closest('[data-product-selection-clear]')){productSelection.clear();render();return;}
  if(e.target.closest('[data-product-delete]')){
   const count=productSelection.size;if(!count)return;
@@ -320,6 +527,13 @@ document.addEventListener('change',e=>{
  if(on){(bulkEdit||=bulkDefaults())[on.dataset.bulkOn].on=on.checked;return;}
  const field=e.target.closest('[data-bulk-field]');
  if(field){bulkField(field);return;}
+ // Layout: liga/desliga a coluna (lembrado neste navegador); a lista não muda de página.
+ const column=e.target.closest('[data-layout-column]');
+ if(column){p2ColumnSet([column.dataset.layoutColumn],column.checked);render();p2Refocus(p2Sel('data-layout-column',column.dataset.layoutColumn));return;}
+ const value=e.target.closest('[data-layout-value]');
+ if(value){const key=value.dataset.layoutValue,off=new Set(p2LayoutOff[key]);if(value.checked)off.delete(value.value);else off.add(value.value);p2LayoutOff[key]=off;p2LayoutChanged(p2Sel('data-layout-value',key,value.value));return;}
+ if(e.target.matches('[data-layout-margin-op]')){p2LayoutMarginOp=e.target.value;p2LayoutChanged(`[data-layout-margin-op][value="${p2LayoutMarginOp}"]`);return;}
+ if(e.target.matches('[data-layout-number]')){p2LayoutNumberTyped(e.target,0);return;}
  const option=e.target.closest('[data-catalog-option]');if(!option)return;
  const key=option.dataset.catalogOption,off=new Set(catalogUnchecked[key]);
  if(option.checked)off.delete(option.value);else off.add(option.value);
@@ -334,8 +548,17 @@ function bulkField(field){
 }
 // Busca enquanto digita, como na Tabela de Preços; Enter continua valendo (app.js, catalog-search).
 let catalogTyping=0;
+// O número de um filtro do Layout vale enquanto digita (como a busca, 250 ms depois da última tecla)
+// e na hora em que o campo perde o foco; o cursor volta para o mesmo campo depois do desenho.
+let p2NumberTyping=0;
+function p2LayoutNumberTyped(input,wait){
+ clearTimeout(p2NumberTyping);const key=input.dataset.layoutNumber,typed=input.value;
+ const apply=()=>{if(p2LayoutNumbers[key]===typed)return;p2LayoutNumbers[key]=typed;p2LayoutChanged(p2Sel('data-layout-number',key));};
+ if(wait)p2NumberTyping=setTimeout(apply,wait);else apply();
+}
 document.addEventListener('input',e=>{
  if(e.target.matches?.('[data-bulk-field]')){bulkField(e.target);return;}
+ if(e.target.matches?.('[data-layout-number]')){p2LayoutNumberTyped(e.target,250);return;}
  if(!e.target.matches?.('#catalog-search [name=query]'))return;
  clearTimeout(catalogTyping);const value=e.target.value;
  catalogTyping=setTimeout(()=>{

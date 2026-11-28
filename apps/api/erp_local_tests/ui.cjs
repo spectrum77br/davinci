@@ -635,6 +635,8 @@ async function rulesEditor(product,{rules=regrasVazias,status=200,consulta}={}){
   w.fetch=async(url,options={})=>{
     url=String(url);
     if(!url.startsWith('/api/produto-regras/'))return plain(url,options);
+    // A chamada da LISTA (M-114…M-116, todos os produtos de uma vez) tem os testes dela; aqui, só o cadastro.
+    if(url==='/api/produto-regras/lista')return {ok:false,status:404,json:async()=>({})};
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):undefined;
     calls.push({url,method,body,credentials:options.credentials});
     if(status>=400)return {ok:false,status,json:async()=>({})};
@@ -797,6 +799,8 @@ async function menusEditor(product,{rules=regrasUranyx(),status=200,consulta,cen
     if(leve&&path==='/api/erp-local/state'){const snap=await (await plain(url,options)).json();return reply(200,{...snap,products:snap.products.map(produtoLeve)});}
     if(leve&&path==='/api/erp-local/products/'+encodeURIComponent(products[0].sku)+'/full')return reply(200,products[0]);
     if(!m73Paths.some(p=>path.startsWith(p)))return plain(url,options);
+    // A chamada da LISTA (M-114…M-116) tem os testes dela; aqui, só o que o cadastro chama.
+    if(path==='/api/produto-regras/lista')return reply(404,{});
     calls.push({url,path,method,body,credentials:options.credentials,headers:options.headers||{}});
     if(path.startsWith('/api/produto-regras/')){
       if(status>=400)return reply(status,{});
@@ -1553,7 +1557,8 @@ test('seller identity and commission policy save together without creating acces
 test('product totals exclude quarantine without hiding its physical balance from stock history',async()=>{
   const p={sku:'part',name:'Produto local',kind:'simple',components:[],price:'10',cost_price:'2',balances:[{depot:'geral',physical:'8',reserved:'0',available:'8',in_total:true},{depot:'quarantine',physical:'5',reserved:'0',available:'5',in_total:false}]};
   const {document:d}=await setup({products:[p]});d.querySelector('nav [data-page=products]').click();
-  const cells=d.querySelector('.product-list tbody tr').querySelectorAll('td');assert.equal(cells.length,5);assert.equal(cells[4].textContent,'8');
+  // M-114/M-115: seleção | Descrição | Cor | Código | Custo | Estoque (as colunas que o Layout mostra de início).
+  const cells=d.querySelector('.product-list tbody tr').querySelectorAll('td');assert.equal(cells.length,6);assert.equal(cells[5].textContent,'8');
 });
 
 test('quarantine is not offered for new sales while the depot form keeps its physical purpose explicit',async()=>{
@@ -2201,9 +2206,9 @@ test('M-30: the example of the request (2.753 products, base of 23/11) counts th
 // estoque do produto à direita, com Incluir e Transferir. Rotas do DaVinci e do ERP respondidas aqui.
 const p2Name='Uranyx F105 12.64 - Preto + cartão 64GB';
 const p2Rows=[
- {sku:'dg019.ra',name:p2Name,kind:'simple',position:9,components:[],price:'800',balances:[{depot:'geral',physical:'98',reserved:'3',available:'95'}],details:{version:4,status:'active'},category:{id:'c1'}},
+ {sku:'dg019.ra',name:p2Name,kind:'simple',position:9,components:[],price:'800',cost_price:'630.0000',balances:[{depot:'geral',physical:'98',reserved:'3',available:'95'}],details:{version:4,status:'active'},category:{id:'c1'}},
  {sku:'dg019.sp',name:'Uranyx F105 SP',kind:'simple',position:8,components:[],price:'560',balances:[{depot:'geral',physical:'57',reserved:'0',available:'57'}],details:{version:1,status:'active'},category:{id:'c1'}},
- {sku:'dg019.ci',name:'Uranyx F105 CI',kind:'simple',position:7,components:[],price:'1',balances:[{depot:'geral',physical:'2',reserved:'0',available:'2'}],details:{version:0,status:'inactive'},category:{id:'c1'}},
+ {sku:'dg019.ci',name:'Uranyx F105 CI',kind:'simple',position:7,components:[],price:'1',cost_price:'0.0000',balances:[{depot:'geral',physical:'2',reserved:'0',available:'2'}],details:{version:0,status:'inactive'},category:{id:'c1'}},
  {sku:'dg019.ra+a001.ra',name:'Kit F105',kind:'kit',position:6,components:[{sku:'dg019.ra',quantity:'1'},{sku:'a001.sp',quantity:'1'}],price:'900',balances:[{depot:'geral',physical:'4',reserved:null,available:'4'}],details:{version:0,status:'active'},category:{id:'c2'}},
  {sku:'dg108.ra',name:'Outro aparelho',kind:'simple',position:5,components:[],price:'10',balances:[{depot:'geral',physical:'1',reserved:'0',available:'1'}],details:{version:0,status:'active'},category:{id:'c1'}},
  {sku:'dg020.sp',name:'Celular zerado',kind:'simple',position:4,components:[],price:'20',balances:[{depot:'geral',physical:'0',reserved:'0',available:'0'}],details:{version:0,status:'active'},category:{id:'c1'}},
@@ -2220,18 +2225,21 @@ const p2Moves={items:[
 ],total:3,entries:'220',exits:'122',bling:{reserved:'3',available:'95'},sku:'dg019.ra',depot:''};
 const tick=async(n=4)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
 // routes: {caminho: resposta | (corpo, chamada) => resposta}; resposta {status, body} ou Error (sem resposta).
-async function p2Page({products=p2Rows,consulta,routes={}}={}){
- const context=await setup({products,categories:p2Categories,...(consulta?{consulta}:{})});
+// Caminho terminado em * vale para o que começa com ele (o exato ganha). beforeOpen(window): antes de
+// abrir Produtos (ex.: o que o navegador já guardava, como depois de recarregar a página).
+async function p2Page({products=p2Rows,categories=p2Categories,consulta,routes={},beforeOpen}={}){
+ const context=await setup({products,categories,...(consulta?{consulta}:{})});
  const {dom}=context,before=dom.window.fetch;context.calls=[];
  dom.window.fetch=async(url,options={})=>{
   const u=String(url),call={url:u,path:u.split('?')[0],method:options.method||'GET',headers:options.headers||{},credentials:options.credentials,body:options.body?JSON.parse(options.body):undefined};
   context.calls.push(call);
-  const route=routes[call.path];
+  const route=routes[call.path]??Object.entries(routes).find(([k])=>k.endsWith('*')&&call.path.startsWith(k.slice(0,-1)))?.[1];
   if(route){const reply=typeof route==='function'?await route(call.body,call):route;if(reply instanceof Error)throw reply;return {ok:(reply.status||200)<400,status:reply.status||200,json:async()=>reply.body};}
   if(u==='/api/produto-cadastros/listas')return {ok:false,status:404,json:async()=>({})};
   return before(url,options);
  };
  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+ if(beforeOpen)beforeOpen(dom.window);
  context.document.querySelector('nav [data-page=products]').click();await tick();
  context.pick=sku=>{const box=context.document.querySelector(`[data-product-select="${sku}"]`);box.checked=true;box.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
  context.submit=form=>form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
@@ -2242,21 +2250,23 @@ async function p2Page({products=p2Rows,consulta,routes={}}={}){
 const field=(form,name)=>form.querySelector(`[name=${name}]`);
 const cellsOf=row=>[...row.querySelectorAll('th,td')].map(c=>c.textContent.trim());
 
-test('M-40: Produtos list like the Tabela de Preços grid — five columns, nothing of the old rail and tools',async()=>{
+test('M-40/M-113/M-114: Produtos list like the Tabela de Preços grid — Cor, Código, Custo and Estoque at first, nothing of the old rail and tools',async()=>{
  const {dom,document:d}=await p2Page();
  assert.equal(d.body.dataset.screen,'products');assert.equal(d.body.dataset.productsTab,'products');
  assert.equal(d.getElementById('action-rail').innerHTML,'','sem painel da direita');
  for(const gone of ['.sales-list-tools','[aria-label="Recarregar produtos"]','[data-product-print]','[data-product-density]','.row-logistics','.row-menu','.product-image','.product-price','[data-stock-product]'])assert.equal(d.querySelector(`.product-list ${gone}`),null,gone);
  const table=d.querySelector('.product-list .p2-split-list table.p2-grid');
- assert.deepEqual(cellsOf(table.querySelector('thead tr')),['','Descrição','Código','Preço','Estoque']);
- assert.deepEqual([...table.querySelectorAll('thead th')].map(th=>th.className),['p2-check','','p2-num','p2-num','p2-num']);
- assert.deepEqual([...table.querySelectorAll('col')].map(c=>c.className),['p2-col-check','','p2-col-code','p2-col-price','p2-col-stock']);
+ // M-113: Preço vira Custo (o cost_price do cadastro, no mesmo lugar); M-114: Cor logo depois da Descrição.
+ assert.deepEqual(cellsOf(table.querySelector('thead tr')),['','Descrição','Cor','Código','Custo','Estoque']);
+ assert.deepEqual([...table.querySelectorAll('thead th')].map(th=>th.className),['p2-check','','p2-num','p2-num','p2-num','p2-num']);
+ assert.deepEqual([...table.querySelectorAll('col')].map(c=>c.className),['p2-col-check','','p2-col-cor','p2-col-code','p2-col-cost','p2-col-stock']);
  const row=d.querySelector('[data-product-select="dg019.ra"]').closest('tr');
- assert.deepEqual(cellsOf(row),['',p2Name,'dg019.ra','800,00','95']);
+ assert.deepEqual(cellsOf(row),['',p2Name,'','dg019.ra','630,00','95'],'sem resposta do DaVinci, a Cor fica vazia; Custo = cost_price');
  assert.equal(row.querySelector('.p2-name').dataset.editProduct,'dg019.ra','o nome abre o cadastro');
  assert.equal(row.querySelector('td:last-child button.p2-stock').dataset.stockSide,'dg019.ra','o número do Estoque é o botão do estoque');
  // Inativo sem o "Inativo" embaixo do nome; serviço sem botão; sem a frase do rodapé; o paginador fica.
- assert.deepEqual(cellsOf(d.querySelector('[data-product-select="dg019.ci"]').closest('tr')),['','Uranyx F105 CI','dg019.ci','1,00','2']);
+ assert.deepEqual(cellsOf(d.querySelector('[data-product-select="dg019.ci"]').closest('tr')),['','Uranyx F105 CI','','dg019.ci','0,00','2'],'custo 0 = 0,00');
+ assert.deepEqual(cellsOf(d.querySelector('[data-product-select="dg019.sp"]').closest('tr')).slice(3),['dg019.sp','—','57'],'sem custo: "—", como o Preço sem preço');
  assert.equal(d.querySelector('[data-product-select="x.serv"]').closest('tr').querySelector('td:last-child').textContent,'—');
  assert.equal(d.querySelector('[data-product-select="x.serv"]').closest('tr').querySelector('td:last-child button'),null);
  assert.doesNotMatch(d.querySelector('.product-list').textContent,/Inativo|Estoque = disponível próprio|Kit virtual · capacidade/);
@@ -2264,7 +2274,7 @@ test('M-40: Produtos list like the Tabela de Preços grid — five columns, noth
  // A barra: os filtros, Excel, Atualizar, Configuração e, no fim, Selecionar todos, lixeira e contagem.
  const bar=d.querySelector('#catalog-search');
  const labels=[...bar.querySelectorAll(':scope > .catalog-bar-filter > button, :scope > button, :scope > .catalog-bar-end > *')].map(b=>b.getAttribute('aria-label')||b.textContent.trim());
- assert.deepEqual(labels,['Estoque','Tags','Categoria','Situação','Excel','Atualizar','Configuração','Selecionar todos','Excluir selecionados','9 produtos · 0 selecionados']);
+ assert.deepEqual(labels,['Estoque','Tags','Categoria','Situação','Layout','Excel','Atualizar','Configuração','Selecionar todos','Excluir selecionados','9 produtos · 0 selecionados']);
  assert.deepEqual([...bar.querySelectorAll('[data-catalog-menu]')].map(b=>b.dataset.catalogMenu),['stock','tag','category','situation']);
  assert.ok(bar.querySelector('[data-products-refresh]').classList.contains('catalog-bar-primary'),'Atualizar azul');
  assert.equal(bar.querySelectorAll('[data-products-refresh] svg').length,1,'Atualizar sem setinha');
@@ -2371,6 +2381,320 @@ test('M-41: Excel crosses Categoria + Tag + Estoque, and "Só os itens seleciona
  // Nada atende: avisa e não baixa.
  const files=downloads.length;only('tag',[]);openExcel().querySelector('[data-excel-download]').click();
  assert.match(d.getElementById('notice').textContent,/Nenhum produto atende/);assert.equal(downloads.length,files);
+});
+
+// M-113…M-116 (27/11/2026): a lista do Produtos 2 nos exemplos dos pedidos — Custo no lugar do Preço,
+// a coluna Cor, o Layout ▾ que escolhe as colunas e os filtros por coluna dentro dele. Um DaVinci de
+// mentira responde a lista inteira numa chamada só (POST /api/produto-regras/lista) e o cadastro (GET/PUT
+// de um produto), guardando a cor pela base (dg115.ci = dg115.sp = dg115). Cores de mentira só aqui:
+// nada vai a banco nenhum (o fetch é o do teste).
+const lp=(sku,name,extra={})=>({sku,name,kind:'simple',components:[],balances:[{depot:'geral',physical:'5',reserved:'0',available:'5'}],price:'1.0000',cost_price:null,details:{version:1,status:'active'},...extra});
+const lineDg115={department:'Celular',pricing_id:'L115',model:'USM003',certificate_number:'07197-26-18234'};
+const listRows=()=>[
+ lp('dg115.ci','Uranyx A17 Pro Max 12.128 - Vermelho',{position:7,cost_price:'630.0000',price_table:{...lineDg115}}),
+ lp('dg115.sp','Uranyx A17 Pro Max 12.128 - Vermelho (SP)',{position:6,cost_price:'630.0000',price_table:{...lineDg115}}),
+ lp('dg054.sp+a004.sp+a019.sp','Uranyx A17 Branco + Relógio + Tag',{kind:'kit',position:5,cost_price:'717.0000',components:[{sku:'dg054.sp',quantity:'1'},{sku:'a004.sp',quantity:'1'},{sku:'a019.sp',quantity:'1'}],balances:[{depot:'geral',physical:'3',reserved:null,available:'3'}],category:{id:'k2'}}),
+ lp('a001.sp','Mala Uranyx P',{position:4,cost_price:'95.5000',category:{id:'k3'},price_table:{department:'Mala',pricing_id:'L001'}}),
+ lp('z2819','Peça sem tag',{position:3}),
+ lp('x.serv','Conserto',{kind:'service',position:2,balances:[]}),
+ lp('e.del.sp','Excluído',{position:8,details:{version:3,status:'deleted'}}),
+];
+const listCategories=[{id:'k2',name:'Celular Kit',path:'Celular Kit',status:'active'},{id:'k3',name:'Mala',path:'Mala',status:'active'}];
+const listOrder=['dg115.ci','dg115.sp','dg054.sp+a004.sp+a019.sp','a001.sp','z2819','x.serv'];
+function listDavinci(){
+ const cores={'C-AZ':'Azul','C-VE':'Vermelho'},cor={'dg054+a004+a019':'C-AZ'};
+ const base=sku=>String(sku).split('+').map(p=>p.replace(/\.(cd|ci|pi|ra|sa|sp)$/,'')).join('+');
+ const none={margem_min:null,margem_min_herdada:null,centro_custo:null,centro_custo_herdado:null,tem_linha:false,categoria_venda:null,categoria_venda_ativa:null,condicao_resumo:'—',condicao_vigente:false,condicao_piso:null,fotos_count:null,foto:false,embalagem:false,embalagens_count:null};
+ const fixed={
+  dg115:{...none,margem_min_herdada:0.18,centro_custo_herdado:'Celular',tem_linha:true,categoria_venda:'Regular',categoria_venda_ativa:true,fotos_count:4,foto:true},
+  'dg054+a004+a019':{...none,margem_min:0.2,margem_min_herdada:0.15,centro_custo:'Mala',centro_custo_herdado:'Celular',condicao_resumo:'até 30/11 · piso 5%',condicao_vigente:true,condicao_piso:0.05},
+  a001:{...none,margem_min_herdada:0.125,centro_custo_herdado:'Mala',tem_linha:true,categoria_venda:'Queima',categoria_venda_ativa:false,condicao_resumo:'01/12 a 05/12 · sem piso',condicao_vigente:true,fotos_count:0,embalagem:true,embalagens_count:2},
+ };
+ const row=sku=>{const b=base(sku);return {sku_base:b,cor_id:cor[b]||null,cor:cores[cor[b]]||null,...(fixed[b]||none)};};
+ const fake={cor,lists:[],puts:[],listStatus:200,routes:{
+  '/api/produto-regras/lista':body=>{fake.lists.push(body);if(fake.listStatus!==200)return {status:fake.listStatus,body:{detail:{code:'sem_permissao',message:'Sem permissão.'}}};const ignored=body.produtos.filter(i=>i.sku==='z2819');return {body:{produtos:Object.fromEntries(body.produtos.filter(i=>!ignored.includes(i)).map(i=>[i.sku,row(i.sku)])),ignorados:ignored.map(i=>i.sku),pode_editar:true}};},
+  '/api/produto-regras/*':(body,call)=>{
+   const sku=decodeURIComponent(call.path.slice('/api/produto-regras/'.length)),b=base(sku);
+   if(call.method==='PUT'){fake.puts.push([sku,body]);if(body.cor_id)cor[b]=body.cor_id;else delete cor[b];}
+   return {body:regrasDg115({sku,sku_base:b,cor_id:cor[b]||null,cor:cores[cor[b]]||null})};
+  },
+  '/api/produto-cadastros/cores':{body:{cores:Object.entries(cores).map(([id,nome])=>({id,nome}))}},
+  '/api/pricing/*':{status:404,body:{}},
+  '/api/erp-local/stock-movements':(_,c)=>({body:{...p2Moves,sku:new URL(c.url,'http://x').searchParams.get('sku')}}),
+ }};
+ return fake;
+}
+async function listPage(options={}){
+ const fake=listDavinci();
+ const page=await p2Page({products:listRows(),categories:listCategories,...options,routes:{...fake.routes,...(options.routes||{})}});
+ await tick(8);
+ const d=page.document,heads=()=>[...d.querySelectorAll('.product-list table.p2-list thead th')];
+ Object.assign(page,{fake,
+  heads:()=>heads().map(th=>th.textContent.trim()),
+  cell:(sku,key)=>{const i=heads().findIndex(th=>th.dataset.column===key),row=d.querySelector(`[data-product-select="${sku}"]`)?.closest('tr');return i<0||!row?undefined:row.children[i];},
+  layout:()=>{if(!d.querySelector('[data-bar-menu-box=layout]'))d.querySelector('[data-bar-menu=layout]').click();return d.querySelector('[data-bar-menu-box=layout]');},
+ });
+ page.text=(sku,key)=>page.cell(sku,key)?.textContent;
+ page.column=(key,on)=>page.change(page.layout().querySelector(`[data-layout-column="${key}"]`),on);
+ page.link=key=>page.layout().querySelector(`[data-layout-filter="${key}"]`);
+ page.filter=key=>{if(!page.layout().querySelector(`[data-layout-filter-box="${key}"]`))page.link(key).click();return d.querySelector(`[data-layout-filter-box="${key}"]`);};
+ page.values=key=>[...page.filter(key).querySelectorAll('[data-layout-value]')].map(i=>[i.closest('label').textContent,i.checked]);
+ page.only=(key,labels)=>{page.filter(key).querySelector(`[data-layout-filter-none="${key}"]`).click();for(const l of labels){const i=[...page.filter(key).querySelectorAll('[data-layout-value]')].find(i=>i.closest('label').textContent===l);assert.ok(i,`opção ${l}`);page.change(i,true);}};
+ page.all=key=>page.filter(key).querySelector(`[data-layout-filter-all="${key}"]`).click();
+ page.number=(key,value)=>page.change(page.filter(key).querySelector(`[data-layout-number="${key}"]`),value);
+ page.pager=()=>d.querySelector('.product-list .reference-pager span').textContent;
+ return page;
+}
+
+test('M-113: Custo in place of Preço — cost_price with comma and two places, "—" without; the Estoque number still opens the stock',async()=>{
+ const e=await listPage(),d=e.document;
+ assert.deepEqual(e.heads(),['','Descrição','Cor','Código','Custo','Estoque']);
+ assert.equal(e.text('dg115.ci','cost'),'630,00','dg115.ci: 630,00 (o price 1,00 não aparece)');
+ assert.equal(e.text('dg054.sp+a004.sp+a019.sp','cost'),'717,00');
+ assert.equal(e.text('a001.sp','cost'),'95,50');
+ assert.equal(e.text('z2819','cost'),'—','sem custo: como o Preço sem preço');
+ assert.doesNotMatch(d.querySelector('.product-list table.p2-list').textContent,/Preço|1,00/);
+ // Estoque: o mesmo botão (só a letra mudou, no CSS) e o clique abre o estoque à direita.
+ const stock=e.cell('dg115.ci','stock').querySelector('button.p2-stock');
+ assert.equal(stock.textContent,'5');stock.click();await tick(6);
+ assert.deepEqual(e.called('/api/erp-local/stock-movements').map(c=>c.url),['/api/erp-local/stock-movements?sku=dg115.ci&depot=']);
+ assert.ok(e.cell('dg115.ci','stock').classList.contains('is-open'));
+ assert.equal(e.text('x.serv','stock'),'—','serviço continua sem número');
+ // O rodapé de páginas desta lista leva a classe das letras novas (as outras telas ficam como eram).
+ assert.ok(d.querySelector('.product-list .reference-pager').classList.contains('p2-pager'));
+ assert.equal(e.pager(),'1–6 de 6');
+ d.querySelector('[data-products-view=listings]').click();await tick(6);
+ assert.equal(d.querySelector('.p2-pager'),null);
+});
+
+test('M-114: Cor right after Descrição — all products in one call, by the code without the tag; Vermelho chosen in dg115.ci shows on dg115.ci and dg115.sp',async()=>{
+ const e=await listPage(),d=e.document;
+ // Uma chamada só para a lista inteira (sem o excluído), com a linha e a categoria de cada um.
+ assert.equal(e.fake.lists.length,1);
+ const call=e.called('/api/produto-regras/lista')[0];
+ assert.equal(call.method,'POST');assert.equal(call.credentials,'same-origin');
+ assert.deepEqual(call.body,{produtos:[
+  {sku:'dg115.ci',linha:'L115'},{sku:'dg115.sp',linha:'L115'},{sku:'dg054.sp+a004.sp+a019.sp',categoria:'Celular Kit'},
+  {sku:'a001.sp',linha:'L001',categoria:'Mala'},{sku:'z2819'},{sku:'x.serv'}]});
+ assert.equal(e.calls.filter(c=>c.path.startsWith('/api/produto-regras/')&&c.path!=='/api/produto-regras/lista').length,0,'nenhuma chamada por produto');
+ assert.deepEqual(e.heads().slice(0,4),['','Descrição','Cor','Código']);
+ assert.equal(d.querySelector('.product-list col:nth-child(3)').className,'p2-col-cor');
+ assert.equal(e.text('dg054.sp+a004.sp+a019.sp','cor'),'Azul');
+ assert.equal(e.text('dg115.ci','cor'),'','sem cor: célula vazia');assert.equal(e.text('z2819','cor'),'','ignorado pelo DaVinci: vazio');
+ assert.equal(e.cell('dg054.sp+a004.sp+a019.sp','cor').querySelector('button,a,input,select'),null,'só o texto: nada para clicar');
+ // O teste do pedido: escolher Vermelho no cadastro do dg115.ci e voltar à lista.
+ d.querySelector('[data-edit-product="dg115.ci"]').click();await tick(8);
+ d.querySelector('[data-campo=cor] [data-p2-menu]').click();await tick(8);
+ [...d.querySelectorAll('[data-campo=cor] [data-p2-menu-opcao]')].find(i=>i.closest('label').textContent==='Vermelho').click();await tick(10);
+ assert.deepEqual(e.fake.puts,[['dg115.ci',{cor_id:'C-VE'}]]);
+ d.getElementById('product-edit-cancel').click();await tick(8);
+ assert.equal(e.fake.lists.length,2,'voltou do cadastro que trocou a cor: a lista relê as colunas');
+ assert.equal(e.text('dg115.ci','cor'),'Vermelho');assert.equal(e.text('dg115.sp','cor'),'Vermelho','a mesma cor: o DaVinci guarda pelo código sem a tag');
+ assert.equal(e.text('a001.sp','cor'),'');
+ // Abrir e voltar sem trocar nada não relê; Atualizar relê.
+ d.querySelector('[data-edit-product="a001.sp"]').click();await tick(8);d.getElementById('product-edit-cancel').click();await tick(8);
+ assert.equal(e.fake.lists.length,2);
+ e.fake.cor['dg115']='C-AZ';
+ d.querySelector('#catalog-search [data-products-refresh]').click();await tick(10);
+ assert.equal(e.fake.lists.length,3);assert.equal(e.text('dg115.sp','cor'),'Azul','Atualizar já mostra a cor nova');
+});
+
+test('M-114/M-115: without the DaVinci (or without permission) the DaVinci columns stay empty and the rest of the list is the same',async()=>{
+ for(const status of [403,503]){
+  const fake=listDavinci();fake.listStatus=status;
+  const e=await listPage({routes:fake.routes}),d=e.document;
+  e.layout().querySelector('[data-layout-all]').click();
+  assert.deepEqual(listed(d),listOrder);
+  for(const key of ['cor','sale_category','cost_center','min_margin','special','photo','packaging'])assert.equal(e.text('dg115.ci',key),'',`${status}: ${key} vazio`);
+  assert.deepEqual(['code','model','number','category','tag','cost','stock'].map(k=>e.text('dg115.ci',k)),['dg115.ci','USM003','07197-26-18234','Sem categoria','.ci','630,00','5']);
+  assert.doesNotMatch(d.getElementById('notice').textContent||'',/permiss/i,'sem aviso: só as células vazias');
+ }
+});
+
+test('M-115: Layout right before Excel — one box per column in the table order, Cor/Código/Custo/Estoque at first, remembered in this browser',async()=>{
+ const e=await listPage(),d=e.document,w=e.dom.window;
+ const bar=d.querySelector('#catalog-search');
+ assert.deepEqual([...bar.querySelectorAll(':scope > .catalog-bar-filter > button')].map(b=>b.textContent.trim()),['Estoque','Tags','Categoria','Situação','Layout','Excel','Configuração']);
+ const button=bar.querySelector('[data-bar-menu=layout]');
+ assert.ok(button.classList.contains('catalog-bar-button'));assert.equal(button.querySelectorAll('svg').length,1,'o nome e a setinha');
+ assert.equal(button.getAttribute('aria-expanded'),'false');
+ const box=e.layout();
+ assert.ok(box.classList.contains('catalog-bar-menu'));assert.equal(d.querySelector('[data-bar-menu=layout]').getAttribute('aria-expanded'),'true');
+ assert.deepEqual([...box.querySelectorAll(':scope > .catalog-bar-menu-head button')].map(b=>b.textContent),['Marcar todas','Limpar']);
+ const options=()=>[...e.layout().querySelectorAll('[data-layout-column]')].map(i=>[i.closest('label').textContent,i.checked]);
+ assert.deepEqual(options(),[['Cor',true],['Código (SKU)',true],['Modelo',false],['Número',false],['Categoria',false],['Categoria de venda',false],['Tag de envio',false],['Centro de custo',false],['Margem mínima',false],['Condição especial',false],['Custo',true],['Foto',false],['Embalagem',false],['Estoque',true]]);
+ // O teste do pedido: marcar Modelo e Número.
+ e.column('model',true);e.column('number',true);
+ assert.ok(d.querySelector('[data-bar-menu-box=layout]'),'o menu continua aberto');
+ assert.deepEqual(e.heads(),['','Descrição','Cor','Código','Modelo','Número','Custo','Estoque']);
+ assert.equal(e.text('dg115.ci','model'),'USM003');assert.equal(e.text('dg115.ci','number'),'07197-26-18234');
+ assert.equal(e.text('a001.sp','model'),'','sem modelo: vazio');
+ const table=()=>d.querySelector('.product-list table.p2-list');
+ assert.equal(table().style.minWidth,`${32+280+90+130+90+130+110+110}px`,'a Descrição nunca com menos de 280px');
+ assert.ok(d.querySelector('.p2-frame.p2-list-frame > table.p2-list'),'rola para o lado dentro da moldura');
+ // Todas: cada coluna com o dado do cadastro, centralizada como o Código, em uma linha e sem clique.
+ e.layout().querySelector('[data-layout-all]').click();
+ assert.deepEqual(e.heads(),['','Descrição','Cor','Código','Modelo','Número','Categoria','Categoria de venda','Tag de envio','Centro de custo','Margem mínima','Condição especial','Custo','Foto','Embalagem','Estoque']);
+ assert.deepEqual([...d.querySelectorAll('.product-list col')].map(c=>c.className).slice(2),['cor','code','model','number','category','sale_category','tag','cost_center','min_margin','special','cost','photo','packaging','stock'].map(k=>'p2-col-'+k));
+ const rowOf=sku=>cellsOf(d.querySelector(`[data-product-select="${sku}"]`).closest('tr')).slice(2);
+ assert.deepEqual(rowOf('dg115.ci'),['','dg115.ci','USM003','07197-26-18234','Sem categoria','Regular','.ci','Celular','18%','—','630,00','Sim','Não','5'],'dg115.ci como no pedido');
+ assert.ok(e.cell('dg115.ci','min_margin').classList.contains('p2-herdada'),'margem herdada em cinza');
+ assert.deepEqual(rowOf('dg054.sp+a004.sp+a019.sp'),['Azul','dg054.sp+a004.sp+a019.sp','','','Celular Kit','—','.sp','Mala','20%','até 30/11 · piso 5%','717,00','Não','Não','3']);
+ assert.ok(!e.cell('dg054.sp+a004.sp+a019.sp','min_margin').classList.contains('p2-herdada'),'a do produto, na cor normal');
+ assert.deepEqual(rowOf('a001.sp'),['','a001.sp','','','Mala','Queima (inativa)','.sp','Mala','12,5%','01/12 a 05/12 · sem piso','95,50','Não','Sim','5']);
+ assert.deepEqual(rowOf('x.serv'),['','x.serv','','','Sem categoria','—','—','—','','—','—','Não','Não','—'],'sem margem nenhuma: vazio');
+ assert.ok([...d.querySelectorAll('.product-list thead th')].slice(2).every(th=>th.classList.contains('p2-num')));
+ assert.ok([...d.querySelectorAll('.product-list tbody td')].filter((td,i)=>i%16>1).every(td=>td.classList.contains('p2-num')),'todas centralizadas como o Código');
+ assert.equal(d.querySelectorAll('.product-list tbody button:not(.p2-name):not(.p2-stock),.product-list tbody a').length,0,'só o nome e o Estoque abrem algo');
+ // As larguras do pedido: Cor 90, Código 130, Modelo 90, Número 130, Categoria 120, Categoria de venda 140,
+ // Tag 90, Centro 110, Margem 110, Condição 170, Custo 110, Foto 70, Embalagem 90, Estoque 110.
+ assert.equal(table().style.minWidth,`${32+280+[90,130,90,130,120,140,90,110,110,170,110,70,90,110].reduce((a,b)=>a+b,0)}px`);
+ // Limpar: só a seleção e a Descrição ficam.
+ e.layout().querySelector('[data-layout-none]').click();
+ assert.deepEqual(e.heads(),['','Descrição']);assert.equal(table().style.minWidth,'312px');
+ assert.equal(cellsOf(d.querySelector('[data-product-select="dg115.ci"]').closest('tr')).length,2);
+ // Guardado no navegador; recarregar a página volta igual.
+ e.column('cor',true);e.column('special',true);e.column('stock',true);
+ const saved=w.localStorage.getItem('erp.produtos2.colunas');
+ assert.deepEqual(JSON.parse(saved),Object.fromEntries(['cor','code','model','number','category','sale_category','tag','cost_center','min_margin','special','cost','photo','packaging','stock'].map(k=>[k,['cor','special','stock'].includes(k)])));
+ const again=await listPage({beforeOpen:win=>win.localStorage.setItem('erp.produtos2.colunas',saved)});
+ assert.deepEqual(again.heads(),['','Descrição','Cor','Condição especial','Estoque']);
+ // Opção que não estava na escolha guardada segue o padrão; guardado estragado = padrão.
+ const partial=await listPage({beforeOpen:win=>win.localStorage.setItem('erp.produtos2.colunas','{"cor":false,"model":true}')});
+ assert.deepEqual(partial.heads(),['','Descrição','Código','Modelo','Custo','Estoque']);
+ const broken=await listPage({beforeOpen:win=>win.localStorage.setItem('erp.produtos2.colunas','{x')});
+ assert.deepEqual(broken.heads(),['','Descrição','Cor','Código','Custo','Estoque']);
+ // Fecha como os menus da barra: clique fora e ESC.
+ again.layout();again.document.body.click();assert.equal(again.document.querySelector('[data-bar-menu-box=layout]'),null);
+ again.layout();again.document.dispatchEvent(new again.dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(again.document.querySelector('[data-bar-menu-box=layout]'),null);
+ // Um menu aberto por vez: abrir o Excel fecha o Layout.
+ again.layout();again.document.querySelector('[data-bar-menu=excel]').click();
+ assert.equal(again.document.querySelector('[data-bar-menu-box=layout]'),null);assert.ok(again.document.querySelector('[data-bar-menu-box=excel]'));
+});
+
+test('M-116: Filtrar in the Layout menu — the request example: Tag .ci and Margem ≥ 18 keep dg115.ci, 19 hides it, Condição especial 1 hides it, and off brings the whole list back',async()=>{
+ const e=await listPage(),d=e.document,w=e.dom.window;
+ const box=e.layout();
+ assert.deepEqual([...box.querySelectorAll('[data-layout-filter]')].map(b=>[b.closest('[data-layout-row]').dataset.layoutRow,b.textContent]),[['cor','Filtrar'],['category','Filtrar'],['sale_category','Filtrar'],['tag','Filtrar'],['cost_center','Filtrar'],['min_margin','Filtrar'],['special','Filtrar']]);
+ assert.ok([...box.querySelectorAll('[data-layout-filter]')].every(b=>b.classList.contains('p2-layout-link')&&b.closest('.p2-layout-row').querySelector('label')));
+ // Abre logo abaixo da opção; de novo, recolhe.
+ const tag=e.filter('tag');
+ assert.equal(tag.previousElementSibling.dataset.layoutRow,'tag');assert.equal(e.link('tag').getAttribute('aria-expanded'),'true');
+ assert.deepEqual([...tag.querySelectorAll('.catalog-bar-menu-head button')].map(b=>b.textContent),['Marcar todas','Limpar']);
+ assert.deepEqual(e.values('tag'),[['—',true],['.ci',true],['.sp',true]],'os textos da coluna, sem repetir, em ordem alfabética, tudo marcado');
+ e.link('tag').click();assert.equal(e.layout().querySelector('[data-layout-filter-box=tag]'),null);assert.equal(e.link('tag').getAttribute('aria-expanded'),'false');
+ // O teste do pedido.
+ e.only('tag',['.ci']);
+ assert.deepEqual(listed(d),['dg115.ci']);assert.equal(e.pager(),'1–1 de 1');assert.equal(barCount(d),'1 produto · 0 selecionados');
+ assert.equal(e.link('tag').textContent,'Filtro ligado');assert.ok(e.link('tag').classList.contains('is-on'));
+ assert.ok(d.querySelector('[data-bar-menu=layout]').classList.contains('is-filtered'),'Layout destacado com filtro ligado');
+ assert.equal(e.heads().includes('Tag de envio'),false,'filtra pela coluna mesmo com ela desligada na tabela');
+ const margin=e.filter('min_margin');
+ assert.deepEqual([...margin.querySelectorAll('[data-layout-margin-op]')].map(r=>[r.type,r.closest('label').textContent,r.checked]),[['radio','maior ou igual a',true],['radio','menor ou igual a',false]]);
+ assert.equal(margin.querySelector('select'),null,'sem caixa com seta');
+ // Digitando: vale 250 ms depois da última tecla, e o cursor fica no campo.
+ const typed=margin.querySelector('[data-layout-number=min_margin]');typed.value='18';typed.dispatchEvent(new w.Event('input',{bubbles:true}));
+ await new Promise(r=>setTimeout(r,300));
+ assert.deepEqual(listed(d),['dg115.ci'],'margem herdada 18%');assert.equal(d.activeElement?.dataset.layoutNumber,'min_margin');
+ assert.equal(e.link('min_margin').textContent,'Filtro ligado');
+ e.number('min_margin','19');assert.deepEqual(listed(d),[]);assert.equal(e.pager(),'0–0 de 0');
+ e.number('min_margin','');assert.deepEqual(listed(d),['dg115.ci']);assert.equal(e.link('min_margin').textContent,'Filtrar');
+ e.number('special','1');assert.deepEqual(listed(d),[],'o dg115.ci não tem condição especial');
+ assert.deepEqual([...e.filter('special').querySelectorAll('span')].map(s=>s.textContent),['margem a partir de','%']);
+ // Desligar: a lista volta inteira e o Layout sem destaque.
+ e.number('special','');e.all('tag');
+ assert.deepEqual(listed(d),listOrder);assert.equal(e.pager(),'1–6 de 6');
+ assert.ok(!d.querySelector('[data-bar-menu=layout]').classList.contains('is-filtered'));
+ assert.deepEqual([...e.layout().querySelectorAll('[data-layout-filter]')].map(b=>b.textContent),Array(7).fill('Filtrar'));
+});
+
+test('M-116: each filter by the rules — boxes with "(em branco)", ≥/≤ on the margin shown (own or inherited), the Condição especial floor, with the search and the bar',async()=>{
+ const e=await listPage(),d=e.document;
+ assert.deepEqual(e.values('cor'),[['Azul',true],['(em branco)',true]]);
+ e.only('cor',['(em branco)']);assert.deepEqual(listed(d),['dg115.ci','dg115.sp','a001.sp','z2819','x.serv']);
+ e.only('cor',['Azul']);assert.deepEqual(listed(d),['dg054.sp+a004.sp+a019.sp']);
+ e.only('cor',[]);assert.deepEqual(listed(d),[],'nada marcado: nenhum produto');assert.equal(e.link('cor').textContent,'Filtro ligado');
+ e.all('cor');assert.equal(e.link('cor').textContent,'Filtrar');
+ assert.deepEqual(e.values('category'),[['Celular Kit',true],['Mala',true],['Sem categoria',true]]);
+ e.only('category',['Sem categoria']);assert.deepEqual(listed(d),['dg115.ci','dg115.sp','z2819','x.serv']);e.all('category');
+ assert.deepEqual(e.values('sale_category'),[['—',true],['Queima (inativa)',true],['Regular',true],['(em branco)',true]],'z2819, ignorado pelo DaVinci, tem a célula vazia');
+ e.only('sale_category',['Regular']);assert.deepEqual(listed(d),['dg115.ci','dg115.sp']);e.all('sale_category');
+ assert.deepEqual(e.values('cost_center'),[['—',true],['Celular',true],['Mala',true],['(em branco)',true]]);
+ e.only('cost_center',['Mala']);assert.deepEqual(listed(d),['dg054.sp+a004.sp+a019.sp','a001.sp'],'o escolhido (kit) e o herdado (a001)');e.all('cost_center');
+ // Margem: a que a coluna mostra (a do produto ou a herdada); sem margem nenhuma não passa.
+ e.number('min_margin','18');assert.deepEqual(listed(d),['dg115.ci','dg115.sp','dg054.sp+a004.sp+a019.sp']);
+ e.change(e.filter('min_margin').querySelector('[data-layout-margin-op][value=lte]'),true);
+ assert.deepEqual(listed(d),['dg115.ci','dg115.sp','a001.sp'],'≤ 18: 18% e 12,5%; o kit (20%) e quem não tem margem saem');
+ assert.ok(e.filter('min_margin').querySelector('[data-layout-margin-op][value=lte]').checked);
+ e.number('min_margin','12,5');assert.deepEqual(listed(d),['a001.sp'],'aceita vírgula');
+ e.number('min_margin','abc');assert.deepEqual(listed(d),listOrder,'não é número: sem filtro');assert.equal(e.link('min_margin').textContent,'Filtrar');
+ e.number('min_margin','');
+ // Condição especial: vigente e com piso ≥ N ("sem piso" não tem número).
+ e.number('special','5');assert.deepEqual(listed(d),['dg054.sp+a004.sp+a019.sp']);
+ e.number('special','5,5');assert.deepEqual(listed(d),[]);
+ e.number('special','0');assert.deepEqual(listed(d),['dg054.sp+a004.sp+a019.sp'],'a001 tem condição, mas sem piso');
+ // Junto com a busca e os filtros da barra.
+ e.number('special','');e.only('tag',['.sp']);
+ assert.deepEqual(listed(d),['dg115.sp','dg054.sp+a004.sp+a019.sp','a001.sp']);
+ onlyThese(e.dom,d,'category',['Mala']);assert.deepEqual(listed(d),['a001.sp']);
+ allOf(d,'category');
+ const search=d.querySelector('#catalog-search [name=query]');search.value='Uranyx A17';e.submit(d.querySelector('#catalog-search'));
+ assert.deepEqual(listed(d),['dg115.sp','dg054.sp+a004.sp+a019.sp']);
+});
+
+test('M-116: the filters cover the whole list (back to page 1), stay on Atualizar and after the cadastro, are not saved, and the Excel ignores them as it ignores the bar',async()=>{
+ const more=Array.from({length:130},(_,i)=>lp(`m${String(i).padStart(3,'0')}.ra`,`Mala ${i}`,{position:100+i,category:{id:'k3'}}));
+ const e=await listPage({products:[...listRows(),...more]}),d=e.document,w=e.dom.window;
+ assert.equal(e.pager(),'1–100 de 136');
+ d.querySelector('[data-catalog-offset="100"]').click();assert.equal(e.pager(),'101–136 de 136');
+ e.only('tag',['.ci','.sp']);
+ assert.equal(e.pager(),'1–4 de 4','a lista inteira, de novo na primeira página');
+ assert.deepEqual(listed(d),['dg115.ci','dg115.sp','dg054.sp+a004.sp+a019.sp','a001.sp']);
+ // Atualizar e voltar do cadastro: continuam (como os da barra).
+ d.querySelector('#catalog-search [data-products-refresh]').click();await tick(10);
+ assert.equal(e.pager(),'1–4 de 4');
+ d.querySelector('[data-edit-product="a001.sp"]').click();await tick(8);d.getElementById('product-edit-cancel').click();await tick(8);
+ assert.equal(e.pager(),'1–4 de 4');
+ assert.ok(d.querySelector('[data-bar-menu=layout]').classList.contains('is-filtered'));
+ // Não vão para o navegador: só a escolha das colunas fica guardada.
+ assert.equal(w.localStorage.getItem('erp.produtos2.colunas'),null,'nada guardado: ninguém mexeu nas colunas');
+ e.column('tag',true);
+ assert.deepEqual(Object.keys(JSON.parse(w.localStorage.getItem('erp.produtos2.colunas'))).length,14);
+ assert.ok(Object.values(JSON.parse(w.localStorage.getItem('erp.produtos2.colunas'))).every(v=>typeof v==='boolean'));
+ const reloaded=await listPage({products:[...listRows(),...more],beforeOpen:win=>win.localStorage.setItem('erp.produtos2.colunas',w.localStorage.getItem('erp.produtos2.colunas'))});
+ assert.equal(reloaded.pager(),'1–100 de 136','recarregar zera os filtros');assert.ok(reloaded.heads().includes('Tag de envio'),'e mantém as colunas');
+});
+
+test('M-115/M-116: the Excel file is the same with any columns and ignores the Layout filters',async()=>{
+ const e=await excelPage(),d=e.document,before=(await e.download()).rows;
+ assert.deepEqual(before[0],['Código','Descrição','Categoria','Tag','Situação','Preço','Estoque']);
+ d.querySelector('[data-bar-menu=layout]').click();d.querySelector('[data-bar-menu-box=layout] [data-layout-all]').click();
+ d.querySelector('[data-bar-menu-box=layout] [data-layout-filter=tag]').click();d.querySelector('[data-layout-filter-none=tag]').click();
+ assert.deepEqual(listed(d),[],'nenhum produto na tela');
+ const after=(await e.download()).rows;
+ assert.deepEqual(after,before,'o arquivo não muda');
+});
+
+test('M-114…M-116: the list asks again only when what goes in the call changed; more than 20.000 products go in parts',async()=>{
+ const e=await listPage(),d=e.document,w=e.dom.window;
+ assert.equal(e.fake.lists.length,1);
+ // Como o servidor de verdade: cada state relido é um objeto novo (o de cada minuto, no modo Consulta).
+ const plain=w.fetch,snapshot=await (await plain('/api/erp-local/state')).json();
+ w.fetch=async(url,options)=>String(url)==='/api/erp-local/state'?{ok:true,status:200,json:async()=>JSON.parse(JSON.stringify(snapshot))}:plain(url,options);
+ d.getElementById('refresh').click();await tick(10);
+ assert.equal(e.fake.lists.length,1,'o state de cada minuto igual: não relê');
+ snapshot.products.push(lp('n001.sp','Produto novo',{position:50}));
+ d.getElementById('refresh').click();await tick(10);
+ assert.equal(e.fake.lists.length,2,'produto novo na lista: relê');assert.equal(e.fake.lists[1].produtos.at(-1).sku,'n001.sp');
+ assert.equal(e.text('n001.sp','cor'),'');
+ snapshot.products.find(p=>p.sku==='a001.sp').category={id:'k2'};
+ d.getElementById('refresh').click();await tick(10);
+ assert.equal(e.fake.lists.length,3,'a categoria mudou (vai na chamada): relê');
+ assert.deepEqual(e.fake.lists[2].produtos.find(i=>i.sku==='a001.sp'),{sku:'a001.sp',linha:'L001',categoria:'Celular Kit'});
+ const big=Array.from({length:20001},(_,i)=>lp(`b${i}.sp`,`Produto ${i}`,{position:i}));
+ const b=await listPage({products:big});
+ assert.deepEqual(b.fake.lists.map(l=>l.produtos.length),[20000,1]);
+ assert.equal(b.text('b20000.sp','cor'),'');
 });
 
 test('M-42: the stock number opens the product stock on the right, without leaving the list, and says nothing of Bling',async()=>{
@@ -2586,7 +2910,8 @@ test('M-45/M-47: price asks first (cancel sends nothing), Novo preço goes in R$
  change(box.querySelector('[data-bulk-on=price]'),true);
  const amount=box.querySelector('[data-bulk-field="price.amount"]');amount.value='1.234,56';amount.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
  box.querySelector('[data-bulk-apply]').click();await tick();
- assert.equal(calls.filter(c=>c.method==='POST').length,0,'cancelou: nada enviado');
+ // (a leitura das colunas da lista no DaVinci, M-114…M-116, não grava nada: fica fora da conta)
+ assert.equal(calls.filter(c=>c.method==='POST'&&c.path!=='/api/produto-regras/lista').length,0,'cancelou: nada enviado');
  answer=true;box=d.querySelector('[data-bar-menu-box=config]');box.querySelector('[data-bulk-apply]').click();await tick(8);
  const price=calls.find(c=>c.path==='/api/erp-local/catalog/bulk-price');
  assert.deepEqual({...price.body,operation_key:'k'},{skus:['dg019.ra','dg019.sp'],action:'set',mode:'value',amount:'1234.56',operation_key:'k'});

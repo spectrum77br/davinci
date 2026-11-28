@@ -25,6 +25,8 @@ async function main() {
   const full = '/api/erp-local/products/' + encodeURIComponent(input.full.sku) + '/full';
   w.fetch = async (url, options = {}) => {
     const reply = (status, body) => ({ok: status < 400, status, json: async () => body});
+    // A lista lê as colunas do DaVinci (M-114…M-116, POST que só lê): sem DaVinci aqui, células vazias.
+    if (url === '/api/produto-regras/lista') return reply(404, {});
     if (options.method === 'POST') {
       const body = JSON.parse(options.body);
       commands.push({kind: body.kind, payload: body.payload});

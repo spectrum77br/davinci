@@ -120,10 +120,15 @@ def test_m40_grade_com_as_medidas_da_tabela_de_precos():
         in css
     )
     assert f"{GRADE} .p2-col-code{{width:130px}}" in css
-    assert f"{GRADE} .p2-col-price,{GRADE} .p2-col-stock{{width:110px}}" in css
-    # Preço em letra normal; o número do Estoque azul, peso 500, sem fundo; contorno azul no aberto.
+    # M-113 (27/11/2026): o Preço virou Custo (mesma largura) e o número do Estoque ficou na letra das
+    # outras células (rgb(15,23,41), peso 400), sem fundo; o link das peças do kit continua azul.
+    assert ".p2-col-price" not in css
     assert (
-        f"{GRADE} .p2-stock,{GRADE} .p2-link{{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);"
+        f"{GRADE} .p2-stock{{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:400;color:rgb(15,23,41);"
+        in css
+    )
+    assert (
+        f"{GRADE} .p2-link{{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);"
         in css
     )
     assert (
@@ -144,6 +149,8 @@ def test_m42_tela_dividida_e_estoque_com_as_mesmas_linhas():
     assert ".p2-fact span{margin-right:6px;font-size:11px;font-weight:600;line-height:14px}" in css
     assert ".p2-fact strong{font-size:12px;font-weight:400;color:rgb(15,23,41)}" in css
     assert ".p2-grid .p2-side-button.is-primary{background:rgb(37,99,235)" in css
+    # M-113: os botões do painel de estoque em 12px, peso 500.
+    assert "font:inherit;font-size:12px;font-weight:500;line-height:16px" in _regra(css, ".p2-grid .p2-side-button")
 
 
 def test_m41_botoes_da_barra_no_tamanho_dos_filtros():
@@ -312,3 +319,89 @@ def test_m111_tabela_da_estrutura_nas_letras_da_tabela_de_precos():
         "border-radius:8px;background:#fff;color:rgb(15,23,41);font-size:12px;line-height:16px;font-weight:500;",
     ):
         assert regra in css, regra
+
+
+def _regra(css, seletor):
+    """O corpo da regra cujo seletor é exatamente `seletor` (a primeira)."""
+    inicio = css.index(seletor + "{") + len(seletor) + 1
+    return css[inicio : css.index("}", inicio)]
+
+
+# M-113…M-116 (27/11/2026): a lista com Custo, Cor e o Layout ▾ (colunas e filtros). O comportamento
+# está em ui.cjs; aqui, as letras e medidas do pedido no CSS.
+LISTA_JS = STATIC / "product-list.js"
+
+
+def test_m113_rodape_de_paginas_com_as_letras_da_tabela_de_precos_so_na_lista():
+    css = _css()
+    rodape = _regra(css, ".product-list .reference-pager.p2-pager")
+    assert rodape.startswith("font-family:ui-sans-serif,system-ui,sans-serif,")
+    assert "font-size:12px;font-weight:400;" in rodape
+    assert "color:rgb(107,114,128)" in rodape
+    botao = _regra(css, ".product-list .reference-pager.p2-pager .action")
+    for parte in (
+        "height:28px;",
+        "padding:0 10px;",
+        "border:.75px solid rgb(229,231,235);",
+        "border-radius:8px;",
+        "background:#fff;",
+        "color:rgb(15,23,41);",
+        "font-size:12px;font-weight:500;",
+    ):
+        assert parte in botao, parte
+    # As outras telas que usam .reference-pager ficam como eram.
+    assert ".reference-pager{font-size:10px;color:#8594ac;margin-top:18px}" in css
+    assert ".reference-pager button{font-size:10px}" in css
+    js = (STATIC / "catalog.js").read_text(encoding="utf-8")
+    assert js.count('class="reference-pager p2-pager"') == 1
+
+
+def test_m115_larguras_das_colunas_iguais_no_css_e_na_conta_da_largura_minima():
+    """Cada coluna do Layout tem a largura do pedido no CSS (.p2-col-<chave>) e a MESMA no
+    p2ListColumns, que soma as à vista na largura mínima da tabela (Descrição ≥ 280px)."""
+    import re
+
+    css = _css()
+    js = LISTA_JS.read_text(encoding="utf-8")
+    colunas = re.findall(r"\['([a-z_]+)','([^']+)','([^']+)',(\d+)\]", js)
+    assert [c[0] for c in colunas] == [
+        "cor", "code", "model", "number", "category", "sale_category", "tag",
+        "cost_center", "min_margin", "special", "cost", "photo", "packaging", "stock",
+    ]
+    pedido = {
+        "cor": 90, "code": 130, "model": 90, "number": 130, "category": 120,
+        "sale_category": 140, "tag": 90, "cost_center": 110, "min_margin": 110,
+        "special": 170, "cost": 110, "photo": 70, "packaging": 90, "stock": 110,
+    }
+    no_css = {}
+    sem_comentarios = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for seletores, largura in re.findall(r"([^{}]+)\{width:(\d+)px\}", sem_comentarios):
+        for s in seletores.split(","):
+            m = re.fullmatch(r"\s*\.p2-grid \.p2-col-([a-z_]+)\s*", s)
+            if m:
+                no_css[m.group(1)] = int(largura)
+    for chave, _menu, _cabecalho, largura in colunas:
+        assert int(largura) == pedido[chave] == no_css[chave], chave
+    assert "P2_DESC_MIN=280" in js
+    # A tabela rola para o lado dentro da moldura; a página não (a tela dividida tem minmax(0,…)).
+    assert ".p2-frame.p2-list-frame{overflow-x:auto}" in css
+    # Margem herdada em cinza.
+    assert ".p2-grid>tbody>tr>td.p2-herdada{color:rgb(107,114,128)}" in css
+
+
+def test_m116_layout_com_filtro_ligado_e_letras_do_menu():
+    css = _css()
+    assert ".catalog-bar .catalog-bar-button.is-filtered{border-color:rgb(96,165,250)}" in css
+    opcoes = _regra(css, ".catalog-bar .p2-layout-menu label")
+    assert "font-size:12px;line-height:16px;font-weight:400;" in opcoes
+    link = _regra(css, ".catalog-bar .p2-layout-link")
+    assert "color:rgb(36,99,235);" in link
+    assert "font-size:11px;font-weight:500;" in link
+    assert _regra(css, ".catalog-bar .p2-layout-link.is-on") == "font-weight:700"
+    quadro = _regra(css, ".p2-layout-filter")
+    assert "border:.75px solid rgb(229,231,235);" in quadro
+    assert "border-radius:4px;" in quadro
+    assert "background:rgb(249,250,251)" in quadro
+    # Lista comprida rola dentro do filtro.
+    assert "max-height:168px;overflow-y:auto" in _regra(css, ".p2-layout-values")
+

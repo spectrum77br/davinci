@@ -42,14 +42,16 @@ function financeLedgerTable(f){
 // M-40 (Produtos 2, 25/11/2026): a lista no padrão da grade da Tabela de Preços — (caixa) | Descrição |
 // Código | Preço | Estoque, linhas de 34px, cabeçalho de 24px, sem imagem, unidade, cubo nem "⋮".
 // O nome abre o cadastro; o número do Estoque abre o estoque do produto à direita (M-42).
+// M-113…M-115 (27/11/2026): Preço vira Custo (cost_price); depois da Descrição, as colunas que o
+// Layout ▾ deixa à vista, na ordem do menu (padrão: Cor | Código | Custo | Estoque; product-list.js).
 function ownProductsPage(){
-  const matches=catalogMatches(),count=matches.length;
+  p2RulesEnsure();
+  const matches=catalogMatches(),count=matches.length,columns=p2VisibleColumns();
   const body=matches.slice(catalogOffset,catalogOffset+100).map(p=>{
     const available=productAvailable(p),service=p.kind==='service',minimum=p.details?.stock_min,low=!service&&minimum!==null&&minimum!==undefined&&available!==null&&available<Number(minimum);
-    const stock=service?'—':`<button type="button" class="p2-stock" data-stock-side="${esc(p.sku)}" title="Ver o estoque de ${esc(p.sku)}">${qty(available)}</button>`;
-    return `<tr><td class="p2-check"><input type="checkbox" data-product-select="${esc(p.sku)}" aria-label="Selecionar ${esc(p.sku)}" ${productSelection.has(p.sku)?'checked':''}></td><td><div class="p2-desc"><button type="button" class="p2-name" data-edit-product="${esc(p.sku)}" title="${esc(p.name)}">${esc(p.name)}</button>${low?'<small class="stock-low">Abaixo do mínimo</small>':''}</div></td><td class="p2-num">${esc(p.sku)}</td><td class="p2-num">${p.price===null||p.price===undefined?'—':brl(p.price).replace(/^R\$\s*/,'')}</td><td class="p2-num p2-stock-cell${p.sku===sideStockSku?' is-open':''}">${stock}</td></tr>`;
+    return `<tr><td class="p2-check"><input type="checkbox" data-product-select="${esc(p.sku)}" aria-label="Selecionar ${esc(p.sku)}" ${productSelection.has(p.sku)?'checked':''}></td><td><div class="p2-desc"><button type="button" class="p2-name" data-edit-product="${esc(p.sku)}" title="${esc(p.name)}">${esc(p.name)}</button>${low?'<small class="stock-low">Abaixo do mínimo</small>':''}</div></td>${columns.map(c=>p2ListCell(c,p)).join('')}</tr>`;
   }).join('');
-  const list=`<div class="p2-frame"><table class="p2-grid p2-list"><colgroup><col class="p2-col-check"><col><col class="p2-col-code"><col class="p2-col-price"><col class="p2-col-stock"></colgroup><thead><tr><th class="p2-check"></th><th>Descrição</th><th class="p2-num">Código</th><th class="p2-num">Preço</th><th class="p2-num">Estoque</th></tr></thead><tbody>${body||empty(5,'Nenhum produto corresponde à pesquisa.')}</tbody></table></div><div class="reference-pager"><span>${Math.min(catalogOffset+1,count)}–${Math.min(catalogOffset+100,count)} de ${count}</span><div><button class="action" data-catalog-offset="${Math.max(0,catalogOffset-100)}" ${catalogOffset===0?'disabled':''}>Anterior</button><button class="action" data-catalog-offset="${catalogOffset+100}" ${catalogOffset+100>=count?'disabled':''}>Próxima</button></div></div>`;
+  const list=`<div class="p2-frame p2-list-frame"><table class="p2-grid p2-list"><colgroup><col class="p2-col-check"><col>${columns.map(c=>`<col class="p2-col-${c.key}">`).join('')}</colgroup><thead><tr><th class="p2-check"></th><th>Descrição</th>${columns.map(c=>`<th class="p2-num" data-column="${c.key}">${esc(c.head)}</th>`).join('')}</tr></thead><tbody>${body||empty(2+columns.length,'Nenhum produto corresponde à pesquisa.')}</tbody></table></div><div class="reference-pager p2-pager"><span>${Math.min(catalogOffset+1,count)}–${Math.min(catalogOffset+100,count)} de ${count}</span><div><button class="action" data-catalog-offset="${Math.max(0,catalogOffset-100)}" ${catalogOffset===0?'disabled':''}>Anterior</button><button class="action" data-catalog-offset="${catalogOffset+100}" ${catalogOffset+100>=count?'disabled':''}>Próxima</button></div></div>`;
   return `<section class="native-list product-list">${productFilterBar(matches)}<div class="p2-split"><div class="p2-split-list">${list}</div>${sideStockPanel()}</div></section>`;
 }
 async function loadStockHistory(){

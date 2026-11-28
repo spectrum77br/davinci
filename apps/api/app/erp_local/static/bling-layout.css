@@ -314,7 +314,7 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .catalog-bar .catalog-bar-bulk input:not([type=checkbox]){max-width:96px}
 .catalog-bar .catalog-bar-bulk [data-bulk-field="price.mode"]{flex:none;width:56px}
 /* Grade: fonte do DaVinci, células 12px/400 rgb(15,23,41) com 4px 8px, linhas de 34px com borda
-   superior clara, cabeçalho 11px/600 com 24px e fundo branco, Código/Preço/Estoque com 130/110/110px,
+   superior clara, cabeçalho 11px/600 com 24px e fundo branco, Código/Custo/Estoque com 130/110/110px,
    centralizados e separados por linhas verticais claras. Bordas "separadas": cada linha mede
    exatamente o que diz, dos dois lados da tela (a lista e o estoque à direita alinham linha a linha). */
 .p2-split{display:grid;grid-template-columns:minmax(0,55fr) minmax(0,45fr);column-gap:16px;align-items:start}
@@ -330,12 +330,26 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .p2-grid .p2-check input{width:15px;height:15px;min-height:15px;margin:0;vertical-align:middle}
 .p2-grid .p2-col-check{width:32px}
 .p2-grid .p2-col-code{width:130px}
-.p2-grid .p2-col-price,.p2-grid .p2-col-stock{width:110px}
+/* M-113…M-115 (27/11/2026): as colunas que o Layout ▾ mostra, cada uma com a largura do pedido (as
+   mesmas do p2ListColumns de product-list.js, que soma as à vista na largura mínima da tabela: a
+   Descrição nunca fica com menos de 280px; com muitas colunas, a moldura rola para o lado e a página
+   não). Custo (era o Preço) e Estoque com os 110px de antes. */
+.p2-grid .p2-col-cor,.p2-grid .p2-col-model,.p2-grid .p2-col-tag,.p2-grid .p2-col-packaging{width:90px}
+.p2-grid .p2-col-number{width:130px}
+.p2-grid .p2-col-category{width:120px}
+.p2-grid .p2-col-sale_category{width:140px}
+.p2-grid .p2-col-cost_center,.p2-grid .p2-col-min_margin,.p2-grid .p2-col-cost,.p2-grid .p2-col-stock{width:110px}
+.p2-grid .p2-col-special{width:170px}
+.p2-grid .p2-col-photo{width:70px}
+.p2-frame.p2-list-frame{overflow-x:auto}
+.p2-grid>tbody>tr>td.p2-herdada{color:rgb(107,114,128)}
 .p2-desc{display:flex;align-items:center;gap:8px;min-width:0}
 .p2-grid .p2-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0;border:0;border-radius:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer;box-shadow:none}
 .p2-grid .p2-name:hover{color:rgb(37,99,235);text-decoration:underline;filter:none}
 .p2-desc .stock-low{flex:none;margin:0;font-size:11px;line-height:14px;font-weight:500}
-.p2-grid .p2-stock,.p2-grid .p2-link{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);cursor:pointer;box-shadow:none}
+/* M-113: o número do Estoque na letra das outras células (o clique continua abrindo o estoque). */
+.p2-grid .p2-stock{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:400;color:rgb(15,23,41);cursor:pointer;box-shadow:none}
+.p2-grid .p2-link{padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:rgb(37,99,235);cursor:pointer;box-shadow:none}
 .p2-grid .p2-stock:hover,.p2-grid .p2-link:hover{text-decoration:underline;filter:none}
 /* O número da venda como no Bling: o "V" branco num quadradinho vermelho e o número ao lado. */
 .order-link{display:inline-flex;align-items:center;gap:6px;padding:0;border:0;border-radius:0;background:none;font:inherit;font-weight:500;color:inherit;cursor:pointer;box-shadow:none;white-space:nowrap}
@@ -355,7 +369,7 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .p2-side-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:400;line-height:16px}
 .p2-side-actions{display:inline-flex;align-items:center;gap:4px;flex:none}
 .p2-side-tip{display:inline-flex}
-.p2-grid .p2-side-button{height:20px;min-height:20px;padding:0 8px;border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,41);font:inherit;font-size:11px;font-weight:500;line-height:14px;cursor:pointer;box-shadow:none}
+.p2-grid .p2-side-button{height:20px;min-height:20px;padding:0 8px;border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,41);font:inherit;font-size:12px;font-weight:500;line-height:16px;cursor:pointer;box-shadow:none}
 .p2-grid .p2-side-button:hover{background:rgb(243,244,246);filter:none}
 .p2-grid .p2-side-button.is-primary{background:rgb(37,99,235);border-color:rgb(37,99,235);color:#fff}
 .p2-grid .p2-side-button.is-primary:hover{background:rgb(29,78,216)}
@@ -391,6 +405,33 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .p2-tag-list em{font-style:normal}
 .p2-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .p2-tag-warning{margin:8px 0 0;padding:8px 10px;border:1px solid rgb(253,230,138);border-radius:4px;background:rgb(255,251,235);color:rgb(146,64,14);font-size:12px}
+/* M-113: rodapé de páginas da lista nas letras da Tabela de Preços (só nesta tela: .p2-pager);
+   Anterior e Próxima como os botões da barra dela. */
+.product-list .reference-pager.p2-pager{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:12px;font-weight:400;line-height:16px;color:rgb(107,114,128)}
+.product-list .reference-pager.p2-pager>div{display:inline-flex;align-items:center;gap:8px}
+.product-list .reference-pager.p2-pager .action{display:inline-flex;align-items:center;justify-content:center;height:28px;min-height:28px;margin:0;padding:0 10px;border:.75px solid rgb(229,231,235);border-radius:8px;background:#fff;color:rgb(15,23,41);font:inherit;font-size:12px;font-weight:500;line-height:16px;box-shadow:none}
+.product-list .reference-pager.p2-pager .action:hover{background:rgb(243,244,246);filter:none}
+.product-list .reference-pager.p2-pager .action:disabled{opacity:.5;cursor:default}
+/* M-115/M-116: Layout ▾ — o botão com borda azul quando algum filtro dele está ligado; no menu, as
+   opções em 12px/400, o "Filtrar" (11px/500, azul; "Filtro ligado" em 700) à direita do nome e o
+   filtro aberto logo abaixo da opção, num quadro cinza-claro. */
+.catalog-bar .catalog-bar-button.is-filtered{border-color:rgb(96,165,250)}
+.catalog-bar .p2-layout-menu{width:256px;max-height:max(240px,calc(100vh - 120px));overflow-y:auto}
+.p2-layout-options{border-top:1px solid rgb(229,231,235);padding-top:4px}
+.p2-layout-row{display:flex;align-items:center;gap:8px;border-radius:4px}
+.p2-layout-row:hover{background:rgba(243,244,246,.5)}
+.catalog-bar .p2-layout-menu label{display:flex;align-items:center;gap:8px;margin:0;padding:4px;border-radius:4px;font-size:12px;line-height:16px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
+.catalog-bar .p2-layout-row>label{flex:1 1 auto;min-width:0}
+.catalog-bar .p2-layout-menu input[type=checkbox],.catalog-bar .p2-layout-menu input[type=radio]{width:16px;height:16px;min-height:16px;margin:0;padding:0;flex:none}
+.catalog-bar .p2-layout-link{flex:none;margin-right:4px;padding:0;border:0;border-radius:0;background:none;color:rgb(36,99,235);font:inherit;font-size:11px;font-weight:500;line-height:14px;box-shadow:none}
+.catalog-bar .p2-layout-link:hover{text-decoration:underline;filter:none}
+.catalog-bar .p2-layout-link.is-on{font-weight:700}
+.p2-layout-filter{margin:2px 4px 6px 28px;padding:6px;border:.75px solid rgb(229,231,235);border-radius:4px;background:rgb(249,250,251)}
+.p2-layout-values{max-height:168px;overflow-y:auto;border-top:1px solid rgb(229,231,235);padding-top:2px}
+.catalog-bar .p2-layout-filter .catalog-bar-menu-head{padding:0 4px 4px}
+.catalog-bar .p2-layout-menu .p2-layout-number{cursor:default}
+.catalog-bar .p2-layout-menu .p2-layout-number input{width:72px;height:28px;min-height:28px;padding:0 6px;border:1px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,42);font:inherit;font-size:12px;line-height:16px;box-shadow:none}
+.catalog-bar .p2-layout-menu .p2-layout-number input:focus{border-color:rgb(147,197,253);box-shadow:0 0 0 1px rgb(147,197,253)}
 @media(max-width:900px){.p2-split{grid-template-columns:minmax(0,1fr);row-gap:16px}.catalog-bar-end{margin-left:0}}
 @media print{.p2-side{display:none!important}}
 
