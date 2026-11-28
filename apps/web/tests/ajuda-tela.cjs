@@ -294,7 +294,8 @@ async function principal() {
     const termosC = (t) => secaoC(t).itens.map((i) => i.termo)
     assert.deepEqual(termosC('Colunas'), ['Plataforma e Conta', 'Catálogo ML', 'Equipe', 'Kit (ADM)', 'Comissão (ADM)',
       'marg e frete (ADM)', 'Afiliado e Desconto', 'Ads', 'Custo total (ADM)', 'Margem mínima (ADM)'])
-    assert.deepEqual(termosC('Barra de botões'), ['Buscar', 'Plataforma e Contas', 'Layout', 'Equipes', 'Excel',
+    // M-104: na ordem da barra (Equipes antes do Layout, Layout logo antes do Excel).
+    assert.deepEqual(termosC('Barra de botões'), ['Buscar', 'Plataforma e Contas', 'Equipes', 'Layout', 'Excel',
       'Vincular Integrações', 'Adicionar Conta'])
     assert.equal(secaoC('Passo a passo').numerada, true)
     assert.equal(secaoC('Passo a passo').itens.length, 5)

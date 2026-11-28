@@ -167,8 +167,8 @@ const AJUDA_CONTAS = {
       itens: [
         { termo: 'Buscar', texto: 'procura a conta pelo nome, plataforma ou e-mail.' },
         { termo: 'Plataforma e Contas', texto: 'escolhem quais linhas aparecem.' },
-        { termo: 'Layout', texto: 'mostra ou esconde Catálogo ML, Equipe, Kit, Comissão e Obs; fica lembrado neste navegador.' },
         { termo: 'Equipes', texto: 'mostra só as contas das equipes marcadas (ou "Sem equipe").' },
+        { termo: 'Layout', texto: 'mostra ou esconde Catálogo ML, Equipe, Kit, Comissão e Obs; fica lembrado neste navegador.' },
         { termo: 'Excel', texto: 'baixa as contas que estão na tela (busca e filtros), só com as colunas à mostra.' },
         { termo: 'Vincular Integrações', texto: 'liga as contas sem integração à conexão do marketplace; não troca vínculo que já existe.' },
         { termo: 'Adicionar Conta', texto: 'cria uma conta nova; no ML ela já nasce com Clássico e Premium, com a comissão usual da categoria.' },
@@ -5810,8 +5810,8 @@ watch(department, async () => {
     <section v-if="tab === 'contas'" class="space-y-3">
       <!-- Barra (M-51, 25/11/2026; saíram o título da categoria e a frase de
            baixo): no estilo da barra da Tabela de Preços, tudo com
-           28px (h-7). Buscar | Plataforma ▾ | Contas ▾ | Layout ▾ | Equipes ▾ |
-           Excel … e à direita N conta(s), Vincular Integrações e + Adicionar Conta. -->
+           28px (h-7). Buscar | Plataforma ▾ | Contas ▾ | Equipes ▾ | Layout ▾ |
+           Excel (M-104: Layout logo antes do Excel) … e à direita N conta(s), Vincular Integrações e + Adicionar Conta. -->
       <div class="flex flex-wrap items-center gap-2" data-barra-contas>
         <div class="relative flex-1 min-w-[200px] max-w-sm">
           <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
@@ -5928,42 +5928,6 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
-        <!-- Layout ▾ (M-51): mostra/esconde colunas da tabela de contas, como o
-             Layout da Tabela de Preços. Lembrado neste navegador. -->
-        <PopoverRoot>
-          <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-contas" title="Escolher as colunas que a tabela de contas mostra">
-              Layout
-              <ChevronDown class="h-3 w-3 ml-1" />
-            </button>
-          </PopoverTrigger>
-          <PopoverPortal>
-            <PopoverContent
-              side="bottom"
-              align="start"
-              :side-offset="4"
-              :collision-padding="8"
-              data-menu-layout-contas
-              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
-            >
-              <!-- Só a caixa e o nome (M-61): a explicação fica na Ajuda ("?"). -->
-              <label
-                v-for="c in opcoesLayoutContas"
-                :key="c.chave"
-                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
-              >
-                <input
-                  type="checkbox"
-                  class="size-4"
-                  :checked="mostraColunaConta(c.chave)"
-                  :data-campo="`layout-contas-${c.chave}`"
-                  @change="colunasOcultasContas = alternarNaLista(colunasOcultasContas, c.chave)"
-                />
-                <span>{{ c.rotulo }}</span>
-              </label>
-            </PopoverContent>
-          </PopoverPortal>
-        </PopoverRoot>
         <PopoverRoot v-if="mostrarFiltroEquipe">
           <PopoverTrigger as-child>
             <button
@@ -6006,6 +5970,43 @@ watch(department, async () => {
                   {{ o.rotulo }}
                 </label>
               </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <!-- Layout ▾ (M-51): mostra/esconde colunas da tabela de contas, como o
+             Layout da Tabela de Preços. Lembrado neste navegador. M-104
+             (27/11/2026): passou para logo antes do Excel, como na Tabela. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout-contas" title="Escolher as colunas que a tabela de contas mostra">
+              Layout
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-layout-contas
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <!-- Só a caixa e o nome (M-61): a explicação fica na Ajuda ("?"). -->
+              <label
+                v-for="c in opcoesLayoutContas"
+                :key="c.chave"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  class="size-4"
+                  :checked="mostraColunaConta(c.chave)"
+                  :data-campo="`layout-contas-${c.chave}`"
+                  @change="colunasOcultasContas = alternarNaLista(colunasOcultasContas, c.chave)"
+                />
+                <span>{{ c.rotulo }}</span>
+              </label>
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
@@ -7891,7 +7892,7 @@ watch(department, async () => {
     <section v-else-if="tab === 'tabela'" class="space-y-3">
       <!-- Barra (M-2, 17/11/2026; M-8, 18/11/2026: Plataforma ▾ e Contas ▾
            com caixas; M-14, 18/11/2026): Buscar | Plataforma ▾ | Contas ▾ |
-           Layout ▾ | Equipes ▾ (M-26) | Excel | Atualizar ▾ | Reposição [N] dias | Margem N% ▾.
+           Equipes ▾ (M-26) | Layout ▾ (M-104) | Excel | Atualizar ▾ | Reposição [N] dias | Margem N% ▾.
            Todos com 28px (h-7) e o mesmo espaço. Recarregar, Enviar e
            Conferir anúncios viraram as opções do Atualizar ▾. Saíram antes
            Desfazer, Refazer, Custo Bling, Enviar relatório e a paleta Cor. -->
@@ -8007,39 +8008,6 @@ watch(department, async () => {
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>
-        <!-- Layout ▾ (era "Mostrar kits"): para todos que veem a Tabela. Kit só
-             no Celular (Mala e Eletro não têm kits). Lembrado neste navegador. -->
-        <PopoverRoot>
-          <PopoverTrigger as-child>
-            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout" title="Escolher as colunas que a grade mostra">
-              Layout
-              <ChevronDown class="h-3 w-3 ml-1" />
-            </button>
-          </PopoverTrigger>
-          <PopoverPortal>
-            <PopoverContent
-              side="bottom"
-              align="start"
-              :side-offset="4"
-              :collision-padding="8"
-              data-menu-layout
-              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
-            >
-              <!-- Só a caixa e o nome (M-61): a explicação fica na Ajuda ("?"). -->
-              <label
-                v-if="department === 'celular'"
-                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
-              >
-                <input v-model="mostrarKits" type="checkbox" class="size-4" data-campo="layout-kit" />
-                <span>Kit</span>
-              </label>
-              <label class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50">
-                <input v-model="mostrarEstoque" type="checkbox" class="size-4" data-campo="layout-estoque" />
-                <span>Estoque</span>
-              </label>
-            </PopoverContent>
-          </PopoverPortal>
-        </PopoverRoot>
         <!-- Equipes ▾ (M-26, 23/11/2026): 1, 2 e 3, no visual do Plataforma e
              do Contas. Soma com os dois: a coluna só aparece passando nos três.
              Filtro parcial: "Equipes (1)". Sem a lista da aba Contas (quem não
@@ -8082,6 +8050,40 @@ watch(department, async () => {
                   {{ o.label }}
                 </label>
               </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+        <!-- Layout ▾ (era "Mostrar kits"): para todos que veem a Tabela. Kit só
+             no Celular (Mala e Eletro não têm kits). Lembrado neste navegador.
+             M-104 (27/11/2026): passou para logo antes do Excel. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button type="button" class="btn btn-sm h-7 py-0" data-acao="layout" title="Escolher as colunas que a grade mostra">
+              Layout
+              <ChevronDown class="h-3 w-3 ml-1" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-layout
+              class="z-[70] w-64 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <!-- Só a caixa e o nome (M-61): a explicação fica na Ajuda ("?"). -->
+              <label
+                v-if="department === 'celular'"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input v-model="mostrarKits" type="checkbox" class="size-4" data-campo="layout-kit" />
+                <span>Kit</span>
+              </label>
+              <label class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50">
+                <input v-model="mostrarEstoque" type="checkbox" class="size-4" data-campo="layout-estoque" />
+                <span>Estoque</span>
+              </label>
             </PopoverContent>
           </PopoverPortal>
         </PopoverRoot>

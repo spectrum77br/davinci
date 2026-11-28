@@ -354,8 +354,9 @@ const antesDaBarra = contas.slice(0, contas.indexOf('data-barra-contas'))
 assert.doesNotMatch(antesDaBarra, /<h3|<p\b|<button/, 'nada antes da barra')
 const barra = contas.slice(contas.indexOf('data-barra-contas'), contas.indexOf('<div v-if="accountsErr"'))
   .replace(/<!--[\s\S]*?-->/g, '')
-const ordem = ['v-model="contasSearch"', 'data-filtro-plataforma', 'data-filtro-contas', 'data-acao="layout-contas"',
-  'data-filtro-equipe', '@click="exportarExcelContas"', '{{ accountsFiltered.length }} conta(s)',
+// M-104 (27/11/2026): Equipes ▾ antes do Layout ▾, e o Layout logo antes do Excel.
+const ordem = ['v-model="contasSearch"', 'data-filtro-plataforma', 'data-filtro-contas', 'data-filtro-equipe',
+  'data-acao="layout-contas"', '@click="exportarExcelContas"', '{{ accountsFiltered.length }} conta(s)',
   '@click="autoMatchAccounts"', '@click="openAddAcc"']
 let antes = -1
 for (const marca of ordem) {
@@ -363,13 +364,21 @@ for (const marca of ordem) {
   assert.ok(i > antes, `barra: ${marca} na ordem`)
   antes = i
 }
+// M-104: nada entre o Layout ▾ e o Excel além do próprio menu do Layout (que
+// vem junto do botão, no lugar novo).
+{
+  const iExcel = barra.lastIndexOf('<button', barra.indexOf('@click="exportarExcelContas"'))
+  const entre = barra.slice(barra.indexOf('data-acao="layout-contas"'), iExcel)
+  assert.ok(entre.includes('data-menu-layout-contas'), 'o menu do Layout está junto do botão')
+  assert.ok(!entre.includes('<PopoverRoot') && !/class="btn /.test(entre), 'Layout logo antes do Excel')
+}
 // Busca igual à da Tabela de Preços: lupa à esquerda, 28px, largura flexível.
 assert.match(barra, /<div class="relative flex-1 min-w-\[200px\] max-w-sm">\s*<Search class="absolute left-2 top-1\/2 -translate-y-1\/2 h-3\.5 w-3\.5 text-muted-foreground" \/>\s*<input\s+v-model="contasSearch"\s+placeholder="Buscar conta\.\.\."\s+class="h-7 border rounded pl-7 pr-2 py-0 text-sm bg-background w-full"/)
 assert.match(tpl, /v-model="gridSearch"\s+placeholder="[^"]*"\s+class="h-7 border rounded pl-7 pr-2 py-0 text-sm bg-background w-full"/,
   'mesma classe da busca da Tabela')
 // Botões no tamanho da barra da Tabela.
 const botoes = [...barra.matchAll(/class="(btn [^"]*)"/g)].map((m) => m[1])
-assert.equal(botoes.length, 7, 'Plataforma, Contas, Layout, Equipes, Excel, Vincular e Adicionar')
+assert.equal(botoes.length, 7, 'Plataforma, Contas, Equipes, Layout, Excel, Vincular e Adicionar')
 for (const b of botoes) assert.match(b, /^btn btn-sm h-7 py-0\b/, `botão no tamanho da barra: ${b}`)
 // Contador, Vincular e Adicionar encostados à direita.
 assert.match(barra, /<span class="ml-auto text-xs text-muted-foreground">\s*\{\{ accountsFiltered\.length \}\} conta\(s\)\s*<\/span>\s*<button v-if="canEditContas"[^>]*@click="autoMatchAccounts">[\s\S]*?Vincular Integrações\s*<\/button>\s*<button v-if="canEditContas"[^>]*@click="openAddAcc">[\s\S]*?Adicionar Conta\s*<\/button>\s*<\/div>\s*$/)

@@ -250,14 +250,23 @@ const tabela = tpl.slice(iTabela, tpl.indexOf('</section>', iTabela))
 const barra = tabela.slice(0, tabela.indexOf('<table')).replace(/<!--[\s\S]*?-->/g, '')
 // M-14 (18/11/2026): Recarregar e Conferir anúncios saíram (viraram opções do
 // Atualizar ▾, que era o Enviar ▾).
-// M-26: Equipes ▾ depois do Layout e antes do Excel.
-const ordem = ['v-model="gridSearch"', 'data-filtro="plataforma"', 'data-filtro="contas"', 'data-acao="layout"',
-  'data-filtro="equipes"', 'handleExportExcel', 'data-acao="atualizar"', 'data-prazo-reposicao', 'data-acao="margem"']
+// M-26: Equipes ▾ antes do Excel. M-104 (27/11/2026): o Layout ▾ fica logo
+// antes do Excel, depois do Equipes ▾.
+const ordem = ['v-model="gridSearch"', 'data-filtro="plataforma"', 'data-filtro="contas"', 'data-filtro="equipes"',
+  'data-acao="layout"', 'handleExportExcel', 'data-acao="atualizar"', 'data-prazo-reposicao', 'data-acao="margem"']
 let antes = -1
 for (const marca of ordem) {
   const i = barra.indexOf(marca)
   assert.ok(i > antes, `barra: ${marca} na ordem`)
   antes = i
+}
+// M-104: nada entre o Layout ▾ e o Excel além do próprio menu do Layout (que
+// vem junto do botão, no lugar novo).
+{
+  const iExcel = barra.lastIndexOf('<button', barra.indexOf('handleExportExcel'))
+  const entre = barra.slice(barra.indexOf('data-acao="layout"'), iExcel)
+  assert.ok(entre.includes('data-menu-layout'), 'o menu do Layout está junto do botão')
+  assert.ok(!entre.includes('<PopoverRoot') && !/class="btn /.test(entre), 'Layout logo antes do Excel')
 }
 assert.ok(!barra.includes('Recarregar'), 'o Recarregar saiu da barra')
 // M-26 (24/11/2026): sem a lista da aba Contas (quem não pode ver Contas,
