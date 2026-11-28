@@ -351,3 +351,22 @@ def test_gaps_list_active_simple_products_the_price_table_does_not_cover(erp):
         gaps = price_table.gaps(db)
     assert not gaps["no_line"]
     assert sorted(r["sku"] for r in gaps["no_department"]) == sorted(simple)
+
+
+def test_the_list_state_carries_the_line_id_model_and_number(erp):
+    """M-115 (27/11/2026): the list's Modelo and Número columns show what the product screen
+    shows, and the list asks DaVinci for all products at once with each line id (pricing_id).
+    The light product keeps those three beside the department, and nothing empty."""
+    from app.erp_local.api import light_product
+
+    reference(erp, pricing=[{**LINE, "id": "l5", "sku": "demo"}])
+    product = next(p for p in erp.snapshot()["products"] if p["sku"] == "demo.aparelho")
+    assert light_product(product)["price_table"] == {
+        "department": "Celular",
+        "pricing_id": "l5",
+        "model": "A17 Pro Max",
+        "certificate_number": "07197-26-18234",
+    }
+    assert "price_table" not in light_product({**product, "price_table": None})
+    partial = {"department": "", "pricing_id": "l6", "model": "", "certificate_number": None}
+    assert light_product({**product, "price_table": partial})["price_table"] == {"pricing_id": "l6"}

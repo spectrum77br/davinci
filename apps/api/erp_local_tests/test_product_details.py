@@ -751,3 +751,46 @@ def test_kit_with_local_parts_is_reported_and_never_overwritten(erp):
     assert convert_virtual_kits(erp, rows)["conflicts"] == [sku]
     with erp.connection() as db:
         assert product_structures.graph(db)[1][sku] == mine
+
+
+def test_fields_that_left_the_screen_are_kept_when_the_screen_saves_without_them(erp):
+    """M-109/M-110 (27/11/2026): the Estoque tab (Mínimo, Máximo, Crossdocking, Localização) and
+    the folds Código DUN, Listas de preço, Descrição complementar, Link Externo, Vídeo,
+    Observações and Tags left the product screen. A save that does not send them (the screen no
+    longer has them) keeps every one exactly as stored — never written empty — and so does the
+    catalogue cost when the screen does not send it."""
+    kept = {
+        "stock_min": "2",
+        "stock_max": "10",
+        "crossdocking": 3,
+        "location": "A1",
+        "dun": [{"code": "17891234567892", "quantity": "12"}],
+        "complementary_html": "<p>Complementar</p>",
+        "external_link": "https://exemplo.test/produto",
+        "video_url": "https://exemplo.test/video",
+        "notes": "Só uso interno",
+        "tags": ["Azul", "Mala"],
+    }
+    update(erp, cost_price="630.1234", short_description_html="<p>Curta</p>", **kept)
+    with erp.connection() as db:
+        before = product_details.details(db, "demo.aparelho")
+        cost = db.execute("SELECT cost_price FROM product_pricing WHERE sku='demo.aparelho'")
+        cost_before = cost.fetchone()[0]
+    # What the screen still has: name, measures, short description.
+    update(
+        erp,
+        version=1,
+        name="Produto da tela",
+        gross_weight_kg="1.2",
+        short_description_html="<p>Curta nova</p>",
+    )
+    with erp.connection() as db:
+        after = product_details.details(db, "demo.aparelho")
+        cost_after = db.execute(
+            "SELECT cost_price FROM product_pricing WHERE sku='demo.aparelho'"
+        ).fetchone()[0]
+    for field in [*kept, "description"]:
+        assert after[field] == before[field], field
+    assert after["short_description_html"] == "<p>Curta nova</p>"
+    assert after["gross_weight_kg"] == "1.200"
+    assert cost_after == cost_before == "630.1234"

@@ -37,6 +37,10 @@ class Command(BaseModel):
 # to about 2 MB (23/11).
 LIGHT_DETAILS = ("version", "status", "gtin", "tags", "brand", "stock_min", "unit")
 LIGHT_ORIGIN = ("sellable", "stock_state")
+# M-115 (27/11/2026): the list's Modelo and Número columns show what the editor shows (model,
+# certificate_number), and the list asks DaVinci for every product at once with the line id
+# (pricing_id, the `linha` of POST /api/produto-regras/lista). Missing key = none, as above.
+LIGHT_PRICE_TABLE = ("department", "pricing_id", "model", "certificate_number")
 
 
 def light_product(product):
@@ -60,9 +64,10 @@ def light_product(product):
     parts = (product.get("structure") or {}).get("components") or []
     if parts and product.get("kind") != "kit":
         out["structure"] = {"components": parts}
-    department = (product.get("price_table") or {}).get("department")
-    if department:
-        out["price_table"] = {"department": department}
+    line = product.get("price_table") or {}
+    kept = {k: line[k] for k in LIGHT_PRICE_TABLE if line.get(k) not in (None, "")}
+    if kept:
+        out["price_table"] = kept
     category = product.get("category") or {}
     if category.get("id"):
         out["category"] = {"id": category["id"], "version": category.get("version", 0)}
