@@ -46,26 +46,26 @@ body[data-screen=purchases] button[data-edit-purchase]{border:0;background:none;
 .product-supplier-dialog{width:min(680px,calc(100vw - 48px));border:1px solid #d5deea;border-radius:8px;padding:24px;color:#26384c;box-shadow:0 12px 44px #14203333}
 .product-supplier-dialog::backdrop{background:#10203955}
 #product-edit-form [role=tablist]{border-bottom:1px solid #d1dae5;gap:8px}
-#product-edit-form [role=tab]{background:transparent;border:0;border-radius:0;padding:9px 10px;color:#506079;box-shadow:none;border-bottom:3px solid transparent}
-#product-edit-form [role=tab][aria-selected=true]{border-bottom-color:var(--blue,#2453d4);color:#26384c;font-weight:700}
+#product-edit-form [role=tab]{background:transparent;border:0;border-radius:0;padding:9px 10px;color:rgb(107,114,128);box-shadow:none;border-bottom:3px solid transparent;font-size:14px;font-weight:400;line-height:20px}
+#product-edit-form [role=tab][aria-selected=true]{border-bottom-color:var(--blue,#2453d4);color:rgb(15,23,41);font-weight:400}
 .product-supplier-dialog h2{font-size:19px;margin:0 0 20px}
 .product-supplier-dialog>label{display:block;margin:12px 0}
 .image-view-dialog>img{display:block;max-width:100%;max-height:70vh;margin:12px auto;object-fit:contain}
 body[data-product-editor=true] main>.panel>.panel-head{display:none}
 #product-edit-form>.form-footer:first-child{justify-content:flex-end;margin-top:0;margin-bottom:20px}
-body[data-product-editor=true] header h1{font-size:20px;line-height:1.4;white-space:normal}
-.product-head>label{display:block;margin-bottom:16px}
-/* M-70 (26/11/2026): o alto do cadastro em linhas de 7 caixas iguais; a linha sem campo nenhum (as
-   reservadas para os pedidos seguintes da série) não ocupa espaço. Sem o "… ›" antes do nome. */
+body[data-product-editor=true] header h1{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";font-size:22px;font-weight:600;letter-spacing:-.55px;color:rgb(15,23,41);line-height:1.4;white-space:normal}
+/* M-70 (26/11/2026): o alto do cadastro em linhas de caixas iguais; a linha sem campo nenhum não ocupa
+   espaço. Sem o "… ›" antes do nome. M-112 (27/11/2026): grade de 9 colunas em tela larga (o resto
+   da arrumação, os grupos e as letras, no bloco "M-107…M-112" no fim). */
 body[data-product-editor=true] header h1:before{content:none}
-.product-head-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:16px;margin-bottom:16px}
+.product-head-row{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:16px;margin-bottom:16px}
 .product-head-row:not(:has(label,a,button)){display:none}
-.product-head-cell{min-width:0}.product-head-cell>label{display:block}.product-head-cell>label input{width:100%}
+.product-head-cell{min-width:0}.product-head-cell>label{display:grid;gap:4px;align-content:start}.product-head-cell>label input:not([type=checkbox]){width:100%}
 .product-head-cell #product-rename-open{margin-top:6px;padding:3px 8px;font-size:11px}
 /* M-72: Fotos e Embalagem com o selo das colunas da Tabela de Preços › Produtos (classeEtiquetaMidia em
    pages/pricing/[tab].vue): "+ Adicionar" tracejado, azul-claro quando tem, âmbar na pasta vazia. */
-.p2-midia-cell{grid-template-rows:auto 38px;align-items:center;justify-items:start}
-.p2-midia{display:inline-flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap;min-width:5.5rem;padding:2px 8px;border:1px solid;border-radius:4px;font-size:11px;font-weight:500;line-height:1.25;letter-spacing:0;text-decoration:none;box-shadow:none;cursor:pointer}
+.p2-midia-cell{grid-template-rows:auto 28px;align-items:center;justify-items:start}
+.p2-midia{display:inline-flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap;min-width:5.5rem;height:28px;padding:0 10px;border:1px solid;border-radius:8px;font-size:12px;font-weight:500;line-height:16px;letter-spacing:0;text-decoration:none;box-shadow:none;cursor:pointer}
 .p2-midia.is-vazio{border-style:dashed;border-color:rgba(107,114,128,.4);background:#fff;color:rgb(107,114,128)}
 .p2-midia.is-vazio:not(:disabled):hover{border-color:rgb(96,165,250);color:rgb(29,78,216)}
 .p2-midia.is-ver{border-color:rgb(226,232,240);background:rgb(241,245,249);color:rgb(51,65,85)}
@@ -81,22 +81,24 @@ body[data-product-editor=true] header h1:before{content:none}
 .p2-regra input[aria-busy=true]{opacity:.6}
 #product-edit-form.read-only .p2-regra input:not(:disabled){pointer-events:auto;background:#fff;color:#21314b}
 .p2-regra input:disabled{background:#f6f7f9;color:#4a5568}
-.p2-regra-botao{display:block;width:100%;min-height:32px;padding:7px 10px;border:1px solid #cbd6e6;border-radius:5px;background:#fff;color:#21314b;font-size:12px;font-weight:400;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:none}
-.p2-regra-botao.is-vazio{color:#9aa6b8}
+.p2-regra-botao{display:block;width:100%;height:28px;min-height:28px;padding:0 8px;border:.75px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,41);font-size:12px;font-weight:400;line-height:16px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:none}
+.p2-regra-botao.is-vazio{color:rgb(107,114,128)}
 .p2-regra-botao:not(:disabled):hover{border-color:#93b4f5}
 .p2-regra-botao:disabled{background:#f6f7f9;cursor:default;opacity:1}
 /* M-73 (26/11/2026): Centro de custo, Categoria, Categoria de venda e Tag de envio (linha 2, colunas 1 a
    4): caixa branca com o valor e uma setinha; o menu abre embaixo, com um checkbox por linha. O valor
    herdado (centro em branco = o departamento) fica em cinza. São trocas na hora (DaVinci e a rota do
    "Alterar categoria"), então continuam clicáveis no modo Consulta, onde o resto do cadastro trava. */
-.product-head-cell[data-campo=centro_custo],.product-head-cell[data-campo=categoria],.product-head-cell[data-campo=categoria_venda],.product-head-cell[data-campo=tag_envio]{position:relative}
-.p2-menu-caixa{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;min-height:32px;padding:7px 10px;border:1px solid #cbd6e6;border-radius:5px;background:#fff;color:#21314b;font-size:12px;font-weight:400;text-align:left;box-shadow:none;cursor:pointer}
+.product-head-cell[data-campo=cor],.product-head-cell[data-campo=formato],.product-head-cell[data-campo=centro_custo],.product-head-cell[data-campo=categoria],.product-head-cell[data-campo=categoria_venda],.product-head-cell[data-campo=tag_envio],.product-head-cell[data-campo=tipo_estoque]{position:relative}
+.p2-menu-caixa{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;height:28px;min-height:28px;padding:0 8px;border:.75px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,41);font-size:12px;font-weight:400;line-height:16px;text-align:left;box-shadow:none;cursor:pointer}
 .p2-menu-caixa>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .p2-menu-caixa.is-herdado>span{color:#9aa6b8}
+/* M-107: Cor sem cor = "—" em cinza rgb(107,114,128). Cor, Formato e Tipo de estoque: sem a seta. */
+.p2-menu-caixa.is-vazio>span{color:rgb(107,114,128)}
 .p2-menu-seta{flex:none;color:#6b7a90}
 .p2-menu-caixa:not(:disabled):hover{border-color:#93b4f5}
 .p2-menu-caixa[aria-expanded=true]{border-color:#285be7;box-shadow:0 0 0 1px #285be7}
-.p2-menu-caixa:disabled{background:#f6f7f9;color:#4a5568;cursor:default;opacity:1}
+.p2-menu-caixa:disabled{background:#f6f7f9;color:rgb(15,23,41);cursor:default;opacity:1}
 .p2-menu-caixa[aria-busy=true]{opacity:.6}
 .p2-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:70;min-width:100%;width:max-content;max-width:min(280px,calc(100vw - 32px));max-height:320px;overflow:auto;padding:6px;border:1px solid rgb(229,231,235);border-radius:8px;background:#fff;box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1)}
 .p2-menu-nota{margin:0 0 4px;padding:4px 6px;font-size:11px;line-height:15px;color:rgb(107,114,128);white-space:normal}
@@ -104,6 +106,8 @@ body[data-product-editor=true] header h1:before{content:none}
 .p2-menu-linha{display:flex;align-items:center;gap:8px;margin:0;padding:5px 6px;border-radius:4px;font-size:13px;line-height:18px;font-weight:400;color:rgb(15,23,42);cursor:pointer}
 .p2-menu-linha:hover{background:rgb(243,244,246)}
 .p2-menu-linha input[type=checkbox]{width:16px;height:16px;min-height:16px;margin:0;flex:none}
+/* M-108/M-111: as opções que só informam (Formato, Tipo de estoque) ficam desativadas. */
+.p2-menu-linha.is-info{cursor:default}.p2-menu-linha.is-info:hover{background:none}
 #product-edit-form.read-only .p2-menu input[type=checkbox]{pointer-events:auto;background:#fff}
 .p2-tag-troca{margin:4px 0 10px;font-size:14px}
 .p2-condicao-dialog h3{margin:18px 0 8px;font-size:13px}
@@ -115,7 +119,7 @@ body[data-product-editor=true] header h1:before{content:none}
 .p2-condicao-msg{margin:8px 0;padding:6px 10px;border-radius:5px;background:#ecfdf3;color:#166534;font-size:12px}
 .p2-condicao-msg.erro{background:#fff0ec;color:#a13a2a}
 @media(max-width:560px){.p2-condicao-form{grid-template-columns:1fr}}
-.product-switch>span{display:flex;align-items:center;gap:8px;min-height:34px}
+.product-switch>span{display:flex;align-items:center;gap:8px;min-height:28px}
 .product-switch input{position:absolute;opacity:0;width:1px;height:1px}
 .product-switch i{display:inline-block;position:relative;width:27px;height:16px;border-radius:9px;background:#c1ccd9;transition:background .15s}
 .product-switch i:after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:left .15s}
@@ -128,7 +132,6 @@ body[data-product-editor=true] header h1:before{content:none}
 .product-fold>summary{cursor:pointer;font-size:14px;font-weight:700;color:#3b4a5c;list-style-position:inside;margin-bottom:10px}
 .product-fold .field-title{margin:0 0 6px;font-size:12px;color:#3b4a5c}
 .product-fold .table-wrap{margin:10px 0 6px}
-.dun-remove{background:none;border:0;padding:4px;color:#d34040;box-shadow:none}
 .link-action{display:block;margin-left:auto;background:none;border:0;padding:4px 0;color:var(--blue,#2453d4);font-weight:700;box-shadow:none}
 .rich-editor{border:1px solid #cdd8e4;border-radius:3px;background:#fff}
 .rich-editor.fullscreen{position:fixed;inset:0;z-index:60;display:flex;flex-direction:column}
@@ -152,13 +155,9 @@ body[data-product-editor=true] header h1:before{content:none}
 .rich-source{display:block;width:100%;min-height:150px;border:0;padding:10px;font:12px/1.5 ui-monospace,Menlo,monospace}
 .rich-source[hidden],.rich-body[hidden],.rich-special[hidden]{display:none}
 .rich-count{padding:4px 10px;border-top:1px solid #dfe6ee;text-align:right;font-size:11px;color:#657c92}
-.product-tags{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
-.product-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:12px;background:#e8eefb;color:#26384c;font-size:12px}
-.product-tag button{background:none;border:0;padding:0 2px;color:#5f7186;box-shadow:none;line-height:1}
 .product-category{margin-top:24px;max-width:320px}
-.product-history-action{margin-top:24px}
-@media(max-width:900px){.product-head-row{grid-template-columns:repeat(4,minmax(0,1fr))}.product-head-row>[data-campo]:empty{display:none}.product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:560px){.product-head-row{grid-template-columns:repeat(2,minmax(0,1fr))}.product-grid{grid-template-columns:1fr}}
+@media(max-width:900px){.product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.product-grid{grid-template-columns:1fr}}
 .product-list.with-filter{display:grid;grid-template-columns:190px minmax(0,1fr);gap:18px;align-items:start}
 .catalog-main{min-width:0}
 .catalog-filter{display:grid;gap:10px;position:sticky;top:10px;padding:0 12px 12px 0;border-right:1px solid #e3e9f0}
@@ -394,3 +393,72 @@ body[data-screen=products]:not([data-product-editor=true]):not([data-products-ta
 .p2-tag-warning{margin:8px 0 0;padding:8px 10px;border:1px solid rgb(253,230,138);border-radius:4px;background:rgb(255,251,235);color:rgb(146,64,14);font-size:12px}
 @media(max-width:900px){.p2-split{grid-template-columns:minmax(0,1fr);row-gap:16px}.catalog-bar-end{margin-left:0}}
 @media print{.p2-side{display:none!important}}
+
+/* M-107…M-112 (27/11/2026): o cadastro do produto (Produtos 2) separado por afinidade e com as letras
+   da Tabela de Preços, só nesta tela (body[data-product-editor=true]).
+   Tela larga (1100px ou mais): grade de 9 colunas, 16px entre os campos. Linha 1 sem título: Nome (5
+   colunas) | Cor | Formato | Código (SKU) | Situação. Linha 2: CERTIFICADO (5) e DIMENSÕES (4). Linha 3:
+   VENDA (9), com o DUIMP padrão em 2. MARKETING (Fotos | Embalagem e a Descrição curta) abre a aba
+   Características. Abaixo de 1100px: o Nome na linha inteira, cada grupo na linha inteira, 4 campos por
+   linha (2 abaixo de 620px). M-110: sem o painel da direita, o cadastro usa a largura toda. */
+body[data-product-editor=true] #content,body[data-product-editor=true] header,body[data-product-editor=true] #notice,body[data-product-editor=true] dialog{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"}
+body[data-product-editor=true] #action-rail{display:none!important}
+body[data-product-editor=true] .workspace header{padding-right:14px}
+body[data-product-editor=true] #content{padding-right:14px}
+body[data-product-editor=true] #notice{margin-right:14px}
+body[data-product-editor=true] footer{padding-right:14px}
+.product-head-row>[data-campo=nome]{grid-column:span 5}
+.product-group{min-width:0}
+.product-head-row>.product-group[data-grupo=certificado]{grid-column:span 5}
+.product-head-row>.product-group[data-grupo=dimensoes]{grid-column:span 4}
+.product-head-row>.product-group[data-grupo=venda]{grid-column:1/-1}
+.product-group:not(:has(label,a,button)){display:none}
+.product-group-title{margin:0 0 8px;padding:0 0 4px;border-bottom:.75px solid rgb(229,231,235);font-size:11px;line-height:16px;font-weight:700;letter-spacing:.55px;text-transform:uppercase;color:rgb(107,114,128)}
+.product-group-cells{display:grid;gap:16px;grid-template-columns:repeat(var(--p2-colunas,9),minmax(0,1fr))}
+.product-group[data-grupo=certificado]>.product-group-cells{--p2-colunas:5}
+.product-group[data-grupo=dimensoes]>.product-group-cells{--p2-colunas:4}
+.product-group[data-grupo=venda] [data-campo=duimp_padrao]{grid-column:span 2}
+.product-group[data-grupo=marketing]{margin-top:16px}
+.product-descricao-curta{margin-top:16px}
+#product-edit-form .product-head-cell>label,#product-edit-form .product-descricao-curta>.field-title{font-size:11px;line-height:16px;font-weight:600;color:rgb(15,23,41)}
+#product-edit-form .product-descricao-curta>.field-title{margin:0 0 4px}
+#product-edit-form .product-head-cell input:not([type=checkbox]):not([type=hidden]){height:28px;min-height:28px;padding:0 8px;border:.75px solid rgb(229,231,235);border-radius:4px;font-size:12px;line-height:16px;font-weight:400;color:rgb(15,23,41);box-shadow:none}
+#product-edit-form .product-switch small{font-size:12px;font-weight:400;color:rgb(15,23,41)}
+#product-edit-form>.form-footer button{height:28px;min-height:28px;padding:0 10px;border-radius:8px;font-size:12px;line-height:16px;font-weight:500}
+#product-edit-form>.form-footer button.secondary{border:1px solid rgb(229,231,235);background:#fff;color:rgb(15,23,41)}
+#product-edit-form>.form-footer .consulta-note{font-size:12px}
+@media(max-width:1099.98px){
+ .product-head-row,.product-group-cells{grid-template-columns:repeat(4,minmax(0,1fr))}
+ .product-head-row>[data-campo=nome],.product-head-row>.product-group[data-grupo]{grid-column:1/-1}
+ .product-group[data-grupo=venda] [data-campo=duimp_padrao]{grid-column:auto}
+ .product-head-row>[data-campo]:empty,.product-group-cells>[data-campo]:empty{display:none}
+}
+@media(max-width:619.98px){.product-head-row,.product-group-cells{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* M-111 (27/11/2026): a aba Estrutura (só no produto composto) como a do Bling, nas letras da grade da
+   Tabela de Preços: Tipo de estoque com a largura de 2 campos; tabela com cabeçalho 11px/600, células
+   12px/400 rgb(15,23,41) em linhas de 34px, números à direita, nº no centro em cinza, a linha "Produto
+   composto" em 600 com fundo rgb(249,250,251), Qtde de 24px, lixeira vermelha; moldura de raio 4px e
+   borda 0,75px; "+ Adicionar outro item" de 28px. */
+.p2-estrutura-tipo-linha{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:16px;margin:16px 0}
+.p2-estrutura-tipo-linha>[data-campo=tipo_estoque]{grid-column:span 2}
+@media(max-width:1099.98px){.p2-estrutura-tipo-linha{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:619.98px){.p2-estrutura-tipo-linha{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.p2-estrutura-moldura{border:.75px solid rgb(229,231,235);border-radius:4px;background:#fff;overflow:auto}
+.p2-estrutura{width:100%;border-collapse:separate;border-spacing:0;font-size:12px;font-weight:400;color:rgb(15,23,41);white-space:nowrap}
+.p2-estrutura>thead>tr{height:24px}
+.p2-estrutura>thead>tr>th{padding:0 8px;border:0;background:#fff;font-size:11px;line-height:16px;font-weight:600;letter-spacing:0;text-transform:none;text-align:left;color:rgb(15,23,41)}
+.p2-estrutura>tbody>tr,.p2-estrutura>tfoot>tr{height:34px}
+.p2-estrutura>tbody>tr>td,.p2-estrutura>tfoot>tr>td{padding:4px 8px;border:0;border-top:1px solid rgb(229,231,235);background:#fff;font-size:12px;line-height:16px;font-weight:400;color:rgb(15,23,41);vertical-align:middle}
+.p2-estrutura>thead>tr>.num,.p2-estrutura>tbody>tr>.num,.p2-estrutura>tfoot>tr>.num{text-align:right;font-variant-numeric:tabular-nums}
+.p2-estrutura>thead>tr>.p2-estrutura-n,.p2-estrutura>tbody>tr>.p2-estrutura-n{width:36px;text-align:center;color:rgb(107,114,128)}
+.p2-estrutura>tfoot>tr>td{font-weight:600;background:rgb(249,250,251)}
+.p2-estrutura-comp{width:40%;max-width:0}
+.p2-estrutura-nome{display:block;overflow:hidden;text-overflow:ellipsis}
+.p2-estrutura-comp select{height:24px;min-height:24px;padding:0 6px;border:.75px solid rgb(229,231,235);border-radius:4px;font-size:12px;color:rgb(15,23,41)}
+#product-edit-form .p2-estrutura input.p2-estrutura-qtde{width:80px;height:24px;min-height:24px;padding:0 6px;border:.75px solid rgb(229,231,235);border-radius:4px;font-size:12px;line-height:16px;text-align:right;color:rgb(15,23,41)}
+.p2-estrutura-acao{width:36px;text-align:center}
+.p2-estrutura-del{display:inline-flex;align-items:center;justify-content:center;padding:4px;border:0;border-radius:4px;background:none;color:rgb(220,38,38);box-shadow:none}
+.p2-estrutura-del:disabled{opacity:.4;cursor:default}
+.p2-estrutura-add{margin-top:8px;height:28px;min-height:28px;padding:0 10px;border:1px solid rgb(229,231,235);border-radius:8px;background:#fff;color:rgb(15,23,41);font-size:12px;line-height:16px;font-weight:500;box-shadow:none}
+.p2-estrutura-add:disabled{opacity:.5;cursor:default}
+.p2-estrutura-historico{margin-top:16px;font-size:12px}

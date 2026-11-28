@@ -1,5 +1,4 @@
 'use strict';
-const productDetailLabels={unit:'Unidade',gtin:'GTIN/EAN',gtin_tax:'GTIN/EAN tributário',status:'Situação',description:'Descrição complementar',complementary_html:'Descrição complementar',short_description_html:'Descrição curta',brand:'Marca',location:'Localização',weight_kg:'Peso anterior',net_weight_kg:'Peso líquido',gross_weight_kg:'Peso bruto',width_cm:'Largura',height_cm:'Altura',length_cm:'Profundidade',dimension_unit:'Unidade de medida',volumes:'Volumes',items_per_box:'Itens p/ caixa',condition:'Condição',production:'Produção',expiry_date:'Data de validade',free_shipping:'Frete grátis',department:'Departamento',dun:'Código DUN',external_link:'Link externo',video_url:'Vídeo',notes:'Observações',tags:'Tags'};
 function shiftDecimal(value,places){
  const match=/^(\d*)\.?(\d*)$/.exec(String(value??'').trim());
  if(!match||!(match[1]+match[2]))return String(value??'');
@@ -68,77 +67,31 @@ document.addEventListener('paste',e=>{
  e.preventDefault();const data=e.clipboardData,html=data?.getData('text/html');
  richInsert(body,html?cleanRichHtml(html):esc(data?.getData('text/plain')||'').replace(/\n/g,'<br>'));updateRichCount(body.closest('[data-rich-editor]'));
 });
-function productDunRow(row={}){return `<tr data-dun-row><td><input name="dun_code" aria-label="Código DUN" inputmode="numeric" maxlength="20" placeholder="Digite aqui" value="${esc(row.code||'')}"></td><td><input name="dun_quantity" aria-label="Quantidade do DUN" type="number" min="0.001" step="0.001" placeholder="Digite aqui" value="${esc(row.quantity||'')}"></td><td><button type="button" class="dun-remove" data-dun-remove aria-label="Remover DUN">${icon('trash')}</button></td></tr>`;}
-function readProductDun(){
- const rows=[];
- for(const row of document.querySelectorAll('#product-dun-body [data-dun-row]')){
-  const code=row.querySelector('[name=dun_code]').value.trim(),quantity=row.querySelector('[name=dun_quantity]').value.trim();
-  if(!code&&!quantity)continue;
-  if(!code||!quantity)throw Error('Não é possível cadastrar um DUN com os campos: '+[!code&&'Código DUN',!quantity&&'Quantidade'].filter(Boolean).join(', ')+' vazios');
-  rows.push({code,quantity});
- }
- return rows;
-}
-const productTagChip=tag=>`<span class="product-tag" data-product-tag="${esc(tag)}">${esc(tag)}<button type="button" data-product-tag-remove aria-label="Remover tag ${esc(tag)}">×</button></span>`;
-const readProductTags=()=>[...document.querySelectorAll('#product-tags [data-product-tag]')].map(el=>el.dataset.productTag);
-function addProductTag(input){
- const added=input.value.split(',').map(t=>t.trim()).filter(Boolean);input.value='';
- for(const tag of added)if(!readProductTags().some(t=>t.toLowerCase()===tag.toLowerCase()))document.getElementById('product-tags').insertAdjacentHTML('beforeend',productTagChip(tag));
-}
-function productPriceListRows(product){
- const rows=(state.price_lists||[]).filter(l=>l.data.mode!=='custom'||l.data.prices?.[product.sku]!==undefined);
- return rows.length?table(['Lista','Tipo','Ajuste','Situação'],rows.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(priceModes[l.data.mode]||l.data.mode)}</td><td>${l.data.mode==='custom'?'R$ '+esc(l.data.prices[product.sku]):esc(l.data.value??'')}${l.data.mode==='percent'?'%':''}</td><td>${l.data.status==='active'?'Ativa':'Inativa'}</td></tr>`).join('')):'<p class="source-line">Caso você utilize mais de um preço para o mesmo produto, você pode incluir uma lista de preços e vincular este produto a ela.</p>';
-}
-const productFold=(title,body,open=true)=>`<details class="product-fold" ${open?'open':''}><summary>${title}</summary>${body}</details>`;
-// M-70 (26/11/2026): sai a grade dos 16 campos (Marca, Voltagem, Produção, Validade, Frete Grátis,
-// pesos, medidas, Volumes, Itens p/ caixa, Unidade de medida, GTIN, GTIN tributário, Departamento).
-// Os valores continuam guardados e voltam como vieram ao salvar (productSavePayload). Ficam as
-// dobras, as Tags e o Histórico do cadastro. M-73 (26/11/2026): a Categoria saiu daqui e foi para a
-// linha 2 do alto do cadastro (menu que troca na hora, pela rota do "Alterar categoria").
+// M-110 (27/11/2026): saíram da aba as dobras Código DUN, Listas de preço, Descrição complementar, Link
+// Externo, Vídeo, Observações e Tags e o botão "Histórico do cadastro" (o histórico continua guardado
+// no servidor). Os dados continuam guardados: o "Salvar produto" não manda essas chaves
+// (productSavePayload). O filtro Tags da lista lê as tags guardadas (estado leve), como antes.
+// M-112 (27/11/2026): a aba começa no grupo MARKETING — Fotos | Embalagem (os selos de hoje, M-72) e,
+// embaixo, na largura toda, a Descrição curta com o editor já aberto (sem a dobra).
 function productCharacteristics(product){
- const d=product.details||{};
- const input=(name,label,value,attrs='')=>`<label>${label}<input name="${name}" value="${esc(value??'')}" ${attrs}></label>`;
- const tagOptions=[...new Set(state.products.flatMap(p=>p.details?.tags||[]))].sort().slice(0,300);
- return `${productFold('Código DUN','<p class="source-line">Informe o DUN para identificar caixas ou fardos com várias unidades. Uma leitura da caixa conta a quantidade da embalagem, nunca uma unidade.</p><div class="table-wrap"><table><thead><tr><th>Código</th><th>Quantidade</th><th></th></tr></thead><tbody id="product-dun-body">'+((d.dun||[]).length?d.dun:[{}]).map(productDunRow).join('')+'</tbody></table></div><button type="button" class="link-action" data-dun-add>+ Adicionar DUN</button>')}${productFold('Listas de preço',productPriceListRows(product)+'<button type="button" class="secondary" data-product-price-lists>Incluir uma lista de preços</button>')}${productFold('Descrição curta','<p class="field-title">Descrição Curta (Descrição Principal)</p>'+richEditor('short_description_html','Descrição curta',d.short_description_html))}${productFold('Descrição complementar','<p class="field-title">Descrição complementar</p>'+richEditor('complementary_html','Descrição complementar',d.complementary_html))}${productFold('Link Externo',input('external_link','Link Externo',d.external_link,'type="url" maxlength="500"'))}${productFold('Vídeo',input('video_url','Vídeo',d.video_url,'type="url" maxlength="500"'))}${productFold('Observações',`<label>Observações<textarea name="notes" rows="4" maxlength="5000">${esc(d.notes||'')}</textarea></label>`)}${productFold('Tags',`<p class="source-line">As Tags servem para classificar os produtos (Exemplo: Marca, Grupo, Cor, etc...).</p><div id="product-tags" class="product-tags">${(d.tags||[]).map(productTagChip).join('')}</div><label>Adicionar tag<input name="product_tag_input" list="product-tag-options" maxlength="60" placeholder="Digite e pressione Enter"></label><datalist id="product-tag-options">${tagOptions.map(t=>`<option value="${esc(t)}"></option>`).join('')}</datalist>`)}<div class="product-history-action"><button type="button" class="secondary" data-product-details-history="${esc(product.sku)}">Histórico do cadastro</button><div id="product-details-history"></div></div>`;
+ const d=product.details||{},media=productMediaCells(product);
+ return `<section class="product-group" data-grupo="marketing"><h3 class="product-group-title">MARKETING</h3><div class="product-group-cells"><div class="product-head-cell" data-campo="fotos">${media.fotos}</div><div class="product-head-cell" data-campo="embalagem">${media.embalagem}</div></div><div class="product-descricao-curta"><p class="field-title">Descrição curta</p>${richEditor('short_description_html','Descrição curta',d.short_description_html)}</div></section>`;
 }
-// Só o que a tela tem; o resto do cadastro sai do produto carregado (productSavePayload).
+// Só o que a tela tem (a Descrição curta); o resto do cadastro sai do produto carregado (productSavePayload).
 function readProductCharacteristics(form){
- const values=new FormData(form),data={},has=name=>!!form.querySelector(`[name="${name}"]`);
- for(const name of ['external_link','video_url','notes'])if(has(name))data[name]=String(values.get(name)??'').trim();
- if(form.querySelector('#product-dun-body'))data.dun=readProductDun();
- const pending=form.querySelector('[name=product_tag_input]');
- if(pending){if(pending.value.trim())addProductTag(pending);data.tags=readProductTags();}
- for(const name of ['short_description_html','complementary_html'])if(form.querySelector(`[data-rich-editor="${name}"]`))data[name]=readRichEditor(name);
+ const data={};
+ for(const name of ['short_description_html'])if(form.querySelector(`[data-rich-editor="${name}"]`))data[name]=readRichEditor(name);
  return data;
 }
 document.addEventListener('change',e=>{
  if(e.target.name==='status'&&e.target.type==='checkbox'&&e.target.closest('#product-edit-form'))e.target.closest('label').querySelector('[data-status-label]').textContent=e.target.checked?'Ativado':'Inativo';
 });
-document.addEventListener('keydown',e=>{if(e.target.name==='product_tag_input'&&(e.key==='Enter'||e.key===',')){e.preventDefault();addProductTag(e.target);}});
-document.addEventListener('click',async e=>{
- if(e.target.closest('[data-dun-add]'))document.getElementById('product-dun-body').insertAdjacentHTML('beforeend',productDunRow());
- const removeDun=e.target.closest('[data-dun-remove]');
- if(removeDun){const body=document.getElementById('product-dun-body');removeDun.closest('[data-dun-row]').remove();if(!body.children.length)body.insertAdjacentHTML('beforeend',productDunRow());}
- const removeTag=e.target.closest('[data-product-tag-remove]');if(removeTag)removeTag.closest('[data-product-tag]').remove();
- if(e.target.closest('[data-product-price-lists]')){
-  if(document.getElementById('product-edit-form').dataset.dirty==='true'){message('Salve ou cancele o produto antes de abrir as listas de preços.',true);return;}
-  editingProduct='';page='price_lists';render();return;
- }
- const button=e.target.closest('[data-product-details-history]');if(!button)return;
- try{
-  const response=await fetch('/api/erp-local/products/'+encodeURIComponent(button.dataset.productDetailsHistory)+'/details/history'),data=await response.json();
-  if(!response.ok)throw Error(data.message||'Não foi possível conferir o histórico do cadastro.');
-  const target=document.getElementById('product-details-history');if(!target||editingProduct!==data.sku)return;
-  target.innerHTML=table(['Versão','Quando','Campos alterados'],data.history.map(h=>`<tr><td>${h.version}</td><td>${when(h.created_at)}</td><td>${h.changed===null?'Versão preservada':[...new Set(h.changed.map(k=>productDetailLabels[k]||k))].map(esc).join(', ')||'Sem alteração de características'}</td></tr>`).join('')||empty(3,'Sem versões registradas.'));
- }catch(error){message(error.message,true);}
-});
-// O que grava na hora, fora do "Salvar produto" (M-73/M-74: a linha 2), não deixa o cadastro "sujo".
+// O que grava na hora, fora do "Salvar produto" (M-73/M-74/M-107: Cor, VENDA), não deixa o cadastro "sujo".
 const productSavesApart='[data-p2-regra],[data-p2-menu-box],[data-p2-menu]';
 document.addEventListener('input',e=>{const form=e.target.closest('#product-edit-form');if(form&&!e.target.closest(productSavesApart))form.dataset.dirty='true';});
 document.addEventListener('change',e=>{const form=e.target.closest('#product-edit-form');if(form&&!e.target.closest(productSavesApart))form.dataset.dirty='true';});
-// Edições só de clique (tirar tag, pôr ou tirar DUN, pôr ou tirar componente da Estrutura) não
-// disparam input nem change, e também deixam o cadastro "sujo": a troca de Categoria e de Tag de
-// envio (M-73) relê a tela e as desfaria sem aviso. Na captura, antes de quem tira a linha (depois
-// disso o botão já não está no formulário).
-const productClickEdits='[data-product-tag-remove],[data-dun-add],[data-dun-remove],[data-add-item],[data-remove-item]';
+// Edições só de clique (pôr ou tirar peça da Estrutura, M-111) não disparam input nem change, e também
+// deixam o cadastro "sujo": a troca de Categoria e de Tag de envio (M-73) relê a tela e as desfaria
+// sem aviso. Na captura, antes de quem tira a linha (depois disso o botão já não está no formulário).
+const productClickEdits='[data-p2-estrutura-add]:not(:disabled),[data-p2-estrutura-del]:not(:disabled)';
 document.addEventListener('click',e=>{const form=e.target.closest?.('#product-edit-form');if(form&&e.target.closest(productClickEdits))form.dataset.dirty='true';},true);

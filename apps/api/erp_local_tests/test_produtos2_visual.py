@@ -49,14 +49,18 @@ def test_a_tela_ja_vem_marcada_na_abertura_embutida():
     assert "document.body.classList.add('embedded');document.body.dataset.screen=page;" in js
 
 
-def test_o_titulo_do_editor_de_produto_continua_como_era():
+def test_o_titulo_do_editor_de_produto_tem_a_regra_dele():
     # Revisão (24/11): `body.embedded[data-screen=products] header h1` (0,2,3) ganhava de
-    # `body[data-product-editor=true] header h1` (0,1,3, 20px) e o nome do produto no editor
-    # também ia para 22px/600. O pedido fala só do título "Produtos".
+    # `body[data-product-editor=true] header h1` (0,1,3) e mudava o nome do produto no editor junto.
+    # O título da lista continua só na regra dela; o do editor, desde a M-112 (27/11/2026), tem as
+    # letras da Tabela de Preços na regra do próprio editor (22px, 600, -0,55px, rgb(15,23,41)).
     css = _css()
     assert f"{TELA} header h1{{" not in css
     editor = "body[data-product-editor=true] header h1"
-    assert f"{editor}{{font-size:20px;line-height:1.4;white-space:normal}}" in css
+    assert (
+        f'{editor}{{font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";'
+        "font-size:22px;font-weight:600;letter-spacing:-.55px;color:rgb(15,23,41);line-height:1.4;white-space:normal}"
+    ) in css
 
 
 # M-40…M-47 (25/11/2026): a lista de Produtos no padrão da grade da Tabela de Preços, sem o painel
@@ -164,13 +168,14 @@ def test_arquivos_novos_carregam_antes_do_app():
     assert ordem == sorted(ordem)
 
 
-def test_m70_editor_sem_reticencias_e_alto_em_linhas_de_sete_caixas():
+def test_m70_editor_sem_reticencias_e_alto_em_linhas_de_caixas_iguais():
     # M-70 (26/11/2026): o "… ›" sai só do título do cadastro do produto; as outras telas ficam.
+    # M-112 (27/11/2026): as linhas passaram de 7 para 9 colunas iguais em tela larga.
     css = _css()
     assert "body[data-product-editor=true] header h1:before{content:none}" in css
     assert "header h1:before{content:'… ›'" in css
     assert (
-        ".product-head-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:16px;"
+        ".product-head-row{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:16px;"
         in css
     )
     # A linha só com caixas reservadas (dos pedidos seguintes) não ocupa espaço.
@@ -185,6 +190,125 @@ def test_m72_fotos_e_embalagem_com_o_selo_da_tabela_de_precos():
     assert ".p2-midia.is-vazio{border-style:dashed;border-color:rgba(107,114,128,.4)" in css
     assert ".p2-midia.is-ok{border-color:rgb(186,230,253);background:rgb(240,249,255)" in css
     assert ".p2-midia.is-ambar{border-color:rgb(252,211,77);background:rgb(255,251,235)" in css
+    # M-112: rótulo em cima e o botão (28px, raio 8px, 12px/500) embaixo.
     assert (
-        ".p2-midia-cell{grid-template-rows:auto 38px;align-items:center;justify-items:start}" in css
+        ".p2-midia-cell{grid-template-rows:auto 28px;align-items:center;justify-items:start}" in css
     )
+    assert (
+        "min-width:5.5rem;height:28px;padding:0 10px;border:1px solid;border-radius:8px;"
+        "font-size:12px;font-weight:500;" in css
+    )
+
+
+# M-107…M-112 (27/11/2026): o cadastro do produto. O comportamento está em ui.cjs; aqui, as medidas
+# dos pedidos no CSS.
+EDITOR = "body[data-product-editor=true]"
+FONTE = 'font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"'
+
+
+def test_m112_grade_de_nove_colunas_com_os_grupos_e_quebra_em_quatro_e_dois():
+    css = _css()
+    for regra in (
+        ".product-head-row>[data-campo=nome]{grid-column:span 5}",
+        ".product-head-row>.product-group[data-grupo=certificado]{grid-column:span 5}",
+        ".product-head-row>.product-group[data-grupo=dimensoes]{grid-column:span 4}",
+        ".product-head-row>.product-group[data-grupo=venda]{grid-column:1/-1}",
+        ".product-group-cells{display:grid;gap:16px;grid-template-columns:repeat(var(--p2-colunas,9),minmax(0,1fr))}",
+        ".product-group[data-grupo=certificado]>.product-group-cells{--p2-colunas:5}",
+        ".product-group[data-grupo=dimensoes]>.product-group-cells{--p2-colunas:4}",
+        ".product-group[data-grupo=venda] [data-campo=duimp_padrao]{grid-column:span 2}",
+        # Título do grupo: maiúsculas, 11px, 700, 0,55px, cinza, fio de 0,75px embaixo.
+        ".product-group-title{margin:0 0 8px;padding:0 0 4px;border-bottom:.75px solid rgb(229,231,235);"
+        "font-size:11px;line-height:16px;font-weight:700;letter-spacing:.55px;text-transform:uppercase;"
+        "color:rgb(107,114,128)}",
+    ):
+        assert regra in css, regra
+    # Abaixo de 1100px (a área do Produtos 2 no iframe): 4 por linha, o Nome e cada grupo na linha
+    # inteira, o DUIMP com 1 coluna; abaixo de 620px, 2 por linha.
+    estreita = css[css.index("@media(max-width:1099.98px){\n .product-head-row") :]
+    for regra in (
+        ".product-head-row,.product-group-cells{grid-template-columns:repeat(4,minmax(0,1fr))}",
+        ".product-head-row>[data-campo=nome],.product-head-row>.product-group[data-grupo]{grid-column:1/-1}",
+        ".product-group[data-grupo=venda] [data-campo=duimp_padrao]{grid-column:auto}",
+    ):
+        assert regra in estreita[: estreita.index("}\n}")], regra
+    assert (
+        "@media(max-width:619.98px){.product-head-row,.product-group-cells{grid-template-columns:repeat(2,minmax(0,1fr))}}"
+        in css
+    )
+    # As quebras antigas (900px e 560px) não mexem mais no alto do cadastro.
+    assert "@media(max-width:900px){.product-head-row" not in css
+    assert "@media(max-width:560px){.product-head-row" not in css
+
+
+def test_m112_letras_e_caixas_da_tabela_de_precos_so_no_cadastro():
+    css = _css()
+    assert f"{EDITOR} #content,{EDITOR} header,{EDITOR} #notice,{EDITOR} dialog{{{FONTE}}}" in css
+    for regra in (
+        # Rótulo 11px/600 e valor 12px/400, rgb(15,23,41); caixas de 28px, borda 0,75px, raio 4px.
+        "#product-edit-form .product-head-cell>label,#product-edit-form .product-descricao-curta>.field-title"
+        "{font-size:11px;line-height:16px;font-weight:600;color:rgb(15,23,41)}",
+        "#product-edit-form .product-head-cell input:not([type=checkbox]):not([type=hidden]){height:28px;"
+        "min-height:28px;padding:0 8px;border:.75px solid rgb(229,231,235);border-radius:4px;font-size:12px;"
+        "line-height:16px;font-weight:400;color:rgb(15,23,41)",
+        ".p2-menu-caixa{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;"
+        "height:28px;min-height:28px;padding:0 8px;border:.75px solid rgb(229,231,235);border-radius:4px;"
+        "background:#fff;color:rgb(15,23,41);font-size:12px;font-weight:400;",
+        ".p2-regra-botao{display:block;width:100%;height:28px;min-height:28px;padding:0 8px;"
+        "border:.75px solid rgb(229,231,235);border-radius:4px;background:#fff;color:rgb(15,23,41);"
+        "font-size:12px;font-weight:400;",
+        # Abas 14px/400 (ativa rgb(15,23,41), as outras rgb(107,114,128)).
+        "#product-edit-form [role=tab]{background:transparent;border:0;border-radius:0;padding:9px 10px;"
+        "color:rgb(107,114,128);box-shadow:none;border-bottom:3px solid transparent;font-size:14px;"
+        "font-weight:400;line-height:20px}",
+        "#product-edit-form [role=tab][aria-selected=true]{border-bottom-color:var(--blue,#2453d4);"
+        "color:rgb(15,23,41);font-weight:400}",
+        # Fechar (e o Salvar de fora do modo Consulta) igual ao Atualizar: 12px/500, 28px, raio 8px.
+        "#product-edit-form>.form-footer button{height:28px;min-height:28px;padding:0 10px;border-radius:8px;"
+        "font-size:12px;line-height:16px;font-weight:500}",
+        "#product-edit-form>.form-footer button.secondary{border:1px solid rgb(229,231,235);background:#fff;"
+        "color:rgb(15,23,41)}",
+        # M-107: sem cor, "—" em cinza.
+        ".p2-menu-caixa.is-vazio>span{color:rgb(107,114,128)}",
+    ):
+        assert regra in css, regra
+    # A fonte do cadastro é só do cadastro: a lista continua com as regras dela.
+    assert "body[data-screen=products] #content{font-family" not in css
+
+
+def test_m110_sem_o_painel_da_direita_e_largura_toda_so_com_o_cadastro_aberto():
+    css = _css()
+    for regra in (
+        f"{EDITOR} #action-rail{{display:none!important}}",
+        f"{EDITOR} .workspace header{{padding-right:14px}}",
+        f"{EDITOR} #content{{padding-right:14px}}",
+        f"{EDITOR} #notice{{margin-right:14px}}",
+        f"{EDITOR} footer{{padding-right:14px}}",
+    ):
+        assert regra in css, regra
+    # As outras telas continuam reservando os 238px do painel.
+    assert "#content{padding:0 238px 24px 10px;" in css
+    for velha in (".product-history-action{", ".product-tag{", ".dun-remove{"):
+        assert velha not in css, velha
+
+
+def test_m111_tabela_da_estrutura_nas_letras_da_tabela_de_precos():
+    css = _css()
+    for regra in (
+        ".p2-estrutura-tipo-linha>[data-campo=tipo_estoque]{grid-column:span 2}",
+        ".p2-estrutura-moldura{border:.75px solid rgb(229,231,235);border-radius:4px;",
+        ".p2-estrutura>thead>tr>th{padding:0 8px;border:0;background:#fff;font-size:11px;line-height:16px;font-weight:600;",
+        ".p2-estrutura>tbody>tr,.p2-estrutura>tfoot>tr{height:34px}",
+        ".p2-estrutura>tbody>tr>td,.p2-estrutura>tfoot>tr>td{padding:4px 8px;border:0;border-top:1px solid rgb(229,231,235);"
+        "background:#fff;font-size:12px;line-height:16px;font-weight:400;color:rgb(15,23,41);",
+        ".p2-estrutura>thead>tr>.num,.p2-estrutura>tbody>tr>.num,.p2-estrutura>tfoot>tr>.num{text-align:right;",
+        ".p2-estrutura>thead>tr>.p2-estrutura-n,.p2-estrutura>tbody>tr>.p2-estrutura-n{width:36px;text-align:center;color:rgb(107,114,128)}",
+        ".p2-estrutura>tfoot>tr>td{font-weight:600;background:rgb(249,250,251)}",
+        "#product-edit-form .p2-estrutura input.p2-estrutura-qtde{width:80px;height:24px;min-height:24px;padding:0 6px;"
+        "border:.75px solid rgb(229,231,235);border-radius:4px;",
+        ".p2-estrutura-del{display:inline-flex;align-items:center;justify-content:center;padding:4px;border:0;"
+        "border-radius:4px;background:none;color:rgb(220,38,38);",
+        ".p2-estrutura-add{margin-top:8px;height:28px;min-height:28px;padding:0 10px;border:1px solid rgb(229,231,235);"
+        "border-radius:8px;background:#fff;color:rgb(15,23,41);font-size:12px;line-height:16px;font-weight:500;",
+    ):
+        assert regra in css, regra

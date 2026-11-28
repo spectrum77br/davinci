@@ -3,6 +3,11 @@ Tipo, Preço venda, Unidade, Condição, a grade dos 16 campos e as abas Imagens
 Tributação, Tabela de Preços e Vínculos. Tirar da tela não pode apagar nada: ao salvar, o que não
 aparece volta exatamente como veio.
 
+M-109/M-110 (27/11/2026): saíram também a aba Estoque (Mínimo, Máximo, Crossdocking, Localização) e as
+dobras Código DUN, Listas de preço, Descrição complementar, Link Externo, Vídeo, Observações e Tags.
+Essas chaves nem vão no comando (ausente = o servidor mantém), e o custo só vai quando mexido no
+Custo (R$), que mostra duas casas e nunca corta as outras.
+
 A prova vai do começo ao fim, pelo caminho de verdade: um produto com TUDO preenchido (cadastro
 inteiro, NCM e fiscal, fornecedor, imagem, categoria, preço e custo) é lido pela API do ERP,
 aberto e salvo pela tela de verdade (tela_produto.cjs: os arquivos do ERP num navegador de
@@ -158,13 +163,31 @@ def _salvar_pela_tela(c, edits=()):
     return before, payload, c.get(f"/api/erp-local/products/{SKU}/full").json()
 
 
-def _igual_menos(before, after, mudou):
-    """Campo a campo: só a versão do cadastro sobe e só o que foi mudado na tela muda."""
+# O que saiu da tela (M-109/M-110) e não pode ir no comando.
+FORA_DA_TELA = (
+    "stock_min",
+    "stock_max",
+    "crossdocking",
+    "location",
+    "dun",
+    "complementary_html",
+    "description",
+    "external_link",
+    "video_url",
+    "notes",
+    "tags",
+)
+
+
+def _igual_menos(before, after, mudou, fora=None):
+    """Campo a campo: só a versão do cadastro sobe e só o que foi mudado na tela muda (`fora`: o
+    que muda fora de `details`, como o custo)."""
+    fora = fora or {}
     assert set(after) == set(before)
     for key in before:
         if key == "details":
             continue
-        assert after[key] == before[key], key
+        assert after[key] == fora.get(key, before[key]), key
     assert after["details"]["version"] == before["details"]["version"] + 1
     for key in before["details"]:
         if key == "version":
@@ -179,15 +202,21 @@ def test_salvar_sem_mexer_devolve_o_produto_inteiro_como_veio(tmp_path, monkeypa
         run(erp, "demo.seed", {})
         _preencher(erp, monkeypatch)
         before, payload, after = _salvar_pela_tela(c)
-        # Fiscal, fornecedores, imagens, tipo e o preço de venda nem são enviados.
+        # Fiscal, fornecedores, imagens, tipo e o preço de venda nem são enviados; nem o custo
+        # (ninguém mexeu) e o que saiu da tela (M-109/M-110).
         assert set(payload) == {"sku", "version", "data"}
-        assert "price" not in payload["data"]
+        assert "price" not in payload["data"] and "cost_price" not in payload["data"]
+        for key in FORA_DA_TELA:
+            assert key not in payload["data"], key
         # O que tinha antes continua lá (os dados das abas que saíram também).
         assert before["tax"]["data"]["ncm"] == "85171231" and before["tax"]["version"] == 1
         assert before["suppliers"]["rows"][0]["code"] == "F-1"
         assert before["images"]["rows"][0]["alt"] == "Frente"
         assert before["category"]["id"] and before["price"] == "199.9000"
         assert before["details"]["voltage"] == "bivolt" and before["details"]["unit"] == "CX"
+        assert before["details"]["notes"] == "Nota" and before["details"]["tags"] == ["Azul", "Mala"]
+        assert before["details"]["stock_min"] and before["details"]["location"] == "A1-03"
+        assert before["cost_price"] == "80.0000"
         _igual_menos(before, after, {})
 
 
@@ -196,17 +225,23 @@ def test_salvar_com_mudanca_na_tela_muda_so_o_que_foi_mexido(tmp_path, monkeypat
         erp = c.app.state.erp
         run(erp, "demo.seed", {})
         _preencher(erp, monkeypatch)
-        # M-72: o Peso (o Peso Bruto de sempre) mexido na linha 3 também vai.
+        # M-72: o Peso (o Peso Bruto de sempre) mexido também vai. M-109: o Custo (R$) mexido vai
+        # com o número digitado (a vírgula vira ponto).
         before, payload, after = _salvar_pela_tela(
             c,
             [
-                ["[name=notes]", "Nota nova"],
                 ["[name=status]", False],
                 ["[name=gross_weight_kg]", "0.5"],
+                ["[name=cost_price]", "81,50"],
             ],
         )
-        assert payload["data"]["notes"] == "Nota nova"
         assert payload["data"]["gross_weight_kg"] == "0.5"
+        assert payload["data"]["cost_price"] == "81.50"
+        for key in FORA_DA_TELA:
+            assert key not in payload["data"], key
         _igual_menos(
-            before, after, {"notes": "Nota nova", "status": "inactive", "gross_weight_kg": "0.500"}
+            before,
+            after,
+            {"status": "inactive", "gross_weight_kg": "0.500"},
+            {"cost_price": "81.5000"},
         )
