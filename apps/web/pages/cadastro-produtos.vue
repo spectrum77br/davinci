@@ -41,9 +41,15 @@
 // M-105 (Harry 27/11/2026): barra Excel | Atualizar | Novo tipo | Novo cadastro, no tamanho da
 // barra da Tabela de Preços (btn btn-sm h-7 py-0; "recarregar" virou "Atualizar"). O Excel baixa
 // a tabela inteira (Tabela | Tipo | Nome, sem Ações), no mesmo .csv do Excel da Tabela de Preços.
+// M-106 (Harry 27/11/2026): botão "Layout ▾" no começo da barra (Layout | Excel | Atualizar | …),
+// no desenho do Layout da Tabela de Preços, que só filtra linhas: Tabela | Tipo | Nome, cada um com
+// caixinhas (múltipla escolha). A linha aparece quando os três valores dela estão marcados. Começa
+// tudo marcado; vale só para a tela (não grava; o Atualizar mantém o que está marcado). O Excel
+// continua baixando TODAS as linhas, com ou sem filtro (M-105).
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { isoToday } from '~/lib/date'
-import { AlertCircle, Check, Download, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { AlertCircle, Check, ChevronDown, Download, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { PopoverAnchor, PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 
 definePageMeta({
   middleware: ['permission'],
@@ -150,6 +156,60 @@ function baixarExcel() {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+// ---------------------------------------------------------------- Layout ▾ (M-106): filtros de linha
+type CampoFiltro = 'tabela' | 'tipo' | 'nome'
+// Os três filtros, nesta ordem, com a largura da coluna no menu.
+const FILTROS_LAYOUT: { campo: CampoFiltro; titulo: string; largura: string }[] = [
+  { campo: 'tabela', titulo: 'Tabela', largura: 'sm:w-[150px]' },
+  { campo: 'tipo', titulo: 'Tipo', largura: 'sm:w-[170px]' },
+  { campo: 'nome', titulo: 'Nome', largura: 'sm:w-[200px]' },
+]
+// O valor da linha em cada filtro (o mesmo texto que aparece na célula).
+function valorDoFiltro(c: Cadastro, campo: CampoFiltro): string {
+  if (campo === 'tabela') return c.tabela || '—'
+  if (campo === 'tipo') return c.tipo_nome
+  return c.nome
+}
+// Guarda as DESMARCADAS: vazio = tudo marcado (o começo). Assim um valor novo, de linha
+// cadastrada depois, já entra marcado.
+const filtrosDesmarcados = ref<Record<CampoFiltro, string[]>>({ tabela: [], tipo: [], nome: [] })
+// As opções de cada filtro: os valores da tabela inteira, sem repetir, em ordem alfabética
+// (não dependem do que está marcado nos outros filtros).
+const opcoesFiltro = computed<Record<CampoFiltro, string[]>>(() => {
+  const r = { tabela: [], tipo: [], nome: [] } as Record<CampoFiltro, string[]>
+  for (const f of FILTROS_LAYOUT) {
+    r[f.campo] = [...new Set(cadastros.value.map((c) => valorDoFiltro(c, f.campo)))].sort((a, b) =>
+      a.localeCompare(b, 'pt-BR'),
+    )
+  }
+  return r
+})
+
+function marcado(campo: CampoFiltro, valor: string): boolean {
+  return !filtrosDesmarcados.value[campo].includes(valor)
+}
+
+function alternarFiltro(campo: CampoFiltro, valor: string, marcar: boolean) {
+  const lista = filtrosDesmarcados.value[campo].filter((v) => v !== valor)
+  if (!marcar) lista.push(valor)
+  filtrosDesmarcados.value = { ...filtrosDesmarcados.value, [campo]: lista }
+}
+
+// "Marcar todas" / "Limpar" de um filtro só.
+function marcarFiltro(campo: CampoFiltro, marcar: boolean) {
+  filtrosDesmarcados.value = { ...filtrosDesmarcados.value, [campo]: marcar ? [] : [...opcoesFiltro.value[campo]] }
+}
+
+// Algum filtro ligado (alguma caixinha desmarcada): o botão Layout fica com a borda azul.
+const filtroLigado = computed(() =>
+  FILTROS_LAYOUT.some((f) => opcoesFiltro.value[f.campo].some((v) => !marcado(f.campo, v))),
+)
+
+// As linhas da tela: Tabela, Tipo e Nome marcados ao mesmo tempo.
+const cadastrosVisiveis = computed(() =>
+  cadastros.value.filter((c) => FILTROS_LAYOUT.every((f) => marcado(f.campo, valorDoFiltro(c, f.campo)))),
+)
 
 // ---------------------------------------------------------------- + Novo tipo / renomear tipo
 const tipoAberto = ref(false)
@@ -477,24 +537,97 @@ async function confirmarExclusao() {
            Preços (btn btn-sm h-7 py-0); cada botão com a cor de antes (Atualizar sem fundo, Novo
            tipo com contorno, Novo cadastro azul). -->
       <template #actions>
-        <button
-          class="btn btn-sm h-7 py-0"
-          :disabled="!cadastros.length"
-          title="Baixar todas as informações desta tabela"
-          data-acao="excel"
-          @click="baixarExcel"
-        >
-          <Download class="h-4 w-4 mr-1" /> Excel
-        </button>
-        <button class="btn btn-sm btn-ghost h-7 py-0" :disabled="loading" data-acao="atualizar" @click="load">
-          <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> Atualizar
-        </button>
-        <button v-if="isAdmin" class="btn btn-sm h-7 py-0" data-acao="novo-tipo" @click="abrirTipo">
-          <Plus class="size-4 mr-1" /> Novo tipo
-        </button>
-        <button v-if="isAdmin" class="btn btn-sm btn-primary h-7 py-0" data-acao="novo-cadastro" @click="abrirCadastro()">
-          <Plus class="size-4 mr-1" /> Novo cadastro
-        </button>
+        <!-- M-106: o Layout ▾ fica no começo da barra. O menu dele só filtra linhas
+             (Tabela | Tipo | Nome) e abre alinhado à direita da barra (âncora). -->
+        <PopoverRoot>
+          <PopoverAnchor as-child>
+            <div class="flex flex-wrap items-center gap-2" data-barra-cadastros>
+              <PopoverTrigger as-child>
+                <button
+                  type="button"
+                  class="btn btn-sm h-7 py-0"
+                  :class="{ 'border-blue-400': filtroLigado }"
+                  data-acao="layout"
+                >
+                  Layout
+                  <ChevronDown class="h-3 w-3 ml-1" />
+                </button>
+              </PopoverTrigger>
+              <button
+                class="btn btn-sm h-7 py-0"
+                :disabled="!cadastros.length"
+                title="Baixar todas as informações desta tabela"
+                data-acao="excel"
+                @click="baixarExcel"
+              >
+                <Download class="h-4 w-4 mr-1" /> Excel
+              </button>
+              <button class="btn btn-sm btn-ghost h-7 py-0" :disabled="loading" data-acao="atualizar" @click="load">
+                <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> Atualizar
+              </button>
+              <button v-if="isAdmin" class="btn btn-sm h-7 py-0" data-acao="novo-tipo" @click="abrirTipo">
+                <Plus class="size-4 mr-1" /> Novo tipo
+              </button>
+              <button v-if="isAdmin" class="btn btn-sm btn-primary h-7 py-0" data-acao="novo-cadastro" @click="abrirCadastro()">
+                <Plus class="size-4 mr-1" /> Novo cadastro
+              </button>
+            </div>
+          </PopoverAnchor>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="end"
+              :side-offset="4"
+              :collision-padding="8"
+              data-menu-layout
+              class="z-[70] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto rounded-md border bg-background p-2 shadow-lg"
+            >
+              <!-- Sem largura para os três, eles ficam um embaixo do outro. -->
+              <div class="flex flex-col gap-3 sm:flex-row">
+                <div
+                  v-for="f in FILTROS_LAYOUT"
+                  :key="f.campo"
+                  class="min-w-0"
+                  :class="f.largura"
+                  :data-filtro="f.campo"
+                >
+                  <div class="px-1 pb-1 text-[11px] font-semibold">{{ f.titulo }}</div>
+                  <div class="flex items-center gap-2 px-1 pb-1 text-[11px]">
+                    <button
+                      type="button"
+                      class="text-[rgb(36,99,235)] hover:underline dark:text-blue-300"
+                      :data-acao="`${f.campo}-marcar-todas`"
+                      @click="marcarFiltro(f.campo, true)"
+                    >Marcar todas</button>
+                    <span class="text-muted-foreground">·</span>
+                    <button
+                      type="button"
+                      class="text-[rgb(36,99,235)] hover:underline dark:text-blue-300"
+                      :data-acao="`${f.campo}-limpar`"
+                      @click="marcarFiltro(f.campo, false)"
+                    >Limpar</button>
+                  </div>
+                  <div class="max-h-60 overflow-y-auto border-t pt-1">
+                    <label
+                      v-for="v in opcoesFiltro[f.campo]"
+                      :key="v"
+                      class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-xs font-normal hover:bg-muted/50"
+                    >
+                      <input
+                        type="checkbox"
+                        class="size-4 shrink-0"
+                        :checked="marcado(f.campo, v)"
+                        :data-valor="v"
+                        @change="alternarFiltro(f.campo, v, !marcado(f.campo, v))"
+                      />
+                      <span class="truncate">{{ v }}</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
       </template>
     </PageHeader>
 
@@ -523,7 +656,11 @@ async function confirmarExclusao() {
           <tr v-else-if="!cadastros.length">
             <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro.</td>
           </tr>
-          <tr v-for="c in cadastros" :key="c.id" class="h-8 hover:bg-accent/30" :data-cadastro="c.nome">
+          <!-- M-106: nenhuma linha passou nos filtros do Layout. -->
+          <tr v-else-if="!cadastrosVisiveis.length" data-aviso="sem-linhas-filtro">
+            <td colspan="4" class="text-center py-6 text-xs text-muted-foreground">Nenhum cadastro com esses filtros.</td>
+          </tr>
+          <tr v-for="c in cadastrosVisiveis" :key="c.id" class="h-8 hover:bg-accent/30" :data-cadastro="c.nome">
             <td class="border border-border px-2 py-1 text-xs">{{ c.tabela || '—' }}</td>
             <td class="border border-border px-2 py-1 text-xs">{{ c.tipo_nome }}</td>
             <td

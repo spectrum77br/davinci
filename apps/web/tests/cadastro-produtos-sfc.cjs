@@ -29,6 +29,10 @@
 //  - M-105: barra Excel | Atualizar ("recarregar" mudou de nome) | + Novo tipo | + Novo cadastro,
 //    todos btn btn-sm h-7 py-0 com a cor de antes; o Excel baixa todas as linhas (Tabela | Tipo |
 //    Nome, sem Ações) num .csv como o da Tabela de Preços (cadastros-produtos-<dia>.csv).
+//  - M-106: botão Layout ▾ no começo da barra (antes do Excel) (btn btn-sm h-7 py-0 + setinha, borda azul com
+//    filtro ligado) com os filtros de linha Tabela | Tipo | Nome (caixinhas, Marcar todas ·
+//    Limpar); começa tudo marcado; a linha aparece com os três marcados; sem linha, o texto
+//    "Nenhum cadastro com esses filtros."; o Atualizar mantém o marcado; valor novo entra marcado.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -82,10 +86,12 @@ const script = descriptor.scriptSetup.content
   // Tabela de Preços (btn btn-sm h-7 py-0), cada um com a cor de antes.
   assert.doesNotMatch(acoes, /recarregar/, '"recarregar" virou "Atualizar"')
   assert.doesNotMatch(acoes, /<Button\b|text-sm|h-9/, 'nenhum botão grande na barra')
-  const ordem = ['> Excel', '> Atualizar', '> Novo tipo', '> Novo cadastro'].map((t) => acoes.indexOf(t))
-  assert.ok(ordem.every((i, k) => i > 0 && (k === 0 || i > ordem[k - 1])), 'Excel, Atualizar, + Novo tipo, + Novo cadastro')
-  const botoes = [...acoes.matchAll(/<button\b[^>]*>/g)].map((m) => m[0])
-  assert.equal(botoes.length, 4)
+  // M-106 junto: o Layout ▾ abre a barra (Layout | Excel | Atualizar | + Novo tipo | + Novo cadastro).
+  const barra = acoes.slice(acoes.indexOf('data-barra-cadastros'), acoes.indexOf('</PopoverAnchor>'))
+  const ordem = ['Layout', '> Excel', '> Atualizar', '> Novo tipo', '> Novo cadastro'].map((t) => barra.indexOf(t))
+  assert.ok(ordem.every((i, k) => i > 0 && (k === 0 || i > ordem[k - 1])), 'Layout, Excel, Atualizar, + Novo tipo, + Novo cadastro')
+  const botoes = [...barra.matchAll(/<button\b[^>]*>/g)].map((m) => m[0])
+  assert.equal(botoes.length, 5, 'só os 5 botões da barra (o menu do Layout fica fora da barra)')
   for (const b of botoes) assert.match(b, /class="btn btn-sm (btn-ghost |btn-primary )?h-7 py-0"/, 'btn btn-sm h-7 py-0')
   assert.match(acoes, /<button\s+class="btn btn-sm h-7 py-0"\s+:disabled="!cadastros\.length"\s+title="Baixar todas as informações desta tabela"\s+data-acao="excel"\s+@click="baixarExcel"\s*>\s*<Download class="h-4 w-4 mr-1" \/> Excel/, 'Excel como o da Tabela de Preços')
   assert.doesNotMatch(botoes[0], /v-if/, 'Excel para quem vê a tela (como o Atualizar)')
@@ -96,7 +102,24 @@ const script = descriptor.scriptSetup.content
   // M-84: a coluna "Centro de custo" saiu. M-89: "Tabela" antes de Tipo.
   assert.deepEqual(ths.map((m) => m[1]), ['Tabela', 'Tipo', 'Nome', 'Ações'])
   for (const m of ths) assert.match(m[0], /text-\[11px\] font-semibold leading-\[14px\]/, 'cabeçalho 11px semibold')
-  const linha = tpl.slice(tpl.indexOf('<tr v-for="c in cadastros"'), tpl.indexOf('</tr>', tpl.indexOf('<tr v-for="c in cadastros"')))
+  // M-106: as linhas da tela são as que passam nos filtros do Layout.
+  const linha = tpl.slice(tpl.indexOf('<tr v-for="c in cadastrosVisiveis"'), tpl.indexOf('</tr>', tpl.indexOf('<tr v-for="c in cadastrosVisiveis"')))
+  assert.ok(linha.length > 0, 'linhas vêm de cadastrosVisiveis')
+  // M-106: Layout ▾ logo antes do recarregar, no desenho do Layout da Tabela de Preços (sem title)
+  {
+    const iLayout = acoes.indexOf('data-acao="layout"')
+    assert.ok(iLayout > 0 && iLayout < acoes.indexOf('data-acao="excel"') && iLayout < acoes.indexOf('data-acao="atualizar"'), 'Layout | Excel | Atualizar | Novo tipo | Novo cadastro (M-105 + M-106)')
+    assert.match(acoes, /<button\s+type="button"\s+class="btn btn-sm h-7 py-0"\s+:class="\{ 'border-blue-400': filtroLigado \}"\s+data-acao="layout"\s*>\s*Layout\s*<ChevronDown class="h-3 w-3 ml-1" \/>\s*<\/button>/)
+    assert.match(acoes, /<PopoverAnchor as-child>/, 'menu ancorado na barra')
+    assert.match(acoes, /align="end"/, 'alinhado à direita da barra')
+    assert.match(acoes, /data-menu-layout[\s\S]{0,40}class="z-\[70\] max-w-\[calc\(100vw-16px\)\][^"]*rounded-md border bg-background p-2 shadow-lg"/)
+    assert.match(acoes, /class="flex flex-col gap-3 sm:flex-row"/, 'sem largura, um embaixo do outro')
+    assert.match(acoes, /class="px-1 pb-1 text-\[11px\] font-semibold">\{\{ f\.titulo \}\}/)
+    assert.equal((acoes.match(/text-\[rgb\(36,99,235\)\]/g) || []).length, 2, 'Marcar todas · Limpar em azul')
+    assert.match(acoes, /class="max-h-60 overflow-y-auto border-t pt-1"/, 'lista com rolagem própria')
+    assert.match(acoes, /text-xs font-normal[\s\S]{0,200}type="checkbox"\s+class="size-4 shrink-0"/)
+    assert.match(tpl, /<tr v-else-if="!cadastrosVisiveis\.length"[^>]*>\s*<td colspan="4"[^>]*>Nenhum cadastro com esses filtros\.<\/td>/)
+  }
   assert.match(linha, /class="h-8 /, 'linhas da mesma altura')
   assert.equal((linha.match(/class="border border-border [^"]*text-xs/g) || []).length, 3, 'Tabela, Tipo e Nome em text-xs com borda')
   assert.match(linha, /<div v-else-if="isAdmin"[\s\S]*<Pencil[\s\S]*<Trash2/, 'lápis e lixeira, só admin')
@@ -135,6 +158,7 @@ const factory = new AsyncFunction(
     cadTabela, tabelasDoMenu, trocarTabela, podeMexer, cadEditando,
     excluirDestino, escolherDestino, precisaDestino, textoTransferencia, textoPrecos, textoTelaProdutos,
     doMeio, textosDoMeio,
+    FILTROS_LAYOUT, opcoesFiltro, marcado, alternarFiltro, marcarFiltro, filtroLigado, cadastrosVisiveis,
   }`,
 )
 
@@ -564,6 +588,61 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
       calls.filter((c) => c.method === 'DELETE').map((c) => c.url),
       ['/api/produto-cadastros/categorias-venda/s1'],
     )
+  }
+  // M-106: Layout ▾ — filtros de linha Tabela | Tipo | Nome (múltipla escolha)
+  {
+    const { p } = await pagina()
+    const ids = () => p.cadastrosVisiveis.value.map((c) => c.id)
+    assert.deepEqual(p.FILTROS_LAYOUT.map((f) => f.titulo), ['Tabela', 'Tipo', 'Nome'])
+    // as opções: valores da tabela inteira, sem repetir, em ordem alfabética
+    assert.deepEqual(p.opcoesFiltro.value.tabela, ['Contas Celular', 'Contas Mala', 'Lojas', 'Produtos 2'])
+    assert.deepEqual(p.opcoesFiltro.value.tipo, ['Categoria', 'Categoria de venda', 'Tag de envio', 'Tipo de conta'])
+    assert.equal(p.opcoesFiltro.value.nome.length, 4, '“Celular” aparece uma vez só')
+    assert.ok(p.opcoesFiltro.value.nome.includes('Queima de estoque'))
+    // começa tudo marcado = a tabela de hoje, sem a borda azul
+    assert.equal(p.filtroLigado.value, false)
+    assert.deepEqual(ids(), ['c1', 'c2', 's1', 's2', 'r-cel'])
+    // "Limpar" em Tipo: nenhuma linha passa
+    p.marcarFiltro('tipo', false)
+    assert.deepEqual(ids(), [])
+    assert.equal(p.filtroLigado.value, true, 'filtro ligado: borda azul')
+    // Tipo só "Categoria de venda" e Tabela só "Contas Mala"
+    p.alternarFiltro('tipo', 'Categoria de venda', true)
+    assert.deepEqual(ids(), ['s1', 's2'])
+    p.marcarFiltro('tabela', false)
+    p.alternarFiltro('tabela', 'Contas Mala', true)
+    assert.deepEqual(ids(), ['s2'], 'Tabela e Tipo marcados ao mesmo tempo')
+    p.alternarFiltro('tabela', 'Contas Celular', true)
+    assert.deepEqual(ids(), ['s1', 's2'], 'vários valores no mesmo filtro')
+    // as opções de um filtro não mudam com o que está marcado nos outros
+    assert.equal(p.opcoesFiltro.value.tabela.length, 4)
+    assert.equal(p.opcoesFiltro.value.nome.length, 4)
+    // Nome desmarcado também tira a linha
+    p.alternarFiltro('nome', 'Queima de estoque', false)
+    assert.deepEqual(ids(), ['s1'])
+    assert.equal(p.marcado('nome', 'Queima de estoque'), false)
+    // o recarregar relê a tabela e mantém o que está marcado
+    await p.load()
+    assert.deepEqual(ids(), ['s1'])
+    assert.equal(p.marcado('tabela', 'Lojas'), false)
+    // "Marcar todas" nos três: volta tudo
+    for (const f of p.FILTROS_LAYOUT) p.marcarFiltro(f.campo, true)
+    assert.deepEqual(ids(), ['c1', 'c2', 's1', 's2', 'r-cel'])
+    assert.equal(p.filtroLigado.value, false)
+  }
+  // M-106: linha cadastrada depois com valor novo: entra no filtro já marcado
+  {
+    let lista = CADS
+    const { p } = await pagina({
+      respostas: { 'GET /api/produto-cadastros': () => Promise.resolve({ tipos: TIPOS, cadastros: lista, centros_custo: CENTROS }) },
+    })
+    p.alternarFiltro('nome', 'Apple', false)
+    lista = [...CADS, { id: 'c9', tipo_id: 't2', tipo_nome: 'Tag de envio', tipo_chave: 'tag_envio', nome: '.rj', tabela: 'Produtos 2' }]
+    await p.load()
+    assert.ok(p.opcoesFiltro.value.nome.includes('.rj'))
+    assert.equal(p.marcado('nome', '.rj'), true)
+    assert.equal(p.marcado('nome', 'Apple'), false, 'o que estava desmarcado continua')
+    assert.deepEqual(p.cadastrosVisiveis.value.map((c) => c.id), ['c1', 'c2', 's2', 'r-cel', 'c9'])
   }
   console.log('cadastro-produtos-sfc: ok')
 })().catch((e) => { console.error(e); process.exit(1) })
