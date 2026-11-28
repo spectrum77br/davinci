@@ -476,10 +476,11 @@ async def test_migration_0516_view_igual_com_tabela_vazia_e_produto_na_frente(db
         for tabela in ("produto_regras", "produto_condicoes_especiais"):
             da_migration = await _estrutura(db, rascunho, tabela)
             assert da_migration["colunas"], tabela
-            # O modelo já tem a coluna da 0518 (M-73: produto_regras.centro_custo_id, com FK e
-            # índice), que não é desta migration: fica de fora da comparação.
+            # O modelo já tem as colunas da 0518 (M-73: produto_regras.centro_custo_id) e da 0521
+            # (M-107: produto_regras.cor_id), com FK e índice, que não são desta migration: ficam
+            # de fora da comparação.
             modelo = {
-                k: [x for x in v if "centro_custo" not in str(x)]
+                k: [x for x in v if "centro_custo" not in str(x) and "cor_id" not in str(x)]
                 for k, v in (await _estrutura(db, TEST_SCHEMA, tabela)).items()
             }
             assert da_migration == modelo, tabela

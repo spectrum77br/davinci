@@ -28,6 +28,18 @@ traz o centro herdado e a linha (categoria de venda atual e as opções do menu,
 pela rota da coluna "Tabela" da Tabela de Preços). O PUT só grava o centro escolhido; a categoria
 de venda e a tag NÃO passam por aqui.
 
+M-107 (27/11/2026): a Cor do produto (`cor_id`, migration 0521) entra no mesmo GET/PUT: o GET
+devolve `cor_id` e `cor` (o nome de agora; renomear a cor em Cadastros › Produtos muda aqui); o PUT
+grava `cor_id` (um id do tipo "Cor" de Cadastros › Produtos; vazio = sem cor), com a regra da
+Margem mín (só administrador; rota do DaVinci, funciona no modo Consulta do ERP). Nada vem do nome
+do produto e nada vai ao Bling.
+
+M-114…M-116 (27/11/2026): POST /api/produto-regras/lista — o que a LISTA do Produtos 2 mostra de
+todos os produtos numa chamada só (Cor, Centro de custo, Categoria de venda, Margem mínima,
+Condição especial, Foto, Embalagem), com as mesmas regras do cadastro (services/produto_regras.
+lista). É leitura (POST só porque leva a lista de códigos com a linha e a categoria de cada um);
+mesma permissão do GET de um produto.
+
 O Histórico registra quem mudou, o antes e o depois pelo gatilho do banco (as duas tabelas são
 de negócio). Os nomes que aparecem lá ficam em historico/nomes.py.
 """
@@ -41,12 +53,24 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_admin, require_permission
-from app.models import CentroCusto, ProdutoCondicaoEspecial, ProdutoRegra, User, UserRole
+from app.deps.auth import require_admin, require_permission, user_scope
+from app.models import (
+    CentroCusto,
+    PricingProduct,
+    ProdutoCadastro,
+    ProdutoCadastroTipo,
+    ProdutoCondicaoEspecial,
+    ProdutoRegra,
+    User,
+    UserRole,
+)
+from app.models.produto_cadastro import CHAVE_COR
 from app.schemas.segments import _limpar_duimp_padrao
 from app.services import nf_emissao_gerar as nf
 from app.services import produto_regras as svc
@@ -76,11 +100,8 @@ def _erro(code: str, message: str, status_code: int = 400) -> HTTPException:
 async def _base(session: AsyncSession, sku: str) -> str:
     """A chave do produto (sem a tag de envio). Recusa código vazio, longo demais, com peça vazia
     ("a++b") ou com peça que é só a tag (".ra")."""
-    texto = (sku or "").strip()
-    tags = await tags_de_envio(session)
-    base = svc.sku_base(texto, tags)
-    pecas = base.split("+")
-    if not texto or len(texto) > svc.SKU_MAX or not base or any(not p or p in tags for p in pecas):
+    base = svc.base_valida(sku, await tags_de_envio(session))
+    if base is None:
         raise _erro("sku_invalido", "Código do produto inválido.")
     return base
 
@@ -143,6 +164,34 @@ async def _centro(session: AsyncSession, v: Any) -> UUID | None:
     return centro_id
 
 
+_MSG_COR = (
+    "Cor não encontrada: ela pode ter sido excluída em Cadastros › Produtos. Feche e abra o "
+    "produto de novo."
+)
+
+
+async def _cor(session: AsyncSession, v: Any) -> UUID | None:
+    """M-107: a cor escolhida (id de um nome do tipo "Cor" de Cadastros › Produtos); vazio = sem
+    cor. Id de outro tipo (uma Categoria, uma Tag de envio) é recusado como cor que não existe."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    cor_id = svc.uuid_ou_none(v) if isinstance(v, str) else None
+    achou = (
+        (
+            await session.execute(
+                select(ProdutoCadastro.id)
+                .join(ProdutoCadastroTipo, ProdutoCadastroTipo.id == ProdutoCadastro.tipo_id)
+                .where(ProdutoCadastro.id == cor_id, ProdutoCadastroTipo.chave == CHAVE_COR)
+            )
+        ).first()
+        if cor_id is not None
+        else None
+    )
+    if achou is None:
+        raise _erro("cor_invalida", _MSG_COR)
+    return cor_id
+
+
 def _f(d: Decimal | None) -> float | None:
     return None if d is None else float(d)
 
@@ -179,6 +228,11 @@ async def _saida(
         if regra is not None and regra.centro_custo_id is not None
         else None
     )
+    cor = (
+        await session.get(ProdutoCadastro, regra.cor_id, populate_existing=True)
+        if regra is not None and regra.cor_id is not None
+        else None
+    )
     return {
         "sku": sku.strip(),
         "sku_base": base,
@@ -200,6 +254,9 @@ async def _saida(
         ),
         "centro_custo_origem": herdado.origem,
         "linha": svc.linha_out(a_linha),
+        # M-107: a cor escolhida (vazio = sem cor; não há cor herdada).
+        "cor_id": str(cor.id) if cor is not None else None,
+        "cor": cor.nome if cor is not None else None,
         "pode_editar": user.role == UserRole.ADMIN,
     }
 
@@ -225,7 +282,7 @@ async def gravar(
     categoria: Categoria = None,
 ) -> dict:
     base = await _base(session, sku)
-    sobra = set(corpo) - {"margem_min", "duimp_padrao", "centro_custo_id"}
+    sobra = set(corpo) - {"margem_min", "duimp_padrao", "centro_custo_id", "cor_id"}
     if sobra:
         raise _erro("campo_desconhecido", f"Campo que não existe aqui: {', '.join(sorted(sobra))}.")
     novos: dict[str, Any] = {}
@@ -235,21 +292,68 @@ async def gravar(
         novos["duimp_padrao"] = _duimp(corpo["duimp_padrao"])
     if "centro_custo_id" in corpo:
         novos["centro_custo_id"] = await _centro(session, corpo["centro_custo_id"])
+    if "cor_id" in corpo:
+        novos["cor_id"] = await _cor(session, corpo["cor_id"])
     regra = await session.get(ProdutoRegra, base)
-    if regra is None:
-        # Linha nova só com valor de verdade: apagar o que não existe não cria nada.
-        if any(v is not None for v in novos.values()):
-            session.add(ProdutoRegra(sku_base=base, atualizado_por=user.id, **novos))
-            await session.commit()
-    else:
-        mudou = {k: v for k, v in novos.items() if getattr(regra, k) != v}
-        if mudou:
-            for k, v in mudou.items():
-                setattr(regra, k, v)
-            regra.atualizado_por = user.id
-            regra.atualizado_em = func.now()
-            await session.commit()
+    try:
+        if regra is None:
+            # Linha nova só com valor de verdade: apagar o que não existe não cria nada.
+            if any(v is not None for v in novos.values()):
+                session.add(ProdutoRegra(sku_base=base, atualizado_por=user.id, **novos))
+                await session.commit()
+        else:
+            mudou = {k: v for k, v in novos.items() if getattr(regra, k) != v}
+            if mudou:
+                for k, v in mudou.items():
+                    setattr(regra, k, v)
+                regra.atualizado_por = user.id
+                regra.atualizado_em = func.now()
+                await session.commit()
+    except IntegrityError as e:
+        # A cor (ou o centro) saiu de Cadastros entre a conferência e a gravação: nada gravado.
+        await session.rollback()
+        if "cor_id" in novos and "cor_id" in str(e.orig):
+            raise _erro("cor_invalida", _MSG_COR) from e
+        raise
     return await _saida(session, sku, base, user, linha, categoria)
+
+
+# --------------------------------------------------------------- M-114…M-116: a lista
+
+LISTA_MAX = 20000
+
+
+class ItemListaIn(BaseModel):
+    sku: str = Field(max_length=svc.SKU_MAX)
+    linha: str | None = Field(default=None, max_length=64)
+    categoria: str | None = Field(default=None, max_length=120)
+
+
+class ListaIn(BaseModel):
+    produtos: list[ItemListaIn] = Field(max_length=LISTA_MAX)
+
+
+@router.post("/lista")
+async def lista(
+    corpo: ListaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos_produtos", "view"))],
+) -> dict:
+    """O que a lista do Produtos 2 mostra de cada produto (Cor, Centro de custo, Categoria de
+    venda, Margem mínima, Condição especial, Foto, Embalagem), todos de uma vez. Cada produto vai
+    com a `linha` e a `categoria` que o GET de um produto recebe no endereço. A resposta é por
+    código (como veio); código que não serve de chave sai em `ignorados`."""
+    produtos, ignorados = await svc.lista(
+        session,
+        [svc.ItemLista(i.sku, i.linha, i.categoria) for i in corpo.produtos],
+        _hoje(),
+        user_scope(PricingProduct, user),
+    )
+    return {
+        "produtos": produtos,
+        "ignorados": ignorados,
+        "pode_editar": user.role == UserRole.ADMIN,
+    }
 
 
 @router.post("/{sku}/condicoes", status_code=status.HTTP_201_CREATED)

@@ -508,7 +508,7 @@ TABELAS: dict[str, str] = {
     "imobilizado": "Item do imobilizado",
     # M-29 (24/11/2026, migration 0508): Cadastros › Produtos.
     "produto_cadastro_tipos": "Tipo (Cadastros › Produtos)",
-    "produto_cadastros": "Categoria ou tag (Cadastros › Produtos)",
+    "produto_cadastros": "Categoria, tag ou cor (Cadastros › Produtos)",
     # M-74 (26/11/2026, migration 0516): Margem mín, DUIMP padrão e Condição especial por
     # produto, no cadastro do Produtos 2. O nome do produto vem da coluna `sku` (= sku_base).
     "produto_regras": "Regras do produto (Produtos 2)",
@@ -604,6 +604,9 @@ CAMPOS: dict[str, str] = {
     # M-73 (26/11/2026, migration 0518): o Centro de custo escolhido no cadastro do Produtos 2 (a
     # FK para centros_custo faz o Histórico mostrar o nome do centro, não o id).
     "centro_custo_id": "Centro de custo",
+    # M-107 (27/11/2026, migration 0521): a Cor do produto no cadastro do Produtos 2 (a FK para
+    # produto_cadastros faz o Histórico mostrar o nome da cor, não o id).
+    "cor_id": "Cor",
     "pedido_de": "Condição especial: de (data do pedido)",
     "pedido_ate": "Condição especial: até (data do pedido)",
     "piso": "Condição especial: margem mínima (%)",

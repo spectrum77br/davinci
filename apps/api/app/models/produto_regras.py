@@ -28,6 +28,9 @@ capacidade e voltagem continuam na chave (b001.12 e b001.24 são produtos difere
 
 M-73 (26/11/2026, migration 0518): `produto_regras.centro_custo_id`, o Centro de custo do produto
 (Cadastros › Centro de custo). Vazio = o departamento do produto, calculado (não copiado).
+
+M-107 (27/11/2026, migration 0521): `produto_regras.cor_id`, a Cor do produto (um nome do tipo
+"Cor" de Cadastros › Produtos). Vazio = sem cor: não há cor herdada nem tirada do nome.
 """
 
 from datetime import date, datetime
@@ -88,6 +91,15 @@ class ProdutoRegra(Base):
     centro_custo_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("centros_custo.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    # M-107 (migration 0521): a Cor do produto (produto_cadastros do tipo de chave 'cor'; o
+    # servidor confere o tipo ao gravar). SET NULL: a cor excluída deixa o produto sem cor (a aba
+    # Cadastros › Produtos já recusa excluir cor em uso; o SET NULL cobre só a corrida).
+    cor_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("produto_cadastros.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

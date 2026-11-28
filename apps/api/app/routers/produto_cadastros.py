@@ -48,6 +48,14 @@ M-91 (26/11/2026): a lixeira da Categoria de venda aceita a do meio. As seguinte
 posição e, em todas as contas do centro, a margem/frete de cada uma anda junto (o GET /uso diz
 quais andam em `sobem` e em quantas contas a margem/frete da excluída somem em `contas_centro`).
 Pela aba Segmentos continua só a última (services/categorias_venda.py).
+
+M-107 (27/11/2026, migration 0521): o tipo "Cor" (chave 'cor', Tabela "Produtos 2"). Os nomes
+entram pelo "Novo cadastro" e seguem as regras da Categoria: só administrador mexe; nome repetido
+no tipo é recusado (sem olhar maiúsculas); cor em uso (produtos com `produto_regras.cor_id`
+nela, contados no próprio DaVinci) NÃO sai nem muda de tipo (409 `cor_em_uso`, com quantos usam).
+Diferente da Categoria, RENOMEAR a cor em uso pode: o produto guarda o id, então todos passam a
+mostrar o nome novo (item 13 do pedido). GET /cores: as cores (id e nome, em ordem alfabética),
+para o menu do campo Cor do cadastro do Produtos 2 — qualquer pessoa logada e ativa, como /listas.
 """
 
 from __future__ import annotations
@@ -63,8 +71,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, is_unique_violation
 from app.deps.auth import require_active_user, require_admin, require_permission
-from app.models import CentroCusto, ProdutoCadastro, ProdutoCadastroTipo, Segment, User
-from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_TAG_ENVIO, NOME_MAX
+from app.models import (
+    CentroCusto,
+    ProdutoCadastro,
+    ProdutoCadastroTipo,
+    ProdutoRegra,
+    Segment,
+    User,
+)
+from app.models.produto_cadastro import CHAVE_CATEGORIA, CHAVE_COR, CHAVE_TAG_ENVIO, NOME_MAX
 from app.services import categorias_venda as cv
 from app.services import centros_custo
 from app.services import produto_cadastros as svc
@@ -131,6 +146,17 @@ class ListaOut(BaseModel):
 class ListasFiltroOut(BaseModel):
     categorias: list[str]
     tags_envio: list[str]
+
+
+class CorOut(BaseModel):
+    id: UUID
+    nome: str
+
+
+class CoresOut(BaseModel):
+    """M-107: as cores do tipo "Cor", em ordem alfabética (lista vazia sem nenhuma)."""
+
+    cores: list[CorOut]
 
 
 class UsoOut(BaseModel):
@@ -331,8 +357,36 @@ def _plural(n: int) -> str:
     return "1 produto" if n == 1 else f"{n:,} produtos".replace(",", ".")
 
 
-async def _uso(tipo: ProdutoCadastroTipo, nome: str) -> UsoOut:
+async def produtos_com_cor(session: AsyncSession, cor_id: UUID) -> int:
+    """M-107: quantos produtos (códigos sem a tag de envio) têm esta cor."""
+    return (
+        await session.execute(
+            select(func.count()).select_from(ProdutoRegra).where(ProdutoRegra.cor_id == cor_id)
+        )
+    ).scalar_one()
+
+
+async def _uso(
+    tipo: ProdutoCadastroTipo,
+    nome: str,
+    session: AsyncSession | None = None,
+    cadastro_id: UUID | None = None,
+) -> UsoOut:
     """Quantos produtos usam este nome, para os tipos que têm regra."""
+    if tipo.chave == CHAVE_COR and session is not None and cadastro_id is not None:
+        # M-107: a cor do produto mora no DaVinci, pelo id (não precisa perguntar ao ERP).
+        n = await produtos_com_cor(session, cadastro_id)
+        return UsoOut(
+            regra=CHAVE_COR,
+            produtos=n,
+            bloqueia=n > 0,
+            mensagem=(
+                f"{_plural(n)} {'usa' if n == 1 else 'usam'} a cor “{nome}”. Troque a cor "
+                "desses produtos antes: nenhum produto pode perder a cor."
+            )
+            if n
+            else None,
+        )
     if tipo.chave == CHAVE_CATEGORIA:
         uso = await svc.uso_no_erp()
         if uso is None:
@@ -370,9 +424,20 @@ async def _uso(tipo: ProdutoCadastroTipo, nome: str) -> UsoOut:
     return UsoOut(regra=None, produtos=None, bloqueia=False, mensagem=None)
 
 
-async def _pode_tirar(tipo: ProdutoCadastroTipo, nome: str, confirmar: bool) -> None:
+async def _pode_tirar(
+    tipo: ProdutoCadastroTipo,
+    nome: str,
+    confirmar: bool,
+    session: AsyncSession | None = None,
+    cadastro_id: UUID | None = None,
+) -> None:
     """O nome deixa de existir no tipo (excluir, renomear, trocar de tipo): confere o uso."""
-    uso = await _uso(tipo, nome)
+    uso = await _uso(tipo, nome, session, cadastro_id)
+    if uso.regra == CHAVE_COR and uso.bloqueia:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "cor_em_uso", "produtos": uso.produtos, "mensagem": uso.mensagem},
+        )
     if uso.regra == CHAVE_CATEGORIA and uso.bloqueia:
         if uso.produtos is None:
             raise HTTPException(
@@ -477,6 +542,25 @@ async def listas_dos_filtros(
     return ListasFiltroOut(categorias=de(CHAVE_CATEGORIA), tags_envio=de(CHAVE_TAG_ENVIO))
 
 
+@router.get("/cores", response_model=CoresOut)
+async def cores(
+    _user: Annotated[User, Depends(require_active_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CoresOut:
+    """M-107: o menu do campo Cor do cadastro do Produtos 2 — só as cores cadastradas aqui (tipo
+    de chave 'cor'), em ordem alfabética, lidas agora (cor nova já aparece)."""
+    linhas = (
+        await session.execute(
+            select(ProdutoCadastro.id, ProdutoCadastro.nome)
+            .join(ProdutoCadastroTipo, ProdutoCadastroTipo.id == ProdutoCadastro.tipo_id)
+            .where(ProdutoCadastroTipo.chave == CHAVE_COR)
+        )
+    ).all()
+    return CoresOut(
+        cores=[CorOut(id=i, nome=n) for i, n in sorted(linhas, key=lambda r: svc.ordem(r[1]))]
+    )
+
+
 @router.get("/{cadastro_id}/uso", response_model=UsoOut)
 async def uso(
     cadastro_id: UUID,
@@ -485,7 +569,7 @@ async def uso(
 ) -> UsoOut:
     """Para a tela avisar antes de excluir: quantos produtos usam (e se a exclusão é barrada)."""
     cad = await _cadastro(session, cadastro_id)
-    return await _uso(await _tipo(session, cad.tipo_id), cad.nome)
+    return await _uso(await _tipo(session, cad.tipo_id), cad.nome, session, cad.id)
 
 
 # ---------------------------------------------------------------- tipos (só admin)
@@ -564,8 +648,14 @@ async def editar(
     if depois.id == antes.id and nome == cad.nome:
         return _cadastro_out(cad, antes)
     await _sem_repetir_nome(session, depois, nome, menos=cad.id)
+    mudou_tipo = depois.id != antes.id
     # Trocar só maiúsculas ("celular" → "Celular") no mesmo tipo não tira o nome de ninguém.
-    if depois.id != antes.id or not svc.igual(nome, cad.nome):
+    # M-107: renomear a cor também não (o produto guarda o id e mostra o nome novo); só sair do
+    # tipo Cor confere o uso.
+    if antes.chave == CHAVE_COR:
+        if mudou_tipo:
+            await _pode_tirar(antes, cad.nome, body.confirmar, session, cad.id)
+    elif mudou_tipo or not svc.igual(nome, cad.nome):
         await _pode_tirar(antes, cad.nome, body.confirmar)
     cad.tipo_id = depois.id
     cad.nome = nome
@@ -585,7 +675,7 @@ async def excluir(
     confirmar: Annotated[bool, Query()] = False,
 ) -> Response:
     cad = await _cadastro(session, cadastro_id)
-    await _pode_tirar(await _tipo(session, cad.tipo_id), cad.nome, confirmar)
+    await _pode_tirar(await _tipo(session, cad.tipo_id), cad.nome, confirmar, session, cad.id)
     await session.delete(cad)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -24,6 +24,13 @@ Tudo o que o resto do sistema precisa saber das tabelas `produto_regras` e
   opções do menu) e `centro_herdado` (o Centro de custo de um produto em branco: o departamento,
   calculado e não copiado — o da linha; sem linha, o da categoria).
 
+* M-107: `cor_id` (a Cor do produto, um nome do tipo "Cor" de Cadastros › Produtos).
+* M-114…M-116: `lista` — o que a LISTA do Produtos 2 mostra de cada produto (Cor, Centro de
+  custo, Categoria de venda, Margem mínima, Condição especial, Foto e Embalagem), para todos os
+  produtos numa consulta só (sem uma chamada por produto), com as MESMAS regras do cadastro:
+  `margens_herdadas` (a margem herdada em lote, o mesmo SQL de `margem_herdada`), `centro_herdado`
+  sobre linhas lidas de uma vez (`_herdado`) e o resumo da condição.
+
 Com as duas tabelas vazias (o dia em que for ao ar) nada daqui muda o que a Margem, o robô que
 segura pedido e a nota já fazem.
 """
@@ -37,13 +44,14 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import ColumnElement, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
     CentroCusto,
     PricingProduct,
+    ProdutoCadastro,
     ProdutoCondicaoEspecial,
     ProdutoRegra,
     Segment,
@@ -69,6 +77,23 @@ def sku_base(sku: str | None, tags: Sequence[str]) -> str:
     uaf001m1.110; z2821 → z2821."""
     lista = list(tags)
     return "+".join(numeracao_do_sku(p, lista) for p in str(sku or "").split("+"))
+
+
+def base_valida(sku: str | None, tags: Sequence[str]) -> str | None:
+    """A chave do produto, ou None quando o código não serve de chave: vazio, longo demais, com
+    peça vazia ("a++b") ou com peça que é só a tag (".ra"). A rota de um produto recusa (400); a
+    lista pula."""
+    texto = (sku or "").strip()
+    base = sku_base(texto, tags)
+    lista_tags = list(tags)
+    if (
+        not texto
+        or len(texto) > SKU_MAX
+        or not base
+        or any(not p or p in lista_tags for p in base.split("+"))
+    ):
+        return None
+    return base
 
 
 async def sku_base_de(session: AsyncSession, sku: str | None) -> str:
@@ -118,21 +143,25 @@ def sku_base_sql(coluna: str, schema: str = _SCHEMA) -> str:
 
 # Mesmo caminho da view vw_bling_pedidos (0235/0516): a variante da Tabela de Preços que casa com
 # o código vendido (exato > kit > com sufixo; a mais longa), o segmento filho dela e a raiz.
-_HERDADA_SQL = text(
+# M-115 (27/11/2026): em LOTE — uma linha por código do array (o mesmo SQL serve a um produto só,
+# `margem_herdada`, e à lista inteira, `margens_herdadas`: nunca duas regras). `k` = o código em
+# minúsculas, calculado uma vez por código (2.763 códigos × ~1.100 variantes: ~0,3 s).
+_HERDADAS_SQL = text(
     f"""
-    SELECT leaf.name       AS leaf_nome,
+    SELECT s.sku           AS sku,
+           leaf.name       AS leaf_nome,
            leaf.min_margin AS leaf_min,
            root.name       AS raiz_nome,
            qz.min_margin   AS queima_min
-    FROM (SELECT 1) um
+    FROM (SELECT DISTINCT x AS sku, lower(x) AS k FROM unnest(CAST(:skus AS text[])) AS x) s
     LEFT JOIN LATERAL (
         SELECT v.segment_id
         FROM {_T}.pricing_product_variant v
-        WHERE lower(CAST(:sku AS text)) = v.variant_norm
-           OR lower(CAST(:sku AS text)) LIKE (v.variant_norm || '.%')
-           OR lower(CAST(:sku AS text)) LIKE (v.variant_norm || '+%')
-        ORDER BY (CASE WHEN lower(CAST(:sku AS text)) = v.variant_norm THEN 1
-                       WHEN lower(CAST(:sku AS text)) LIKE (v.variant_norm || '+%') THEN 2
+        WHERE s.k = v.variant_norm
+           OR s.k LIKE (v.variant_norm || '.%')
+           OR s.k LIKE (v.variant_norm || '+%')
+        ORDER BY (CASE WHEN s.k = v.variant_norm THEN 1
+                       WHEN s.k LIKE (v.variant_norm || '+%') THEN 2
                        ELSE 3 END),
                  v.vlen DESC, v.segment_id
         LIMIT 1
@@ -143,7 +172,7 @@ _HERDADA_SQL = text(
         SELECT s2.min_margin FROM {_T}.segments s2
         WHERE lower(s2.name) = '{QUEIMA}' LIMIT 1
     ) qz ON true
-    """  # noqa: S608 — só o schema das settings; o SKU vai por parâmetro
+    """  # noqa: S608 — só o schema das settings; os SKUs vão por parâmetro
 )
 
 
@@ -153,9 +182,7 @@ class Herdada:
     origem: str
 
 
-async def margem_herdada(session: AsyncSession, sku: str) -> Herdada:
-    """A margem mínima que o pedido deste SKU usa quando o produto está em branco."""
-    r = (await session.execute(_HERDADA_SQL, {"sku": sku})).mappings().one()
+def _herdada_de(sku: str, r) -> Herdada:
     if r["leaf_min"] is not None:
         nome = r["leaf_nome"] or "?"
         raiz = f" ({r['raiz_nome']})" if r["raiz_nome"] else ""
@@ -163,6 +190,20 @@ async def margem_herdada(session: AsyncSession, sku: str) -> Herdada:
     if sku.strip().lower().startswith("z") and r["queima_min"] is not None:
         return Herdada(Decimal(r["queima_min"]), "da Queima de estoque (código começa com z)")
     return Herdada(MARGEM_PADRAO, "padrão do sistema")
+
+
+async def margens_herdadas(session: AsyncSession, skus: Sequence[str]) -> dict[str, Herdada]:
+    """{SKU (como veio): a margem mínima que o pedido dele usa quando o produto está em branco}."""
+    lista = sorted({str(s) for s in skus})
+    if not lista:
+        return {}
+    rows = (await session.execute(_HERDADAS_SQL, {"skus": lista})).mappings().all()
+    return {r["sku"]: _herdada_de(r["sku"], r) for r in rows}
+
+
+async def margem_herdada(session: AsyncSession, sku: str) -> Herdada:
+    """A margem mínima que o pedido deste SKU usa quando o produto está em branco."""
+    return (await margens_herdadas(session, [sku]))[sku]
 
 
 # --------------------------------------------------------------- condição especial
@@ -346,21 +387,30 @@ def _chave_nome(texto: str | None) -> str:
     return " ".join(_sem_acento(str(texto or "")).casefold().split())
 
 
-async def centro_da_categoria(session: AsyncSession, categoria: str | None) -> CentroCusto | None:
-    """O centro de custo de uma CATEGORIA do produto (Cadastros › Produtos): o centro cujo nome é
-    a categoria ou o começo dela ("Celular Kit" → Celular, "Mala" → Mala; "Acessórios" e
-    "Insumos" → nenhum). Lido agora: um centro criado em Cadastros › Centro de custo vale na hora.
-    Se dois servirem, o de nome mais longo."""
+def centro_por_categoria(
+    centros: Sequence[CentroCusto], categoria: str | None
+) -> CentroCusto | None:
+    """`centro_da_categoria` sobre os centros já lidos (a lista do Produtos 2 lê uma vez só)."""
     cat = _chave_nome(categoria)
     if not cat:
         return None
-    centros = list((await session.execute(select(CentroCusto))).scalars())
     achados = [
         c
         for c in centros
         if (nome := _chave_nome(c.nome)) and (cat == nome or cat.startswith(nome + " "))
     ]
     return max(achados, key=lambda c: len(_chave_nome(c.nome)), default=None)
+
+
+async def centro_da_categoria(session: AsyncSession, categoria: str | None) -> CentroCusto | None:
+    """O centro de custo de uma CATEGORIA do produto (Cadastros › Produtos): o centro cujo nome é
+    a categoria ou o começo dela ("Celular Kit" → Celular, "Mala" → Mala; "Acessórios" e
+    "Insumos" → nenhum). Lido agora: um centro criado em Cadastros › Centro de custo vale na hora.
+    Se dois servirem, o de nome mais longo."""
+    if not _chave_nome(categoria):
+        return None
+    centros = list((await session.execute(select(CentroCusto))).scalars())
+    return centro_por_categoria(centros, categoria)
 
 
 @dataclass(frozen=True)
@@ -378,6 +428,15 @@ async def centro_herdado(
     1. Com linha na Tabela de Preços: o departamento da linha (a raiz da categoria de venda).
        Raiz que não é centro de custo (o Catálogo) → nenhum.
     2. Sem linha: o da categoria do produto (`centro_da_categoria`)."""
+    centro = None if linha is not None else await centro_da_categoria(session, categoria)
+    return _herdado(linha, centro, categoria)
+
+
+def _herdado(
+    linha: LinhaTabela | None, centro_da_cat: CentroCusto | None, categoria: str | None
+) -> CentroHerdado:
+    """A regra de `centro_herdado`, com o centro da categoria já achado (a lista lê tudo de uma
+    vez e chama esta mesma função)."""
     if linha is not None:
         if linha.centro is not None:
             return CentroHerdado(linha.centro, "do departamento da linha da Tabela de Preços")
@@ -387,7 +446,175 @@ async def centro_herdado(
                 f"a linha da Tabela de Preços é do {linha.raiz.name}, que não é centro de custo",
             )
         return CentroHerdado(None, "a linha da Tabela de Preços não tem departamento")
-    centro = await centro_da_categoria(session, categoria)
-    if centro is not None:
-        return CentroHerdado(centro, f"da categoria {str(categoria).strip()}")
+    if centro_da_cat is not None:
+        return CentroHerdado(centro_da_cat, f"da categoria {str(categoria).strip()}")
     return CentroHerdado(None, None)
+
+
+# --------------------------------------------------------------- M-114…M-116: a lista do Produtos 2
+
+
+@dataclass(frozen=True)
+class ItemLista:
+    """Um produto da lista do Produtos 2, como o ERP o conhece: o código, a linha da Tabela de
+    Preços que o ERP acha para ele (`pricing_id`, texto; o que não é uuid vale como sem linha) e
+    a categoria dele no ERP (o nome). Os mesmos `linha` e `categoria` do GET de um produto."""
+
+    sku: str
+    linha: str | None = None
+    categoria: str | None = None
+
+
+def _f(d: Decimal | None) -> float | None:
+    return None if d is None else float(d)
+
+
+def _linhas_em_memoria(
+    produtos: Sequence[PricingProduct],
+    segmentos: dict[UUID, Segment],
+    centro_da_raiz: dict[UUID, CentroCusto],
+) -> dict[UUID, LinhaTabela]:
+    """`linha_da_tabela` para várias linhas lidas de uma vez (sem as opções do menu, que a lista
+    não usa): o mesmo segmento, a mesma raiz (`categorias_venda.raiz_de`: o pai, se ele é raiz) e
+    o mesmo centro."""
+    out: dict[UUID, LinhaTabela] = {}
+    for pp in produtos:
+        seg = segmentos.get(pp.segment_id) if pp.segment_id else None
+        raiz: Segment | None
+        if seg is None:
+            raiz = None
+        elif seg.parent_id is None:
+            raiz = seg  # linha apontando para a própria raiz (não deveria)
+        else:
+            pai = segmentos.get(seg.parent_id)
+            raiz = pai if pai is not None and pai.parent_id is None else None
+        centro = centro_da_raiz.get(raiz.id) if raiz is not None else None
+        out[pp.id] = LinhaTabela(pp, seg, raiz, centro, [])
+    return out
+
+
+def _piso_vigente(condicoes: list[ProdutoCondicaoEspecial], hoje: date) -> Decimal | None:
+    """O piso da condição que o resumo mostra (a primeira vigente); None = sem condição vigente
+    ou condição "sem piso"."""
+    vigentes = sorted(
+        (c for c in condicoes if c.pedido_ate >= hoje), key=lambda c: (c.pedido_de, c.pedido_ate)
+    )
+    return vigentes[0].piso if vigentes else None
+
+
+async def lista(
+    session: AsyncSession,
+    itens: Sequence[ItemLista],
+    hoje: date,
+    escopo_linhas: ColumnElement[bool] | None = None,
+) -> tuple[dict[str, dict], list[str]]:
+    """O que a lista do Produtos 2 mostra de cada produto, com as regras do cadastro, para todos
+    de uma vez: ({SKU como veio: dados}, [SKUs que não servem de chave]).
+
+    Consultas fixas (não crescem com a lista): a lista de tags, `produto_regras` + os nomes das
+    cores, as condições especiais, os centros de custo, os segmentos, as linhas da Tabela de Preços
+    pedidas e a margem herdada em lote. `escopo_linhas` = o filtro de quem pede nas linhas
+    (`user_scope`, o mesmo da rota de Fotos/Embalagem)."""
+    tags = await tags_de_envio(session)
+    validos: list[tuple[ItemLista, str]] = []
+    ignorados: list[str] = []
+    for item in itens:
+        base = base_valida(item.sku, tags)
+        if base is None:
+            ignorados.append(item.sku)
+        else:
+            validos.append((item, base))
+    if not validos:
+        return {}, ignorados
+    bases = sorted({b for _, b in validos})
+
+    regras = {
+        r.sku_base: r
+        for r in (
+            await session.execute(select(ProdutoRegra).where(ProdutoRegra.sku_base.in_(bases)))
+        ).scalars()
+    }
+    cor_ids = sorted({r.cor_id for r in regras.values() if r.cor_id is not None}, key=str)
+    cores = (
+        dict(
+            (
+                await session.execute(
+                    select(ProdutoCadastro.id, ProdutoCadastro.nome).where(
+                        ProdutoCadastro.id.in_(cor_ids)
+                    )
+                )
+            ).all()
+        )
+        if cor_ids
+        else {}
+    )
+    conds: dict[str, list[ProdutoCondicaoEspecial]] = {}
+    for c in (
+        await session.execute(
+            select(ProdutoCondicaoEspecial).where(ProdutoCondicaoEspecial.sku_base.in_(bases))
+        )
+    ).scalars():
+        conds.setdefault(c.sku_base, []).append(c)
+    centros = list((await session.execute(select(CentroCusto))).scalars())
+    centro_por_id = {c.id: c for c in centros}
+    centro_da_raiz = {c.segment_id: c for c in centros if c.segment_id is not None}
+
+    linha_ids = sorted(
+        {u for item, _ in validos if item.linha and (u := uuid_ou_none(item.linha))}, key=str
+    )
+    linhas: dict[UUID, LinhaTabela] = {}
+    if linha_ids:
+        produtos = list(
+            (
+                await session.execute(
+                    select(PricingProduct).where(
+                        PricingProduct.id.in_(linha_ids),
+                        escopo_linhas if escopo_linhas is not None else true(),
+                    )
+                )
+            ).scalars()
+        )
+        segmentos = {s.id: s for s in (await session.execute(select(Segment))).scalars()}
+        linhas = _linhas_em_memoria(produtos, segmentos, centro_da_raiz)
+
+    herdadas = await margens_herdadas(session, [item.sku for item, _ in validos])
+    out: dict[str, dict] = {}
+    for item, base in validos:
+        regra = regras.get(base)
+        linha = linhas.get(uuid_ou_none(item.linha)) if item.linha else None
+        herdado = _herdado(
+            linha,
+            None if linha is not None else centro_por_categoria(centros, item.categoria),
+            item.categoria,
+        )
+        escolhido = (
+            centro_por_id.get(regra.centro_custo_id)
+            if regra is not None and regra.centro_custo_id is not None
+            else None
+        )
+        seg, raiz = (linha.segmento, linha.raiz) if linha is not None else (None, None)
+        folha = seg is not None and raiz is not None and seg.id != raiz.id
+        pp = linha.produto if linha is not None else None
+        do_produto = conds.get(base, [])
+        piso = _piso_vigente(do_produto, hoje)
+        resumo = resumo_condicao(do_produto, hoje)
+        out[item.sku] = {
+            "sku_base": base,
+            "cor_id": str(regra.cor_id) if regra is not None and regra.cor_id else None,
+            "cor": cores.get(regra.cor_id) if regra is not None and regra.cor_id else None,
+            "margem_min": _f(regra.margem_min) if regra is not None else None,
+            "margem_min_herdada": float(herdadas[item.sku].valor),
+            "centro_custo": escolhido.nome if escolhido is not None else None,
+            "centro_custo_herdado": herdado.centro.nome if herdado.centro is not None else None,
+            "tem_linha": linha is not None,
+            "categoria_venda": seg.name if folha else None,
+            "categoria_venda_ativa": bool(seg.active) if folha else None,
+            "condicao_resumo": resumo,
+            "condicao_vigente": resumo != "—",
+            "condicao_piso": _f(piso),
+            "fotos_count": pp.fotos_count if pp is not None else None,
+            "foto": bool(pp is not None and (pp.fotos_count or 0) > 0),
+            "embalagem": bool(pp is not None and (pp.embalagens_path or "").strip()),
+            "embalagens_count": pp.embalagens_count if pp is not None else None,
+        }
+    return out, ignorados

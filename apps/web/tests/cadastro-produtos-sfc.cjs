@@ -33,6 +33,9 @@
 //    filtro ligado) com os filtros de linha Tabela | Tipo | Nome (caixinhas, Marcar todas ·
 //    Limpar); começa tudo marcado; a linha aparece com os três marcados; sem linha, o texto
 //    "Nenhum cadastro com esses filtros."; o Atualizar mantém o marcado; valor novo entra marcado.
+//  - M-107: o tipo "Cor" (Tabela Produtos 2) vem do servidor como os outros — entra no menu Tipo
+//    do Novo cadastro do Produtos 2 (não no das Contas) e vai pelo POST de sempre; cor em uso
+//    (GET /uso bloqueia) só avisa, sem Excluir; renomear a cor vai pelo PATCH de sempre.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -323,6 +326,40 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     await p.confirmarExclusao()
     assert.deepEqual(calls.filter((c) => c.method === 'DELETE').map((c) => c.url), ['/api/produto-cadastros/c2?confirmar=true'])
     assert.equal(p.excluindo.value, null)
+  }
+  // M-107: tipo "Cor" (Tabela Produtos 2) — no menu Tipo do Produtos 2 (não no das Contas), POST
+  // de sempre; cor em uso só avisa (sem Excluir); renomear vai pelo PATCH de sempre
+  {
+    const COR = { id: 'tcor', nome: 'Cor', chave: 'cor', tabela: 'Produtos 2' }
+    const tipos = [TIPOS[0], TIPOS[1], COR, TIPOS[2], TIPOS[3]]
+    const verm = { id: 'k1', tipo_id: 'tcor', tipo_nome: 'Cor', tipo_chave: 'cor', nome: 'Vermelho', tabela: 'Produtos 2' }
+    const uso = { regra: 'cor', produtos: 2, bloqueia: true, mensagem: '2 produtos usam a cor “Vermelho”. Troque a cor desses produtos antes: nenhum produto pode perder a cor.' }
+    const { p, calls } = await pagina({
+      respostas: {
+        'GET /api/produto-cadastros': () => Promise.resolve({ tipos, cadastros: [...CADS, verm], centros_custo: CENTROS }),
+        'GET /api/produto-cadastros/k1/uso': uso,
+      },
+    })
+    p.abrirCadastro()
+    assert.deepEqual(p.tiposDoMenu.value.map((t) => t.nome), ['Categoria', 'Cor', 'Tag de envio'], 'Cor no menu do Produtos 2')
+    p.cadTipo.value = 'tcor'
+    p.cadNome.value = 'Azul'
+    await p.salvarCadastro()
+    assert.deepEqual(calls.find((c) => c.method === 'POST'), { url: '/api/produto-cadastros', method: 'POST', body: { tipo_id: 'tcor', nome: 'Azul' } })
+    p.abrirCadastro()
+    p.cadTabela.value = 'r-cel'
+    p.trocarTabela()
+    assert.ok(!p.tiposDoMenu.value.some((t) => t.id === 'tcor'), 'Cor não é tipo das Contas')
+    // lixeira da cor em uso: só avisa
+    await p.pedirExclusao(verm)
+    assert.deepEqual(p.excluirUso.value, uso)
+    assert.ok(!calls.some((c) => c.method === 'DELETE'), 'cor em uso não é excluída')
+    // lápis: renomear a cor vai sem confirmar, pelo PATCH de sempre
+    p.abrirCadastro(verm)
+    p.cadNome.value = 'Vermelho Fosco'
+    await p.salvarCadastro()
+    assert.deepEqual(calls.find((c) => c.method === 'PATCH'), { url: '/api/produto-cadastros/k1', method: 'PATCH', body: { tipo_id: 'tcor', nome: 'Vermelho Fosco', confirmar: false } })
+    assert.equal(p.cadErro.value, null)
   }
   // M-75 + M-89: Novo cadastro de Categoria de venda — a Tabela "Contas Mala" escolhe o tipo e o
   // centro de custo; vai para /categorias-venda; o limite (10 desde a M-93; era 5) mostra a

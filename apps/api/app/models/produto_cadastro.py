@@ -13,6 +13,11 @@ A ligação produto → categoria NÃO mora aqui: continua na base do ERP (own_c
 own_product_categories) e é pelo NOME. Por isso excluir ou renomear uma Categoria que ainda tem
 produto é recusado no servidor (routers/produto_cadastros.py). A tag de envio do produto é o fim
 do SKU (dg105.sp e dg105.sp+a001.sp têm .sp): nada é gravado por produto.
+
+M-107 (27/11/2026, migration 0521): o tipo "Cor" (chave 'cor'), na Tabela "Produtos 2". A cor
+de cada produto mora no DaVinci, em `produto_regras.cor_id` (pelo código sem a tag de envio, a
+chave da Margem mín), apontando para o NOME da cor aqui (o id): renomear a cor muda o que todos os
+produtos mostram; cor em uso não sai (a mesma regra da Categoria, routers/produto_cadastros.py).
 """
 
 from uuid import UUID, uuid4
@@ -25,6 +30,7 @@ from app.models.base import Base, TimestampMixin
 
 CHAVE_CATEGORIA = "categoria"
 CHAVE_TAG_ENVIO = "tag_envio"
+CHAVE_COR = "cor"  # M-107 (migration 0521)
 NOME_MAX = 60
 
 

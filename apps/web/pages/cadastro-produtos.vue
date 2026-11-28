@@ -46,6 +46,12 @@
 // caixinhas (múltipla escolha). A linha aparece quando os três valores dela estão marcados. Começa
 // tudo marcado; vale só para a tela (não grava; o Atualizar mantém o que está marcado). O Excel
 // continua baixando TODAS as linhas, com ou sem filtro (M-105).
+// M-107 (Harry 27/11/2026): tipo novo "Cor" (Tabela "Produtos 2"), criado pela migration 0521 com a
+// lista VAZIA; as cores entram pelo "+ Novo cadastro" e são as opções do campo Cor do cadastro do
+// Produtos 2. Nada muda nesta tela: o tipo chega do servidor como os outros e segue as regras da
+// Categoria lá (só administrador mexe; nome repetido recusado; cor em uso não sai — o GET /uso
+// bloqueia e a janela só avisa, sem Excluir). Diferente da Categoria, renomear a cor em uso pode:
+// o produto guarda o id da cor e passa a mostrar o nome novo.
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { isoToday } from '~/lib/date'
 import { AlertCircle, Check, ChevronDown, Download, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
