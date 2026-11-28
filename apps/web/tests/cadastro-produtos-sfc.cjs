@@ -26,6 +26,9 @@
 //    para" (escolha única entre os destinos do servidor), textos da transferência, botão
 //    "Transferir e excluir" apagado até escolher e DELETE com ?destino_id=; sem uso, os avisos
 //    do servidor (nome reservado, produtos da tela Produtos sem segmento) e DELETE simples.
+//  - M-105: barra Excel | Atualizar ("recarregar" mudou de nome) | + Novo tipo | + Novo cadastro,
+//    todos btn btn-sm h-7 py-0 com a cor de antes; o Excel baixa todas as linhas (Tabela | Tipo |
+//    Nome, sem Ações) num .csv como o da Tabela de Preços (cadastros-produtos-<dia>.csv).
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -75,10 +78,20 @@ const script = descriptor.scriptSetup.content
   assert.match(tpl, /<PageHeader title="Produtos">/, 'título Produtos, sem descrição')
   assert.doesNotMatch(tpl, /<PageHeader[^>]*description/)
   const acoes = tpl.slice(tpl.indexOf('<template #actions>'), tpl.indexOf('</template>', tpl.indexOf('<template #actions>')))
-  const ordem = ['recarregar', 'Novo tipo', 'Novo cadastro'].map((t) => acoes.indexOf(t))
-  assert.ok(ordem.every((i) => i > 0) && ordem[0] < ordem[1] && ordem[1] < ordem[2], 'recarregar, + Novo tipo, + Novo cadastro')
-  assert.match(acoes, /<Button v-if="isAdmin" size="sm" data-acao="novo-cadastro"/, 'Novo cadastro azul (variante padrão) e só admin')
-  assert.match(acoes, /<Button v-if="isAdmin" size="sm" variant="outline" data-acao="novo-tipo"/)
+  // M-105: Excel | Atualizar | + Novo tipo | + Novo cadastro, todos no tamanho da barra da
+  // Tabela de Preços (btn btn-sm h-7 py-0), cada um com a cor de antes.
+  assert.doesNotMatch(acoes, /recarregar/, '"recarregar" virou "Atualizar"')
+  assert.doesNotMatch(acoes, /<Button\b|text-sm|h-9/, 'nenhum botão grande na barra')
+  const ordem = ['> Excel', '> Atualizar', '> Novo tipo', '> Novo cadastro'].map((t) => acoes.indexOf(t))
+  assert.ok(ordem.every((i, k) => i > 0 && (k === 0 || i > ordem[k - 1])), 'Excel, Atualizar, + Novo tipo, + Novo cadastro')
+  const botoes = [...acoes.matchAll(/<button\b[^>]*>/g)].map((m) => m[0])
+  assert.equal(botoes.length, 4)
+  for (const b of botoes) assert.match(b, /class="btn btn-sm (btn-ghost |btn-primary )?h-7 py-0"/, 'btn btn-sm h-7 py-0')
+  assert.match(acoes, /<button\s+class="btn btn-sm h-7 py-0"\s+:disabled="!cadastros\.length"\s+title="Baixar todas as informações desta tabela"\s+data-acao="excel"\s+@click="baixarExcel"\s*>\s*<Download class="h-4 w-4 mr-1" \/> Excel/, 'Excel como o da Tabela de Preços')
+  assert.doesNotMatch(botoes[0], /v-if/, 'Excel para quem vê a tela (como o Atualizar)')
+  assert.match(acoes, /<button class="btn btn-sm btn-ghost h-7 py-0" :disabled="loading" data-acao="atualizar" @click="load">\s*<RefreshCw[^>]*\/> Atualizar/, 'Atualizar faz o mesmo de antes')
+  assert.match(acoes, /<button v-if="isAdmin" class="btn btn-sm btn-primary h-7 py-0" data-acao="novo-cadastro" @click="abrirCadastro\(\)">\s*<Plus /, 'Novo cadastro azul e só admin')
+  assert.match(acoes, /<button v-if="isAdmin" class="btn btn-sm h-7 py-0" data-acao="novo-tipo" @click="abrirTipo">\s*<Plus /, 'Novo tipo com contorno e só admin')
   const ths = [...tpl.matchAll(/<th\b[^>]*>([^<]*)<\/th>/g)]
   // M-84: a coluna "Centro de custo" saiu. M-89: "Tabela" antes de Tipo.
   assert.deepEqual(ths.map((m) => m[1]), ['Tabela', 'Tipo', 'Nome', 'Ações'])
@@ -112,9 +125,9 @@ const script = descriptor.scriptSetup.content
 const pageScript = script.replace(/^import[\s\S]*?from\s+'[^']+'\s*$/gm, '')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
-  'ref', 'computed', 'definePageMeta', 'useApi', 'useAuthStore', 'TABS_CADASTROS',
+  'ref', 'computed', 'definePageMeta', 'useApi', 'useAuthStore', 'TABS_CADASTROS', 'isoToday',
   transpile(pageScript, ts.ModuleKind.ESNext) + `\nreturn {
-    tipos, cadastros, error, load, isAdmin,
+    tipos, cadastros, error, load, isAdmin, linhasExcel, baixarExcel,
     tipoAberto, tipoNome, tipoErro, abrirTipo, criarTipo, editarTipo, tipoEditNome, salvarTipo,
     cadAberto, cadTipo, cadNome, cadErro, cadAviso, abrirCadastro, salvarCadastro,
     excluindo, excluirUso, excluirErro, pedirExclusao, confirmarExclusao,
@@ -156,7 +169,7 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     if (url === '/api/produto-cadastros') return Promise.resolve({ tipos: TIPOS, cadastros: CADS, centros_custo: CENTROS })
     return Promise.resolve({})
   }
-  const p = await factory(Vue.ref, Vue.computed, () => {}, () => ({ api }), () => ({ user: { role } }), [])
+  const p = await factory(Vue.ref, Vue.computed, () => {}, () => ({ api }), () => ({ user: { role } }), [], () => '2026-11-27')
   return { p, calls }
 }
 
@@ -169,6 +182,46 @@ async function pagina({ role = 'admin', respostas = {} } = {}) {
     assert.equal(p.isAdmin.value, true)
     const { p: q } = await pagina({ role: 'user' })
     assert.equal(q.isAdmin.value, false)
+  }
+  // M-105: Excel — todas as linhas na ordem da tela, Tabela | Tipo | Nome (sem Ações), o texto
+  // da tela em cada célula; .csv como o da Tabela de Preços, com o nome cadastros-produtos-<dia>
+  {
+    const { p } = await pagina({ role: 'user' })
+    assert.deepEqual(p.linhasExcel(), [
+      ['Tabela', 'Tipo', 'Nome'],
+      ['Produtos 2', 'Categoria', 'Celular'],
+      ['Produtos 2', 'Tag de envio', '.sp'],
+      ['Contas Celular', 'Categoria de venda', 'Apple'],
+      ['Contas Mala', 'Categoria de venda', 'Queima de estoque inativa'],
+      ['Lojas', 'Tipo de conta', 'Celular'],
+    ])
+    p.cadastros.value = [{ ...CADS[0], tabela: null, nome: 'Cor "azul"' }]
+    assert.deepEqual(p.linhasExcel()[1], ['—', 'Categoria', 'Cor "azul"'], 'sem tabela fica "—", como na tela')
+    const antes = { document: globalThis.document, criar: URL.createObjectURL, soltar: URL.revokeObjectURL }
+    let blob = null
+    const link = { clicado: false, click() { this.clicado = true } }
+    globalThis.document = { createElement: (tag) => (assert.equal(tag, 'a'), link) }
+    URL.createObjectURL = (b) => { blob = b; return 'blob:falso' }
+    URL.revokeObjectURL = () => {}
+    try {
+      p.baixarExcel()
+      assert.equal(link.clicado, true)
+      assert.equal(link.download, 'cadastros-produtos-2026-11-27.csv')
+      assert.equal(blob.type, 'text/csv;charset=utf-8')
+      const bytes = new Uint8Array(await blob.arrayBuffer())
+      assert.deepEqual([...bytes.slice(0, 3)], [0xef, 0xbb, 0xbf], 'BOM para o Excel ler os acentos')
+      const texto = new TextDecoder('utf-8', { ignoreBOM: false }).decode(bytes)
+      assert.equal(texto, '"Tabela","Tipo","Nome"\n"—","Categoria","Cor ""azul"""')
+      // Tabela vazia: nada é baixado
+      link.clicado = false
+      p.cadastros.value = []
+      p.baixarExcel()
+      assert.equal(link.clicado, false)
+    } finally {
+      globalThis.document = antes.document
+      URL.createObjectURL = antes.criar
+      URL.revokeObjectURL = antes.soltar
+    }
   }
   // + Novo tipo e renomear tipo
   {

@@ -38,8 +38,12 @@
 // O GET /uso manda `sobem` (as que andam uma posição) e `contas_centro`; a janela lista o que
 // acontece (transferência, colunas que andam levando margem/frete, margem/frete apagados, "Não dá
 // para desfazer.") e o DELETE é o mesmo da M-90 — o servidor faz tudo num commit só.
+// M-105 (Harry 27/11/2026): barra Excel | Atualizar | Novo tipo | Novo cadastro, no tamanho da
+// barra da Tabela de Preços (btn btn-sm h-7 py-0; "recarregar" virou "Atualizar"). O Excel baixa
+// a tabela inteira (Tabela | Tipo | Nome, sem Ações), no mesmo .csv do Excel da Tabela de Preços.
 import { TABS_CADASTROS } from '~/lib/navGroups'
-import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
+import { AlertCircle, Check, Download, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -121,6 +125,31 @@ async function load() {
 }
 
 await load()
+
+// ---------------------------------------------------------------- Excel (M-105)
+// Todas as linhas, na ordem da tela; em cada célula o mesmo texto da tela (Tabela vazia = "—";
+// a marca "inativa" vem depois do nome, como aparece). A coluna Ações não vai.
+function linhasExcel(): string[][] {
+  const linhas: string[][] = [['Tabela', 'Tipo', 'Nome']]
+  for (const c of cadastros.value) {
+    linhas.push([c.tabela || '—', c.tipo_nome, c.ativa === false ? `${c.nome} inativa` : c.nome])
+  }
+  return linhas
+}
+
+// O mesmo arquivo do Excel da Tabela de Preços (pages/pricing/[tab].vue, handleExportExcel):
+// .csv com vírgula, tudo entre aspas e o BOM para o Excel abrir os acentos certos.
+function baixarExcel() {
+  if (!cadastros.value.length) return
+  const csv = linhasExcel().map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `cadastros-produtos-${isoToday()}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 // ---------------------------------------------------------------- + Novo tipo / renomear tipo
 const tipoAberto = ref(false)
@@ -444,16 +473,28 @@ async function confirmarExclusao() {
   <div class="space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
     <PageHeader title="Produtos">
+      <!-- M-105: Excel | Atualizar | Novo tipo | Novo cadastro, no tamanho da barra da Tabela de
+           Preços (btn btn-sm h-7 py-0); cada botão com a cor de antes (Atualizar sem fundo, Novo
+           tipo com contorno, Novo cadastro azul). -->
       <template #actions>
-        <Button size="sm" variant="ghost" :disabled="loading" @click="load">
-          <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> recarregar
-        </Button>
-        <Button v-if="isAdmin" size="sm" variant="outline" data-acao="novo-tipo" @click="abrirTipo">
+        <button
+          class="btn btn-sm h-7 py-0"
+          :disabled="!cadastros.length"
+          title="Baixar todas as informações desta tabela"
+          data-acao="excel"
+          @click="baixarExcel"
+        >
+          <Download class="h-4 w-4 mr-1" /> Excel
+        </button>
+        <button class="btn btn-sm btn-ghost h-7 py-0" :disabled="loading" data-acao="atualizar" @click="load">
+          <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> Atualizar
+        </button>
+        <button v-if="isAdmin" class="btn btn-sm h-7 py-0" data-acao="novo-tipo" @click="abrirTipo">
           <Plus class="size-4 mr-1" /> Novo tipo
-        </Button>
-        <Button v-if="isAdmin" size="sm" data-acao="novo-cadastro" @click="abrirCadastro()">
+        </button>
+        <button v-if="isAdmin" class="btn btn-sm btn-primary h-7 py-0" data-acao="novo-cadastro" @click="abrirCadastro()">
           <Plus class="size-4 mr-1" /> Novo cadastro
-        </Button>
+        </button>
       </template>
     </PageHeader>
 
